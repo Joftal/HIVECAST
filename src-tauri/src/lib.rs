@@ -11,6 +11,8 @@ mod platform;
 mod postprocess;
 mod process;
 mod recorder;
+mod retention;
+mod segment;
 mod settings;
 mod state;
 mod stream;

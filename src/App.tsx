@@ -43,7 +43,6 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
-
   // 顶栏语言切换也写回设置，免得重启后被设置里的旧值覆盖。
   const pickLanguage = (code: Language) => {
     setLanguage(code);

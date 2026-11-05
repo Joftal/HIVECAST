@@ -18,8 +18,14 @@ const KEY_MEDIA_ROOT: &str = "media.root";
 const KEY_MAX_CONCURRENT: &str = "record.max_concurrent";
 const KEY_NOTIFY: &str = "ui.notify";
 const KEY_LANGUAGE: &str = "ui.language";
+/// 保留策略：多少天后自动删除；0 表示不按天删。
+pub const KEY_RETENTION_DAYS: &str = "media.retention_days";
+/// 保留策略：媒体库总容量上限（GB）；0 表示不按容量删。
+pub const KEY_MAX_TOTAL_GB: &str = "media.max_total_gb";
 
 pub const MAX_CONCURRENT_LIMIT: u32 = 8;
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+pub const MAX_TOTAL_GB: u32 = 100_000;
 
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
@@ -30,6 +36,8 @@ pub fn defaults() -> Settings {
             max_concurrent_records: 4,
             notify_enabled: true,
         language: "system".into(),
+        retention_days: 0,
+        max_total_gb: 0,
     }
 }
 
@@ -56,6 +64,12 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_LANGUAGE).filter(|v| matches!(v.as_str(), "zh-CN" | "en-US" | "system")) {
         settings.language = value;
     }
+    if let Some(value) = read(KEY_RETENTION_DAYS).and_then(|v| v.parse::<u32>().ok()) {
+        settings.retention_days = value.min(MAX_RETENTION_DAYS);
+    }
+    if let Some(value) = read(KEY_MAX_TOTAL_GB).and_then(|v| v.parse::<u32>().ok()) {
+        settings.max_total_gb = value.min(MAX_TOTAL_GB);
+    }
     settings
 }
 
@@ -70,6 +84,8 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     if !matches!(settings.language.as_str(), "zh-CN" | "en-US" | "system") {
         settings.language = "system".into();
     }
+    settings.retention_days = settings.retention_days.min(MAX_RETENTION_DAYS);
+    settings.max_total_gb = settings.max_total_gb.min(MAX_TOTAL_GB);
     let media_root = settings.media_root.trim();
     if media_root.is_empty() {
         return Err(AppError::User("媒体目录不能为空".into()));
@@ -93,6 +109,10 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     )?;
     db.set_setting(KEY_NOTIFY, &settings.notify_enabled.to_string())?;
     db.set_setting(KEY_LANGUAGE, &settings.language)?;
+    db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
+    db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
+    // 阈值调小后立刻生效，不用等下次录制收尾。
+    crate::retention::enforce_from_settings(db);
     Ok(settings)
 }
 
@@ -140,6 +160,8 @@ mod tests {
                 max_concurrent_records: 99,
                 notify_enabled: false,
                 language: "fr-FR".into(),
+                retention_days: 9_999,
+                max_total_gb: 500_000,
             },
         )
         .expect("save settings");
@@ -147,6 +169,8 @@ mod tests {
         assert_eq!(saved.default_record_qn, 12300);
         assert_eq!(saved.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert_eq!(saved.language, "system", "未知语言回落到跟随系统");
+        assert_eq!(saved.retention_days, MAX_RETENTION_DAYS, "保留天数被夹到上限");
+        assert_eq!(saved.max_total_gb, MAX_TOTAL_GB, "容量上限被夹到上限");
         assert!(media.is_dir(), "保存时应把媒体目录建出来");
 
         let loaded = load(&db);
@@ -154,6 +178,8 @@ mod tests {
         assert_eq!(loaded.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert!(!loaded.notify_enabled);
         assert_eq!(loaded.language, "system");
+        assert_eq!(loaded.retention_days, MAX_RETENTION_DAYS);
+        assert_eq!(loaded.max_total_gb, MAX_TOTAL_GB);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

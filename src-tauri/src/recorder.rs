@@ -1,11 +1,13 @@
-//! 录制引擎（M1 版）：一个房间一个 ffmpeg 进程，FLV 直录。
+//! 录制引擎：一个房间一个 ffmpeg 进程，分段 mpegts 直录，收尾合成 mp4。
 //!
-//! 为什么先只做 FLV：B 站 flv 线路最稳、断流时已写入的部分可直接播放；
-//! 分段 / 转封装 / 弹幕在 M2 之后再叠加（见 docs/08）。
+//! 为什么分段（M7.1）：进程被强杀 / 断电时，单文件 FLV 的索引与尾部会丢，
+//! 整场录像可能直接不可播；segment muxer 每 5 分钟落一个独立 ts，
+//! 崩溃最多丢最后一片，下次启动还能把已有分片合成 mp4。
 //!
 //! 状态机：idle → recording → (stopped | stream_ended | failed)。
-//! 进程退出由 1 秒轮询发现（tokio::process 的 wait 不能与 stop 并存取同一子进程），
-//! 退出后统一收尾：写 session、算文件大小、广播事件。
+//! 进程退出由 1 秒轮询发现（tokio::process 的 wait 不能与 stop 并存取同一子进程）。
+//! 意外断流（不是用户停、也不是平台下播）会先在同一个会话里续录最多 3 次，
+//! 分片接着编号，避免一次抖动就把整场切成两条历史；彻底失败才收尾。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use std::time::{Duration, Instant};
 
 use hivecast_ipc::{RecordNotice, RecordSession, RecordingInfo, RoomRecord};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
 
 use crate::broker::StreamBroker;
@@ -25,11 +27,14 @@ use crate::error::AppError;
 use crate::ffmpeg;
 use crate::platform::StreamGroup;
 use crate::process::send_graceful;
+use crate::segment;
 
 /// 进程存活不足这个时长就退出，视为「秒退」，需要换线路重试。
 const EARLY_EXIT: Duration = Duration::from_secs(12);
 /// 连续失败后的冷却时间，避免对着同一个坏房间疯狂重试。
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+/// 断流自动续录的最大次数：网络抖动通常一次就够，连续 3 次说明源头真断了。
+const MAX_RESTARTS: u32 = 3;
 
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
@@ -46,6 +51,8 @@ struct Active {
     /// 本场录制的弹幕写入器（与视频同名 .jsonl）
     danmaku: Option<Arc<RecordWriter>>,
     danmaku_path: Option<String>,
+    /// 已续录的次数，达到 MAX_RESTARTS 后不再重开
+    restarts: u32,
 }
 
 pub struct Recorder {
@@ -171,6 +178,15 @@ impl Recorder {
             .contains_key(room_id)
     }
 
+    /// 当前这段 ffmpeg 已经活了多久；没在录时返回 None。
+    fn elapsed(&self, room_id: &str) -> Option<Duration> {
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .get(room_id)
+            .map(|active| active.started.elapsed())
+    }
+
     /// 开录。已有进程时直接返回现有快照（幂等）。
     pub async fn start(
         self: &Arc<Self>,
@@ -237,7 +253,7 @@ impl Recorder {
             &room.host_name,
             &room.title,
             started_at,
-            "flv",
+            "mp4",
         );
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -245,41 +261,18 @@ impl Recorder {
                 .map_err(|err| AppError::from_io(err, parent))?;
         }
 
-        let mut command = tokio::process::Command::new(ffmpeg::binary());
-        command
-            .arg("-hide_banner")
-            .arg("-nostdin")
-            .arg("-loglevel")
-            .arg("warning")
-            .arg("-y");
+        let headers: Vec<(String, String)> = candidate
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let url = candidate.url.clone().unwrap_or_default();
 
-        let mut headers = String::new();
-        for (name, value) in &candidate.headers {
-            headers.push_str(name);
-            headers.push_str(": ");
-            headers.push_str(value);
-            headers.push_str("\r\n");
-        }
-        if !headers.is_empty() {
-            command.arg("-headers").arg(headers);
-        }
-        command
-            .arg("-i")
-            .arg(candidate.url.as_deref().unwrap_or_default())
-            .arg("-c")
-            .arg("copy")
-            .arg("-f")
-            .arg("flv")
-            .arg("-flvflags")
-            .arg("no_duration_filesize")
-            .arg(&path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-
-        let child = command
+        let mut command = build_command(&path, &url, &headers, 0);
+        let mut child = command
             .spawn()
             .map_err(|err| AppError::Ffmpeg(format!("启动 ffmpeg 失败：{err}")))?;
+        drain_stderr(&mut child);
 
         // 弹幕落盘与视频同名，只换扩展名；后处理阶段按这个约定找旁挂文件。
         let danmaku_path = path.with_extension("jsonl");
@@ -333,6 +326,7 @@ impl Recorder {
                     host_name: room.host_name.clone(),
                     danmaku,
                     danmaku_path: Some(danmaku_path.display().to_string()),
+                    restarts: 0,
                 },
             );
         }
@@ -439,6 +433,23 @@ impl Recorder {
                 let Some((status, stop_reason)) = rec.poll_exit(&room_id) else {
                     continue;
                 };
+                // 意外断流（不是用户停、也不是平台正常下播）先续录，
+                // 网络抖一下不该把整场录像切成两条历史。
+                // 退出码 0 但只活了不到 EARLY_EXIT 的同样算断流：播放地址过期时
+                // ffmpeg 会当成正常 EOF 退出，不重试的话整场录像就此提前结束。
+                let early = rec
+                    .elapsed(&room_id)
+                    .is_some_and(|elapsed| elapsed < EARLY_EXIT);
+                if stop_reason.is_none() && (!status.success() || early) {
+                    let broker = {
+                        let state = app.state::<crate::state::AppState>();
+                        state.broker.clone()
+                    };
+                    if rec.respawn(&app, &broker, &room_id).await {
+                        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                        continue;
+                    }
+                }
                 rec.finalize(&app, &room_id, status, stop_reason).await;
                 return;
             }
@@ -452,6 +463,107 @@ impl Recorder {
             Ok(Some(status)) => Some((status, active.stop_reason.clone())),
             _ => None,
         }
+    }
+
+    /// 断流续录：同一个会话里重开 ffmpeg，分片从已有数量接着编号。
+    ///
+    /// 不新开会话的理由：用户看到的「这一场直播」还没结束，
+    /// 媒体库里出现两条半场录像比丢几十秒更难理解。
+    ///
+    /// 必须重新解析线路：平台播放地址带时效签名（斗鱼 anti-code、虎牙 wsSecret），
+    /// 复用旧地址时新进程往往一两秒就 EOF——那正是"续录成功但立刻结束"的成因。
+    async fn respawn(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: &StreamBroker,
+        room_id: &str,
+    ) -> bool {
+        // 取快照后立刻放锁：下面要 await 解析线路，持有 std::sync::Mutex 会卡死整个录制表。
+        let (session_id, path, start_number, restarts) = {
+            let inner = self.inner.lock().expect("录制状态被污染");
+            let Some(active) = inner.get(room_id) else {
+                return false;
+            };
+            if active.restarts >= MAX_RESTARTS {
+                tracing::warn!(room_id, restarts = active.restarts, "续录次数用尽");
+                return false;
+            }
+            let path = PathBuf::from(&active.recording.file_path);
+            let start_number = segment::collect_parts(&path).len() as u32;
+            (
+                active.recording.session_id.clone(),
+                path,
+                start_number,
+                active.restarts,
+            )
+        };
+
+        let room = match self.db.get_room(room_id) {
+            Ok(Some(room)) => room,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::warn!(%err, room_id, "续录读取房间失败");
+                return false;
+            }
+        };
+        let reference = crate::monitor::room_ref(&room);
+        // 断流往往就是旧地址失效：必须丢掉缓存重新解析，
+        // 否则续录用回同一个过期地址，只会「续上就断」循环到次数用尽。
+        broker.invalidate(&reference);
+        // 给 CDN 一点时间回收上一条连接：立刻重连时常被判定为重复会话而秒断。
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let groups = match broker.groups(&reference, room.record_qn).await {
+            Ok(groups) => groups,
+            Err(err) => {
+                tracing::warn!(%err, room_id, "续录解析线路失败");
+                return false;
+            }
+        };
+        let Some((candidate, _group)) = pick_candidate(&groups) else {
+            tracing::warn!(room_id, "续录没有可用线路");
+            return false;
+        };
+        let headers: Vec<(String, String)> = candidate
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let url = candidate.url.clone().unwrap_or_default();
+
+        let mut command = build_command(&path, &url, &headers, start_number);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::warn!(%err, room_id, "续录启动失败");
+                return false;
+            }
+        };
+        drain_stderr(&mut child);
+
+        {
+            let mut inner = self.inner.lock().expect("录制状态被污染");
+            let Some(active) = inner.get_mut(room_id) else {
+                let _ = child.start_kill();
+                return false;
+            };
+            // 解析期间可能被停掉或换成新会话，别把旧进程挂到新会话上。
+            if active.recording.session_id != session_id {
+                let _ = child.start_kill();
+                return false;
+            }
+            active.child = child;
+            active.restarts = restarts + 1;
+            active.started = Instant::now();
+            tracing::info!(
+                room_id,
+                start_number,
+                restarts = active.restarts,
+                quality = %candidate.name,
+                "断流后续录"
+            );
+        }
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        true
     }
 
     async fn finalize(
@@ -468,10 +580,18 @@ impl Recorder {
         let Some(active) = active else { return };
 
         let elapsed = active.started.elapsed();
-        let file_size = tokio::fs::metadata(&active.recording.file_path)
-            .await
-            .map(|meta| meta.len() as i64)
-            .unwrap_or(0);
+        // 收尾产物：分片 → mp4；合成失败退化为字节拼接的 .ts；再不行只能报分片总量。
+        let source_path = PathBuf::from(&active.recording.file_path);
+        let (stored_path, file_size) = finish_file(&source_path).await;
+        if stored_path != source_path {
+            if let Err(err) = self.db.update_session_file(
+                &active.recording.session_id,
+                &stored_path.display().to_string(),
+                file_size,
+            ) {
+                tracing::warn!(%err, "改写录像路径失败");
+            }
+        }
 
         let (final_status, reason, error) = match stop_reason.as_deref() {
             Some("stopped") => ("finished", "stopped", None),
@@ -513,6 +633,9 @@ impl Recorder {
         if final_status == "finished" {
             self.clear_failure(room_id);
         }
+
+        // 每次收尾跑一次保留策略：录制是媒体库唯一的增长来源。
+        crate::retention::enforce_from_settings(&self.db);
 
         tracing::info!(
             room_id,
@@ -560,6 +683,135 @@ impl Recorder {
     }
 }
 
+/// 分段录制的命令行。
+///
+/// - segment muxer + mpegts：每 SEGMENT_SECONDS 秒落一片，进程被杀也只丢尾片
+/// - reset_timestamps：每片时间戳从 0 开始，否则合并后音画会错位
+/// - start_number：续录时接着编号，避免覆盖已有分片
+fn build_command(
+    path: &Path,
+    url: &str,
+    headers: &[(String, String)],
+    start_number: u32,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(ffmpeg::binary());
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-y");
+    if !headers.is_empty() {
+        let mut raw = String::new();
+        for (name, value) in headers {
+            raw.push_str(name);
+            raw.push_str(": ");
+            raw.push_str(value);
+            raw.push_str("\r\n");
+        }
+        command.arg("-headers").arg(raw);
+    }
+    command
+        .arg("-i")
+        .arg(url)
+        .arg("-c")
+        .arg("copy")
+        .arg("-f")
+        .arg("segment")
+        .arg("-segment_time")
+        .arg(segment::SEGMENT_SECONDS.to_string())
+        .arg("-segment_format")
+        .arg("mpegts")
+        .arg("-reset_timestamps")
+        .arg("1");
+    if start_number > 0 {
+        command
+            .arg("-segment_start_number")
+            .arg(start_number.to_string());
+    }
+    command
+        .arg(segment::parts_pattern(path))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    command
+}
+
+/// 把 ffmpeg 的 stderr 读空。
+///
+/// 不读会死锁：管道缓冲区（约 64KB）写满后 ffmpeg 就卡在写日志上，
+/// 表现是「录到一半没声音也没退出」。这里只做排水，内容进 debug 日志。
+fn drain_stderr(child: &mut Child) {
+    let Some(stderr) = child.stderr.take() else {
+        return;
+    };
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+            if !line.is_empty() {
+                tracing::debug!(target: "ffmpeg", %line, "录制 ffmpeg");
+            }
+        }
+    });
+}
+
+/// 收尾产物落定，返回（最终路径, 字节数）。
+async fn finish_file(path: &Path) -> (PathBuf, i64) {
+    match segment::merge(path).await {
+        Ok(size) => return (path.to_path_buf(), size as i64),
+        Err(err) => tracing::warn!(%err, "分片合成 mp4 失败，改用字节拼接"),
+    }
+    match segment::fallback_concat(path).await {
+        Ok((target, size)) => (target, size as i64),
+        Err(err) => {
+            tracing::warn!(%err, "分片拼接失败，只能记录分片总大小");
+            (path.to_path_buf(), segment::parts_total(path) as i64)
+        }
+    }
+}
+
+/// 启动时恢复上次崩溃留下的分片。
+///
+/// 必须在 close_orphan_sessions 之前调用：那一步会把 status 改成 aborted，
+/// 之后就分不清「崩溃遗留」和「正常收尾的旧录像」了。
+pub async fn recover_parts(db: &Db) -> (usize, u64) {
+    let rows = match db.recording_sessions() {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(%err, "读取待恢复会话失败");
+            return (0, 0);
+        }
+    };
+    let mut recovered = 0usize;
+    let mut bytes = 0u64;
+    for (id, file_path) in rows {
+        let path = PathBuf::from(&file_path);
+        let has_parts = !segment::collect_parts(&path).is_empty();
+        if !has_parts {
+            // 没有分片但成品已存在：可能上次是在合并之后、写库之前被杀。
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                if meta.len() > 0 {
+                    let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
+                    recovered += 1;
+                    bytes += meta.len();
+                }
+            }
+            continue;
+        }
+        let (target, size) = finish_file(&path).await;
+        if size <= 0 {
+            continue;
+        }
+        let _ = db.update_session_file(&id, &target.display().to_string(), size);
+        tracing::info!(id = %id, file = %target.display(), size, "恢复崩溃遗留的录像");
+        recovered += 1;
+        bytes += size as u64;
+    }
+    (recovered, bytes)
+}
+
 fn emit_notice(app: &AppHandle, kind: &str, room_id: &str, host_name: &str, detail: Option<String>) {
     let notice = RecordNotice {
         kind: kind.to_string(),
@@ -597,7 +849,7 @@ fn platform_label(platform: &str) -> &'static str {
     }
 }
 
-/// 生成录制文件路径：媒体库/平台/主播/[时间][主播][标题].flv
+/// 生成录制文件路径：媒体库/平台/主播/[时间][主播][标题].mp4
 pub fn session_path(
     root: &Path,
     platform: &str,

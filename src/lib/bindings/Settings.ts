@@ -30,4 +30,12 @@ notifyEnabled: boolean,
 /**
  * zh-CN | en-US | system
  */
-language: string, };
+language: string, 
+/**
+ * 录像保留天数（0 = 不按天删除）
+ */
+retentionDays: number, 
+/**
+ * 媒体库总容量上限 GB（0 = 不限）
+ */
+maxTotalGb: number, };

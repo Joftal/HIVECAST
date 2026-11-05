@@ -379,6 +379,59 @@ impl Db {
             .map_err(db_err)?;
         Ok(())
     }
+
+    // ---- 崩溃恢复与保留策略（M7.1） ----
+
+    /// 上次没收尾的会话：启动时据此把遗留分片合成 mp4。
+    ///
+    /// 必须在 close_orphan_sessions 之前调用，否则状态已被改成 aborted，就找不到了。
+    pub fn recording_sessions(&self) -> Result<Vec<(String, String)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path FROM record_session
+                  WHERE status = 'recording' AND file_path IS NOT NULL AND file_path <> ''",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 修正会话的产物路径与大小：合并失败降级成 .ts、或崩溃恢复后路径变化时用。
+    pub fn update_session_file(&self, id: &str, path: &str, file_size: i64) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session SET file_path = ?2, file_size = ?3 WHERE id = ?1",
+                params![id, path, file_size],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 保留策略用：已收尾且有文件的会话，按开始时间倒序。
+    pub fn retention_rows(&self) -> Result<Vec<(String, String, i64, i64)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, file_size, started_at FROM record_session
+                  WHERE file_path IS NOT NULL AND file_path <> '' AND status <> 'recording'
+                  ORDER BY started_at DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
 }
 
 /// 轻量迁移：老库缺弹幕列时补上。

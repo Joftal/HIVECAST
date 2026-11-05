@@ -229,6 +229,10 @@ pub struct Settings {
     pub notify_enabled: bool,
     /// zh-CN | en-US | system
     pub language: String,
+    /// 录像保留天数（0 = 不按天删除）
+    pub retention_days: u32,
+    /// 媒体库总容量上限 GB（0 = 不限）
+    pub max_total_gb: u32,
 }
 
 /// 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。

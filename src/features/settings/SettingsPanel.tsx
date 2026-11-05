@@ -196,6 +196,37 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                 </span>
               </label>
 
+              <div className="space-y-1.5">
+                <span className={labelClass}>{t("settings.retention")}</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block space-y-1">
+                    <span className="text-[11px] text-zinc-500">{t("settings.retentionDays")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={settings.retentionDays}
+                      onChange={(event) => patch({ retentionDays: Number(event.target.value) })}
+                      className={fieldClass}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-[11px] text-zinc-500">{t("settings.retentionGb")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100000}
+                      value={settings.maxTotalGb}
+                      onChange={(event) => patch({ maxTotalGb: Number(event.target.value) })}
+                      className={fieldClass}
+                    />
+                  </label>
+                </div>
+                <span className="block text-[11px] leading-relaxed text-zinc-500">
+                  {t("settings.retentionHint")}
+                </span>
+              </div>
+
               <label className="block space-y-1.5">
                 <span className={labelClass}>{t("settings.language")}</span>
                 <select

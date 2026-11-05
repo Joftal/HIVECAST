@@ -52,11 +52,19 @@ impl AppState {
             .map_err(|err| AppError::from_io(err, &data_dir))?;
 
         let db = Arc::new(Db::open(&data_dir.join("hivecast.db"))?);
+        // 顺序很重要：先把崩溃遗留的分片合成 mp4，再收尾状态。
+        // 反过来的话状态已经变成 aborted，就找不到「待恢复」的会话了。
+        let (recovered, recovered_bytes) = crate::recorder::recover_parts(&db).await;
+        if recovered > 0 {
+            tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");
+        }
         if let Ok(count) = db.close_orphan_sessions() {
             if count > 0 {
                 tracing::info!(count, "收尾上次异常退出的录制记录");
             }
         }
+        // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
+        crate::retention::enforce_from_settings(&db);
 
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut settings = crate::settings::load(&db);
