@@ -23,6 +23,17 @@ CREATE TABLE IF NOT EXISTS app_setting (
     value TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS credential (
+    platform TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT '',
+    cookie TEXT NOT NULL,
+    uid TEXT NOT NULL DEFAULT '',
+    account_name TEXT NOT NULL DEFAULT '',
+    avatar TEXT,
+    status TEXT NOT NULL DEFAULT 'ok',
+    updated_at INTEGER NOT NULL
+);
 ";
 
 pub struct Db {
@@ -431,6 +442,83 @@ impl Db {
             })
             .map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+}
+
+/// 平台账号凭据（v1 单账号，account_id 预留给多账号）。
+///
+/// cookie 是明文：桌面端单用户，加密方案（Keychain / DPAPI）见 credential.rs 顶部说明。
+#[derive(Debug, Clone)]
+pub struct CredentialRow {
+    pub platform: String,
+    pub account_id: String,
+    pub cookie: String,
+    pub uid: String,
+    pub account_name: String,
+    pub avatar: Option<String>,
+    pub status: String,
+    pub updated_at: i64,
+}
+
+impl Db {
+    pub fn credentials(&self) -> Result<Vec<CredentialRow>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT platform, account_id, cookie, uid, account_name, avatar, status, updated_at
+                   FROM credential ORDER BY platform ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CredentialRow {
+                    platform: row.get(0)?,
+                    account_id: row.get(1)?,
+                    cookie: row.get(2)?,
+                    uid: row.get(3)?,
+                    account_name: row.get(4)?,
+                    avatar: row.get(5)?,
+                    status: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    pub fn save_credential(&self, row: &CredentialRow) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "INSERT INTO credential (platform, account_id, cookie, uid, account_name, avatar, status, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (platform) DO UPDATE SET
+                    account_id = excluded.account_id,
+                    cookie = excluded.cookie,
+                    uid = excluded.uid,
+                    account_name = excluded.account_name,
+                    avatar = excluded.avatar,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at",
+                params![
+                    row.platform,
+                    row.account_id,
+                    row.cookie,
+                    row.uid,
+                    row.account_name,
+                    row.avatar,
+                    row.status,
+                    row.updated_at,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn delete_credential(&self, platform: &str) -> Result<(), AppError> {
+        self.lock()
+            .execute("DELETE FROM credential WHERE platform = ?1", params![platform])
+            .map_err(db_err)?;
+        Ok(())
     }
 }
 

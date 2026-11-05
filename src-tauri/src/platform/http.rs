@@ -41,8 +41,27 @@ async fn send(
     request: reqwest::RequestBuilder,
     url: &str,
 ) -> Result<reqwest::Response, PlatformError> {
-    let response = request
-        .send()
+    // 统一在这里挂登录态：调用方没显式给 Cookie（扫码校验、登录接口）才用本地存的，
+    // 这样既不会把同一个 Cookie 头发两遍，也避免每个适配器都去查一次凭据。
+    let mut request = request
+        .build()
+        .map_err(|err| PlatformError::Network(format!("{url} → {err}")))?;
+    if request.headers().get(reqwest::header::COOKIE).is_none() {
+        if let Some(cookie) = crate::credential::cookie_for_url(url) {
+            match reqwest::header::HeaderValue::from_str(&cookie) {
+                Ok(value) => {
+                    request.headers_mut().insert(reqwest::header::COOKIE, value);
+                }
+                Err(_) => {
+                    // Cookie 里有非法字节时宁可这次不带，也不要把整个请求打挂。
+                    tracing::warn!(url, "Cookie 含非法字符，已跳过注入");
+                }
+            }
+        }
+    }
+
+    let response = client()
+        .execute(request)
         .await
         .map_err(|err| PlatformError::Network(format!("{url} → {err}")))?;
 
@@ -83,6 +102,37 @@ pub async fn get_json_with_date<T: DeserializeOwned>(
         .await
         .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))?;
     Ok(Fetched { data, date })
+}
+
+/// 需要读响应的 Set-Cookie 时用这个（B 站扫码登录成功后，登录态只在响应头里）。
+pub struct FetchedWithHeaders<T> {
+    pub data: T,
+    pub set_cookies: Vec<String>,
+}
+
+pub async fn get_json_with_headers<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<FetchedWithHeaders<T>, PlatformError> {
+    let mut request = client().get(url).header("Referer", referer);
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+
+    let response = send(request, url).await?;
+    let set_cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .collect();
+    let data = response
+        .json::<T>()
+        .await
+        .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))?;
+    Ok(FetchedWithHeaders { data, set_cookies })
 }
 
 /// 取文本（HTML 页面）；虎牙与斗鱼的取流参数都从页面上抠。

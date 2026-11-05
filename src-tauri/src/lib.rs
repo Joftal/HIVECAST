@@ -1,5 +1,7 @@
+mod account;
 mod broker;
 mod commands;
+mod credential;
 mod danmaku;
 mod db;
 mod disk;
@@ -88,6 +90,11 @@ pub fn run() {
             commands::room_merge_sessions,
             commands::settings_get,
             commands::settings_update,
+            commands::credentials_list,
+            commands::credential_save,
+            commands::credential_delete,
+            commands::bilibili_qr_start,
+            commands::bilibili_qr_poll,
             commands::media_list,
             commands::media_delete,
             commands::media_reveal,

@@ -208,5 +208,32 @@
     "douyu": "斗鱼",
     "huya": "虎牙",
     "douyin": "抖音"
+  },
+  "account": {
+    "title": "账号",
+    "singleAccountHint": "每个平台只保留一个账号",
+    "connected": "已登录",
+    "notConnected": "未登录",
+    "expired": "登录已失效",
+    "expiredHint": "Cookie 已过期，登录态相关的清晰度会回落到游客档位，请重新导入。",
+    "cookieCount": "{{n}} 个 Cookie",
+    "qrLogin": "扫码登录",
+    "pasteCookie": "粘贴 Cookie",
+    "updateCookie": "更新 Cookie",
+    "logout": "退出登录",
+    "confirmLogout": "再点一次确认",
+    "savedAs": "已登录：{{name}}",
+    "loggedOut": "已退出登录",
+    "cancel": "取消",
+    "cookieTitle": "{{name}} Cookie",
+    "cookiePlaceholder": "从浏览器开发者工具复制 Cookie 请求头，或整段粘贴后保存",
+    "cookieHint": "只保存在本机数据库，不会上传。",
+    "save": "保存",
+    "saving": "校验中…",
+    "qrTitle": "用哔哩哔哩手机客户端扫码",
+    "qrHint": "登录后可解锁 1080P 及以上清晰度。",
+    "qrWaiting": "正在生成二维码…",
+    "qrRefresh": "刷新二维码",
+    "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。"
   }
 }

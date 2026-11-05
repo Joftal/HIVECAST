@@ -272,3 +272,46 @@ pub struct Playback {
     pub duration_ms: i64,
 }
 
+
+/// 已保存的平台账号（v1 单账号，account_id 预留）。
+///
+/// 不返回 Cookie 本身，只给条目名：设置页只需要展示「带了哪些字段」。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct CredentialInfo {
+    pub platform: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub uid: String,
+    pub avatar: Option<String>,
+    /// Cookie 里的 name 列表（有序、去重），用于确认导入内容
+    pub cookie_names: Vec<String>,
+    /// ok | expired
+    pub status: String,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+/// 扫码登录的起点：二维码 SVG 由后端渲染，前端直接 innerHTML。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct QrTicket {
+    pub qrcode_key: String,
+    /// 二维码承载的内容（B 站登录页 URL）
+    pub url: String,
+    pub svg: String,
+}
+
+/// 一次扫码轮询的结果。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct QrPoll {
+    /// pending | scanned | confirmed | expired | error
+    pub state: String,
+    pub message: String,
+    /// 只有 confirmed 时才有
+    pub credential: Option<CredentialInfo>,
+}

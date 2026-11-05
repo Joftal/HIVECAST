@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import { isTauri, settingsGet, settingsUpdate, type Settings } from "../../lib/ipc";
+import AccountSection from "./AccountSection";
 
 function describeError(err: unknown): string {
   if (typeof err === "string") return err;
@@ -239,6 +240,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                   <option value="en-US">English</option>
                 </select>
               </label>
+
+              <AccountSection />
 
               <label className="flex items-start gap-2.5 rounded-xl border hairline bg-ink-850/60 px-3 py-2.5">
                 <input

@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo } from "./bindings/AppInfo";
+import type { CredentialInfo } from "./bindings/CredentialInfo";
+import type { QrPoll } from "./bindings/QrPoll";
+import type { QrTicket } from "./bindings/QrTicket";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { MediaItem } from "./bindings/MediaItem";
@@ -15,6 +18,9 @@ import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
 
 export type {
   AppInfo,
+  CredentialInfo,
+  QrPoll,
+  QrTicket,
   DanmakuBatch,
   DanmakuMessage,
   MediaItem,
@@ -191,3 +197,28 @@ export async function mediaDelete(sessionId: string, deleteFile: boolean): Promi
   return invoke("media_delete", { sessionId, deleteFile });
 }
 
+
+// ---- M7.2 账号 ----
+
+export async function credentialsList(): Promise<CredentialInfo[]> {
+  return invoke<CredentialInfo[]>("credentials_list");
+}
+
+export async function credentialSave(
+  platform: string,
+  cookie: string,
+): Promise<CredentialInfo> {
+  return invoke<CredentialInfo>("credential_save", { platform, cookie });
+}
+
+export async function credentialDelete(platform: string): Promise<void> {
+  return invoke<void>("credential_delete", { platform });
+}
+
+export async function bilibiliQrStart(): Promise<QrTicket> {
+  return invoke<QrTicket>("bilibili_qr_start");
+}
+
+export async function bilibiliQrPoll(qrcodeKey: string): Promise<QrPoll> {
+  return invoke<QrPoll>("bilibili_qr_poll", { qrcodeKey });
+}

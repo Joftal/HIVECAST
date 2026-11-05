@@ -66,6 +66,14 @@ impl AppState {
         // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
         crate::retention::enforce_from_settings(&db);
 
+        // 账号凭据先灌进内存，之后所有 HTTP 请求按域名自动带上。
+        crate::credential::load_from_db(&db);
+        // B 站登录态会过期，启动后异步复验一次；网络慢不该拖住启动。
+        let db_for_auth = db.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::account::revalidate(&db_for_auth).await;
+        });
+
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut settings = crate::settings::load(&db);
         let mut media_root = PathBuf::from(&settings.media_root);

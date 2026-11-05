@@ -208,5 +208,32 @@
     "douyu": "Douyu",
     "huya": "Huya",
     "douyin": "Douyin"
+  },
+  "account": {
+    "title": "Accounts",
+    "singleAccountHint": "One account per platform",
+    "connected": "Signed in",
+    "notConnected": "Not signed in",
+    "expired": "Session expired",
+    "expiredHint": "The cookie expired, so logged-in qualities fall back to guest tiers. Import it again.",
+    "cookieCount": "{{n}} cookies",
+    "qrLogin": "Scan to sign in",
+    "pasteCookie": "Paste cookie",
+    "updateCookie": "Update cookie",
+    "logout": "Sign out",
+    "confirmLogout": "Click again to confirm",
+    "savedAs": "Signed in as {{name}}",
+    "loggedOut": "Signed out",
+    "cancel": "Cancel",
+    "cookieTitle": "{{name}} cookie",
+    "cookiePlaceholder": "Copy the Cookie request header from your browser devtools, or paste the whole line",
+    "cookieHint": "Stored only in the local database, never uploaded.",
+    "save": "Save",
+    "saving": "Checking…",
+    "qrTitle": "Scan with the Bilibili mobile app",
+    "qrHint": "Signing in unlocks 1080P and above.",
+    "qrWaiting": "Generating QR code…",
+    "qrRefresh": "Refresh QR code",
+    "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
   }
 }

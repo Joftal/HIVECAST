@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, MediaItem, Playback, PostResult, RecordSession, RoomRecord, RoomView, Settings,
-    StreamDescriptor, ViewSlotInfo,
+    AppInfo, CredentialInfo, MediaItem, Playback, PostResult, QrPoll, QrTicket, RecordSession,
+    RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -406,6 +406,45 @@ pub async fn settings_update(
     let saved = crate::settings::save(&state.db, &settings)?;
     crate::settings::apply(&saved, &state.recorder);
     Ok(saved)
+}
+
+// ---- 账号与登录（M7.2） ----
+
+#[tauri::command]
+pub async fn credentials_list(state: State<'_, AppState>) -> Result<Vec<CredentialInfo>, AppError> {
+    crate::account::list(&state.db)
+}
+
+/// 保存粘贴的 Cookie。B 站会先打 nav 接口验证并回填昵称，
+/// 所以这里可能因「Cookie 失效」失败，而不是静默存一份用不了的凭据。
+#[tauri::command]
+pub async fn credential_save(
+    state: State<'_, AppState>,
+    platform: String,
+    cookie: String,
+) -> Result<CredentialInfo, AppError> {
+    crate::account::save_cookie(&state.db, &platform, &cookie).await
+}
+
+#[tauri::command]
+pub async fn credential_delete(
+    state: State<'_, AppState>,
+    platform: String,
+) -> Result<(), AppError> {
+    crate::account::delete(&state.db, &platform)
+}
+
+#[tauri::command]
+pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
+    crate::account::bilibili_qr_start().await
+}
+
+#[tauri::command]
+pub async fn bilibili_qr_poll(
+    state: State<'_, AppState>,
+    qrcode_key: String,
+) -> Result<QrPoll, AppError> {
+    crate::account::bilibili_qr_poll(&state.db, &qrcode_key).await
 }
 
 // ---- 媒体库 ----
