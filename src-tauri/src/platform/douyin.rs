@@ -392,6 +392,20 @@ struct Quality {
     hls: Option<String>,
 }
 
+/// 弹幕长连接需要真实 room_id。页面 SSR 并不保证带 roomIdStr（实测常是 "$undefined"），
+/// 所以统一走 enter 接口拿 id_str。
+pub(crate) async fn live_room_id(web_rid: &str) -> Result<(String, bool), crate::platform::PlatformError> {
+    let adapter = DouyinAdapter::new();
+    let entered = adapter.enter(web_rid).await?;
+    let (payload, _, _) = unwrap_enter(entered, web_rid)?;
+    if payload.id_str.is_empty() {
+        return Err(crate::platform::PlatformError::Parse(
+            "enter 响应缺少 id_str".into(),
+        ));
+    }
+    Ok((payload.id_str, payload.status == 2))
+}
+
 fn unwrap_enter(
     entered: EnterResponse,
     rid: &str,

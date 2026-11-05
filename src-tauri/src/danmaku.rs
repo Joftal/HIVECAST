@@ -203,7 +203,7 @@ impl DanmakuHub {
 
 /// 是否已有该平台的弹幕接入（M3 B 站；M7.3 起加斗鱼、虎牙）。
 pub fn supports(room: &RoomRecord) -> bool {
-    matches!(room.platform.as_str(), "bilibili" | "douyu" | "huya")
+    matches!(room.platform.as_str(), "bilibili" | "douyu" | "huya" | "douyin")
 }
 
 /// 单个录制会话的 JSONL 写入器。
@@ -547,6 +547,10 @@ async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
     }
     if conn.room.platform == "huya" {
         run_huya_room(app, conn).await;
+        return;
+    }
+    if conn.room.platform == "douyin" {
+        run_douyin_room(app, conn).await;
         return;
     }
 
@@ -1796,5 +1800,72 @@ mod huya_tests {
         }
         println!("收到虎牙弹幕 {chats} 条，样例：{samples:#?}");
         assert!(chats > 0, "30 秒内没有收到任何虎牙弹幕");
+    }
+}
+
+/// 抖音：一条 WS，帧里可能一次带回几十条消息；批量窗口与其它平台保持一致。
+async fn run_douyin_room(app: AppHandle, conn: Arc<RoomConn>) {
+    let mut backoff = Duration::from_secs(3);
+    loop {
+        if conn.closed.load(Ordering::SeqCst) {
+            break;
+        }
+        match douyin_session(&app, &conn).await {
+            Ok(()) => {
+                if conn.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                conn.set_error("抖音弹幕连接被关闭");
+            }
+            Err(err) => {
+                tracing::warn!(room = %conn.room.room_key, %err, "抖音弹幕断开");
+                conn.set_error(err);
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = wait_closed(&conn) => break,
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+async fn wait_closed(conn: &RoomConn) {
+    while !conn.closed.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn douyin_session(app: &AppHandle, conn: &RoomConn) -> Result<(), String> {
+    let mut stream = crate::douyin_ws::open(&conn.room.room_key).await?;
+    let mut window = Instant::now();
+    let mut count = 0u32;
+    let mut batch: Vec<DanmakuMessage> = Vec::new();
+    let mut last_flush = Instant::now();
+
+    loop {
+        if conn.closed.load(Ordering::SeqCst) {
+            flush(app, conn, &mut batch);
+            return Ok(());
+        }
+        let events = match tokio::time::timeout(Duration::from_millis(200), stream.next_events()).await {
+            Err(_) => Vec::new(),
+            Ok(Err(err)) => return Err(err),
+            Ok(Ok(events)) => events,
+        };
+        for event in events {
+            let message = DanmakuMessage {
+                offset_ms: 0,
+                kind: event.kind.into(),
+                user: Some(event.user),
+                content: event.content,
+                color: if event.kind == "gift" { 0xFFB027 } else { 0xFFFFFF },
+            };
+            accept(conn, &mut window, &mut count, &mut batch, message);
+        }
+        if last_flush.elapsed() >= BATCH_WINDOW {
+            flush(app, conn, &mut batch);
+            last_flush = Instant::now();
+        }
     }
 }

@@ -4,6 +4,7 @@
 pub mod abogus;
 pub mod bilibili;
 pub mod douyin;
+pub mod douyin_sign;
 pub mod douyu;
 pub mod http;
 pub mod huya;

@@ -3,6 +3,7 @@ mod broker;
 mod commands;
 mod credential;
 mod danmaku;
+mod douyin_ws;
 mod db;
 mod disk;
 mod error;
