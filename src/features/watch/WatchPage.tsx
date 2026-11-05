@@ -385,6 +385,10 @@ function SlotCell({
   // 平台不一定给到请求的画质（未登录 B 站会把原画降到超清），要如实告诉用户。
   const degraded =
     session.requestedQn > 0 && session.actualQn > 0 && session.actualQn !== session.requestedQn;
+  // 降级时用平台自己的档位名（如斗鱼「蓝光4M」），避免各平台 qn 语义不一致造成误读。
+  const actualQuality =
+    (session.quality ?? "").split(" · ")[0].trim() ||
+    t(`watch.qn.${session.actualQn}`, { defaultValue: String(session.actualQn) });
 
   useEffect(() => {
     setFatal(null);
@@ -437,7 +441,7 @@ function SlotCell({
             title={t("watch.degradedHint")}
             className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 font-mono text-[10px] text-amber-300/90"
           >
-            ↓ {t(`watch.qn.${session.actualQn}`, { defaultValue: String(session.actualQn) })}
+            ↓ {actualQuality}
           </span>
         )}
 

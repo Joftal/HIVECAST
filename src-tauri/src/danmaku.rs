@@ -95,6 +95,9 @@ impl DanmakuHub {
 
     /// 增加一个消费者（录制或观看）；第一个消费者负责拉起连接。
     pub fn retain(&self, room: &RoomRecord) {
+        if !supports(room) {
+            return;
+        }
         let mut rooms = self.rooms.lock().expect("弹幕房间表被污染");
         if let Some(conn) = rooms.get(&room.id) {
             conn.refs.fetch_add(1, Ordering::SeqCst);
@@ -127,6 +130,9 @@ impl DanmakuHub {
 
     /// 录制开始时挂一个 JSONL 写入器；同时自动 retain。
     pub fn attach_record(&self, room: &RoomRecord, path: &Path) -> Option<Arc<RecordWriter>> {
+        if !supports(room) {
+            return None;
+        }
         self.retain(room);
         let writer = RecordWriter::new(path).ok()?;
         let rooms = self.rooms.lock().expect("弹幕房间表被污染");
@@ -192,6 +198,11 @@ impl DanmakuHub {
             }
         }
     }
+}
+
+/// 是否已有该平台的弹幕接入（M3 只做了 B 站；斗鱼/虎牙在 M4 不接弹幕）。
+pub fn supports(room: &RoomRecord) -> bool {
+    room.platform == "bilibili"
 }
 
 /// 单个录制会话的 JSONL 写入器。

@@ -21,7 +21,7 @@
     "title": "Monitor",
     "subtitle": "Add rooms to watch for going live, record automatically, and post-process.",
     "emptyTitle": "No rooms monitored yet",
-    "emptyBody": "Paste a Bilibili live link or room id to start monitoring. Recordings land in your media library.",
+    "emptyBody": "Paste a live room link or room id (Bilibili / Douyu / Huya) to start monitoring. Recordings land in your media library.",
     "envTitle": "Environment check",
     "envBody": "Values come from the Rust side and confirm the runtime is ready.",
     "ffmpeg": "ffmpeg",
@@ -48,9 +48,9 @@
     "remove": "Remove",
     "noHistory": "No recordings yet",
     "tipsTitle": "Tips",
-    "tipInput": "Accepts Bilibili live links, bare room ids, and b23.tv short links.",
+    "tipInput": "Supports Bilibili (including b23.tv short links), Douyu, and Huya live links or room ids.",
     "tipAuto": "Manual recording still works with auto record off. Stop sends SIGINT so ffmpeg can finalize the file.",
-    "tipQuality": "Record quality is independent of playback quality. Without login Bilibili caps at 720p.",
+    "tipQuality": "Record quality is independent of playback quality. Without login platforms often downgrade; the actual quality is marked with ↓.",
     "status": {
       "recording": "Recording",
       "finished": "Finished",
@@ -150,5 +150,10 @@
   "error": {
     "ffmpegMissing": "ffmpeg was not found. Install it or set its path in Settings later.",
     "generic": "Action failed: {{message}}"
+  },
+  "platformName": {
+    "bilibili": "Bilibili",
+    "douyu": "Douyu",
+    "huya": "Huya"
   }
 }

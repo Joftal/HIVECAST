@@ -2,7 +2,9 @@
 //! 不打开连接、不写文件、不碰数据库与 UI（见 docs/04）。
 
 pub mod bilibili;
+pub mod douyu;
 pub mod http;
+pub mod huya;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -169,7 +171,13 @@ pub trait PlatformAdapter: Send + Sync {
 
 fn registry() -> &'static Vec<Arc<dyn PlatformAdapter>> {
     static REGISTRY: OnceLock<Vec<Arc<dyn PlatformAdapter>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| vec![Arc::new(bilibili::BilibiliAdapter::new())])
+    REGISTRY.get_or_init(|| {
+        vec![
+            Arc::new(bilibili::BilibiliAdapter::new()) as Arc<dyn PlatformAdapter>,
+            Arc::new(douyu::DouyuAdapter::new()) as Arc<dyn PlatformAdapter>,
+            Arc::new(huya::HuyaAdapter::new()),
+        ]
+    })
 }
 
 /// 把用户输入（房间号 / 短号 / 直播链接）解析成房间引用。

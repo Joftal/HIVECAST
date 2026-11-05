@@ -22,17 +22,25 @@ pub fn client() -> &'static reqwest::Client {
     })
 }
 
-/// 发 GET 并解析 JSON；错误统一收敛成 PlatformError，方便上层映射错误码。
-pub async fn get_json<T: DeserializeOwned>(
-    url: &str,
-    referer: &str,
-    extra_headers: &[(&str, &str)],
-) -> Result<T, PlatformError> {
-    let mut request = client().get(url).header("Referer", referer);
-    for (name, value) in extra_headers {
-        request = request.header(*name, *value);
-    }
+/// 带响应元信息的结果。斗鱼签名要求用服务器时间（响应 Date 头）而不是本地时钟，
+/// 所以这里把 Date 一并带出来。
+pub struct Fetched<T> {
+    pub data: T,
+    /// 响应 Date 头对应的 Unix 秒
+    pub date: Option<i64>,
+}
 
+fn parse_date(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+    let value = headers.get(reqwest::header::DATE)?.to_str().ok()?;
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|date| date.timestamp())
+}
+
+async fn send(
+    request: reqwest::RequestBuilder,
+    url: &str,
+) -> Result<reqwest::Response, PlatformError> {
     let response = request
         .send()
         .await
@@ -44,9 +52,80 @@ pub async fn get_json<T: DeserializeOwned>(
             response.status()
         )));
     }
+    Ok(response)
+}
 
-    response
+/// 发 GET 并解析 JSON；错误统一收敛成 PlatformError，方便上层映射错误码。
+pub async fn get_json<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<T, PlatformError> {
+    get_json_with_date(url, referer, extra_headers)
+        .await
+        .map(|fetched| fetched.data)
+}
+
+pub async fn get_json_with_date<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<Fetched<T>, PlatformError> {
+    let mut request = client().get(url).header("Referer", referer);
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+
+    let response = send(request, url).await?;
+    let date = parse_date(response.headers());
+    let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))
+        .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))?;
+    Ok(Fetched { data, date })
+}
+
+/// 取文本（HTML 页面）；虎牙与斗鱼的取流参数都从页面上抠。
+pub async fn get_text(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<(String, Option<i64>), PlatformError> {
+    let mut request = client().get(url).header("Referer", referer);
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+
+    let response = send(request, url).await?;
+    let date = parse_date(response.headers());
+    let body = response
+        .text()
+        .await
+        .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))?;
+    Ok((body, date))
+}
+
+/// 以表单 POST 并解析 JSON（斗鱼 getH5PlayV1 走这条路）。
+pub async fn post_form_json<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    form: &[(&str, String)],
+    extra_headers: &[(&str, &str)],
+) -> Result<Fetched<T>, PlatformError> {
+    let mut request = client()
+        .post(url)
+        .header("Referer", referer)
+        .header("Origin", "https://www.douyu.com")
+        .form(form);
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+
+    let response = send(request, url).await?;
+    let date = parse_date(response.headers());
+    let data = response
+        .json::<T>()
+        .await
+        .map_err(|err| PlatformError::Parse(format!("{url} → {err}")))?;
+    Ok(Fetched { data, date })
 }

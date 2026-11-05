@@ -21,7 +21,7 @@
     "title": "主播监控",
     "subtitle": "添加直播间后自动监听开播、录制与后处理。",
     "emptyTitle": "还没有监控中的直播间",
-    "emptyBody": "粘贴 B 站直播间链接或房间号开始监控，开播后会自动录制到媒体库。",
+    "emptyBody": "粘贴直播间链接或房间号开始监控（哔哩哔哩 / 斗鱼 / 虎牙），开播后会自动录制到媒体库。",
     "envTitle": "环境自检",
     "envBody": "以下信息来自 Rust 侧，用于确认运行环境可用。",
     "ffmpeg": "ffmpeg",
@@ -48,9 +48,9 @@
     "remove": "移除",
     "noHistory": "暂无录制记录",
     "tipsTitle": "使用提示",
-    "tipInput": "支持 B 站直播间链接、房间号，也支持 b23.tv 短链。",
+    "tipInput": "目前支持哔哩哔哩（含 b23.tv 短链）、斗鱼、虎牙的直播间链接或房间号。",
     "tipAuto": "关闭自动录制后仍可手动开录；停录会先发送 SIGINT，让 ffmpeg 写完文件尾。",
-    "tipQuality": "录制画质独立于观看画质；未登录时 B 站最高只给到 720P 超清。",
+    "tipQuality": "录制画质独立于观看画质；未登录时平台常把画质降到它能给的最高档，界面上会用 ↓ 标出实际画质。",
     "status": {
       "recording": "录制中",
       "finished": "已完成",
@@ -150,5 +150,10 @@
   "error": {
     "ffmpegMissing": "未找到 ffmpeg，请检查安装或稍后在设置中指定路径。",
     "generic": "操作失败：{{message}}"
+  },
+  "platformName": {
+    "bilibili": "哔哩哔哩",
+    "douyu": "斗鱼",
+    "huya": "虎牙"
   }
 }

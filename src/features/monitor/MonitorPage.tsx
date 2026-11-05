@@ -166,7 +166,7 @@ function RoomRow(props: RowProps) {
 
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
             <span className="rounded border hairline px-1 text-[10px] uppercase tracking-wide text-zinc-400">
-              {room.platform}
+              {t(`platformName.${room.platform}`, { defaultValue: room.platform })}
             </span>
             <span className="truncate">{room.hostName}</span>
             {room.areaName && <span className="text-zinc-600">· {room.areaName}</span>}

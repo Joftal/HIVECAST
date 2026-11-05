@@ -36,6 +36,9 @@ export default function Player({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  // 卡死时的自救次数：先整体重载播放器，仍不行才交给用户点重试。
+  const reloadsRef = useRef(0);
+  const [reloadKey, setReloadKey] = useState(0);
   // 回调放在 ref 里：外层每次渲染都会传新函数，不能让它触发 hls 重建。
   const fatalRef = useRef(onFatal);
   fatalRef.current = onFatal;
@@ -64,6 +67,11 @@ export default function Player({
         setPlaying(false);
       });
   };
+
+  // 换流（切画质/换房间）时重置自救预算。
+  useEffect(() => {
+    reloadsRef.current = 0;
+  }, [url]);
 
   // 每个播放器实例独立持有自己的 hls 实例：这是「互不打架」的最小单元。
   useEffect(() => {
@@ -116,7 +124,12 @@ export default function Player({
           hls.startLoad();
           if (live !== null && Math.abs(live - video.currentTime) > 2) video.currentTime = live;
         } else if (stalls >= 6) {
-          fatalRef.current?.("stalled");
+          if (reloadsRef.current < 2) {
+            reloadsRef.current += 1;
+            setReloadKey((value) => value + 1);
+          } else {
+            fatalRef.current?.("stalled");
+          }
         }
       }, 2000);
       return () => {
@@ -135,7 +148,7 @@ export default function Player({
       video.removeAttribute("src");
       video.load();
     };
-  }, [url]);
+  }, [url, reloadKey]);
 
   // 统计信息每秒刷新一次，不参与 React 的高频路径。
   useEffect(() => {

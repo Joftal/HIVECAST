@@ -251,8 +251,9 @@ impl Recorder {
         let danmaku = self
             .danmaku
             .as_ref()
+            .filter(|_| crate::danmaku::supports(room))
             .and_then(|hub| hub.attach_record(room, &danmaku_path));
-        if self.danmaku.is_some() && danmaku.is_none() {
+        if self.danmaku.is_some() && danmaku.is_none() && crate::danmaku::supports(room) {
             tracing::warn!(path = %danmaku_path.display(), "弹幕文件创建失败，本场只录视频");
         }
 

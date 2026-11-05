@@ -36,6 +36,7 @@ futures-util = "0.3"
 brotli = "7"
 flate2 = "1"
 md5 = "0.7"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
