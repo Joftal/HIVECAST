@@ -4,7 +4,6 @@ import { Button, Select, cx } from "../../components/ui/Controls";
 import {
   describeError,
   isTauri,
-  mediaList,
   mediaReveal,
   onRoomsChanged,
   recordStart,
@@ -27,9 +26,15 @@ import {
 
 const QUALITIES = [10000, 400, 250, 150, 80];
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
+const PLATFORM_DOT: Record<string, string> = {
+  bilibili: "#22a7f0",
+  douyu: "#ff7a1a",
+  huya: "#f5a623",
+  douyin: "#ff2d6f",
+};
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。 */
-const COLUMNS = "120px 68px 84px minmax(0,1fr) 78px 92px 148px";
+const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 76px 116px 148px";
 const ROW_H = 76;
 const THUMB_W = 120;
 const THUMB_H = 68;
@@ -94,6 +99,27 @@ function postKey(roomId: string, kind: PostKind, sessionId?: string): string {
   return roomId + ":" + kind + ":" + (sessionId ?? "");
 }
 
+/** 头像：没有 avatarUrl 时用平台色 + 首字母占位。 */
+function Avatar({ room, size: px }: { room: RoomView["room"]; size: number }) {
+  const src = room.avatarUrl;
+  return src ? (
+    <img
+      src={src}
+      alt=""
+      referrerPolicy="no-referrer"
+      className="shrink-0 rounded-full bg-raised object-cover"
+      style={{ width: px, height: px }}
+    />
+  ) : (
+    <span
+      className="flex shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white"
+      style={{ width: px, height: px, backgroundColor: PLATFORM_DOT[room.platform] ?? "#8a8f98" }}
+    >
+      {(room.hostName || room.title || "?").slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
 function Thumb({
   room,
   w,
@@ -145,7 +171,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
 
   const [views, setViews] = useState<RoomView[]>([]);
   const [sessions, setSessions] = useState<RecordSession[]>([]);
-  const [library, setLibrary] = useState({ count: 0, bytes: 0 });
+
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
   const [onlyRecording, setOnlyRecording] = useState(false);
@@ -156,6 +182,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // 详情是「录制详情」抽屉，默认不展开；点行不再自动打开。
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   useEffect(() => {
@@ -169,6 +196,15 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [addOpen]);
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId]);
+
   const [lines, setLines] = useState<LineInfo[] | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
   const [postBusy, setPostBusy] = useState<string | null>(null);
@@ -177,13 +213,9 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
   const load = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const [rooms, history, media] = await Promise.all([roomsList(), sessionsList(undefined, 200), mediaList(200)]);
+      const [rooms, history] = await Promise.all([roomsList(), sessionsList(undefined, 200)]);
       setViews(rooms);
       setSessions(history);
-      setLibrary({
-        count: media.filter((item) => item.hasFile).length,
-        bytes: media.reduce((sum, item) => sum + (item.hasFile ? item.size : 0), 0),
-      });
     } catch (err) {
       setError(describeError(err));
     }
@@ -215,21 +247,12 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     return () => window.clearInterval(timer);
   }, [recordingActive]);
 
-  // 右栏跟着选中走：选中被移除或筛选后仍保留，只有第一次进来时自动选第一个。
-  useEffect(() => {
-    if (selectedId && views.some((view) => view.room.id === selectedId)) return;
-    setSelectedId(views.length > 0 ? views[0].room.id : null);
-  }, [views, selectedId]);
-
   useEffect(() => {
     setLines(null);
     setConfirmId(null);
     setNotice(null);
     setMenuId(null);
   }, [selectedId]);
-
-  const online = views.filter((view) => view.room.isLive).length;
-  const recording = views.filter((view) => view.recording).length;
 
   const counts = useMemo(() => {
     const map: Record<string, number> = { all: views.length };
@@ -258,15 +281,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     const label = (view: RoomView) => view.room.hostName || view.room.title || view.room.roomKey;
     return list.sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true }));
   }, [views, query, platform, onlyRecording]);
-
-  // 默认选中第一行：进入页面、切筛选、删掉当前选中行时都保证右栏有内容。
-  useEffect(() => {
-    if (shown.length === 0) {
-      if (selectedId !== null) setSelectedId(null);
-      return;
-    }
-    if (!shown.some((view) => view.room.id === selectedId)) setSelectedId(shown[0].room.id);
-  }, [shown, selectedId]);
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
   const selectedSessions = useMemo(
@@ -407,18 +421,11 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     const busy = busyId === room.id;
     const elapsed = view.recording ? now / 1000 - view.recording.startedAt : 0;
     const last = lastByRoom.get(room.id);
+    const startedAt = view.recording ? view.recording.startedAt : last?.startedAt;
+    const durationMs = view.recording ? now - view.recording.startedAt * 1000 : (last?.durationMs ?? 0);
     return (
       <div
         key={room.id}
-        role="button"
-        tabIndex={0}
-        onClick={() => setSelectedId(room.id)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setSelectedId(room.id);
-          }
-        }}
         style={{ gridTemplateColumns: COLUMNS, minHeight: ROW_H }}
         className={cx(
           "grid cursor-default items-center gap-x-3 border-b border-line px-5 text-left transition-colors",
@@ -434,28 +441,42 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           lastAt={last ? last.startedAt : null}
           locale={locale}
         />
+        <span className={cx("truncate text-[12.5px]", room.isLive ? "text-ink-soft" : "text-faint")}>
+          {room.isLive ? t("monitor.statusLive") : t("monitor.statusOffline")}
+        </span>
         <span
-          className={cx(
-            "truncate text-[12.5px]",
-            isRecording ? "font-medium text-rec" : room.isLive ? "text-ink-soft" : "text-faint",
-          )}
+          className={cx("truncate text-[12.5px]", isRecording ? "font-medium text-rec" : "text-faint")}
+          title={isRecording ? statusText(view) : undefined}
         >
-          {statusText(view)}
+          {isRecording ? t("monitor.statusRecording") : t("monitor.statusIdle")}
         </span>
         <span className="truncate text-[12.5px] text-ink-soft">{t("platformName." + room.platform)}</span>
-        <span className="min-w-0">
-          <span className="block truncate text-[14px] font-medium leading-5 text-ink" title={room.title}>
-            {room.title || room.roomKey}
-          </span>
-          <span className="mt-0.5 block truncate text-[12px] leading-4 text-muted">
-            {(room.hostName || "—") +
-              (room.isLive && room.startedAt ? " · " + t("monitor.detailStarted") + " " + hhmm(room.startedAt) : "")}
+        <span className="flex min-w-0 items-center gap-2">
+          <Avatar room={room} size={26} />
+          <span className="min-w-0">
+            <span className="block truncate text-[13.5px] font-medium leading-5 text-ink" title={room.hostName || room.title}>
+              {room.hostName || room.title || room.roomKey}
+            </span>
+            <span className="mt-0.5 block truncate text-[11.5px] leading-4 text-muted" title={room.title}>
+              {room.title || room.roomKey}
+            </span>
           </span>
         </span>
         <span className="truncate text-[12.5px] text-muted">
           {t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
         </span>
-        <span className="tnum text-right text-[12.5px] text-ink-soft">{isRecording ? clock(elapsed) : "—"}</span>
+        <span className="tnum text-right text-[12.5px] leading-4 text-ink-soft">
+          {startedAt ? (
+            <>
+              <span className="block text-[11.5px] text-muted">{recent(startedAt)}</span>
+              <span className={cx("block", isRecording ? "text-rec" : "")}>
+                {isRecording ? clock(elapsed) : clockMs(durationMs)}
+              </span>
+            </>
+          ) : (
+            "—"
+          )}
+        </span>
         <span className="relative flex items-center justify-end gap-1.5">
           <Button
             size="sm"
@@ -492,6 +513,16 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
             <>
               <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
               <div className="absolute right-0 top-9 z-40 w-[176px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuId(null);
+                    setSelectedId(room.id);
+                  }}
+                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                >
+                  {t("monitor.recordDetail")}
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -534,130 +565,157 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     const last = lastByRoom.get(room.id);
     const isRecording = Boolean(view.recording);
     return (
-      <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface">
-        <div className="p-4">
-          <button
-            type="button"
-            onClick={() => void openWatch(room.id)}
-            title={t("monitor.watch")}
-            className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px]"
-          >
-            <Thumb
-              room={room}
-              w={288}
-              h={162}
-              recording={isRecording}
-              lastAt={last ? last.startedAt : null}
-              locale={locale}
-            />
-          </button>
-
-          <div className="mt-3 flex items-center gap-1.5 text-[12.5px]">
-            <span
-              className={cx(
-                "font-medium",
-                isRecording ? "text-rec" : room.isLive ? "text-live" : "text-faint",
-              )}
+      <div className="fixed inset-0 z-50 flex justify-end">
+        <button
+          type="button"
+          aria-label={t("monitor.closeDetail")}
+          onClick={() => setSelectedId(null)}
+          className="absolute inset-0 animate-fade-in bg-black/35 backdrop-blur-[2px]"
+        />
+        <aside className="relative flex h-full w-[min(440px,94vw)] animate-sheet flex-col border-l border-line bg-surface shadow-2xl">
+          <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+            <div className="min-w-0">
+              <h2 className="text-[14px] font-semibold text-ink">{t("monitor.recordDetail")}</h2>
+              <p className="mt-0.5 truncate text-[11px] leading-4 text-muted">{room.hostName || room.roomKey}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedId(null)}
+              aria-label={t("monitor.closeDetail")}
+              className="focus-ring -mr-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
             >
-              {statusText(view)}
-            </span>
-            {room.isLive && room.startedAt ? (
-              <span className="tnum text-muted">· {t("monitor.detailStarted")} {hhmm(room.startedAt)}</span>
-            ) : null}
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
+              </svg>
+            </button>
           </div>
-          <h2 className="mt-1.5 text-[15px] font-semibold leading-[22px] text-ink">{room.title || room.roomKey}</h2>
-          <p className="mt-1 truncate text-[12.5px] text-muted">{room.hostName || "—"}</p>
-          <p className="mt-1 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
-            {room.canonicalUrl}
-          </p>
+          <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+            <button
+              type="button"
+              onClick={() => void openWatch(room.id)}
+              title={t("monitor.watch")}
+              className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px]"
+            >
+              <Thumb
+                room={room}
+                w={368}
+                h={207}
+                recording={isRecording}
+                lastAt={last ? last.startedAt : null}
+                locale={locale}
+              />
+            </button>
 
-          <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-[7px] bg-raised/60 px-3 py-2.5">
-            {[
-              { label: t("monitor.colArea"), value: room.areaName ?? "—" },
-              { label: t("monitor.detailRecorded"), value: size(recorded) },
-              { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
-              { label: t("monitor.lastRecorded"), value: last ? recent(last.startedAt) : "—" },
-            ].map((item) => (
-              <div key={item.label} className="min-w-0">
-                <div className="text-[11.5px] text-faint">{item.label}</div>
-                <div className="mt-0.5 truncate text-[12.5px] text-ink-soft">{item.value}</div>
+            <div className="mt-3 flex items-center gap-1.5 text-[12.5px]">
+              <span
+                className={cx(
+                  "font-medium",
+                  isRecording ? "text-rec" : room.isLive ? "text-live" : "text-faint",
+                )}
+              >
+                {statusText(view)}
+              </span>
+              {room.isLive && room.startedAt ? (
+                <span className="tnum text-muted">· {t("monitor.detailStarted")} {hhmm(room.startedAt)}</span>
+              ) : null}
+            </div>
+            <h2 className="mt-1.5 text-[15px] font-semibold leading-[22px] text-ink">{room.title || room.roomKey}</h2>
+            <p className="mt-1 truncate text-[12.5px] text-muted">{room.hostName || "—"}</p>
+            <p className="mt-1 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
+              {room.canonicalUrl}
+            </p>
+
+            <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-[7px] bg-raised/60 px-3 py-2.5">
+              {[
+                { label: t("monitor.colArea"), value: room.areaName ?? "—" },
+                { label: t("monitor.detailRecorded"), value: size(recorded) },
+                { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
+                { label: t("monitor.lastRecorded"), value: last ? recent(last.startedAt) : "—" },
+              ].map((item) => (
+                <div key={item.label} className="min-w-0">
+                  <div className="text-[11.5px] text-faint">{item.label}</div>
+                  <div className="mt-0.5 truncate text-[12.5px] text-ink-soft">{item.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 text-[11.5px] font-medium text-muted">{t("monitor.panelSettings")}</div>
+            <div className="mt-2 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.quality")}</span>
+                <Select
+                  value={String(room.recordQn)}
+                  size="md"
+                  disabled={busy}
+                  onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
+                  options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
+                  className="flex-1"
+                />
               </div>
-            ))}
-          </div>
-
-          <div className="mt-4 text-[11.5px] font-medium text-muted">{t("monitor.panelSettings")}</div>
-          <div className="mt-2 space-y-2.5">
-            <div className="flex items-center gap-2">
-              <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.quality")}</span>
-              <Select
-                value={String(room.recordQn)}
-                size="md"
-                disabled={busy}
-                onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
-                options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
-                className="flex-1"
-              />
+              <div className="flex items-center gap-2">
+                <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.line")}</span>
+                <Select
+                  value={room.recordLine ?? ""}
+                  size="md"
+                  disabled={lineBusy || busy}
+                  title={t("monitor.lineHint")}
+                  onChange={(next) => void run(room.id, () => roomSetLine(room.id, next || null))}
+                  options={lineOptions}
+                  className="flex-1"
+                />
+              </div>
+              {lines === null ? (
+                <button
+                  type="button"
+                  onClick={() => void loadLines(room.id, room.recordQn)}
+                  className="focus-ring inline-flex items-center gap-1 rounded-ctl px-1.5 py-0.5 text-[12px] text-accent-text transition-colors hover:bg-accent-soft"
+                >
+                  {lineBusy ? t("common.loading") : t("monitor.lineLoad")}
+                </button>
+              ) : lines.length === 0 ? (
+                <span className="block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
+              ) : null}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.line")}</span>
-              <Select
-                value={room.recordLine ?? ""}
-                size="md"
-                disabled={lineBusy || busy}
-                title={t("monitor.lineHint")}
-                onChange={(next) => void run(room.id, () => roomSetLine(room.id, next || null))}
-                options={lineOptions}
-                className="flex-1"
-              />
-            </div>
-            {lines === null ? (
-              <button
-                type="button"
-                onClick={() => void loadLines(room.id, room.recordQn)}
-                className="focus-ring inline-flex items-center gap-1 rounded-ctl px-1.5 py-0.5 text-[12px] text-accent-text transition-colors hover:bg-accent-soft"
-              >
-                {lineBusy ? t("common.loading") : t("monitor.lineLoad")}
-              </button>
-            ) : lines.length === 0 ? (
-              <span className="block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
-            ) : null}
-          </div>
 
-          <div className="mt-4 flex items-center gap-2 border-t border-line pt-3">
-            <span className="text-[11.5px] font-medium text-muted">{t("monitor.sessions")}</span>
-            {mergeable > 1 ? (
-              <button
-                type="button"
-                onClick={() => void doPost(room.id, "merge")}
-                disabled={postBusy === postKey(room.id, "merge")}
-                title={t("monitor.post.mergeHint", { n: mergeable })}
-                className="focus-ring ml-auto rounded-ctl px-1.5 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft disabled:opacity-40"
-              >
-                {t("monitor.post.merge")}
-              </button>
-            ) : null}
-          </div>
-          {selectedSessions.length === 0 ? (
-            <p className="py-3 text-[12px] text-faint">{t("monitor.noHistory")}</p>
-          ) : (
-            <div className="mt-1">
-              {selectedSessions.map((session) => {
-                return (
-                  <div key={session.id} className="border-t border-line py-2 first:border-t-0">
-                    <div className="flex items-center justify-between text-[12px]">
-                      <span className="tnum text-ink-soft">
-                        {recent(session.startedAt)} · {clockMs(session.durationMs)}
-                      </span>
-                      <span className="tnum text-muted">{size(session.fileSize)}</span>
+            <div className="mt-4 flex items-center gap-2 border-t border-line pt-3">
+              <span className="text-[11.5px] font-medium text-muted">{t("monitor.sessions")}</span>
+              {mergeable > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => void doPost(room.id, "merge")}
+                  disabled={postBusy === postKey(room.id, "merge")}
+                  title={t("monitor.post.mergeHint", { n: mergeable })}
+                  className="focus-ring ml-auto rounded-ctl px-1.5 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft disabled:opacity-40"
+                >
+                  {t("monitor.post.merge")}
+                </button>
+              ) : null}
+            </div>
+            {selectedSessions.length === 0 ? (
+              <p className="py-3 text-[12px] text-faint">{t("monitor.noHistory")}</p>
+            ) : (
+              <div className="mt-1">
+                {selectedSessions.map((session) => {
+                  return (
+                    <div key={session.id} className="border-t border-line py-2 first:border-t-0">
+                      <div className="flex items-center justify-between text-[12px]">
+                        <span className="tnum text-ink-soft">
+                          {recent(session.startedAt)} ·{" "}
+                          {session.status === "recording"
+                            ? clock(now / 1000 - session.startedAt)
+                            : clockMs(session.durationMs)}
+                        </span>
+                        <span className="tnum text-muted">{size(session.fileSize)}</span>
+                      </div>
+                      <div className="mt-1 truncate text-[11.5px] text-muted">{sessionStatus(session)}</div>
                     </div>
-                    <div className="mt-1 truncate text-[11.5px] text-muted">{sessionStatus(session)}</div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </aside>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
     );
   };
   return (
@@ -665,9 +723,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
       <div className="flex shrink-0 items-center gap-3 px-5 pb-3 pt-4">
         <div className="min-w-0">
           <h1 className="text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">{t("monitor.title")}</h1>
-          <p className="tnum mt-1 text-[12.5px] text-muted">
-            {t("monitor.summary", { rooms: views.length, online, recording })}
-          </p>
+
         </div>
         <div className="ml-auto flex items-center gap-2">
           <div className="relative">
@@ -825,9 +881,10 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               style={{ gridTemplateColumns: COLUMNS }}
             >
               <span />
-              <span>{t("monitor.colStatus")}</span>
+              <span>{t("monitor.colLive")}</span>
+              <span>{t("monitor.colRecord")}</span>
               <span>{t("monitor.colPlatform")}</span>
-              <span>{t("monitor.colRoom")}</span>
+              <span>{t("monitor.colHost")}</span>
               <span>{t("monitor.colQuality")}</span>
               <span className="text-right">{t("monitor.colDuration")}</span>
               <span className="text-right">{t("monitor.colActions")}</span>
@@ -861,19 +918,9 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           </div>
         </div>
 
-        {selected ? (
-          renderPanel(selected)
-        ) : (
-          <aside className="flex w-[320px] shrink-0 items-center justify-center border-l border-line bg-surface px-8">
-            <p className="text-center text-[12.5px] leading-5 text-faint">{t("monitor.detailEmpty")}</p>
-          </aside>
-        )}
       </div>
 
-      <div className="flex h-9 shrink-0 items-center gap-2 border-t border-line px-5 text-[12px] text-muted">
-        <span className="tnum">{t("monitor.summary", { rooms: views.length, online, recording })}</span>
-        <span className="ml-auto tnum">{t("monitor.footerLibrary", { n: library.count, size: size(library.bytes) })}</span>
-      </div>
+      {selected ? renderPanel(selected) : null}
     </div>
   );
 }
