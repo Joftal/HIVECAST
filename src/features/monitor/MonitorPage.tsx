@@ -1046,10 +1046,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                       platform === item.key ? "font-medium text-accent-text" : "text-ink-soft",
                     )}
                   >
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: PLATFORM_DOT[item.key] }}
-                    />
                     <span className="flex-1 truncate">{item.label}</span>
                     <span className="tnum text-[11px] text-faint">{item.count}</span>
                   </button>
