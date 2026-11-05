@@ -40,6 +40,9 @@ struct PollData {
     code: i64,
     #[serde(default)]
     message: String,
+    /// 距离二维码失效还剩多少秒；B 站轮询接口每次都带。
+    #[serde(default)]
+    expires_in: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +88,9 @@ fn platform_name(platform: &str) -> &'static str {
     }
 }
 
+/// B 站二维码固定 180 秒有效；生成接口不回这个值，所以按官方值兜底。
+pub const QR_TTL_SECONDS: i64 = 180;
+
 /// 开始扫码：返回二维码内容、key 与后端渲染好的 SVG。
 pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
     let url = format!("{PASSPORT}/x/passport-login/web/qrcode/generate?source=main-fe-header");
@@ -105,6 +111,7 @@ pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
         qrcode_key: data.qrcode_key,
         url: data.url,
         svg,
+        expires_in: QR_TTL_SECONDS,
     })
 }
 
@@ -135,6 +142,13 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
             .await
             .map_err(AppError::from)?;
 
+    let expires_in = fetched
+        .data
+        .data
+        .as_ref()
+        .map(|data| data.expires_in.max(0))
+        .unwrap_or(0);
+
     let (state, message) = match (fetched.data.code, fetched.data.data.as_ref()) {
         (0, Some(data)) if data.code == 0 => ("confirmed", "登录成功".to_string()),
         (0, Some(data)) => match data.code {
@@ -161,6 +175,7 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         return Ok(QrPoll {
             state: state.to_string(),
             message: format!("已登录：{}", row.account_name),
+            expires_in: 0,
             credential: Some(info_from_row(&row)),
         });
     }
@@ -168,6 +183,7 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
     Ok(QrPoll {
         state: state.to_string(),
         message,
+        expires_in,
         credential: None,
     })
 }
@@ -341,6 +357,19 @@ mod tests {
             credential::merge(base, &extra),
             "SESSDATA=new; dy_did=keep"
         );
+    }
+
+    #[test]
+    fn parses_poll_expires_in() {
+        // B 站 poll 返回的 data 里带 expires_in（剩余秒数），缺字段时按 0 处理。
+        let with: Envelope<PollData> =
+            serde_json::from_str(r#"{"code":0,"data":{"code":86101,"message":"","expires_in":145}}"#)
+                .unwrap();
+        assert_eq!(with.data.unwrap().expires_in, 145);
+        let without: Envelope<PollData> =
+            serde_json::from_str(r#"{"code":0,"data":{"code":86101}}"#).unwrap();
+        assert_eq!(without.data.unwrap().expires_in, 0);
+        assert_eq!(QR_TTL_SECONDS, 180);
     }
 
     /// 联网冒烟：cargo test --lib account -- --ignored --nocapture

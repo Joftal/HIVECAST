@@ -10,6 +10,10 @@ export type QrPoll = {
  */
 state: string, message: string, 
 /**
+ * 还剩多少秒失效（服务端给出的剩余时间，0 表示未知）
+ */
+expiresIn: number, 
+/**
  * 只有 confirmed 时才有
  */
 credential: CredentialInfo | null, };

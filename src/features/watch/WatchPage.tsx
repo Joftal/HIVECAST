@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
+import { useSecondsLeft } from "../../lib/countdown";
 import Player from "./Player";
 import {
   describeError,
@@ -444,19 +445,6 @@ export default function WatchPage() {
       <p className="shrink-0 text-[11px] leading-5 text-zinc-600">{t("watch.hint")}</p>
     </div>
   );
-}
-
-/** 重连倒计时：retryAt 是后端给的绝对时刻，这里只负责每秒重算。 */
-function useSecondsLeft(target: number | null | undefined): number | null {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!target) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(timer);
-  }, [target]);
-  if (!target) return null;
-  return Math.max(0, Math.ceil((target - now) / 1000));
 }
 
 type CellProps = {

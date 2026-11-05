@@ -12,6 +12,7 @@ import {
   type QrPoll,
   type QrTicket,
 } from "../../lib/ipc";
+import { formatCountdown, useSecondsLeft } from "../../lib/countdown";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"] as const;
 type Platform = (typeof PLATFORMS)[number];
@@ -27,6 +28,8 @@ type QrState = {
   ticket: QrTicket;
   poll: QrPoll | null;
   error: string | null;
+  /** 失效时刻（绝对毫秒）；每次轮询用服务端剩余秒数重新对齐。 */
+  expiresAt: number;
 };
 
 export default function AccountSection() {
@@ -99,7 +102,12 @@ export default function AccountSection() {
     setBusy(true);
     try {
       const ticket = await bilibiliQrStart();
-      setQr({ ticket, poll: null, error: null });
+      setQr({
+        ticket,
+        poll: null,
+        error: null,
+        expiresAt: Date.now() + Math.max(1, ticket.expiresIn) * 1000,
+      });
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -111,6 +119,26 @@ export default function AccountSection() {
   const qrMessage =
     qr?.error ??
     (qr ? (qr.poll ? qr.poll.message : t("account.qrWaiting")) : t("account.qrWaiting"));
+  const secondsLeft = useSecondsLeft(qr?.expiresAt);
+  const counting = Boolean(qr) && (qrState === "pending" || qrState === "scanned");
+
+  // 本地先到点就先判失效，不必等服务端下一次轮询（最多省 1.6 秒的错觉）。
+  useEffect(() => {
+    if (!counting || secondsLeft === null || secondsLeft > 0) return;
+    setQr((current) =>
+      current && !current.poll?.state?.startsWith("expired")
+        ? {
+            ...current,
+            poll: {
+              state: "expired",
+              message: t("account.qrExpired"),
+              expiresIn: 0,
+              credential: null,
+            },
+          }
+        : current,
+    );
+  }, [counting, secondsLeft, t]);
 
   // 扫码期间每 1.6 秒问一次；confirmed / expired / error 后停表。
   useEffect(() => {
@@ -122,7 +150,20 @@ export default function AccountSection() {
       try {
         const poll = await bilibiliQrPoll(qr.ticket.qrcodeKey);
         if (cancelled) return;
-        setQr((current) => (current ? { ...current, poll, error: null } : current));
+        setQr((current) =>
+          current
+            ? {
+                ...current,
+                poll,
+                error: null,
+                // 服务端是权威：每轮都按它还剩多少秒重新对齐本地倒计时。
+                expiresAt:
+                  poll.expiresIn > 0
+                    ? Date.now() + poll.expiresIn * 1000
+                    : current.expiresAt,
+              }
+            : current,
+        );
         if (poll.state === "confirmed") {
           window.clearInterval(timer);
           setNotice(poll.message);
@@ -314,6 +355,17 @@ export default function AccountSection() {
           >
             {qrMessage}
           </p>
+          {counting && secondsLeft !== null && (
+            <p
+              className={
+                secondsLeft <= 30
+                  ? "text-center text-[10px] tabular-nums text-amber-300/80"
+                  : "text-center text-[10px] tabular-nums text-zinc-600"
+              }
+            >
+              {t("account.qrExpiresIn", { time: formatCountdown(secondsLeft) })}
+            </p>
+          )}
           <div className="flex items-center justify-center gap-2">
             {(qrState === "expired" || qr?.error) && (
               <button type="button" onClick={() => void openQr()} className={smallButton}>

@@ -338,6 +338,9 @@ pub struct QrTicket {
     /// 二维码承载的内容（B 站登录页 URL）
     pub url: String,
     pub svg: String,
+    /// 二维码有效期（秒），从生成时刻算起
+    #[ts(type = "number")]
+    pub expires_in: i64,
 }
 
 /// 一次扫码轮询的结果。
@@ -348,6 +351,9 @@ pub struct QrPoll {
     /// pending | scanned | confirmed | expired | error
     pub state: String,
     pub message: String,
+    /// 还剩多少秒失效（服务端给出的剩余时间，0 表示未知）
+    #[ts(type = "number")]
+    pub expires_in: i64,
     /// 只有 confirmed 时才有
     pub credential: Option<CredentialInfo>,
 }

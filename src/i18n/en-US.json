@@ -280,6 +280,8 @@
     "qrHint": "Signing in unlocks 1080P and above.",
     "qrWaiting": "Generating QR code…",
     "qrRefresh": "Refresh QR code",
+  "qrExpiresIn": "Expires in {{time}}",
+  "qrExpired": "QR code expired, please refresh",
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
   }
 }
