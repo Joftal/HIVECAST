@@ -234,10 +234,11 @@
       "single": "单画面",
       "twoH": "左右",
       "twoV": "上下",
-      "threeBig": "左大右二",
-      "threeCol": "三列",
+      "threeBig": "上大下二",
+      "threeCol": "左大右二",
       "quad": "四宫格",
-      "main": "主次"
+      "main": "主次",
+      "portrait": "竖排"
     },
     "status": {
       "starting": "正在起播…",
@@ -299,7 +300,8 @@
       "empty": "没有可添加的直播间",
       "full": "已满 4 路",
       "dragHint": "拖到格子里可直接替换"
-    }
+    },
+    "cellN": "第 {{n}} 格"
   },
   "notice": {
     "started": {

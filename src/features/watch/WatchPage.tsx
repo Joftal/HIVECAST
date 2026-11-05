@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player from "./Player";
-import SplitStage, { writeDrag } from "./SplitStage";
+import SplitStage, { type DragPayload, type SplitStageHandle } from "./SplitStage";
 import {
   buildTree,
   leafCount,
@@ -16,6 +16,7 @@ import {
   type Variant,
 } from "./split";
 import { Button } from "../../components/ui/Controls";
+import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
   isTauri,
@@ -63,8 +64,16 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   // 分屏：树管版式与比例，order 管「第几格放哪个房间」。order 与后端 slot 解耦。
   const [tree, setTree] = useState<SplitNode>(() => buildTree(1));
   const [variant, setVariant] = useState<Variant>("default");
+  const [portrait, setPortrait] = useState(false);
   const [order, setOrder] = useState<(string | null)[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 指针拖拽：不依赖 HTML5 DnD，WKWebView 里更可靠；拖拽中显示跟随指针的浮标。
+  const [drag, setDrag] = useState<{ payload: DragPayload; x: number; y: number } | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const stageRef = useRef<SplitStageHandle | null>(null);
+  const dragRef = useRef<{ payload: DragPayload; x: number; y: number; moved: boolean } | null>(null);
+  const dropRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
   const [query, setQuery] = useState("");
   const [input, setInput] = useState("");
 
@@ -309,14 +318,72 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     });
   };
 
-  const switchVariant = (next: Variant) => {
-    setVariant(next);
-    setTree(buildTree(count, next));
+  const applyLayout = (kind: "default" | "alt" | "portrait") => {
+    if (kind === "portrait") {
+      setPortrait(true);
+      setVariant("default");
+      setTree(portraitTree(count));
+      return;
+    }
+    setPortrait(false);
+    setVariant(kind);
+    setTree(buildTree(count, kind));
   };
 
-  const usePortrait = () => {
-    setVariant("default");
-    setTree(portraitTree(count));
+  const swapRef = useRef(swapCells);
+  swapRef.current = swapCells;
+  const watchRef = useRef(watchRoom);
+  watchRef.current = watchRoom;
+
+  // 监听器在 pointerdown 里同步挂上，不依赖下一次 render，快速拖拽也不会丢事件。
+  const startDrag = (payload: DragPayload, event: ReactPointerEvent) => {
+    if (event.button !== 0) return;
+    dragRef.current = { payload, x: event.clientX, y: event.clientY, moved: false };
+    dropRef.current = null;
+    setDrag({ payload, x: event.clientX, y: event.clientY });
+    setDropIndex(null);
+
+    const move = (moveEvent: PointerEvent) => {
+      const current = dragRef.current;
+      if (!current) return;
+      if (Math.abs(moveEvent.clientX - current.x) + Math.abs(moveEvent.clientY - current.y) > 4) {
+        current.moved = true;
+      }
+      current.x = moveEvent.clientX;
+      current.y = moveEvent.clientY;
+      setDrag({ payload: current.payload, x: moveEvent.clientX, y: moveEvent.clientY });
+      const index = stageRef.current?.hitTest(moveEvent.clientX, moveEvent.clientY) ?? null;
+      dropRef.current = index;
+      setDropIndex(index);
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      const current = dragRef.current;
+      dragRef.current = null;
+      const index = dropRef.current;
+      dropRef.current = null;
+      if (current && current.moved) {
+        // 拖拽结束后浏览器还会补一个 click，这里先压掉，避免「拖进格子」又被当成点「加入观看」。
+        suppressClickRef.current = true;
+        window.setTimeout(() => {
+          suppressClickRef.current = false;
+        }, 0);
+        if (index !== null) {
+          if (current.payload.kind === "cell") {
+            if (current.payload.index !== index) swapRef.current(current.payload.index, index);
+          } else {
+            void watchRef.current(current.payload.roomId, index);
+          }
+        }
+      }
+      setDrag(null);
+      setDropIndex(null);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   };
 
   const candidates = rooms.filter((view) => view.room.isLive && !watchedIds.has(view.room.id));
@@ -330,6 +397,23 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   });
   const prefs = useDanmakuPrefs();
 
+  const layoutOptions: Array<{ kind: "default" | "alt" | "portrait"; label: string; glyph: LayoutKind }> =
+    count === 4
+      ? [
+          { kind: "default", label: t("watch.layout.quad"), glyph: "quad" },
+          { kind: "portrait", label: t("watch.layout.portrait"), glyph: "portrait" },
+        ]
+      : count === 3
+        ? [
+            { kind: "default", label: t("watch.layout.threeBig"), glyph: "top" },
+            { kind: "alt", label: t("watch.layout.threeCol"), glyph: "left" },
+            { kind: "portrait", label: t("watch.layout.portrait"), glyph: "portrait" },
+          ]
+        : [
+            { kind: "default", label: t("watch.layout.twoH"), glyph: "row" },
+            { kind: "alt", label: t("watch.layout.twoV"), glyph: "col" },
+          ];
+
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
       <div className="flex min-w-0 flex-1 flex-col">
@@ -338,40 +422,26 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
             {count} <span className="text-faint">/ 4</span>
           </span>
 
-          {count >= 2 && count <= 3 ? (
-            <div className="flex items-center rounded-[6px] border border-line p-0.5">
-              {(["default", "alt"] as Variant[]).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => switchVariant(option)}
-                  className={[
-                    "focus-ring rounded-[4px] px-2 py-0.5 text-[11px] transition-colors",
-                    variant === option ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
-                  ].join(" ")}
-                >
-                  {t(
-                    count === 2
-                      ? option === "default"
-                        ? "watch.layout.twoH"
-                        : "watch.layout.twoV"
-                      : option === "default"
-                        ? "watch.layout.threeBig"
-                        : "watch.layout.threeCol",
-                  )}
-                </button>
-              ))}
-            </div>
-          ) : null}
-
           {count >= 2 ? (
-            <button
-              type="button"
-              onClick={usePortrait}
-              className="focus-ring rounded-[6px] px-2 py-1 text-[11px] text-muted transition-colors hover:bg-raised hover:text-ink"
-            >
-              {t("watch.portrait")}
-            </button>
+            <div className="flex items-center rounded-[6px] border border-line p-0.5">
+              {layoutOptions.map((option) => {
+                const active = option.kind === "portrait" ? portrait : !portrait && variant === option.kind;
+                return (
+                  <button
+                    key={option.kind}
+                    type="button"
+                    onClick={() => applyLayout(option.kind)}
+                    className={[
+                      "focus-ring inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors",
+                      active ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
+                    ].join(" ")}
+                  >
+                    <LayoutGlyph kind={option.glyph} />
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
           ) : null}
 
           <div className="ml-auto flex items-center gap-1">
@@ -478,11 +548,11 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
             </div>
           ) : (
             <SplitStage
+              ref={stageRef}
               tree={tree}
               count={count}
+              dropIndex={dropIndex}
               onTreeChange={(next) => setTree(next)}
-              onSwap={swapCells}
-              onDropRoom={(roomId, index) => void watchRoom(roomId, index)}
               renderCell={(index) => {
                 const roomId = order[index] ?? null;
                 const session = roomId ? sessions.find((item) => item.roomId === roomId) : undefined;
@@ -511,6 +581,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                     onClose={() => void closeSlot(session.slot)}
                     onRetry={() => void retrySlot(session.slot)}
                     onSwapNext={() => swapCells(index, (index + 1) % count)}
+                    onDragStart={(event) => startDrag({ kind: "cell", index }, event)}
                   />
                 );
               }}
@@ -553,9 +624,15 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                   filtered.map((view) => (
                     <div
                       key={view.room.id}
-                      draggable
-                      onDragStart={(event) => writeDrag(event, { kind: "room", roomId: view.room.id })}
-                      className="group flex cursor-grab items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised active:cursor-grabbing"
+                      onPointerDown={(event) => {
+                        if ((event.target as HTMLElement).closest("button")) return;
+                        startDrag({ kind: "room", roomId: view.room.id }, event);
+                      }}
+                      onClick={() => {
+                        if (suppressClickRef.current) return;
+                        void watchRoom(view.room.id);
+                      }}
+                      className="group flex cursor-grab touch-none items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised active:cursor-grabbing"
                     >
                       {view.room.avatarUrl ? (
                         <img
@@ -612,34 +689,45 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
         </div>
       </div>
 
-      <aside className="flex w-11 shrink-0 flex-col items-center border-l border-line bg-surface py-1.5">
+      <aside className="flex w-11 shrink-0 flex-col border-l border-line bg-surface">
         <button
           type="button"
           onClick={() => setPanelOpen((open) => !open)}
           title={t("watch.panel.title")}
-          className="focus-ring flex w-full flex-col items-center gap-1 rounded-[6px] py-1 text-muted hover:text-ink"
+          className="focus-ring flex h-full w-full flex-col items-center gap-1 py-1.5 text-muted hover:text-ink"
         >
-          <span className="flex flex-col -space-y-1.5">
-            {candidates.slice(0, 3).map((view) =>
+          <span className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-hidden px-1 pt-1">
+            {candidates.map((view) =>
               view.room.avatarUrl ? (
                 <img
                   key={view.room.id}
                   src={view.room.avatarUrl}
                   alt=""
                   referrerPolicy="no-referrer"
-                  className="h-[22px] w-[22px] rounded-full object-cover ring-2 ring-surface"
+                  className="h-6 w-6 shrink-0 rounded-full object-cover ring-2 ring-surface"
                 />
               ) : (
-                <span key={view.room.id} className="h-[22px] w-[22px] rounded-full bg-raised ring-2 ring-surface" />
+                <span key={view.room.id} className="h-6 w-6 shrink-0 rounded-full bg-raised ring-2 ring-surface" />
               ),
             )}
           </span>
-          <span className="font-mono text-[10px] tabular-nums text-faint">{candidates.length}</span>
-          <span className="rounded-[4px] border border-line px-1 text-[10px] leading-4 text-muted">
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">{candidates.length}</span>
+          <span className="shrink-0 rounded-[4px] border border-line px-1 text-[10px] leading-4 text-muted">
             {panelOpen ? "»" : "«"}
           </span>
         </button>
       </aside>
+
+      {drag ? (
+        <div
+          className="pointer-events-none fixed z-[60] max-w-[220px] truncate rounded-[6px] border border-line bg-surface px-2 py-1 text-[11px] text-ink shadow-pop"
+          style={{ left: drag.x + 14, top: drag.y + 12 }}
+        >
+          {drag.payload.kind === "cell"
+            ? t("watch.cellN", { n: drag.payload.index + 1 })
+            : roomById.get(drag.payload.roomId)?.room.title || t("watch.panel.title")}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -659,6 +747,7 @@ type CellProps = {
   onClose: () => void;
   onRetry: () => void;
   onSwapNext: () => void;
+  onDragStart: (event: ReactPointerEvent) => void;
 };
 
 function SlotCell({
@@ -676,6 +765,7 @@ function SlotCell({
   onClose,
   onRetry,
   onSwapNext,
+  onDragStart,
 }: CellProps) {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
@@ -711,12 +801,13 @@ function SlotCell({
     >
       <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex h-8 items-center gap-1.5 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
         <span
-          draggable={count > 1}
-          onDragStart={(event) => writeDrag(event, { kind: "cell", index })}
+          onPointerDown={(event) => {
+            if (count > 1) onDragStart(event);
+          }}
           title={t("watch.dragHint")}
           className={[
-            "pointer-events-auto flex h-5 w-4 shrink-0 items-center justify-center rounded-[3px] text-white/35",
-            count > 1 ? "cursor-grab active:cursor-grabbing hover:text-white/80" : "",
+            "pointer-events-auto flex h-6 w-5 shrink-0 touch-none items-center justify-center rounded-[3px] text-white/45",
+            count > 1 ? "cursor-grab hover:bg-white/10 hover:text-white active:cursor-grabbing" : "",
           ].join(" ")}
         >
           <svg width="6" height="12" viewBox="0 0 6 12" fill="currentColor" aria-hidden>

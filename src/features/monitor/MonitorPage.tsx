@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Select, cx } from "../../components/ui/Controls";
+import { LayoutGlyph } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
   isTauri,
@@ -1181,7 +1182,10 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: (roomIds?: 
             {t("monitor.clearSelection")}
           </Button>
           <Button size="sm" variant="primary" onClick={() => onOpenWatch?.(Array.from(picked))}>
-            {t("monitor.watchSelected")}
+            <span className="inline-flex items-center gap-1.5">
+              <LayoutGlyph kind="quad" />
+              {t("monitor.watchSelected")}
+            </span>
           </Button>
         </div>
       ) : null}

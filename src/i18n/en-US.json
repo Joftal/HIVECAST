@@ -234,10 +234,11 @@
       "single": "Single",
       "twoH": "Side by side",
       "twoV": "Stacked",
-      "threeBig": "Big + 2",
-      "threeCol": "3 columns",
+      "threeBig": "Big top + 2",
+      "threeCol": "Big left + 2",
       "quad": "Grid",
-      "main": "Main + 3"
+      "main": "Main + 3",
+      "portrait": "Vertical"
     },
     "status": {
       "starting": "Starting…",
@@ -299,7 +300,8 @@
       "empty": "No rooms available",
       "full": "4 slots in use",
       "dragHint": "Drop onto a cell to replace it"
-    }
+    },
+    "cellN": "Cell {{n}}"
   },
   "notice": {
     "started": {

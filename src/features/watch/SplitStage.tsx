@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import {
   clampRatio,
   computeLayout,
@@ -8,43 +8,21 @@ import {
   type SplitNode,
 } from "./split";
 
-const MIME = "application/x-hivecast";
-
 export type DragPayload =
   | { kind: "cell"; index: number }
   | { kind: "room"; roomId: string };
 
-export function readDrag(event: DragEvent): DragPayload | null {
-  const raw = event.dataTransfer.getData(MIME) || event.dataTransfer.getData("text/plain");
-  if (!raw) return null;
-  try {
-    const data = JSON.parse(raw) as DragPayload;
-    if (data.kind === "cell" && typeof data.index === "number") return data;
-    if (data.kind === "room" && typeof data.roomId === "string") return data;
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-export function writeDrag(event: DragEvent, payload: DragPayload) {
-  event.dataTransfer.setData(MIME, JSON.stringify(payload));
-  event.dataTransfer.setData("text/plain", JSON.stringify(payload));
-  event.dataTransfer.effectAllowed = "move";
-}
-
-/** dragover 阶段浏览器不允许读 dataTransfer 的内容，只能看 types 判断有没有拖东西。 */
-function hasDrag(event: DragEvent): boolean {
-  const types = Array.from(event.dataTransfer.types);
-  return types.includes(MIME) || types.includes("text/plain");
-}
+export type SplitStageHandle = {
+  /** 指针拖拽时用坐标反查落在哪一格。 */
+  hitTest: (clientX: number, clientY: number) => number | null;
+};
 
 type Props = {
   tree: SplitNode;
   count: number;
+  /** 指针拖拽当前悬停的格子，用于高亮。 */
+  dropIndex?: number | null;
   onTreeChange: (tree: SplitNode, commit: boolean) => void;
-  onSwap: (from: number, to: number) => void;
-  onDropRoom: (roomId: string, index: number) => void;
   renderCell: (index: number, rect: Rect) => ReactNode;
 };
 
@@ -52,10 +30,12 @@ type Props = {
  * 舞台：按树算出像素矩形，格子绝对定位，分割线浮在缝里。
  * 指针按下后把 pointermove 挂在分割线自己身上（setPointerCapture），拖出边界也不丢。
  */
-export default function SplitStage({ tree, count, onTreeChange, onSwap, onDropRoom, renderCell }: Props) {
+const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
+  { tree, count, dropIndex, onTreeChange, renderCell },
+  ref,
+) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
-  const [over, setOver] = useState<number | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const treeRef = useRef(tree);
   treeRef.current = tree;
@@ -78,6 +58,24 @@ export default function SplitStage({ tree, count, onTreeChange, onSwap, onDropRo
   }, []);
 
   const { cells, dividers } = size.width > 0 ? computeLayout(tree, size.width, size.height) : { cells: new Map(), dividers: [] };
+  const cellsRef = useRef(cells);
+  cellsRef.current = cells;
+
+  useImperativeHandle(ref, () => ({
+    hitTest(clientX, clientY) {
+      const host = hostRef.current;
+      if (!host) return null;
+      const box = host.getBoundingClientRect();
+      const x = clientX - box.left;
+      const y = clientY - box.top;
+      for (const [index, rect] of cellsRef.current) {
+        if (x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height) {
+          return index;
+        }
+      }
+      return null;
+    },
+  }));
 
   const startDragDivider = (
     event: React.PointerEvent<HTMLDivElement>,
@@ -125,27 +123,9 @@ export default function SplitStage({ tree, count, onTreeChange, onSwap, onDropRo
             key={index}
             className="absolute"
             style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
-            onDragOver={(event) => {
-              if (!hasDrag(event)) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              setOver(index);
-            }}
-            onDragLeave={() => setOver((value) => (value === index ? null : value))}
-            onDrop={(event) => {
-              event.preventDefault();
-              setOver(null);
-              const payload = readDrag(event);
-              if (!payload) return;
-              if (payload.kind === "cell") {
-                if (payload.index !== index) onSwap(payload.index, index);
-              } else {
-                onDropRoom(payload.roomId, index);
-              }
-            }}
           >
             {renderCell(index, rect)}
-            {over === index ? (
+            {dropIndex === index ? (
               <div className="pointer-events-none absolute inset-0 z-30 rounded-[8px] ring-2 ring-accent ring-inset" />
             ) : null}
           </div>
@@ -186,4 +166,6 @@ export default function SplitStage({ tree, count, onTreeChange, onSwap, onDropRo
       ))}
     </div>
   );
-}
+});
+
+export default SplitStage;
