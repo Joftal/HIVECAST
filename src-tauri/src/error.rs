@@ -18,6 +18,16 @@ pub enum AppError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("database error: {0}")]
+    Db(String),
+
+    /// 平台侧错误：code 直接沿用 platform 层的错误码，前端按 code 分支。
+    #[error("{message}")]
+    Platform {
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl AppError {
@@ -28,12 +38,23 @@ impl AppError {
             AppError::FfmpegMissing => "ffmpeg_missing",
             AppError::Path(_) => "path_invalid",
             AppError::Internal(_) => "internal",
+            AppError::Db(_) => "db",
+            AppError::Platform { code, .. } => code,
         }
     }
 
     pub fn from_io(err: std::io::Error, path: impl Into<PathBuf>) -> Self {
         let path: PathBuf = path.into();
         AppError::Path(format!("{} ({})", path.display(), err))
+    }
+}
+
+impl From<crate::platform::PlatformError> for AppError {
+    fn from(err: crate::platform::PlatformError) -> Self {
+        AppError::Platform {
+            code: err.code(),
+            message: err.to_string(),
+        }
     }
 }
 

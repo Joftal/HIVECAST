@@ -45,3 +45,88 @@ pub struct IpcError {
     pub code: String,
     pub message: String,
 }
+
+/// 房间：用户在监控页看到的一行。
+///
+/// 平台侧的展示信息会被轮询刷新；auto_record / record_qn / view_qn 是本地设置，
+/// 轮询不会覆盖它们。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RoomRecord {
+    pub id: String,
+    pub platform: String,
+    pub room_key: String,
+    pub canonical_url: String,
+    pub title: String,
+    pub host_name: String,
+    pub avatar_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub area_name: Option<String>,
+    pub is_live: bool,
+    #[ts(type = "number")]
+    pub started_at: Option<i64>,
+    #[ts(type = "number")]
+    pub online: Option<u64>,
+    /// 开播后是否自动录制
+    pub auto_record: bool,
+    /// 录制清晰度（qn 数值，10000 = 原画）
+    pub record_qn: u32,
+    /// 观看清晰度（0 = 跟随自动降级）
+    pub view_qn: u32,
+    #[ts(type = "number")]
+    pub last_checked_at: Option<i64>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+/// 正在进行的录制快照。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RecordingInfo {
+    pub room_id: String,
+    pub session_id: String,
+    pub file_path: String,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    pub quality: String,
+    pub line: String,
+}
+
+/// 监控页列表项 = 房间 + 实时录制状态 + 最近的错误。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RoomView {
+    pub room: RoomRecord,
+    pub recording: Option<RecordingInfo>,
+    pub error: Option<String>,
+}
+
+/// 一次录制记录（历史页数据源）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RecordSession {
+    pub id: String,
+    pub room_id: String,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number")]
+    pub ended_at: Option<i64>,
+    /// recording | finished | failed | aborted
+    pub status: String,
+    /// stream_ended | stopped | error | app_exit
+    pub reason: Option<String>,
+    pub file_path: Option<String>,
+    #[ts(type = "number")]
+    pub file_size: i64,
+    #[ts(type = "number")]
+    pub duration_ms: i64,
+    pub quality: Option<String>,
+    pub line: Option<String>,
+    pub error: Option<String>,
+}
