@@ -207,7 +207,12 @@
     "roomSettingsSoon": "直播间设置即将上线",
     "pauseMonitor": "停止监控",
     "resumeMonitor": "开始监控",
-    "close": "关闭"
+    "close": "关闭",
+    "selectHint": "选择该直播间用于分屏观看",
+    "selectedCount": "已选 {{n}} 个",
+    "watchSelected": "分屏观看",
+    "clearSelection": "清除",
+    "maxSelection": "最多同时观看 4 路"
   },
   "watch": {
     "title": "多屏观看",
@@ -277,7 +282,24 @@
     "reload": "重新连接",
     "pip": "画中画",
     "autoQuality": "自动（{{q}}）",
-    "lineN": "线路 {{n}}"
+    "lineN": "线路 {{n}}",
+    "portrait": "竖屏优先",
+    "dragHint": "拖动格子标题可换位，拖动分割线可调大小",
+    "fill": "铺满格子",
+    "swapNext": "与下一格交换",
+    "remove": "移出观看",
+    "cellMenu": "格子菜单",
+    "stage": {
+      "empty": "等待画面"
+    },
+    "panel": {
+      "title": "直播间",
+      "search": "搜索直播间",
+      "join": "加入观看",
+      "empty": "没有可添加的直播间",
+      "full": "已满 4 路",
+      "dragHint": "拖到格子里可直接替换"
+    }
   },
   "notice": {
     "started": {

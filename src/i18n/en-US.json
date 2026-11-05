@@ -207,7 +207,12 @@
     "roomSettingsSoon": "Room settings are coming soon",
     "pauseMonitor": "Pause monitoring",
     "resumeMonitor": "Resume monitoring",
-    "close": "Close"
+    "close": "Close",
+    "selectHint": "Select this room for split view",
+    "selectedCount": "{{n}} selected",
+    "watchSelected": "Watch in split view",
+    "clearSelection": "Clear",
+    "maxSelection": "Up to 4 rooms at once"
   },
   "watch": {
     "title": "Multi-view",
@@ -277,7 +282,24 @@
     "reload": "Reconnect",
     "pip": "Picture in picture",
     "autoQuality": "Auto ({{q}})",
-    "lineN": "Line {{n}}"
+    "lineN": "Line {{n}}",
+    "portrait": "Portrait first",
+    "dragHint": "Drag a cell header to swap, drag a divider to resize",
+    "fill": "Fill cell",
+    "swapNext": "Swap with next cell",
+    "remove": "Stop watching",
+    "cellMenu": "Cell menu",
+    "stage": {
+      "empty": "Waiting for video"
+    },
+    "panel": {
+      "title": "Rooms",
+      "search": "Search rooms",
+      "join": "Add to view",
+      "empty": "No rooms available",
+      "full": "4 slots in use",
+      "dragHint": "Drop onto a cell to replace it"
+    }
   },
   "notice": {
     "started": {

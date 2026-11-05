@@ -4,7 +4,7 @@ import { IconButton, cx } from "./components/ui/Controls";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsPanel from "./features/settings/SettingsPanel";
-import WatchPage from "./features/watch/WatchPage";
+import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
 import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
@@ -16,6 +16,8 @@ export default function App() {
   const [tab, setTab] = useState<TabKey>("monitor");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("light");
+  // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
+  const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
   const notifyRef = useRef(true);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
 
@@ -183,9 +185,14 @@ export default function App() {
 
       <main key={tab} className="animate-fade-rise flex min-h-0 flex-1 flex-col">
         {tab === "monitor" ? (
-          <MonitorPage onOpenWatch={() => setTab("watch")} />
+          <MonitorPage
+            onOpenWatch={(ids) => {
+              if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now() });
+              setTab("watch");
+            }}
+          />
         ) : tab === "watch" ? (
-          <WatchPage />
+          <WatchPage seed={watchSeed} onSeedApplied={() => setWatchSeed(null)} />
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="mx-auto flex min-h-full w-full max-w-[1360px] flex-col px-6 py-5">

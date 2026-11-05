@@ -236,7 +236,7 @@ function SortHead({
   );
 }
 
-export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void }) {
+export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: (roomIds?: string[]) => void }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
 
@@ -255,8 +255,19 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // 房间下播后把它从多选里摘掉，避免带着离线房间进分屏。
+  useEffect(() => {
+    setPicked((prev) => {
+      const live = new Set(views.filter((view) => view.room.isLive).map((view) => view.room.id));
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [views]);
+
   // 详情是「录制详情」抽屉，默认不展开；点行不再自动打开。
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [menuId, setMenuId] = useState<string | null>(null);
   useEffect(() => {
     if (!addOpen) return;
@@ -505,10 +516,27 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     void run(view.room.id, () => (isRecording ? recordStop(view.room.id) : recordStart(view.room.id)));
   };
 
+  const togglePick = (view: RoomView) => {
+    const room = view.room;
+    if (!room.isLive) return;
+    if (picked.has(room.id)) {
+      const next = new Set(picked);
+      next.delete(room.id);
+      setPicked(next);
+      return;
+    }
+    if (picked.size >= 4) {
+      setNotice({ text: t("monitor.maxSelection"), error: false });
+      return;
+    }
+    setPicked(new Set(picked).add(room.id));
+  };
+
   const renderRow = (view: RoomView) => {
     const room = view.room;
     const isRecording = Boolean(view.recording);
     const isSelected = selectedId === room.id;
+    const isPicked = picked.has(room.id);
     const busy = busyId === room.id;
     const elapsed = view.recording ? now / 1000 - view.recording.startedAt : 0;
     const last = lastByRoom.get(room.id);
@@ -520,18 +548,38 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
         style={{ gridTemplateColumns: COLUMNS, minHeight: ROW_H }}
         className={cx(
           "grid cursor-default items-center gap-x-3 border-b border-line px-5 text-left transition-colors",
-          isSelected ? "bg-accent-soft" : "hover:bg-raised/70",
+          isPicked ? "bg-accent-soft" : isSelected ? "bg-raised/60" : "hover:bg-raised/70",
           busy ? "opacity-60" : "",
         )}
       >
-        <Thumb
-          room={room}
-          w={THUMB_W}
-          h={THUMB_H}
-          recording={isRecording}
-          lastAt={last ? last.startedAt : null}
-          locale={locale}
-        />
+        <div className="relative" style={{ width: THUMB_W, height: THUMB_H }}>
+          <Thumb
+            room={room}
+            w={THUMB_W}
+            h={THUMB_H}
+            recording={isRecording}
+            lastAt={last ? last.startedAt : null}
+            locale={locale}
+          />
+          {room.isLive ? (
+            <button
+              type="button"
+              onClick={() => togglePick(view)}
+              aria-label={t("monitor.selectHint")}
+              aria-pressed={isPicked}
+              className={cx(
+                "focus-ring absolute right-1 top-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border transition-colors",
+                isPicked
+                  ? "border-accent bg-accent text-accent-ink"
+                  : "border-white/75 bg-black/40 text-transparent hover:border-white hover:bg-black/65",
+              )}
+            >
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                <path d="M2.2 6.3 4.8 8.9 9.8 3.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          ) : null}
+        </div>
         <span className={cx("truncate text-[12.5px]", room.isLive && !room.monitorPaused ? "text-ink-soft" : "text-faint")}>
           {room.monitorPaused
             ? t("monitor.statusPaused")
@@ -855,7 +903,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     );
   };
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-3 px-5 pb-3 pt-4">
         <div className="min-w-0">
           <h1 className="text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">{t("monitor.title")}</h1>
@@ -1125,6 +1173,18 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
         </div>
 
       </div>
+
+      {picked.size > 0 ? (
+        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line bg-surface/95 py-1.5 pl-3.5 pr-1.5 shadow-pop backdrop-blur">
+          <span className="text-[12px] text-ink">{t("monitor.selectedCount", { n: picked.size })}</span>
+          <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>
+            {t("monitor.clearSelection")}
+          </Button>
+          <Button size="sm" variant="primary" onClick={() => onOpenWatch?.(Array.from(picked))}>
+            {t("monitor.watchSelected")}
+          </Button>
+        </div>
+      ) : null}
 
       {selected ? renderPanel(selected) : null}
     </div>

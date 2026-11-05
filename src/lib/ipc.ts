@@ -225,6 +225,17 @@ export async function mediaDelete(sessionId: string, deleteFile: boolean): Promi
 }
 
 
+// ---- 观看页布局 ----
+
+/** 读分屏树 JSON；没有存过就返回 null。 */
+export async function layoutGet(): Promise<string | null> {
+  return invoke<string | null>("layout_get");
+}
+
+export async function layoutSet(layout: string): Promise<void> {
+  return invoke<void>("layout_set", { layout });
+}
+
 // ---- M7.2 账号 ----
 
 export async function credentialsList(): Promise<CredentialInfo[]> {

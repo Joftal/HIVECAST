@@ -96,6 +96,8 @@ pub fn run() {
             commands::sessions_merge,
             commands::settings_get,
             commands::settings_update,
+            commands::layout_get,
+            commands::layout_set,
             commands::credentials_list,
             commands::credential_save,
             commands::credential_delete,

@@ -43,6 +43,8 @@ type Props = {
   onOpenDanmakuSettings?: () => void;
   /** 画质浮层展开时回调：外层借此按需拉线路列表。 */
   onMenuOpen?: () => void;
+  /** 画面适配：contain 保留完整画面（默认），cover 铺满格子但会裁切。 */
+  fit?: "contain" | "cover";
 };
 
 type Stats = {
@@ -73,6 +75,7 @@ export default function Player({
   onReload,
   onOpenDanmakuSettings,
   onMenuOpen,
+  fit = "contain",
 }: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -108,9 +111,15 @@ export default function Player({
     const measure = () => {
       const cw = shell.clientWidth;
       const ch = shell.clientHeight;
+      if (!cw || !ch) return;
+      // 铺满模式没有黑边，弹幕直接铺满整个格子。
+      if (fit === "cover") {
+        setBox({ left: 0, top: 0, width: cw, height: ch });
+        return;
+      }
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      if (!cw || !ch || !vw || !vh) return;
+      if (!vw || !vh) return;
       const scale = Math.min(cw / vw, ch / vh);
       const width = Math.round(vw * scale);
       const height = Math.round(vh * scale);
@@ -126,7 +135,7 @@ export default function Player({
       video.removeEventListener("loadedmetadata", measure);
       video.removeEventListener("resize", measure);
     };
-  }, [url, reloadKey]);
+  }, [url, reloadKey, fit]);
 
   const volumeRef = useRef(volume);
   volumeRef.current = volume;
@@ -343,7 +352,7 @@ export default function Player({
         ref={videoRef}
         muted={muted}
         playsInline
-        className="h-full w-full object-contain"
+        className={fit === "cover" ? "h-full w-full object-cover" : "h-full w-full object-contain"}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onTimeUpdate={(event) => setPositionMs(startMs + event.currentTarget.currentTime * 1000)}

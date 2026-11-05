@@ -540,6 +540,22 @@ pub async fn settings_update(
     Ok(saved)
 }
 
+// ---- 观看页布局（分屏树与比例，JSON 原文存 app_setting） ----
+
+#[tauri::command]
+pub fn layout_get(state: State<'_, AppState>) -> Result<Option<String>, AppError> {
+    state.db.get_setting("view.layout")
+}
+
+/// 前端只做结构校验；后端按原文存取，方便以后加字段不迁移。
+#[tauri::command]
+pub fn layout_set(state: State<'_, AppState>, layout: String) -> Result<(), AppError> {
+    if layout.len() > 64 * 1024 {
+        return Err(AppError::User("布局数据过大".into()));
+    }
+    state.db.set_setting("view.layout", &layout)
+}
+
 // ---- 账号与登录（M7.2） ----
 
 #[tauri::command]
