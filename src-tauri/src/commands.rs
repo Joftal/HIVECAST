@@ -1,4 +1,4 @@
-use hivecast_ipc::{AppInfo, RecordSession, RoomRecord, RoomView, StreamDescriptor};
+use hivecast_ipc::{AppInfo, RecordSession, RoomRecord, RoomView, StreamDescriptor, ViewSlotInfo};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db::now_ts;
@@ -116,6 +116,7 @@ pub async fn room_remove(
     if state.recorder.is_recording(&id) {
         let _ = state.recorder.stop(&app, &id, "stopped").await;
     }
+    state.view.close_room(&app, &id).await;
     state.db.delete_room(&id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -241,4 +242,64 @@ pub async fn sessions_list(
     state
         .db
         .list_sessions(room_id.as_deref(), limit.unwrap_or(100) as usize)
+}
+
+#[tauri::command]
+pub async fn view_slots(state: State<'_, AppState>) -> Result<Vec<ViewSlotInfo>, AppError> {
+    Ok(state.view.snapshot())
+}
+
+/// 把房间放进空闲观看槽位。qn 为空表示使用房间的观看画质设置。
+#[tauri::command]
+pub async fn view_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    room_id: String,
+    qn: Option<u32>,
+) -> Result<ViewSlotInfo, AppError> {
+    let room = state
+        .db
+        .get_room(&room_id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    if !room.is_live {
+        return Err(AppError::User("房间未开播".into()));
+    }
+    if let Some(qn) = qn {
+        if room.view_qn != qn {
+            state.db.set_quality(&room.id, room.record_qn, qn)?;
+        }
+    }
+    let room = state
+        .db
+        .get_room(&room_id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    state.view.open(&app, state.broker.clone(), &room).await
+}
+
+#[tauri::command]
+pub async fn view_close(app: AppHandle, state: State<'_, AppState>, slot: u8) -> Result<(), AppError> {
+    state.view.close(&app, slot).await
+}
+
+/// 切换某个槽位的观看画质：只换这一路的租约，录制进程不受影响。
+#[tauri::command]
+pub async fn view_set_quality(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: u8,
+    qn: u32,
+) -> Result<ViewSlotInfo, AppError> {
+    state.view.set_quality(&app, slot, qn)
+}
+
+#[tauri::command]
+pub async fn view_retry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: u8,
+) -> Result<ViewSlotInfo, AppError> {
+    state
+        .view
+        .retry(&app, state.broker.clone(), slot)
+        .await
 }

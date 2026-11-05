@@ -142,3 +142,25 @@ pub struct RecordNotice {
     pub host_name: String,
     pub detail: Option<String>,
 }
+
+/// 观看槽位快照：每个槽位一条独立的转封装管道。
+///
+/// url 为空表示还没起播（starting / reconnecting / error），前端据此显示占位。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ViewSlotInfo {
+    /// 0..3
+    pub slot: u8,
+    pub room_id: String,
+    /// starting | playing | reconnecting | error
+    pub status: String,
+    pub url: Option<String>,
+    /// 请求的画质（qn 数值，0 表示跟随平台自动）
+    pub requested_qn: u32,
+    /// 平台实际给的画质
+    pub actual_qn: u32,
+    pub quality: Option<String>,
+    pub line: Option<String>,
+    pub error: Option<String>,
+}

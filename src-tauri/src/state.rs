@@ -11,6 +11,7 @@ use crate::ffmpeg;
 use crate::monitor;
 use crate::recorder::Recorder;
 use crate::stream::StreamServer;
+use crate::view::ViewManager;
 
 pub struct AppState {
     pub info: AppInfo,
@@ -21,6 +22,7 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub broker: Arc<StreamBroker>,
     pub recorder: Arc<Recorder>,
+    pub view: Arc<ViewManager>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
 }
@@ -61,6 +63,8 @@ impl AppState {
 
         let broker = Arc::new(StreamBroker::new());
         let recorder = Arc::new(Recorder::new(db.clone(), media_root.clone()));
+        let view = ViewManager::new(cache_root.join("view"), server.clone());
+        view.clean_cache().await;
 
         monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
 
@@ -83,6 +87,7 @@ impl AppState {
             db,
             broker,
             recorder,
+            view,
             demo: tokio::sync::Mutex::new(None),
         })
     }

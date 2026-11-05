@@ -6,9 +6,11 @@ mod error;
 mod ffmpeg;
 mod monitor;
 mod platform;
+mod process;
 mod recorder;
 mod state;
 mod stream;
+mod view;
 
 use state::AppState;
 use tauri::Manager;
@@ -34,6 +36,25 @@ pub fn run() {
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。
             let state = tauri::async_runtime::block_on(AppState::init(&handle))?;
             app.manage(state);
+
+            // dev 服务器重启 / 系统注销发的是 SIGTERM，它不会触发 RunEvent::Exit；
+            // 不接住就会留下一堆还在写文件的 ffmpeg。
+            #[cfg(unix)]
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let Ok(mut term) = signal(SignalKind::terminate()) else {
+                        return;
+                    };
+                    term.recv().await;
+                    tracing::info!("收到 SIGTERM，开始收尾");
+                    let state = handle.state::<AppState>();
+                    state.recorder.shutdown_all(&handle).await;
+                    state.view.shutdown_all(&handle).await;
+                    handle.exit(0);
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -47,7 +68,12 @@ pub fn run() {
             commands::room_set_quality,
             commands::record_start,
             commands::record_stop,
-            commands::sessions_list
+            commands::sessions_list,
+            commands::view_slots,
+            commands::view_open,
+            commands::view_close,
+            commands::view_set_quality,
+            commands::view_retry
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIVECAST");
@@ -55,7 +81,10 @@ pub fn run() {
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
-                tauri::async_runtime::block_on(state.recorder.shutdown_all(handle));
+                tauri::async_runtime::block_on(async {
+                    state.recorder.shutdown_all(handle).await;
+                    state.view.shutdown_all(handle).await;
+                });
             }
         }
     });

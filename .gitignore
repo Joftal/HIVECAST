@@ -11,10 +11,11 @@ logs/
 # ---- 录制产物 ----
 recordings/
 *.flv
-*.ts
 *.mp4
 *.aac
 *.ass
+# 注意：不要写全局 *.ts —— 会把 TypeScript 源码一起忽略掉，
+# MPEG-TS 录制产物只出现在 recordings/（已整体忽略）。
 
 # ---- Rust / Tauri ----
 target/

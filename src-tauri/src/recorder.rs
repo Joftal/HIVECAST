@@ -23,6 +23,7 @@ use crate::disk;
 use crate::error::AppError;
 use crate::ffmpeg;
 use crate::platform::StreamGroup;
+use crate::process::send_graceful;
 
 /// 进程存活不足这个时长就退出，视为「秒退」，需要换线路重试。
 const EARLY_EXIT: Duration = Duration::from_secs(12);
@@ -576,18 +577,6 @@ pub fn sanitize(input: &str, fallback: &str, max_chars: usize) -> String {
         result = fallback.to_string();
     }
     result
-}
-
-fn send_graceful(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = child.id() {
-            // SIGINT 让 ffmpeg 正常 flush 后退出；失败再退化为强杀。
-            let _ = unsafe { libc::kill(pid as i32, libc::SIGINT) };
-            return;
-        }
-    }
-    let _ = child.start_kill();
 }
 
 #[cfg(test)]

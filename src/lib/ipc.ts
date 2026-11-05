@@ -1,0 +1,116 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { AppInfo } from "./bindings/AppInfo";
+import type { RecordNotice } from "./bindings/RecordNotice";
+import type { RecordSession } from "./bindings/RecordSession";
+import type { RoomView } from "./bindings/RoomView";
+import type { StreamDescriptor } from "./bindings/StreamDescriptor";
+import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
+
+export type { AppInfo, RecordNotice, RecordSession, RoomView, StreamDescriptor, ViewSlotInfo };
+
+// 浏览器里跑 Vite 预览时没有 Tauri 运行时，界面上要给出明确提示而不是空白。
+export function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function appInfo(): Promise<AppInfo> {
+  return invoke<AppInfo>("app_info");
+}
+
+// M0 演示流：本机 ffmpeg 生成 HLS，经本地 HTTP 服务交给 hls.js。
+export async function openDemoStream(): Promise<StreamDescriptor> {
+  return invoke<StreamDescriptor>("demo_stream");
+}
+
+export function describeError(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(err);
+}
+
+// ---- M1 监控 ----
+
+export const EVENT_ROOMS_CHANGED = "rooms://changed";
+
+export async function roomsList(): Promise<RoomView[]> {
+  return invoke<RoomView[]>("rooms_list");
+}
+
+// input 支持房间号、直播间链接、主播主页链接；解析在 Rust 侧完成。
+export async function roomAdd(input: string): Promise<RoomView> {
+  return invoke<RoomView>("room_add", { input });
+}
+
+export async function roomRemove(id: string): Promise<void> {
+  return invoke("room_remove", { id });
+}
+
+export async function roomRefresh(id: string): Promise<RoomView> {
+  return invoke<RoomView>("room_refresh", { id });
+}
+
+export async function roomSetAutoRecord(id: string, enabled: boolean): Promise<void> {
+  return invoke("room_set_auto_record", { id, enabled });
+}
+
+export async function roomSetQuality(id: string, recordQn: number, viewQn: number): Promise<void> {
+  return invoke("room_set_quality", { id, recordQn, viewQn });
+}
+
+export async function recordStart(id: string): Promise<void> {
+  return invoke("record_start", { id });
+}
+
+export async function recordStop(id: string): Promise<void> {
+  return invoke("record_stop", { id });
+}
+
+export async function sessionsList(roomId?: string, limit = 50): Promise<RecordSession[]> {
+  return invoke<RecordSession[]>("sessions_list", { roomId, limit });
+}
+
+// 后端在任何房间状态变化（开播/下播/开录/停录/出错）时广播，前端只刷新列表。
+export const EVENT_RECORD_NOTICE = "record://notice";
+
+// 录制状态播报：前端拿到后自己用 i18n 组装文案再弹系统通知。
+export function onRecordNotice(handler: (notice: RecordNotice) => void): Promise<UnlistenFn> {
+  return listen<RecordNotice>(EVENT_RECORD_NOTICE, (event) => handler(event.payload));
+}
+
+export function onRoomsChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen(EVENT_ROOMS_CHANGED, () => handler());
+}
+
+// ---- M2 观看 ----
+
+export const EVENT_VIEW_CHANGED = "view://changed";
+
+export async function viewSlots(): Promise<ViewSlotInfo[]> {
+  return invoke<ViewSlotInfo[]>("view_slots");
+}
+
+// 把房间放进空闲槽位；qn 省略时用房间自己的观看画质。
+export async function viewOpen(roomId: string, qn?: number): Promise<ViewSlotInfo> {
+  return invoke<ViewSlotInfo>("view_open", { roomId, qn });
+}
+
+export async function viewClose(slot: number): Promise<void> {
+  return invoke("view_close", { slot });
+}
+
+// 只影响这一路的租约，录制进程不会被打断。
+export async function viewSetQuality(slot: number, qn: number): Promise<ViewSlotInfo> {
+  return invoke<ViewSlotInfo>("view_set_quality", { slot, qn });
+}
+
+export async function viewRetry(slot: number): Promise<ViewSlotInfo> {
+  return invoke<ViewSlotInfo>("view_retry", { slot });
+}
+
+export function onViewChanged(handler: (slots: ViewSlotInfo[]) => void): Promise<UnlistenFn> {
+  return listen<ViewSlotInfo[]>(EVENT_VIEW_CHANGED, (event) => handler(event.payload));
+}

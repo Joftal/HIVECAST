@@ -73,27 +73,55 @@
   },
   "watch": {
     "title": "多屏观看",
-    "subtitle": "最多 4 路同屏，音频与画质互不干扰。",
-    "slot": "槽位 {{index}}",
-    "empty": "空槽位",
-    "pickRoom": "选择直播间",
-    "loadDemo": "载入演示流",
-    "demoTip": "演示流由本机 ffmpeg 生成，经由本地 HTTP 服务交给 hls.js 播放，用于验证 M0 管道。",
+    "subtitle": "最多 4 路同屏，音频、画质与线路互相独立。",
+    "addRoom": "添加直播间",
+    "addAndWatch": "添加并观看",
+    "inputPlaceholder": "粘贴直播间链接或房间号，例如 live.bilibili.com/545068",
+    "watchNow": "观看",
+    "noCandidates": "监控列表里的房间都在观看中，或者还没有添加房间。",
+    "unknownRoom": "未知直播间",
+    "quality": "观看画质",
+    "close": "关闭槽位",
+    "muteAll": "全部静音",
+    "multiSound": "当前有 3 路以上同时发声。HIVECAST 不会自动静音，需要安静时点「全部静音」。",
+    "emptyTitle": "还没有正在观看的直播间",
+    "emptyBody": "从监控列表选一个直播间，或直接粘贴链接开始观看。每一路都有独立的取流与转封装，切换画质不会影响录制。",
+    "hint": "观看与录制是两条独立会话：切换画质、关闭槽位都不会打断正在进行的录制。",
+    "layout": {
+      "single": "单画面",
+      "twoH": "左右",
+      "twoV": "上下",
+      "threeBig": "左大右二",
+      "threeCol": "三列",
+      "quad": "四宫格",
+      "main": "主次"
+    },
+    "status": {
+      "starting": "正在起播…",
+      "reconnecting": "正在重连…",
+      "error": "播放失败"
+    },
     "playing": "播放中",
     "paused": "已暂停",
-    "connecting": "连接中",
-    "error": "播放失败",
     "retry": "重新连接",
     "audioOn": "有声",
     "muted": "静音",
-    "qualityLocked": "画质切换将在 M2 开放",
     "danmakuLocked": "弹幕将在 M3 开放",
     "stats": {
-      "resolution": "分辨率",
-      "bitrate": "码率",
-      "dropped": "丢帧",
-      "buffer": "缓冲"
-    }
+      "dropped": "丢帧"
+    },
+    "qn": {
+      "80": "流畅",
+      "150": "高清",
+      "250": "超清",
+      "400": "蓝光",
+      "10000": "原画",
+      "20000": "4K",
+      "30000": "杜比",
+      "auto": "自动"
+    },
+    "buffering": "缓冲中…",
+    "degradedHint": "请求的画质不可用，平台已自动降级"
   },
   "settings": {
     "title": "设置",
@@ -101,10 +129,22 @@
     "open": "设置"
   },
   "notice": {
-    "started": { "title": "开始录制", "body": "{{host}} 正在直播，已开始录制" },
-    "ended": { "title": "录制结束", "body": "{{host}} 的直播已结束，文件已保存到媒体库" },
-    "failed": { "title": "录制中断", "body": "{{host}} 的录制异常中断：{{detail}}" },
-    "diskFull": { "title": "磁盘空间不足", "body": "{{host}} 的录制已停止，请清理磁盘后手动开录" }
+    "started": {
+      "title": "开始录制",
+      "body": "{{host}} 正在直播，已开始录制"
+    },
+    "ended": {
+      "title": "录制结束",
+      "body": "{{host}} 的直播已结束，文件已保存到媒体库"
+    },
+    "failed": {
+      "title": "录制中断",
+      "body": "{{host}} 的录制异常中断：{{detail}}"
+    },
+    "diskFull": {
+      "title": "磁盘空间不足",
+      "body": "{{host}} 的录制已停止，请清理磁盘后手动开录"
+    }
   },
   "error": {
     "ffmpegMissing": "未找到 ffmpeg，请检查安装或稍后在设置中指定路径。",
