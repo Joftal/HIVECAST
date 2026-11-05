@@ -27,7 +27,24 @@
     "noFile": "The file is gone; only the record can be deleted",
     "deleted": "Deleted",
     "playFailed": "Playback failed",
-    "danmakuCount": "{{n}} danmaku"
+    "danmakuCount": "{{n}} danmaku",
+    "search": "Search title or host",
+    "filterAll": "All",
+    "sortRecent": "By date",
+    "sortDuration": "By length",
+    "sortSize": "By size",
+    "summary": "{{n}} items · {{size}}",
+    "selected": "{{n}} selected",
+    "clearSelection": "Clear",
+    "deleteSelected": "Delete selected",
+    "deletedBatch": "Deleted {{n}} items",
+    "noMatchTitle": "No matching recordings",
+    "noMatchBody": "Try another keyword, or switch the platform filter back to All.",
+    "remux": "To mp4",
+    "screenshot": "Snapshot",
+    "exportAss": "ASS subs",
+    "postDone": "{{what}} created · {{size}}",
+    "postFailed": "Post-processing failed"
   },
   "settings": {
     "title": "Settings",
@@ -55,7 +72,10 @@
     "qnUltra": "Ultra HD",
     "qnHigh": "HD",
     "qnStandard": "SD",
-    "saveFailed": "Failed to save"
+    "saveFailed": "Failed to save",
+    "groupRecord": "Playback & recording",
+    "groupStorage": "Storage & retention",
+    "groupInterface": "Interface & alerts"
   },
   "common": {
     "retry": "Retry",
@@ -179,7 +199,8 @@
       "auto": "Auto"
     },
     "buffering": "Buffering…",
-    "degradedHint": "Requested quality is unavailable; downgraded by the platform"
+    "degradedHint": "Requested quality is unavailable; downgraded by the platform",
+    "dismissHint": "Dismiss"
   },
   "notice": {
     "started": {

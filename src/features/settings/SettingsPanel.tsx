@@ -104,6 +104,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   const fieldClass =
     "w-full rounded-lg border hairline bg-ink-800/80 px-2.5 py-1.5 text-[12px] text-zinc-100 outline-none transition-colors focus:border-amber-400/50";
   const labelClass = "text-[11px] font-medium tracking-wide text-zinc-400";
+  // 分组标题：抽屉只有一列，靠它把长表单切成三段。
+  const groupClass = "text-[11px] font-semibold tracking-[0.08em] text-zinc-200";
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -133,6 +135,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
             <div className="text-[12px] text-zinc-500">{t("common.loading")}</div>
           ) : (
             <>
+              <p className={groupClass}>{t("settings.groupRecord")}</p>
+
               <label className="block space-y-1.5">
                 <span className={labelClass}>{t("settings.recordQuality")}</span>
                 <select
@@ -162,6 +166,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                   ))}
                 </select>
               </label>
+
+              <p className={groupClass + " border-t hairline pt-3.5"}>{t("settings.groupStorage")}</p>
 
               <div className="space-y-1.5">
                 <span className={labelClass}>{t("settings.mediaRoot")}</span>
@@ -227,6 +233,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                   {t("settings.retentionHint")}
                 </span>
               </div>
+
+              <p className={groupClass + " border-t hairline pt-3.5"}>{t("settings.groupInterface")}</p>
 
               <label className="block space-y-1.5">
                 <span className={labelClass}>{t("settings.language")}</span>

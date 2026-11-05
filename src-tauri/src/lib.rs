@@ -109,7 +109,7 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 tauri::async_runtime::block_on(async {
-                    state.local.stop().await;
+                    state.local.stop_all().await;
                     state.recorder.shutdown_all(handle).await;
                     state.view.shutdown_all(handle).await;
                     state.danmaku.shutdown_all();

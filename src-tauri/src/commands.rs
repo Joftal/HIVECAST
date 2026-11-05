@@ -473,7 +473,7 @@ pub async fn media_delete(
         return Err(AppError::User("这段还在录制，先停下再删除".into()));
     }
 
-    state.local.stop().await;
+    state.local.stop(&session_id).await;
 
     if delete_file {
         if let Some(path) = session.file_path.as_deref() {
@@ -519,9 +519,13 @@ pub async fn media_play(
     state.local.open(&state.db, &session_id).await
 }
 
+/// 停止一条回放；只影响这一条，其余各格继续放。
 #[tauri::command]
-pub async fn media_stop(state: State<'_, AppState>) -> Result<(), AppError> {
-    state.local.stop().await;
+pub async fn media_stop(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    state.local.stop(&session_id).await;
     Ok(())
 }
 

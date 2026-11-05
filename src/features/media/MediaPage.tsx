@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
 import {
@@ -8,6 +8,9 @@ import {
   mediaPlay,
   mediaReveal,
   mediaStop,
+  sessionExportDanmaku,
+  sessionRemux,
+  sessionScreenshot,
   type MediaItem,
   type Playback,
 } from "../../lib/ipc";
@@ -69,10 +72,19 @@ export default function MediaPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [playback, setPlayback] = useState<Playback | null>(null);
-  const [volume, setVolume] = useState(0.8);
+  const [playbacks, setPlaybacks] = useState<Record<string, Playback>>({});
+  const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [platform, setPlatform] = useState<string>("all");
+  const [sort, setSort] = useState<"recent" | "duration" | "size">("recent");
+  const [selected, setSelected] = useState<string[]>([]);
+  // 后处理任务（转封装/截图/ASS）：一次只跑一个，避免 ffmpeg 抢 IO。
+  const [posting, setPosting] = useState<string | null>(null);
+  // 卸载清理要用最新值，但不能再触发 effect，所以放 ref。
+  const playbacksRef = useRef<Record<string, Playback>>({});
+  playbacksRef.current = playbacks;
 
   const reload = useCallback(async () => {
     if (!isTauri()) {
@@ -94,30 +106,110 @@ export default function MediaPage() {
     void reload();
   }, [reload]);
 
-  // 离开媒体库时把回放停掉：缓存目录要清，不能留一个 ffmpeg 在后台。
-  useEffect(() => () => {
-    void mediaStop().catch(() => undefined);
-  }, []);
+  // 离开媒体库时把回放全部停掉：缓存目录要清，不能留 ffmpeg 在后台。
+  useEffect(
+    () => () => {
+      for (const id of Object.keys(playbacksRef.current)) {
+        void mediaStop(id).catch(() => undefined);
+      }
+    },
+    [],
+  );
 
-  const stop = async () => {
-    setPlayback(null);
-    await mediaStop().catch(() => undefined);
+  // 平台筛选只列出当前真的存在的平台，避免出现永远为空的选项。
+  const platforms = useMemo(() => Array.from(new Set(items.map((item) => item.platform))), [items]);
+
+  // 搜索命中标题与主播名；排序只换顺序，不动原数组。
+  const view = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    const list = items.filter((item) => {
+      if (platform !== "all" && item.platform !== platform) return false;
+      if (!keyword) return true;
+      return (item.title + " " + item.hostName).toLowerCase().includes(keyword);
+    });
+    return [...list].sort((a, b) => {
+      if (sort === "duration") return b.durationMs - a.durationMs;
+      if (sort === "size") return b.size - a.size;
+      return b.startedAt - a.startedAt;
+    });
+  }, [items, platform, query, sort]);
+
+  const totalSize = view.reduce((sum, item) => sum + Math.max(0, item.size), 0);
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((one) => one !== id) : [...prev, id]));
   };
 
+  const removeSelected = async () => {
+    if (selected.length === 0) return;
+    setBusy("batch");
+    setError(null);
+    setNotice(null);
+    try {
+      for (const id of selected) {
+        const item = items.find((one) => one.id === id);
+        if (!item) continue;
+        if (playbacks[id]) await stop(id);
+        await mediaDelete(id, item.hasFile);
+      }
+      setNotice(t("media.deletedBatch", { n: selected.length }));
+      setSelected([]);
+      await reload();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const stop = async (id: string) => {
+    setPlaybacks((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    await mediaStop(id).catch(() => undefined);
+  };
+
+  // 每条录像各自一格播放器，可以同时放多条（后端上限 3 条）。
   const play = async (item: MediaItem) => {
-    if (playback?.sessionId === item.id) {
-      await stop();
+    if (playbacks[item.id]) {
+      await stop(item.id);
       return;
     }
     setBusy(item.id);
     setError(null);
     setNotice(null);
     try {
-      setPlayback(await mediaPlay(item.id));
+      const playback = await mediaPlay(item.id);
+      setPlaybacks((prev) => ({ ...prev, [item.id]: playback }));
     } catch (err) {
       setError(t("media.playFailed") + "：" + describeError(err));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const post = async (item: MediaItem, kind: "mp4" | "screenshot" | "ass") => {
+    if (posting) return;
+    setPosting(item.id + ":" + kind);
+    setError(null);
+    setNotice(null);
+    try {
+      const result =
+        kind === "mp4"
+          ? await sessionRemux(item.id)
+          : kind === "screenshot"
+            ? await sessionScreenshot(item.id, null)
+            : await sessionExportDanmaku(item.id);
+      const label =
+        result.kind === "mp4" ? t("media.remux") : result.kind === "ass" ? t("media.exportAss") : t("media.screenshot");
+      setNotice(t("media.postDone", { what: label, size: formatSize(result.size) }));
+      await reload();
+    } catch (err) {
+      setError(t("media.postFailed") + "：" + describeError(err));
+    } finally {
+      setPosting(null);
     }
   };
 
@@ -130,7 +222,7 @@ export default function MediaPage() {
     setBusy(item.id);
     setError(null);
     try {
-      if (playback?.sessionId === item.id) await stop();
+      if (playbacks[item.id]) await stop(item.id);
       await mediaDelete(item.id, item.hasFile);
       setNotice(t("media.deleted"));
       await reload();
@@ -162,27 +254,71 @@ export default function MediaPage() {
         </div>
       </div>
 
-      {playback && (
-        <div className="rounded-2xl border hairline bg-ink-850/80 p-3">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="truncate text-[13px] font-medium text-zinc-100">{playback.title || playback.sessionId}</div>
-              <div className="text-[11px] text-zinc-500">
-                {t("media.playing")} · {formatDuration(playback.durationMs)}
-              </div>
-            </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={t("media.search")}
+          className="focus-ring w-52 rounded-full border hairline bg-ink-900/60 px-3 py-1 text-[12px] text-zinc-200 placeholder:text-zinc-600"
+        />
+        <div className="flex items-center gap-0.5 rounded-full border hairline p-0.5">
+          <button
+            type="button"
+            onClick={() => setPlatform("all")}
+            className={[
+              "focus-ring rounded-full px-2.5 py-0.5 text-[11px] transition-colors",
+              platform === "all" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200",
+            ].join(" ")}
+          >
+            {t("media.filterAll")}
+          </button>
+          {platforms.map((one) => (
+            <button
+              key={one}
+              type="button"
+              onClick={() => setPlatform(one)}
+              className={[
+                "focus-ring rounded-full px-2.5 py-0.5 text-[11px] transition-colors",
+                platform === one ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200",
+              ].join(" ")}
+            >
+              {t("platformName." + one, { defaultValue: one })}
+            </button>
+          ))}
+        </div>
+        <select
+          value={sort}
+          onChange={(event) => setSort(event.target.value as "recent" | "duration" | "size")}
+          className="focus-ring rounded-full border hairline bg-ink-900/60 px-2.5 py-1 text-[11px] text-zinc-300"
+        >
+          <option value="recent">{t("media.sortRecent")}</option>
+          <option value="duration">{t("media.sortDuration")}</option>
+          <option value="size">{t("media.sortSize")}</option>
+        </select>
+        <span className="ml-auto text-[11px] text-zinc-500">
+          {t("media.summary", { n: view.length, size: formatSize(totalSize) })}
+        </span>
+      </div>
+
+      {selected.length > 0 && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-200">
+          <span>{t("media.selected", { n: selected.length })}</span>
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void stop()}
-              className="focus-ring rounded-full border hairline px-3 py-1 text-[12px] text-zinc-300 hover:border-white/25 hover:text-white"
+              onClick={() => setSelected([])}
+              className="focus-ring rounded-full border border-amber-300/30 px-3 py-0.5 text-[11px] transition-colors hover:border-amber-200/60"
             >
-              {t("media.stop")}
+              {t("media.clearSelection")}
             </button>
-          </div>
-          <div className="overflow-hidden rounded-xl border hairline bg-black">
-            <div className="aspect-video max-h-[52vh] w-full">
-              <Player url={playback.url} volume={volume} onVolumeChange={setVolume} />
-            </div>
+            <button
+              type="button"
+              disabled={busy === "batch"}
+              onClick={() => void removeSelected()}
+              className="focus-ring rounded-full border border-red-400/50 bg-red-500/15 px-3 py-0.5 text-[11px] text-red-200 transition-colors hover:bg-red-500/25 disabled:opacity-40"
+            >
+              {busy === "batch" ? "…" : t("media.deleteSelected")}
+            </button>
           </div>
         </div>
       )}
@@ -203,11 +339,16 @@ export default function MediaPage() {
           <div className="text-[14px] font-medium text-zinc-200">{t("media.emptyTitle")}</div>
           <div className="max-w-[420px] text-[12px] leading-relaxed text-zinc-500">{t("media.emptyBody")}</div>
         </div>
+      ) : view.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed hairline bg-ink-850/40 px-6 py-16 text-center">
+          <div className="text-[14px] font-medium text-zinc-200">{t("media.noMatchTitle")}</div>
+          <div className="max-w-[380px] text-[12px] leading-relaxed text-zinc-500">{t("media.noMatchBody")}</div>
+        </div>
       ) : (
         <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 gap-3 overflow-auto pb-2 md:grid-cols-2 xl:grid-cols-3">
-          {items.map((item) => {
+          {view.map((item) => {
             const tone = PLATFORM_TONE[item.platform] ?? "border-white/15 bg-white/5 text-zinc-300";
-            const isPlaying = playback?.sessionId === item.id;
+            const isPlaying = Boolean(playbacks[item.id]);
             const busyItem = busy === item.id;
             return (
               <div
@@ -219,11 +360,32 @@ export default function MediaPage() {
                 ].join(" ")}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className={"rounded-full border px-2 py-0.5 text-[10px] font-medium " + tone}>
-                    {t("platformName." + item.platform, { defaultValue: item.platform })}
-                  </span>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(item.id)}
+                      onChange={() => toggleSelected(item.id)}
+                      className="h-3.5 w-3.5 accent-amber-400"
+                    />
+                    <span className={"rounded-full border px-2 py-0.5 text-[10px] font-medium " + tone}>
+                      {t("platformName." + item.platform, { defaultValue: item.platform })}
+                    </span>
+                  </label>
                   <span className="text-[11px] text-zinc-500">{formatDate(item.startedAt)}</span>
                 </div>
+
+                {isPlaying && (
+                  <div className="overflow-hidden rounded-xl border hairline bg-black">
+                    <div className="aspect-video w-full">
+                      <Player
+                        url={playbacks[item.id].url}
+                        volume={volumes[item.id] ?? 0}
+                        onVolumeChange={(next) => setVolumes((prev) => ({ ...prev, [item.id]: next }))}
+                        onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="min-h-[38px]">
                   <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">
@@ -237,6 +399,26 @@ export default function MediaPage() {
                   <span>{formatSize(item.size)}</span>
                   {item.danmakuCount > 0 && <span>{t("media.danmakuCount", { n: item.danmakuCount })}</span>}
                   {!item.hasFile && <span className="text-amber-400">{t("media.missing")}</span>}
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  {(["mp4", "screenshot", "ass"] as const).map((kind) => {
+                    const key = item.id + ":" + kind;
+                    const label =
+                      kind === "mp4" ? t("media.remux") : kind === "screenshot" ? t("media.screenshot") : t("media.exportAss");
+                    return (
+                      <button
+                        key={kind}
+                        type="button"
+                        disabled={!item.hasFile || posting !== null}
+                        onClick={() => void post(item, kind)}
+                        className="focus-ring rounded-md border hairline px-2 py-0.5 text-[11px] text-zinc-400 transition-colors hover:border-white/25 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {posting === key ? "…" : label}
+                      </button>
+                    );
+                  })}
+                  <span className="ml-auto text-[11px] text-zinc-600">{isPlaying ? t("media.playing") : ""}</span>
                 </div>
 
                 <div className="mt-auto flex items-center gap-1.5 pt-1">

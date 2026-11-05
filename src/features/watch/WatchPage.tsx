@@ -61,6 +61,8 @@ export default function WatchPage() {
   const [rooms, setRooms] = useState<RoomView[]>([]);
   const [slots, setSlots] = useState<ViewSlotInfo[]>([]);
   const [volumes, setVolumes] = useState<Record<number, number>>({});
+  // 「多路发声」提示只弹一次；降到 3 路以下后复位，下次重新提醒。
+  const [loudHint, setLoudHint] = useState(true);
   // 弹幕按槽位独立开关：关掉一路不影响其它路（与音量同理）。
   const [danmaku, setDanmaku] = useState<Record<number, boolean>>({});
   const [layoutChoice, setLayoutChoice] = useState<Layout | null>(null);
@@ -121,6 +123,10 @@ export default function WatchPage() {
   }, [count]);
 
   const sounding = sessions.filter((session) => (volumes[session.slot] ?? 0) > 0).length;
+
+  useEffect(() => {
+    if (sounding < 3) setLoudHint(true);
+  }, [sounding]);
 
   const setVolume = (slot: number, volume: number) => {
     setVolumes((prev) => ({ ...prev, [slot]: volume }));
@@ -255,8 +261,28 @@ export default function WatchPage() {
         </div>
       )}
 
-      {sounding >= 3 && (
-        <p className="text-[11px] text-amber-300/80">{t("watch.multiSound")}</p>
+      {sounding >= 3 && loudHint && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
+          <span className="flex-1">{t("watch.multiSound")}</span>
+          <button
+            type="button"
+            onClick={() => {
+              muteAll();
+              setLoudHint(false);
+            }}
+            className="focus-ring rounded-md border border-amber-300/40 px-2 py-0.5 text-[11px] transition-colors hover:bg-amber-300/15"
+          >
+            {t("watch.muteAll")}
+          </button>
+          <button
+            type="button"
+            aria-label={t("watch.dismissHint")}
+            onClick={() => setLoudHint(false)}
+            className="focus-ring rounded-md px-1.5 py-0.5 text-amber-300/70 transition-colors hover:text-amber-100"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {pickerOpen && isTauri() && (

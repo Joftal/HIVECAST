@@ -25,6 +25,9 @@ const PLAY_RES_Y: i64 = 720;
 const FONT_SIZE: u32 = 42;
 const LANE_HEIGHT: i64 = 54;
 const LANE_TOP: i64 = 20;
+/// 公告（礼物/上舰）停留 5 秒，同一泳道至少隔 0.8 秒。
+const ANNOUNCE_HOLD_MS: i64 = 5000;
+const ANNOUNCE_GAP_MS: i64 = 800;
 
 fn sibling(src: &Path, suffix: &str, ext: &str) -> PathBuf {
     let stem = src
@@ -194,11 +197,15 @@ pub async fn merge(sources: &[PathBuf]) -> Result<PostResult, AppError> {
     })
 }
 
-/// 弹幕 JSONL → ASS 字幕：右上角滚动，供播放器或压制使用。
+/// 弹幕 JSONL → ASS 字幕：聊天从右向左滚动，礼物/上舰固定在图上方居中。
+///
+/// 直播里的礼物与上舰本来就是「悬停公告」，跟着聊天一起滚会看不清，
+/// 所以给它们单独的 `\an8\pos` 定位和 5 秒停留时间。
 pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     ensure_file(jsonl)?;
     let raw = std::fs::read_to_string(jsonl)?;
-    let mut lines: Vec<(i64, String, u32)> = Vec::new();
+    // 第四位表示「固定不滚动」：chat 之外（gift / super_chat）都按公告处理。
+    let mut lines: Vec<(i64, String, u32, bool)> = Vec::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -209,12 +216,13 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
         }
         let at = value["t"].as_i64().unwrap_or(0);
         let color = value["col"].as_u64().unwrap_or(0) as u32;
-        lines.push((at, text, color));
+        let kind = value["k"].as_str().unwrap_or("chat");
+        lines.push((at, text, color, kind != "chat"));
     }
     if lines.is_empty() {
         return Err(AppError::User("这场没有弹幕".into()));
     }
-    lines.sort_by_key(|(at, _, _)| *at);
+    lines.sort_by_key(|(at, _, _, _)| *at);
 
     let mut ass = String::new();
     ass.push_str("[Script Info]\n");
@@ -233,14 +241,29 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
 
     let lane_count = ((PLAY_RES_Y - LANE_TOP) / LANE_HEIGHT).max(1);
     let mut lane_free = vec![0i64; lane_count as usize];
-    for (at, text, color) in lines {
+    // 公告只占顶部三条泳道，避免盖住画面主体。
+    let announce_lanes = 3usize.min(lane_count as usize);
+    let mut announce_free = vec![0i64; announce_lanes];
+    for (at, text, color, fixed) in lines {
+        let body = escape_text(&text);
+        let colour = ass_colour(color);
+        if fixed {
+            let lane = pick_lane(&announce_free, at);
+            let y = LANE_TOP + lane as i64 * LANE_HEIGHT;
+            announce_free[lane] = at + ANNOUNCE_GAP_MS;
+            ass.push_str(&format!(
+                "Dialogue: 0,{},{},Danmaku,,0,0,0,,{{\\an8\\pos({},{y})\\c{colour}}}{body}\n",
+                ass_time(at),
+                ass_time(at + ANNOUNCE_HOLD_MS),
+                PLAY_RES_X / 2
+            ));
+            continue;
+        }
         let width = estimate_width(&text);
         let lane = pick_lane(&lane_free, at);
         let y = LANE_TOP + lane as i64 * LANE_HEIGHT;
         let duration = ((PLAY_RES_X as f64 + width as f64) / SCROLL_SPEED * 1000.0) as i64;
         lane_free[lane] = at + duration.min(4000);
-        let colour = ass_colour(color);
-        let body = escape_text(&text);
         ass.push_str(&format!(
             "Dialogue: 0,{},{},Danmaku,,0,0,0,,{{\\move({PLAY_RES_X},{y},-{width},{y})\\c{colour}}}{body}\n",
             ass_time(at),
@@ -406,6 +429,7 @@ mod tests {
             &file,
             r#"{"t":1200,"k":"chat","u":"小明","c":"哈哈哈","col":16711680}
 {"t":9000,"k":"chat","u":"小红","c":"{\\move(0,0)} 注入","col":0}
+{"t":2000,"k":"gift","u":"小刚","c":"赠送 辣条 ×3","col":16776960}
 "#,
         )
         .unwrap();
@@ -415,6 +439,9 @@ mod tests {
         assert!(text.contains("&H000000FF&"));
         assert!(text.contains("｛"));
         assert!(!text.contains("{\\move(0,0)}"));
+        // 礼物走固定公告：居中、an8 顶部对齐，不带 move。
+        assert!(text.contains("\\an8\\pos(640,"));
+        assert!(text.contains("赠送 辣条 ×3"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -27,7 +27,24 @@
     "noFile": "录像文件已不存在，只能删除记录",
     "deleted": "已删除",
     "playFailed": "回放失败",
-    "danmakuCount": "{{n}} 条弹幕"
+    "danmakuCount": "{{n}} 条弹幕",
+    "search": "搜索标题或主播",
+    "filterAll": "全部",
+    "sortRecent": "按时间",
+    "sortDuration": "按时长",
+    "sortSize": "按大小",
+    "summary": "{{n}} 条 · {{size}}",
+    "selected": "已选 {{n}} 条",
+    "clearSelection": "取消选择",
+    "deleteSelected": "删除所选",
+    "deletedBatch": "已删除 {{n}} 条",
+    "noMatchTitle": "没有匹配的录像",
+    "noMatchBody": "换个关键词，或把平台筛选切回「全部」。",
+    "remux": "转 mp4",
+    "screenshot": "截图",
+    "exportAss": "ASS 字幕",
+    "postDone": "{{what}}已生成 · {{size}}",
+    "postFailed": "后处理失败"
   },
   "settings": {
     "title": "设置",
@@ -55,7 +72,10 @@
     "qnUltra": "超清",
     "qnHigh": "高清",
     "qnStandard": "标清",
-    "saveFailed": "保存失败"
+    "saveFailed": "保存失败",
+    "groupRecord": "录制与观看",
+    "groupStorage": "存储与保留",
+    "groupInterface": "界面与通知"
   },
   "common": {
     "retry": "重试",
@@ -179,7 +199,8 @@
       "auto": "自动"
     },
     "buffering": "缓冲中…",
-    "degradedHint": "请求的画质不可用，平台已自动降级"
+    "degradedHint": "请求的画质不可用，平台已自动降级",
+    "dismissHint": "关闭提示"
   },
   "notice": {
     "started": {

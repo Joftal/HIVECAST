@@ -1,8 +1,10 @@
 //! 本地录像回放（M6 媒体库）：把一条已完成的录像转成 HLS，复用观看端的播放器。
 //!
 //! 与观看端的区别只有输入源：这里是磁盘文件（-re 按帧率读），观看端是平台直播流。
-//! 同一时刻只允许一个本地回放：媒体库是「点一条看一条」，没必要占两份缓存。
+//! 允许同时回放多条（上限 MAX_ACTIVE）：媒体库会并排比较不同录像，但每条都要
+//! 单独起一个 ffmpeg 转封装、单独占一份分片缓存，所以必须设上限。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,6 +20,8 @@ use crate::stream::StreamServer;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
+/// 同时回放上限：每条占一个 ffmpeg 进程和一整套 HLS 分片。
+const MAX_ACTIVE: usize = 3;
 
 struct Active {
     key: String,
@@ -28,7 +32,7 @@ struct Active {
 pub struct LocalPlayer {
     root: PathBuf,
     server: Arc<StreamServer>,
-    current: Mutex<Option<Active>>,
+    current: Mutex<HashMap<String, Active>>,
     gate: tokio::sync::Mutex<()>,
 }
 
@@ -37,12 +41,12 @@ impl LocalPlayer {
         Arc::new(Self {
             root,
             server,
-            current: Mutex::new(None),
+            current: Mutex::new(HashMap::new()),
             gate: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// 打开一条录像；同一时刻只保留一个回放，旧的会被停掉。
+    /// 打开一条录像；同一条已经在放就直接复用，不同录像各自独立。
     pub async fn open(&self, db: &Db, session_id: &str) -> Result<Playback, AppError> {
         let _gate = self.gate.lock().await;
 
@@ -58,7 +62,29 @@ impl LocalPlayer {
             .filter(|p| Path::new(p).is_file())
             .ok_or_else(|| AppError::User("录像文件已不存在".into()))?;
 
-        self.stop_inner().await;
+        // 已经在放同一条：复用现成的 HLS，别重复转封装。
+        {
+            let guard = self.current.lock().expect("本地回放状态被污染");
+            if let Some(active) = guard.get(session_id) {
+                let key = active.key.clone();
+                drop(guard);
+                let title = db
+                    .get_room(&session.room_id)?
+                    .map(|room| room.title)
+                    .unwrap_or_default();
+                return Ok(Playback {
+                    url: self.server.playlist_url(&key),
+                    session_id: session_id.to_string(),
+                    title,
+                    duration_ms: session.duration_ms,
+                });
+            }
+            if guard.len() >= MAX_ACTIVE {
+                return Err(AppError::User(format!(
+                    "最多同时回放 {MAX_ACTIVE} 条，先停掉一条再开"
+                )));
+            }
+        }
 
         let dir = self.root.join(format!("{}-{}", session_id, now_ms()));
         tokio::fs::create_dir_all(&dir)
@@ -128,11 +154,14 @@ impl LocalPlayer {
         self.server.register(&key, dir.clone());
         {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
-            *guard = Some(Active {
-                key: key.clone(),
-                dir,
-                child,
-            });
+            guard.insert(
+                session_id.to_string(),
+                Active {
+                    key: key.clone(),
+                    dir,
+                    child,
+                },
+            );
         }
 
         let title = db
@@ -148,24 +177,37 @@ impl LocalPlayer {
         })
     }
 
-    pub async fn stop(&self) {
+    /// 只停指定的一条（媒体库删某条录像时用，不能牵连其它正在放的）。
+    pub async fn stop(&self, session_id: &str) {
         let _gate = self.gate.lock().await;
-        self.stop_inner().await;
-    }
-
-    async fn stop_inner(&self) {
         let active = {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
-            guard.take()
+            guard.remove(session_id)
         };
-        let Some(mut active) = active else {
-            return;
-        };
-        send_graceful(&mut active.child);
-        let _ = wait_exit(&mut active.child, STOP_TIMEOUT).await;
-        self.server.unregister(&active.key);
-        let _ = tokio::fs::remove_dir_all(&active.dir).await;
+        if let Some(active) = active {
+            teardown(self.server.as_ref(), active).await;
+        }
     }
+
+    /// 退出前停掉全部回放。
+    pub async fn stop_all(&self) {
+        let _gate = self.gate.lock().await;
+        let all = {
+            let mut guard = self.current.lock().expect("本地回放状态被污染");
+            std::mem::take(&mut *guard)
+        };
+        for (_, active) in all {
+            teardown(self.server.as_ref(), active).await;
+        }
+    }
+}
+
+/// 收尾一个回放：先礼后兵，再注销 URL、删掉分片目录。
+async fn teardown(server: &StreamServer, mut active: Active) {
+    send_graceful(&mut active.child);
+    let _ = wait_exit(&mut active.child, STOP_TIMEOUT).await;
+    server.unregister(&active.key);
+    let _ = tokio::fs::remove_dir_all(&active.dir).await;
 }
 
 fn now_ms() -> i64 {

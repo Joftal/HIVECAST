@@ -104,8 +104,8 @@ export async function sessionRemux(sessionId: string): Promise<PostResult> {
   return invoke<PostResult>("session_remux", { sessionId });
 }
 
-export async function sessionScreenshot(sessionId: string, atSecs?: number): Promise<PostResult> {
-  return invoke<PostResult>("session_screenshot", { sessionId, atSecs });
+export async function sessionScreenshot(sessionId: string, atSecs?: number | null): Promise<PostResult> {
+  return invoke<PostResult>("session_screenshot", { sessionId, atSecs: atSecs ?? null });
 }
 
 export async function sessionExportDanmaku(sessionId: string): Promise<PostResult> {
@@ -185,8 +185,8 @@ export async function mediaPlay(sessionId: string): Promise<Playback> {
   return invoke<Playback>("media_play", { sessionId });
 }
 
-export async function mediaStop(): Promise<void> {
-  return invoke("media_stop");
+export async function mediaStop(sessionId: string): Promise<void> {
+  return invoke("media_stop", { sessionId });
 }
 
 export async function mediaReveal(sessionId: string): Promise<void> {
