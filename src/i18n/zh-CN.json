@@ -39,10 +39,6 @@
     "deletedBatch": "已删除 {{n}} 条",
     "noMatchTitle": "没有匹配的录像",
     "noMatchBody": "换个关键词，或把平台筛选切回「全部」。",
-    "remux": "转 mp4",
-    "screenshot": "截图",
-    "exportAss": "ASS 字幕",
-    "postDone": "{{what}}已生成 · {{size}}",
     "postFailed": "后处理失败",
     "merge": "合并选中",
     "mergeDone": "已合并：{{size}}",
@@ -84,7 +80,10 @@
     "themeLight": "浅色",
     "themeDark": "深色",
     "themeSystem": "跟随系统",
-    "notifyHint": "录制开始、录制结束与播放异常时发送系统通知"
+    "notifyHint": "录制开始、录制结束与播放异常时发送系统通知",
+    "groupPost": "文件后处理",
+    "autoRemux": "录制结束后自动转成 MP4",
+    "autoRemuxHint": "把录好的分片合成一个 MP4。关闭后保留 .ts 拼接文件，适合手动剪辑或救援。"
   },
   "common": {
     "retry": "重试",
@@ -131,14 +130,8 @@
     "remove": "移除",
     "noHistory": "暂无录制记录",
     "post": {
-      "mp4": "转 MP4",
-      "shot": "截图",
-      "ass": "弹幕 ASS",
       "merge": "合并",
-      "mergeHint": "把 {{n}} 段按时间合并为一个 mp4",
-      "mp4Hint": "把这场录像转封装成 MP4，不重新编码",
-      "shotHint": "从这场录像里截一张图",
-      "assHint": "把这场弹幕导出为 ASS 字幕文件"
+      "mergeHint": "把 {{n}} 段按时间合并为一个 mp4"
     },
     "tipsTitle": "使用提示",
     "tipInput": "目前支持哔哩哔哩（含 b23.tv 短链）、斗鱼、虎牙、抖音的直播间链接或房间号。",
@@ -184,7 +177,6 @@
     "colArea": "分区",
     "colQuality": "画质",
     "colDuration": "录制时长",
-    "colRecent": "最近录制",
     "colActions": "操作",
     "statusLive": "直播中",
     "statusOffline": "离线",
@@ -202,8 +194,10 @@
     "footerLibrary": "媒体库 {{n}} 个文件 · {{size}}",
     "panelSettings": "录制设置",
     "more": "更多",
-    "toggleOn": "开",
-    "toggleOff": "关"
+    "autoRecordOn": "开启自动录制",
+    "autoRecordOff": "关闭自动录制",
+    "recent": "最近录制",
+    "lastRecorded": "上次录制"
   },
   "watch": {
     "title": "多屏观看",

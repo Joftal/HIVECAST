@@ -42,4 +42,8 @@ retentionDays: number,
 /**
  * 媒体库总容量上限 GB（0 = 不限）
  */
-maxTotalGb: number, };
+maxTotalGb: number, 
+/**
+ * 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
+ */
+autoRemux: boolean, };

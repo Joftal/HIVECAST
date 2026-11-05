@@ -17,9 +17,6 @@ import {
   roomSetLine,
   roomSetQuality,
   roomsList,
-  sessionExportDanmaku,
-  sessionRemux,
-  sessionScreenshot,
   sessionsList,
   viewOpen,
   type LineInfo,
@@ -32,12 +29,12 @@ const QUALITIES = [10000, 400, 250, 150, 80];
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。 */
-const COLUMNS = "120px 68px 84px minmax(0,1fr) 78px 88px 92px 148px";
+const COLUMNS = "120px 68px 84px minmax(0,1fr) 78px 92px 148px";
 const ROW_H = 76;
 const THUMB_W = 120;
 const THUMB_H = 68;
 
-type PostKind = "mp4" | "shot" | "ass" | "merge";
+type PostKind = "merge";
 
 function pad(value: number): string {
   return value < 10 ? "0" + value : String(value);
@@ -102,7 +99,6 @@ function Thumb({
   w,
   h,
   recording,
-  elapsed,
   lastAt,
   locale,
 }: {
@@ -110,12 +106,11 @@ function Thumb({
   w: number;
   h: number;
   recording: boolean;
-  elapsed: number;
   lastAt: number | null;
   locale: string;
 }) {
   const src = room.coverUrl ?? room.avatarUrl ?? null;
-  const footer = recording ? clock(elapsed) : room.isLive ? compactNumber(room.online, locale) : lastAt ? recent(lastAt) : "";
+  const footer = room.isLive ? compactNumber(room.online, locale) : lastAt ? recent(lastAt) : "";
   return (
     <div className="relative shrink-0 overflow-hidden rounded-[5px] bg-raised" style={{ width: w, height: h }}>
       {src ? (
@@ -264,6 +259,15 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     return list.sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true }));
   }, [views, query, platform, onlyRecording]);
 
+  // 默认选中第一行：进入页面、切筛选、删掉当前选中行时都保证右栏有内容。
+  useEffect(() => {
+    if (shown.length === 0) {
+      if (selectedId !== null) setSelectedId(null);
+      return;
+    }
+    if (!shown.some((view) => view.room.id === selectedId)) setSelectedId(shown[0].room.id);
+  }, [shown, selectedId]);
+
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
   const selectedSessions = useMemo(
     () => (selectedId ? sessions.filter((session) => session.roomId === selectedId).slice(0, 4) : []),
@@ -357,12 +361,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     setPostBusy(postKey(roomId, kind, sessionId));
     setNotice(null);
     try {
-      let result: PostResult;
-      if (kind === "merge") result = await roomMergeSessions(roomId);
-      else if (!sessionId) throw new Error("missing session");
-      else if (kind === "mp4") result = await sessionRemux(sessionId);
-      else if (kind === "shot") result = await sessionScreenshot(sessionId);
-      else result = await sessionExportDanmaku(sessionId);
+      const result: PostResult = await roomMergeSessions(roomId);
       const name = result.path.split(/[\\/]/).pop() ?? result.path;
       setNotice({ text: size(result.size) + " · " + name, error: false });
       await load();
@@ -432,7 +431,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           w={THUMB_W}
           h={THUMB_H}
           recording={isRecording}
-          elapsed={elapsed}
           lastAt={last ? last.startedAt : null}
           locale={locale}
         />
@@ -458,7 +456,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           {t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
         </span>
         <span className="tnum text-right text-[12.5px] text-ink-soft">{isRecording ? clock(elapsed) : "—"}</span>
-        <span className="tnum text-right text-[12.5px] text-faint">{last ? recent(last.startedAt) : "—"}</span>
         <span className="relative flex items-center justify-end gap-1.5">
           <Button
             size="sm"
@@ -501,19 +498,9 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                     setMenuId(null);
                     void run(room.id, () => roomSetAutoRecord(room.id, !room.autoRecord));
                   }}
-                  className="flex h-8 w-full items-center gap-2 px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
                 >
-                  <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-accent-text">
-                    {room.autoRecord ? (
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                        <path d="M2.5 6.4l2.3 2.3 4.7-4.9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    ) : null}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{t("monitor.autoRecord")}</span>
-                  <span className="shrink-0 text-[11.5px] text-faint">
-                    {room.autoRecord ? t("monitor.toggleOn") : t("monitor.toggleOff")}
-                  </span>
+                  {room.autoRecord ? t("monitor.autoRecordOff") : t("monitor.autoRecordOn")}
                 </button>
                 <button
                   type="button"
@@ -560,7 +547,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               w={288}
               h={162}
               recording={isRecording}
-              elapsed={view.recording ? now / 1000 - view.recording.startedAt : 0}
               lastAt={last ? last.startedAt : null}
               locale={locale}
             />
@@ -590,7 +576,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               { label: t("monitor.colArea"), value: room.areaName ?? "—" },
               { label: t("monitor.detailRecorded"), value: size(recorded) },
               { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
-              { label: t("monitor.colRecent"), value: last ? recent(last.startedAt) : "—" },
+              { label: t("monitor.lastRecorded"), value: last ? recent(last.startedAt) : "—" },
             ].map((item) => (
               <div key={item.label} className="min-w-0">
                 <div className="text-[11.5px] text-faint">{item.label}</div>
@@ -656,7 +642,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           ) : (
             <div className="mt-1">
               {selectedSessions.map((session) => {
-                const ready = session.status !== "recording" && Boolean(session.filePath);
                 return (
                   <div key={session.id} className="border-t border-line py-2 first:border-t-0">
                     <div className="flex items-center justify-between text-[12px]">
@@ -665,44 +650,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                       </span>
                       <span className="tnum text-muted">{size(session.fileSize)}</span>
                     </div>
-                    <div className="mt-1 flex items-center gap-1">
-                      <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">
-                        {sessionStatus(session)}
-                      </span>
-                      {ready ? (
-                        <span className="flex shrink-0 items-center gap-1">
-                          <button
-                            type="button"
-                            disabled={postBusy === postKey(room.id, "mp4", session.id)}
-                            title={t("monitor.post.mp4Hint")}
-                            onClick={() => void doPost(room.id, "mp4", session.id)}
-                            className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
-                          >
-                            MP4
-                          </button>
-                          <button
-                            type="button"
-                            disabled={postBusy === postKey(room.id, "shot", session.id)}
-                            title={t("monitor.post.shotHint")}
-                            onClick={() => void doPost(room.id, "shot", session.id)}
-                            className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
-                          >
-                            {t("monitor.post.shot")}
-                          </button>
-                          {session.danmakuPath && session.danmakuCount > 0 ? (
-                            <button
-                              type="button"
-                              disabled={postBusy === postKey(room.id, "ass", session.id)}
-                              title={t("monitor.post.assHint")}
-                              onClick={() => void doPost(room.id, "ass", session.id)}
-                              className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
-                            >
-                              ASS
-                            </button>
-                          ) : null}
-                        </span>
-                      ) : null}
-                    </div>
+                    <div className="mt-1 truncate text-[11.5px] text-muted">{sessionStatus(session)}</div>
                   </div>
                 );
               })}
@@ -882,7 +830,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               <span>{t("monitor.colRoom")}</span>
               <span>{t("monitor.colQuality")}</span>
               <span className="text-right">{t("monitor.colDuration")}</span>
-              <span className="text-right">{t("monitor.colRecent")}</span>
               <span className="text-right">{t("monitor.colActions")}</span>
             </div>
           ) : null}

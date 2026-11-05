@@ -118,14 +118,6 @@ export async function sessionRemux(sessionId: string): Promise<PostResult> {
   return invoke<PostResult>("session_remux", { sessionId });
 }
 
-export async function sessionScreenshot(sessionId: string, atSecs?: number | null): Promise<PostResult> {
-  return invoke<PostResult>("session_screenshot", { sessionId, atSecs: atSecs ?? null });
-}
-
-export async function sessionExportDanmaku(sessionId: string): Promise<PostResult> {
-  return invoke<PostResult>("session_export_danmaku", { sessionId });
-}
-
 export async function roomMergeSessions(roomId: string): Promise<PostResult> {
   return invoke<PostResult>("room_merge_sessions", { roomId });
 }

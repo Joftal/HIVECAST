@@ -271,6 +271,8 @@ pub struct Settings {
     pub retention_days: u32,
     /// 媒体库总容量上限 GB（0 = 不限）
     pub max_total_gb: u32,
+    /// 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
+    pub auto_remux: bool,
 }
 
 /// 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。

@@ -10,10 +10,7 @@ import {
   mediaReveal,
   mediaStop,
   onPostProgress,
-  sessionExportDanmaku,
-  sessionRemux,
   sessionsMerge,
-  sessionScreenshot,
   type MediaItem,
   type Playback,
 } from "../../lib/ipc";
@@ -97,9 +94,7 @@ export default function MediaPage() {
   const [platform, setPlatform] = useState<string>("all");
   const [sort, setSort] = useState<"recent" | "duration" | "size">("recent");
   const [selected, setSelected] = useState<string[]>([]);
-  // 后处理任务（转封装/截图/ASS）：一次只跑一个，避免 ffmpeg 抢 IO。
-  const [posting, setPosting] = useState<string | null>(null);
-  // 后处理进度（0..99）：合并任务用 "merge"，与录像 id 不冲突。
+  // 合并任务进度（0..99）：合并任务用 "merge"，与录像 id 不冲突。
   const [postPercent, setPostPercent] = useState<number | null>(null);
   // 卸载清理要用最新值，但不能再触发 effect，所以放 ref。
   const playbacksRef = useRef<Record<string, Playback>>({});
@@ -257,31 +252,6 @@ export default function MediaPage() {
       setPlaybacks((prev) => ({ ...prev, [item.id]: playback }));
     } catch (err) {
       setError(t("media.playFailed") + "：" + describeError(err));
-    }
-  };
-
-  const post = async (item: MediaItem, kind: "mp4" | "screenshot" | "ass") => {
-    if (posting) return;
-    setPosting(item.id + ":" + kind);
-    setPostPercent(0);
-    setError(null);
-    setNotice(null);
-    try {
-      const result =
-        kind === "mp4"
-          ? await sessionRemux(item.id)
-          : kind === "screenshot"
-            ? await sessionScreenshot(item.id, null)
-            : await sessionExportDanmaku(item.id);
-      const label =
-        result.kind === "mp4" ? t("media.remux") : result.kind === "ass" ? t("media.exportAss") : t("media.screenshot");
-      setNotice(t("media.postDone", { what: label, size: formatSize(result.size) }));
-      await reload();
-    } catch (err) {
-      setError(t("media.postFailed") + "：" + describeError(err));
-    } finally {
-      setPosting(null);
-      setPostPercent(null);
     }
   };
 
@@ -511,25 +481,6 @@ export default function MediaPage() {
                       </>
                     )}
                     {!item.hasFile && <span className="font-sans text-warn">{t("media.missing")}</span>}
-                  </div>
-
-                  <div className="flex items-center gap-1">
-                    {(["mp4", "screenshot", "ass"] as const).map((kind) => {
-                      const key = item.id + ":" + kind;
-                      const label =
-                        kind === "mp4" ? t("media.remux") : kind === "screenshot" ? t("media.screenshot") : t("media.exportAss");
-                      return (
-                        <button
-                          key={kind}
-                          type="button"
-                          disabled={!item.hasFile || posting !== null}
-                          onClick={() => void post(item, kind)}
-                          className="focus-ring rounded-[6px] border border-line px-1.5 py-0.5 text-[10.5px] text-muted transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          {posting === key ? (postPercent === null ? "…" : postPercent + "%") : label}
-                        </button>
-                      );
-                    })}
                   </div>
 
                   <div className="mt-auto flex items-center gap-1.5 pt-0.5">

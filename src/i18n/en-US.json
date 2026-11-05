@@ -39,10 +39,6 @@
     "deletedBatch": "Deleted {{n}} items",
     "noMatchTitle": "No matching recordings",
     "noMatchBody": "Try another keyword, or switch the platform filter back to All.",
-    "remux": "To mp4",
-    "screenshot": "Snapshot",
-    "exportAss": "ASS subs",
-    "postDone": "{{what}} created · {{size}}",
     "postFailed": "Post-processing failed",
     "merge": "Merge selected",
     "mergeDone": "Merged: {{size}}",
@@ -84,7 +80,10 @@
     "themeLight": "Light",
     "themeDark": "Dark",
     "themeSystem": "Follow system",
-    "notifyHint": "Notify on recording start, finish, and playback errors"
+    "notifyHint": "Notify on recording start, finish, and playback errors",
+    "groupPost": "File post-processing",
+    "autoRemux": "Remux recordings to MP4 when they finish",
+    "autoRemuxHint": "Joins the segments into a single MP4. Turn off to keep the .ts join for manual editing or recovery."
   },
   "common": {
     "retry": "Retry",
@@ -131,14 +130,8 @@
     "remove": "Remove",
     "noHistory": "No recordings yet",
     "post": {
-      "mp4": "To MP4",
-      "shot": "Snapshot",
-      "ass": "Danmaku ASS",
       "merge": "Merge",
-      "mergeHint": "Merge {{n}} sessions into one mp4",
-      "mp4Hint": "Remux this recording to MP4 without re-encoding",
-      "shotHint": "Grab one frame from this recording",
-      "assHint": "Export this recording's danmaku as an ASS subtitle"
+      "mergeHint": "Merge {{n}} sessions into one mp4"
     },
     "tipsTitle": "Tips",
     "tipInput": "Supports Bilibili (including b23.tv short links), Douyu, Huya, and Douyin live links or room ids.",
@@ -184,7 +177,6 @@
     "colArea": "Category",
     "colQuality": "Quality",
     "colDuration": "Recorded",
-    "colRecent": "Last rec",
     "colActions": "Actions",
     "statusLive": "Live",
     "statusOffline": "Offline",
@@ -202,8 +194,10 @@
     "footerLibrary": "Library {{n}} files · {{size}}",
     "panelSettings": "Recording",
     "more": "More",
-    "toggleOn": "On",
-    "toggleOff": "Off"
+    "autoRecordOn": "Enable auto-record",
+    "autoRecordOff": "Disable auto-record",
+    "recent": "Last recorded",
+    "lastRecorded": "Last recording"
   },
   "watch": {
     "title": "Multi-view",

@@ -1,4 +1,4 @@
-//! 本地后处理（D5）：转 mp4 / 截图 / 弹幕转 ASS / 多段合并。
+//! 本地后处理（D5）：转 mp4 / 弹幕转 ASS / 多段合并。
 //!
 //! 全部在本地 ffmpeg 上跑，不上传任何数据；产物默认落在源文件旁边，
 //! 命名沿用录制文件名，方便在访达里直接对照。
@@ -203,38 +203,7 @@ pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostRe
     })
 }
 
-/// 截图：默认取 10% 处，避开刚开播的黑帧。
-pub async fn screenshot(src: &Path, at_secs: Option<f64>) -> Result<PostResult, AppError> {
-    ensure_file(src)?;
-    let seconds = at_secs.unwrap_or(10.0).max(0.0);
-    let stamp = format!("-{seconds:.0}s");
-    let out = sibling(src, &format!(" 截图{stamp}"), "jpg");
-    let args: Vec<OsString> = vec![
-        "-hide_banner".into(),
-        "-nostdin".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-y".into(),
-        "-ss".into(),
-        format!("{seconds:.3}").into(),
-        "-i".into(),
-        src.as_os_str().to_os_string(),
-        "-frames:v".into(),
-        "1".into(),
-        "-q:v".into(),
-        "2".into(),
-        out.as_os_str().to_os_string(),
-    ];
-    run_ffmpeg(args, "截图").await?;
-    Ok(PostResult {
-        kind: "screenshot".into(),
-        path: out.to_string_lossy().to_string(),
-        size: size_of(&out),
-        message: None,
-    })
-}
-
-/// 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
+// 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
 pub async fn merge(sources: &[PathBuf], progress: Option<&Progress<'_>>) -> Result<PostResult, AppError> {
     if sources.len() < 2 {
         return Err(AppError::User("至少需要两段录像才能合并".into()));
@@ -482,7 +451,7 @@ mod tests {
         assert!(status.success(), "生成测试片失败");
     }
 
-    /// 真跑 ffmpeg 的端到端冒烟：转封装 / 截图 / 合并都要产出可读文件。
+    /// 真跑 ffmpeg 的端到端冒烟：转封装 / 合并都要产出可读文件。
     /// 依赖本机 ffmpeg，默认跳过；手动跑时加 --ignored。
     #[tokio::test]
     #[ignore = "需要本机 ffmpeg"]
@@ -497,10 +466,6 @@ mod tests {
         let mp4 = remux(&first, None).await.unwrap();
         assert!(mp4.path.ends_with(".mp4"));
         assert!(mp4.size > 1000, "mp4 太小：{}", mp4.size);
-
-        let shot = screenshot(&first, Some(1.0)).await.unwrap();
-        assert!(shot.path.ends_with(".jpg"));
-        assert!(shot.size > 500, "截图太小：{}", shot.size);
 
         let merged = merge(&[first.clone(), second.clone()], None).await.unwrap();
         let source_total = size_of(&first) + size_of(&second);

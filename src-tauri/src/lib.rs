@@ -91,8 +91,6 @@ pub fn run() {
             commands::view_set_line,
             commands::view_retry,
             commands::session_remux,
-            commands::session_screenshot,
-            commands::session_export_danmaku,
             commands::room_merge_sessions,
             commands::sessions_merge,
             commands::settings_get,

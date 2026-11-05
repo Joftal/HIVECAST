@@ -582,7 +582,8 @@ impl Recorder {
         let elapsed = active.started.elapsed();
         // 收尾产物：分片 → mp4；合成失败退化为字节拼接的 .ts；再不行只能报分片总量。
         let source_path = PathBuf::from(&active.recording.file_path);
-        let (stored_path, file_size) = finish_file(&source_path).await;
+        let auto_remux = crate::settings::load(&self.db).auto_remux;
+        let (stored_path, file_size) = finish_file(&source_path, auto_remux).await;
         if stored_path != source_path {
             if let Err(err) = self.db.update_session_file(
                 &active.recording.session_id,
@@ -628,6 +629,14 @@ impl Recorder {
             error.as_deref(),
         ) {
             tracing::warn!(%err, "写入录制历史失败");
+        }
+
+        // 弹幕存档（.jsonl）随录随写；收尾时顺手导出一份 .ass，媒体目录里直接可用。
+        if let Some(path) = danmaku_path.as_deref().filter(|_| danmaku_count > 0) {
+            match crate::postprocess::danmaku_to_ass(std::path::Path::new(path)) {
+                Ok(result) => tracing::info!(ass = %result.path, "已导出弹幕字幕"),
+                Err(err) => tracing::warn!(%err, "导出弹幕字幕失败"),
+            }
         }
 
         if final_status == "finished" {
@@ -758,10 +767,14 @@ fn drain_stderr(child: &mut Child) {
 }
 
 /// 收尾产物落定，返回（最终路径, 字节数）。
-async fn finish_file(path: &Path) -> (PathBuf, i64) {
-    match segment::merge(path).await {
-        Ok(size) => return (path.to_path_buf(), size as i64),
-        Err(err) => tracing::warn!(%err, "分片合成 mp4 失败，改用字节拼接"),
+async fn finish_file(path: &Path, remux: bool) -> (PathBuf, i64) {
+    if remux {
+        match segment::merge(path).await {
+            Ok(size) => return (path.to_path_buf(), size as i64),
+            Err(err) => tracing::warn!(%err, "分片合成 mp4 失败，改用字节拼接"),
+        }
+    } else {
+        tracing::info!("文件后处理已关闭，保留 .ts 拼接结果");
     }
     match segment::fallback_concat(path).await {
         Ok((target, size)) => (target, size as i64),
@@ -800,7 +813,7 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
             }
             continue;
         }
-        let (target, size) = finish_file(&path).await;
+        let (target, size) = finish_file(&path, true).await;
         if size <= 0 {
             continue;
         }

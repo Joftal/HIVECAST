@@ -23,6 +23,8 @@ const KEY_THEME: &str = "ui.theme";
 pub const KEY_RETENTION_DAYS: &str = "media.retention_days";
 /// 保留策略：媒体库总容量上限（GB）；0 表示不按容量删。
 pub const KEY_MAX_TOTAL_GB: &str = "media.max_total_gb";
+/// 文件后处理：录制结束后是否自动合成 mp4。
+pub const KEY_POST_AUTO_REMUX: &str = "post.auto_remux";
 
 pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
@@ -40,6 +42,7 @@ pub fn defaults() -> Settings {
         theme: "light".into(),
         retention_days: 0,
         max_total_gb: 0,
+        auto_remux: true,
     }
 }
 
@@ -74,6 +77,9 @@ pub fn load(db: &Db) -> Settings {
     }
     if let Some(value) = read(KEY_MAX_TOTAL_GB).and_then(|v| v.parse::<u32>().ok()) {
         settings.max_total_gb = value.min(MAX_TOTAL_GB);
+    }
+    if let Some(value) = read(KEY_POST_AUTO_REMUX).and_then(|v| v.parse::<bool>().ok()) {
+        settings.auto_remux = value;
     }
     settings
 }
@@ -120,6 +126,7 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_THEME, &settings.theme)?;
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
     db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
+    db.set_setting(KEY_POST_AUTO_REMUX, &settings.auto_remux.to_string())?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
     Ok(settings)
@@ -172,6 +179,7 @@ mod tests {
                 theme: "neon".into(),
                 retention_days: 9_999,
                 max_total_gb: 500_000,
+                auto_remux: false,
             },
         )
         .expect("save settings");
@@ -182,6 +190,7 @@ mod tests {
         assert_eq!(saved.theme, "light", "未知主题回落到浅色");
         assert_eq!(saved.retention_days, MAX_RETENTION_DAYS, "保留天数被夹到上限");
         assert_eq!(saved.max_total_gb, MAX_TOTAL_GB, "容量上限被夹到上限");
+        assert!(!saved.auto_remux, "文件后处理开关应原样保存");
         assert!(media.is_dir(), "保存时应把媒体目录建出来");
 
         let loaded = load(&db);
@@ -192,6 +201,7 @@ mod tests {
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.retention_days, MAX_RETENTION_DAYS);
         assert_eq!(loaded.max_total_gb, MAX_TOTAL_GB);
+        assert!(!loaded.auto_remux);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

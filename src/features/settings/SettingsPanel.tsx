@@ -267,6 +267,21 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
               </section>
 
               <section className="space-y-3 border-t border-line pt-5">
+                <h3 className={GROUP}>{t("settings.groupPost")}</h3>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="min-w-0">
+                    <span className="block text-[11.5px] font-medium text-ink">{t("settings.autoRemux")}</span>
+                    <span className="mt-0.5 block text-[10.5px] leading-4 text-faint">{t("settings.autoRemuxHint")}</span>
+                  </span>
+                  <Switch
+                    checked={settings.autoRemux}
+                    onChange={(next) => patch({ autoRemux: next })}
+                    label={t("settings.autoRemux")}
+                  />
+                </div>
+              </section>
+
+              <section className="space-y-3 border-t border-line pt-5">
                 <h3 className={GROUP}>{t("settings.groupInterface")}</h3>
                 <div className="flex items-center justify-between gap-3">
                   <span className={LABEL}>{t("settings.theme")}</span>

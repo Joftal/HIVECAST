@@ -403,32 +403,6 @@ pub async fn session_remux(
     postprocess::remux(&path, Some(&progress)).await
 }
 
-/// 截图：默认第 10 秒，避开刚开播的黑帧。
-#[tauri::command]
-pub async fn session_screenshot(
-    state: State<'_, AppState>,
-    session_id: String,
-    at_secs: Option<f64>,
-) -> Result<PostResult, AppError> {
-    let session = session_file(&state, &session_id)?;
-    let path = session_video(&session, session.status == "recording")?;
-    postprocess::screenshot(&path, at_secs).await
-}
-
-/// 弹幕 JSONL → ASS 字幕。
-#[tauri::command]
-pub async fn session_export_danmaku(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<PostResult, AppError> {
-    let session = session_file(&state, &session_id)?;
-    let path = session
-        .danmaku_path
-        .as_ref()
-        .ok_or_else(|| AppError::User("这场没有弹幕存档".into()))?;
-    postprocess::danmaku_to_ass(std::path::Path::new(path))
-}
-
 /// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
 #[tauri::command]
 pub async fn room_merge_sessions(
