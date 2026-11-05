@@ -1,0 +1,57 @@
+# ---- 运行期数据（不入库）----
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# ---- 录制产物 ----
+recordings/
+*.flv
+*.ts
+*.mp4
+*.aac
+*.ass
+
+# ---- Rust / Tauri ----
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+**/*.rs.bk
+*.pdb
+
+# ---- Node / 前端 ----
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+pnpm-store/
+.eslintcache
+coverage/
+
+# ---- 环境与密钥 ----
+.env
+.env.*
+!.env.example
+config.local.yml
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+
+# ---- 构建产物 ----
+/build/
+/out/
+*.dmg
+*.msi
+*.AppImage
+*.app
