@@ -86,6 +86,11 @@ export async function roomSetAutoRecord(id: string, enabled: boolean): Promise<v
   return invoke("room_set_auto_record", { id, enabled });
 }
 
+/** 暂停/恢复直播状态监控（暂停只停轮询，不影响已有录制）。 */
+export async function roomSetMonitor(id: string, paused: boolean): Promise<void> {
+  return invoke("room_set_monitor", { id, paused });
+}
+
 export async function roomSetQuality(id: string, recordQn: number, viewQn: number): Promise<void> {
   return invoke("room_set_quality", { id, recordQn, viewQn });
 }

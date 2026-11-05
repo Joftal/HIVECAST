@@ -91,6 +91,7 @@ pub async fn room_add(
         started_at: info.started_at,
         online: info.online,
         auto_record: true,
+        monitor_paused: false,
         record_qn: settings.default_record_qn,
         view_qn: settings.default_view_qn,
         record_line: None,
@@ -189,6 +190,19 @@ pub async fn room_set_auto_record(
     } else if !enabled && state.recorder.is_recording(&id) {
         let _ = state.recorder.stop(&app, &id, "stopped").await;
     }
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(())
+}
+
+/// 暂停/恢复直播状态监控。暂停后定时轮询跳过该房间，已有录制不受影响。
+#[tauri::command]
+pub async fn room_set_monitor(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    paused: bool,
+) -> Result<(), AppError> {
+    state.db.set_monitor_paused(&id, paused)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
 }

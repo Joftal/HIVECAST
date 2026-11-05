@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Select, cx } from "../../components/ui/Controls";
 import {
@@ -11,8 +12,10 @@ import {
   roomAdd,
   roomLines,
   roomMergeSessions,
+  roomRefresh,
   roomRemove,
   roomSetAutoRecord,
+  roomSetMonitor,
   roomSetLine,
   roomSetQuality,
   roomsList,
@@ -34,7 +37,7 @@ const PLATFORM_DOT: Record<string, string> = {
 };
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。 */
-const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 76px 116px 148px";
+const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 76px 138px 148px";
 const ROW_H = 76;
 const THUMB_W = 120;
 const THUMB_H = 68;
@@ -74,6 +77,27 @@ function hhmm(seconds: number): string {
   const date = new Date(seconds * 1000);
   return pad(date.getHours()) + ":" + pad(date.getMinutes());
 }
+
+/** 上次录制开始时间统一用完整时间戳：2026-11-06 00:02:28。 */
+function datetime(seconds: number): string {
+  if (!seconds) return "—";
+  const date = new Date(seconds * 1000);
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    " " +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
+  );
+}
+
+type SortKey = "live" | "record";
 
 /** 最近录制列只放得下 5 个字：今天给时分，更早给月日。 */
 function recent(seconds: number): string {
@@ -127,6 +151,7 @@ function Thumb({
   recording,
   lastAt,
   locale,
+  fluid,
 }: {
   room: RoomView["room"];
   w: number;
@@ -134,11 +159,15 @@ function Thumb({
   recording: boolean;
   lastAt: number | null;
   locale: string;
+  fluid?: boolean;
 }) {
   const src = room.coverUrl ?? room.avatarUrl ?? null;
   const footer = room.isLive ? compactNumber(room.online, locale) : lastAt ? recent(lastAt) : "";
   return (
-    <div className="relative shrink-0 overflow-hidden rounded-[5px] bg-raised" style={{ width: w, height: h }}>
+    <div
+      className={cx("relative shrink-0 overflow-hidden rounded-[5px] bg-raised", fluid ? "h-full w-full" : "")}
+      style={fluid ? undefined : { width: w, height: h }}
+    >
       {src ? (
         <img src={src} alt="" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
       ) : (
@@ -165,6 +194,48 @@ function Thumb({
     </div>
   );
 }
+/** 可排序表头：一次升序、再点降序、第三次取消。 */
+function SortHead({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        "group focus-ring -mx-1 inline-flex items-center gap-1 rounded-ctl px-1 py-0.5 text-left transition-colors hover:text-ink-soft",
+        active ? "text-ink" : "",
+      )}
+    >
+      {label}
+      <svg
+        width="8"
+        height="8"
+        viewBox="0 0 12 12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        aria-hidden
+        className={cx(
+          "transition-opacity",
+          active ? "opacity-90" : "opacity-0 group-hover:opacity-40",
+          dir === "desc" ? "rotate-180" : "",
+        )}
+      >
+        <path d="M2.5 7.5 6 4 9.5 7.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
 export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
@@ -174,6 +245,8 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
 
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
+  const [platformOpen, setPlatformOpen] = useState(false);
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -277,10 +350,23 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
       if (!needle) return true;
       return (view.room.title + " " + view.room.hostName + " " + view.room.roomKey).toLowerCase().includes(needle);
     });
-    // 固定按主播名称排序（中文按拼音、数字按数值），不再提供排序入口。
+    // 默认按主播名称（中文按拼音、数字按数值）；点表头再叠加状态排序。
     const label = (view: RoomView) => view.room.hostName || view.room.title || view.room.roomKey;
-    return list.sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true }));
-  }, [views, query, platform, onlyRecording]);
+    const byName = (a: RoomView, b: RoomView) => label(a).localeCompare(label(b), undefined, { numeric: true });
+    if (!sort) return list.sort(byName);
+    const rank = (view: RoomView) =>
+      sort.key === "live" ? (view.room.isLive ? 1 : 0) : view.recording ? 1 : 0;
+    return list.sort((a, b) => {
+      const diff = rank(b) - rank(a);
+      return (sort.dir === "asc" ? diff : -diff) || byName(a, b);
+    });
+  }, [views, query, platform, onlyRecording, sort]);
+
+  /** 点一次升序（在线/录制中优先），再点降序，第三次取消。 */
+  const toggleSort = (key: SortKey) =>
+    setSort((prev) =>
+      prev?.key !== key ? { key, dir: "asc" } : prev.dir === "asc" ? { key, dir: "desc" } : null,
+    );
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
   const selectedSessions = useMemo(
@@ -390,17 +476,22 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     (lines ?? []).map((line) => ({ value: line.name, label: line.name + " · " + line.quality })),
   );
 
-  const platformTabs = [
-    { key: "all", label: t("monitor.filterAll"), count: counts.all ?? 0 },
-    ...PLATFORMS.map((key) => ({ key, label: t("platformName." + key), count: counts[key] ?? 0 })),
-  ].filter((item) => item.key === "all" || item.count > 0);
+  const platformOptions = PLATFORMS.map((key) => ({
+    key,
+    label: t("platformName." + key),
+    count: counts[key] ?? 0,
+  })).filter((item) => item.count > 0);
+
+  const platformLabel = platform === "all" ? t("monitor.filterPlatform") : t("platformName." + platform);
 
   const statusText = (view: RoomView) =>
     view.recording
       ? t("monitor.status.recording")
-      : view.room.isLive
-        ? t("monitor.statusLive")
-        : t("monitor.statusOffline");
+      : view.room.monitorPaused
+        ? t("monitor.statusPaused")
+        : view.room.isLive
+          ? t("monitor.statusLive")
+          : t("monitor.statusOffline");
 
   const sessionStatus = (session: RecordSession) =>
     session.status === "recording"
@@ -441,8 +532,12 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           lastAt={last ? last.startedAt : null}
           locale={locale}
         />
-        <span className={cx("truncate text-[12.5px]", room.isLive ? "text-ink-soft" : "text-faint")}>
-          {room.isLive ? t("monitor.statusLive") : t("monitor.statusOffline")}
+        <span className={cx("truncate text-[12.5px]", room.isLive && !room.monitorPaused ? "text-ink-soft" : "text-faint")}>
+          {room.monitorPaused
+            ? t("monitor.statusPaused")
+            : room.isLive
+              ? t("monitor.statusLive")
+              : t("monitor.statusOffline")}
         </span>
         <span
           className={cx("truncate text-[12.5px]", isRecording ? "font-medium text-rec" : "text-faint")}
@@ -468,7 +563,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
         <span className="tnum text-right text-[12.5px] leading-4 text-ink-soft">
           {startedAt ? (
             <>
-              <span className="block text-[11.5px] text-muted">{recent(startedAt)}</span>
+              <span className="block text-[11px] text-muted">{datetime(startedAt)}</span>
               <span className={cx("block", isRecording ? "text-rec" : "")}>
                 {isRecording ? clock(elapsed) : clockMs(durationMs)}
               </span>
@@ -512,7 +607,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           {menuId === room.id ? (
             <>
               <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
-              <div className="absolute right-0 top-9 z-40 w-[176px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
+              <div className="absolute right-0 top-9 z-40 w-[196px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
                 <button
                   type="button"
                   onClick={() => {
@@ -522,6 +617,37 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                   className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
                 >
                   {t("monitor.recordDetail")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuId(null);
+                    void run(room.id, () => roomRefresh(room.id));
+                  }}
+                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                >
+                  {t("monitor.refreshInfo")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuId(null);
+                    setNotice({ text: t("monitor.roomSettingsSoon"), error: false });
+                  }}
+                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                >
+                  {t("monitor.roomSettings")}
+                </button>
+                <div className="my-1 border-t border-line" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuId(null);
+                    void run(room.id, () => roomSetMonitor(room.id, !room.monitorPaused));
+                  }}
+                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                >
+                  {room.monitorPaused ? t("monitor.resumeMonitor") : t("monitor.pauseMonitor")}
                 </button>
                 <button
                   type="button"
@@ -544,6 +670,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                 >
                   {t("monitor.reveal")}
                 </button>
+                <div className="my-1 border-t border-line" />
                 <button
                   type="button"
                   onBlur={() => setConfirmId(null)}
@@ -564,7 +691,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     const busy = busyId === room.id;
     const last = lastByRoom.get(room.id);
     const isRecording = Boolean(view.recording);
-    return (
+    return createPortal(
       <div className="fixed inset-0 z-50 flex justify-end">
         <button
           type="button"
@@ -596,14 +723,17 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               title={t("monitor.watch")}
               className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px]"
             >
-              <Thumb
-                room={room}
-                w={368}
-                h={207}
-                recording={isRecording}
-                lastAt={last ? last.startedAt : null}
-                locale={locale}
-              />
+              <div className="aspect-video w-full">
+                <Thumb
+                  room={room}
+                  w={368}
+                  h={207}
+                  fluid
+                  recording={isRecording}
+                  lastAt={last ? last.startedAt : null}
+                  locale={locale}
+                />
+              </div>
             </button>
 
             <div className="mt-3 flex items-center gap-1.5 text-[12.5px]">
@@ -630,7 +760,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                 { label: t("monitor.colArea"), value: room.areaName ?? "—" },
                 { label: t("monitor.detailRecorded"), value: size(recorded) },
                 { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
-                { label: t("monitor.lastRecorded"), value: last ? recent(last.startedAt) : "—" },
+                { label: t("monitor.lastRecorded"), value: last ? datetime(last.startedAt) : "—" },
               ].map((item) => (
                 <div key={item.label} className="min-w-0">
                   <div className="text-[11.5px] text-faint">{item.label}</div>
@@ -714,8 +844,14 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               </div>
             )}
           </div>
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-5 py-3">
+            <Button variant="secondary" onClick={() => setSelectedId(null)}>
+              {t("monitor.close")}
+            </Button>
+          </div>
         </aside>
-      </div>
+      </div>,
+      document.body,
     );
   };
   return (
@@ -842,22 +978,86 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
       ) : null}
 
       <div className="flex shrink-0 items-center gap-1 border-b border-line px-5 py-2.5">
-        {platformTabs.map((item) => (
+        <button
+          type="button"
+          onClick={() => {
+            setPlatform("all");
+            setPlatformOpen(false);
+          }}
+          className={cx(
+            "focus-ring rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
+            platform === "all"
+              ? "bg-accent-soft font-medium text-accent-text"
+              : "text-muted hover:bg-raised hover:text-ink-soft",
+          )}
+        >
+          {t("monitor.filterAll")}
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{counts.all ?? 0}</span>
+        </button>
+        <div className="relative">
           <button
-            key={item.key}
             type="button"
-            onClick={() => setPlatform(item.key)}
+            onClick={() => setPlatformOpen((open) => !open)}
+            aria-haspopup="menu"
+            aria-expanded={platformOpen}
             className={cx(
-              "focus-ring rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
-              platform === item.key
+              "focus-ring inline-flex items-center gap-1.5 rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
+              platform !== "all"
                 ? "bg-accent-soft font-medium text-accent-text"
                 : "text-muted hover:bg-raised hover:text-ink-soft",
             )}
           >
-            {item.label}
-            <span className="tnum ml-1.5 text-[11.5px] opacity-60">{item.count}</span>
+            {platformLabel}
+            {platform !== "all" ? (
+              <span className="tnum text-[11.5px] opacity-60">{counts[platform] ?? 0}</span>
+            ) : null}
+            <svg
+              width="9"
+              height="9"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              aria-hidden
+              className={cx("transition-transform", platformOpen ? "rotate-180" : "")}
+            >
+              <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
-        ))}
+          {platformOpen ? (
+            <>
+              <div className="fixed inset-0 z-30" onClick={() => setPlatformOpen(false)} />
+              <div
+                role="menu"
+                className="absolute left-0 top-[calc(100%+5px)] z-40 w-[168px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop"
+              >
+                {platformOptions.map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={platform === item.key}
+                    onClick={() => {
+                      setPlatform(item.key);
+                      setPlatformOpen(false);
+                    }}
+                    className={cx(
+                      "flex h-8 w-full items-center gap-2 px-3 text-left text-[12.5px] transition-colors hover:bg-raised",
+                      platform === item.key ? "font-medium text-accent-text" : "text-ink-soft",
+                    )}
+                  >
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: PLATFORM_DOT[item.key] }}
+                    />
+                    <span className="flex-1 truncate">{item.label}</span>
+                    <span className="tnum text-[11px] text-faint">{item.count}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
         <span className="mx-1.5 h-4 w-px bg-line" />
         <button
           type="button"
@@ -881,8 +1081,18 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               style={{ gridTemplateColumns: COLUMNS }}
             >
               <span />
-              <span>{t("monitor.colLive")}</span>
-              <span>{t("monitor.colRecord")}</span>
+              <SortHead
+                label={t("monitor.colLive")}
+                active={sort?.key === "live"}
+                dir={sort?.dir ?? "asc"}
+                onClick={() => toggleSort("live")}
+              />
+              <SortHead
+                label={t("monitor.colRecord")}
+                active={sort?.key === "record"}
+                dir={sort?.dir ?? "asc"}
+                onClick={() => toggleSort("record")}
+              />
               <span>{t("monitor.colPlatform")}</span>
               <span>{t("monitor.colHost")}</span>
               <span>{t("monitor.colQuality")}</span>

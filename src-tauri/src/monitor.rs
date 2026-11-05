@@ -57,6 +57,10 @@ async fn tick(app: &AppHandle, db: &Db, broker: &StreamBroker, recorder: &Arc<Re
     }
 
     for room in rooms {
+        // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
+        if room.monitor_paused {
+            continue;
+        }
         let interval = if room.is_live {
             LIVE_INTERVAL
         } else {

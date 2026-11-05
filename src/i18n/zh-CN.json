@@ -183,7 +183,7 @@
     "detailRecorded": "已录",
     "detailViewers": "人气",
     "watch": "观看",
-    "reveal": "Finder",
+    "reveal": "打开录制文件夹",
     "removeRoom": "移除房间",
     "confirmRemove": "再点一次",
     "noMatch": "没有匹配的房间",
@@ -199,7 +199,15 @@
     "statusRecording": "录制中",
     "statusIdle": "未录制",
     "recordDetail": "录制详情",
-    "closeDetail": "关闭详情"
+    "closeDetail": "关闭详情",
+    "filterPlatform": "平台",
+    "statusPaused": "已暂停监控",
+    "refreshInfo": "刷新直播间信息",
+    "roomSettings": "直播间设置",
+    "roomSettingsSoon": "直播间设置即将上线",
+    "pauseMonitor": "停止监控",
+    "resumeMonitor": "开始监控",
+    "close": "关闭"
   },
   "watch": {
     "title": "多屏观看",

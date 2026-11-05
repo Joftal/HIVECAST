@@ -12,6 +12,10 @@ export type RoomRecord = { id: string, platform: string, roomKey: string, canoni
  */
 autoRecord: boolean, 
 /**
+ * 是否暂停监控：暂停后不再定时刷新直播间信息
+ */
+monitorPaused: boolean, 
+/**
  * 录制清晰度（qn 数值，10000 = 原画）
  */
 recordQn: number, 

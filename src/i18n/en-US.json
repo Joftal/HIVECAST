@@ -183,7 +183,7 @@
     "detailRecorded": "Recorded",
     "detailViewers": "Viewers",
     "watch": "Watch",
-    "reveal": "Reveal",
+    "reveal": "Open recording folder",
     "removeRoom": "Remove room",
     "confirmRemove": "Click again",
     "noMatch": "No rooms match",
@@ -199,7 +199,15 @@
     "statusRecording": "Recording",
     "statusIdle": "Idle",
     "recordDetail": "Recording details",
-    "closeDetail": "Close details"
+    "closeDetail": "Close details",
+    "filterPlatform": "Platform",
+    "statusPaused": "Paused",
+    "refreshInfo": "Refresh room info",
+    "roomSettings": "Room settings",
+    "roomSettingsSoon": "Room settings are coming soon",
+    "pauseMonitor": "Pause monitoring",
+    "resumeMonitor": "Resume monitoring",
+    "close": "Close"
   },
   "watch": {
     "title": "Multi-view",

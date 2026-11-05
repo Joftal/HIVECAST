@@ -81,6 +81,7 @@ pub fn run() {
             commands::room_set_quality,
             commands::room_lines,
             commands::room_set_line,
+            commands::room_set_monitor,
             commands::record_start,
             commands::record_stop,
             commands::sessions_list,

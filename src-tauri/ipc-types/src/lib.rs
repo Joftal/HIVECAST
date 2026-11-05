@@ -70,6 +70,8 @@ pub struct RoomRecord {
     pub online: Option<u64>,
     /// 开播后是否自动录制
     pub auto_record: bool,
+    /// 是否暂停监控：暂停后不再定时刷新直播间信息
+    pub monitor_paused: bool,
     /// 录制清晰度（qn 数值，10000 = 原画）
     pub record_qn: u32,
     /// 观看清晰度（0 = 跟随自动降级）
