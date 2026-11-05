@@ -1,9 +1,7 @@
 //! 账号凭据：Cookie 的标准化、按平台存取，以及注入 HTTP 请求的入口。
 //!
-//! 取舍：v1 把 Cookie 明文存进本地 SQLite（库文件在用户数据目录，权限随系统）。
-//! docs/19 §4.3 设计的 cookie_enc（Keychain / DPAPI）留到 v1.1——单机单用户场景下，
-//! 先保证「扫码拿到 Set-Cookie 能落库、取流能带上」这条主链路跑通，
-//! 加密属于可替换的实现细节，不影响上层接口。
+//! 落库时由 db 层用 AES-256-GCM 加密（enc:v1: 前缀，密钥见 secret.rs），
+//! 这一层拿到的 cookie 始终是明文，只管解析、合并、按域名分发。
 
 use std::collections::BTreeMap;
 use std::sync::{OnceLock, RwLock};

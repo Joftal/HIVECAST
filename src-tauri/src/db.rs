@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS credential (
 
 pub struct Db {
     conn: Mutex<Connection>,
+    /// 凭据列的加解密器；密钥文件与库文件同目录。
+    secret: crate::secret::Secret,
 }
 
 impl Db {
@@ -52,8 +54,15 @@ impl Db {
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         conn.execute_batch(EXTRA_SCHEMA).map_err(db_err)?;
         migrate(&conn)?;
+        // 密钥跟库文件放一起；内存库（单测）落到临时目录，避免在仓库里生成文件。
+        let key_path = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join("secret.bin"),
+            _ => std::env::temp_dir().join(format!("hivecast-memory-{}.bin", std::process::id())),
+        };
+        let secret = crate::secret::Secret::load_or_create(&key_path)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            secret,
         })
     }
 
@@ -495,10 +504,58 @@ impl Db {
                 })
             })
             .map_err(db_err)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+        let rows: Vec<CredentialRow> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
+        drop(stmt);
+        let mut out = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            match self.secret.open(&row.cookie) {
+                Some(plain) => row.cookie = plain,
+                None => {
+                    tracing::warn!(platform = %row.platform, "凭据解密失败，已跳过（需要重新登录）");
+                    continue;
+                }
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// 把历史明文 Cookie 就地改成密文；返回改动了多少行。
+    ///
+    /// 只在启动时跑一次，幂等：已经带 enc:v1: 前缀的行会被跳过。
+    pub fn reseal_credentials(&self) -> Result<usize, AppError> {
+        let raw: Vec<(String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn
+                .prepare("SELECT platform, cookie FROM credential")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
+        };
+        let mut changed = 0;
+        for (platform, cookie) in raw {
+            if crate::secret::Secret::is_sealed(&cookie) {
+                continue;
+            }
+            let sealed = self.secret.seal(&cookie)?;
+            self.lock()
+                .execute(
+                    "UPDATE credential SET cookie = ?1 WHERE platform = ?2",
+                    params![sealed, platform],
+                )
+                .map_err(db_err)?;
+            changed += 1;
+        }
+        if changed > 0 {
+            tracing::info!(count = changed, "已把历史明文 Cookie 加密");
+        }
+        Ok(changed)
     }
 
     pub fn save_credential(&self, row: &CredentialRow) -> Result<(), AppError> {
+        let sealed = self.secret.seal(&row.cookie)?;
         self.lock()
             .execute(
                 "INSERT INTO credential (platform, account_id, cookie, uid, account_name, avatar, status, updated_at)
@@ -514,7 +571,7 @@ impl Db {
                 params![
                     row.platform,
                     row.account_id,
-                    row.cookie,
+                    sealed,
                     row.uid,
                     row.account_name,
                     row.avatar,
@@ -642,4 +699,88 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
 pub fn extra_value(raw: Option<&str>) -> Value {
     raw.and_then(|text| serde_json::from_str(text).ok())
         .unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db(tag: &str) -> (Db, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "hivecast-db-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录失败");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("开库失败");
+        (db, path)
+    }
+
+    fn row(platform: &str, cookie: &str) -> CredentialRow {
+        CredentialRow {
+            platform: platform.into(),
+            account_id: String::new(),
+            cookie: cookie.into(),
+            uid: "1".into(),
+            account_name: "测试".into(),
+            avatar: None,
+            status: "ok".into(),
+            updated_at: 0,
+        }
+    }
+
+    fn raw_cookie(db: &Db, platform: &str) -> String {
+        db.lock()
+            .query_row(
+                "SELECT cookie FROM credential WHERE platform = ?1",
+                params![platform],
+                |r| r.get(0),
+            )
+            .expect("读不到 cookie")
+    }
+
+    #[test]
+    fn credential_is_sealed_at_rest_and_decrypted_on_read() {
+        let (db, _path) = temp_db("seal");
+        db.save_credential(&row("bilibili", "SESSDATA=secret; bili_jct=abc"))
+            .expect("写凭据失败");
+        let stored = raw_cookie(&db, "bilibili");
+        assert!(crate::secret::Secret::is_sealed(&stored));
+        assert!(!stored.contains("SESSDATA"));
+        let rows = db.credentials().expect("读凭据失败");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cookie, "SESSDATA=secret; bili_jct=abc");
+    }
+
+    #[test]
+    fn reseals_legacy_plaintext_once() {
+        let (db, _path) = temp_db("legacy");
+        db.lock()
+            .execute(
+                "INSERT INTO credential (platform, cookie, updated_at) VALUES ('douyu', 'dy_did=1', 0)",
+                [],
+            )
+            .expect("插明文失败");
+        assert_eq!(raw_cookie(&db, "douyu"), "dy_did=1");
+        assert_eq!(db.reseal_credentials().expect("迁移失败"), 1);
+        let stored = raw_cookie(&db, "douyu");
+        assert!(crate::secret::Secret::is_sealed(&stored));
+        // 幂等：第二次跑没有可迁移的行。
+        assert_eq!(db.reseal_credentials().expect("二次迁移失败"), 0);
+        assert_eq!(db.credentials().expect("读失败")[0].cookie, "dy_did=1");
+    }
+
+    #[test]
+    fn undecryptable_row_is_skipped_instead_of_failing() {
+        let (db, _path) = temp_db("broken");
+        db.lock()
+            .execute(
+                "INSERT INTO credential (platform, cookie, updated_at) VALUES ('huya', 'enc:v1:AAAA', 0)",
+                [],
+            )
+            .expect("插坏密文失败");
+        assert!(db.credentials().expect("读失败").is_empty());
+    }
 }

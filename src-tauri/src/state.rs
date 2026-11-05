@@ -67,6 +67,9 @@ impl AppState {
         crate::retention::enforce_from_settings(&db);
 
         // 账号凭据先灌进内存，之后所有 HTTP 请求按域名自动带上。
+        if let Err(err) = db.reseal_credentials() {
+            tracing::warn!(error = %err, "历史 Cookie 加密迁移失败");
+        }
         crate::credential::load_from_db(&db);
         // B 站登录态会过期，启动后异步复验一次；网络慢不该拖住启动。
         let db_for_auth = db.clone();

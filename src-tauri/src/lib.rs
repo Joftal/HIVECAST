@@ -16,6 +16,7 @@ mod postprocess;
 mod process;
 mod recorder;
 mod retention;
+mod secret;
 mod segment;
 mod settings;
 mod state;
