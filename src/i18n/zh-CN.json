@@ -214,7 +214,10 @@
     "danmakuFont": "字号",
     "danmakuSpeed": "滚动速度",
     "danmakuArea": "显示区域",
-    "danmakuReset": "恢复默认"
+    "danmakuReset": "恢复默认",
+    "line": "线路",
+    "lineAuto": "自动",
+    "lineHint": "手选线路；自动由程序挑最快的"
   },
   "notice": {
     "started": {

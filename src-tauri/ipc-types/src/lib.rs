@@ -129,6 +129,7 @@ pub struct RecordSession {
     #[ts(type = "number")]
     pub duration_ms: i64,
     pub quality: Option<String>,
+    /// 实际使用的线路组名
     pub line: Option<String>,
     pub error: Option<String>,
     /// 与视频同名的弹幕存档（JSONL），未开启弹幕时为空
@@ -185,7 +186,10 @@ pub struct ViewSlotInfo {
     /// 平台实际给的画质
     pub actual_qn: u32,
     pub quality: Option<String>,
+    /// 实际使用的线路组名
     pub line: Option<String>,
+    /// 用户手选的线路组名；None 表示自动
+    pub preferred_line: Option<String>,
     pub error: Option<String>,
     /// 断线重连的锚点（epoch 毫秒）；None 表示当前不在等待重连
     #[ts(type = "number | null")]

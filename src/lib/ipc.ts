@@ -167,6 +167,10 @@ export async function viewSetQuality(slot: number, qn: number): Promise<ViewSlot
   return invoke<ViewSlotInfo>("view_set_quality", { slot, qn });
 }
 
+export async function viewSetLine(slot: number, line: string | null): Promise<ViewSlotInfo> {
+  return invoke<ViewSlotInfo>("view_set_line", { slot, line });
+}
+
 export async function viewRetry(slot: number): Promise<ViewSlotInfo> {
   return invoke<ViewSlotInfo>("view_retry", { slot });
 }

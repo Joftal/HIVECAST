@@ -87,6 +87,7 @@ pub fn run() {
             commands::view_open,
             commands::view_close,
             commands::view_set_quality,
+            commands::view_set_line,
             commands::view_retry,
             commands::session_remux,
             commands::session_screenshot,

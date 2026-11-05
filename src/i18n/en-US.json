@@ -214,7 +214,10 @@
     "danmakuFont": "Font size",
     "danmakuSpeed": "Speed",
     "danmakuArea": "Area",
-    "danmakuReset": "Reset"
+    "danmakuReset": "Reset",
+    "line": "Line",
+    "lineAuto": "Auto",
+    "lineHint": "Pick a line manually; Auto chooses the fastest"
   },
   "notice": {
     "started": {

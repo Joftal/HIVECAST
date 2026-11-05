@@ -46,6 +46,8 @@ struct SlotState {
     actual_qn: u32,
     quality: Option<String>,
     line: Option<String>,
+    /// 用户手选的线路；None 表示自动挑
+    preferred_line: Option<String>,
     error: Option<String>,
     /// 重连倒计时的目标时刻（epoch 毫秒）；不在等待重连时为 None。
     retry_at: Option<i64>,
@@ -68,6 +70,7 @@ impl SlotState {
             actual_qn: 0,
             quality: None,
             line: None,
+            preferred_line: None,
             error: None,
             retry_at: None,
             generation: 0,
@@ -86,6 +89,7 @@ impl SlotState {
             actual_qn: self.actual_qn,
             quality: self.quality.clone(),
             line: self.line.clone(),
+            preferred_line: self.preferred_line.clone(),
             error: self.error.clone(),
             retry_at: self.retry_at,
         }
@@ -247,6 +251,33 @@ impl ViewManager {
         Ok(handle.info(slot))
     }
 
+    /// 切换某槽位使用的线路。None 表示回到自动挑线路。
+    pub fn set_line(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: Arc<StreamBroker>,
+        slot: u8,
+        line: Option<String>,
+    ) -> Result<ViewSlotInfo, AppError> {
+        let handle = self.handle(slot)?;
+        let needs_spawn = {
+            let mut state = handle.lock();
+            if state.preferred_line == line {
+                return Ok(state.info(slot, &handle.room.id));
+            }
+            state.preferred_line = line;
+            state.generation += 1;
+            state.status = "starting".into();
+            state.error = None;
+            !state.alive
+        };
+        self.emit(app);
+        if needs_spawn {
+            self.restart_supervisor(app, broker, slot, handle.clone(), handle.room.clone());
+        }
+        Ok(handle.info(slot))
+    }
+
     /// 失败后手动重试：监督循环已经退出就重新拉起，否则只让它按新参数重启。
     pub async fn retry(
         self: &Arc<Self>,
@@ -375,16 +406,21 @@ impl ViewManager {
     ) {
         let mut attempts: u32 = 0;
         loop {
-            let (closed, generation, qn) = {
+            let (closed, generation, qn, preferred) = {
                 let state = handle.lock();
-                (state.closed, state.generation, state.requested_qn)
+                (
+                    state.closed,
+                    state.generation,
+                    state.requested_qn,
+                    state.preferred_line.clone(),
+                )
             };
             if closed {
                 break;
             }
 
             match self
-                .start_once(&app, &broker, &handle, &room, qn, generation)
+                .start_once(&app, &broker, &handle, &room, qn, preferred, generation)
                 .await
             {
                 Ok(()) => {
@@ -484,6 +520,7 @@ impl ViewManager {
         handle: &Arc<Slot>,
         room: &RoomRecord,
         qn: u32,
+        preferred: Option<String>,
         generation: u64,
     ) -> Result<(), AppError> {
         handle.lock().retry_at = None;
@@ -495,8 +532,8 @@ impl ViewManager {
             .groups(&room_ref(room), qn)
             .await
             .map_err(AppError::from)?;
-        let (candidate, group) =
-            pick_view_candidate(&groups).ok_or_else(|| AppError::User("没有可用的线路".into()))?;
+        let (candidate, group) = pick_view_candidate(&groups, preferred.as_deref())
+            .ok_or_else(|| AppError::User("没有可用的线路".into()))?;
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = self.root.join(&session_id);
@@ -726,23 +763,43 @@ fn backoff(attempts: u32) -> Duration {
 }
 
 /// 每个线路组内优先 H.264（hls.js 兼容性最好），其次是 FLV（断流最稳）。
-fn pick_view_candidate(groups: &[StreamGroup]) -> Option<(StreamCandidate, StreamGroup)> {
-    for group in groups {
-        let mut best: Option<&StreamCandidate> = None;
-        for candidate in &group.candidates {
-            if candidate.url.is_none() {
-                continue;
+fn pick_view_candidate(
+    groups: &[StreamGroup],
+    preferred: Option<&str>,
+) -> Option<(StreamCandidate, StreamGroup)> {
+    if let Some(name) = preferred {
+        match groups.iter().find(|group| group.name == name) {
+            Some(group) if group.candidates.iter().any(|item| item.url.is_some()) => {
+                if let Some(candidate) = best_in_group(group) {
+                    return Some((candidate, group.clone()));
+                }
             }
-            match best {
-                Some(current) if candidate_rank(current) >= candidate_rank(candidate) => {}
-                _ => best = Some(candidate),
+            Some(_) => {
+                tracing::warn!(line = name, "指定线路没有可用地址，改用其它线路")
             }
+            None => tracing::warn!(line = name, "指定线路不存在，改用其它线路"),
         }
-        if let Some(best) = best {
-            return Some((best.clone(), group.clone()));
+    }
+    for group in groups {
+        if let Some(candidate) = best_in_group(group) {
+            return Some((candidate, group.clone()));
         }
     }
     None
+}
+
+fn best_in_group(group: &StreamGroup) -> Option<StreamCandidate> {
+    let mut best: Option<&StreamCandidate> = None;
+    for candidate in &group.candidates {
+        if candidate.url.is_none() {
+            continue;
+        }
+        match best {
+            Some(current) if candidate_rank(current) >= candidate_rank(candidate) => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best.cloned()
 }
 
 fn candidate_rank(candidate: &StreamCandidate) -> (u8, u8, u64) {
@@ -790,7 +847,7 @@ mod tests {
                 candidate(StreamFormat::Flv, Codec::H264, 250),
             ],
         };
-        let (picked, _) = pick_view_candidate(&[group]).expect("有候选");
+        let (picked, _) = pick_view_candidate(&[group], None).expect("有候选");
         assert_eq!(picked.codec, Some(Codec::H264));
         assert_eq!(actual_qn(&picked), 250);
     }
@@ -804,7 +861,7 @@ mod tests {
             priority: 0,
             candidates: vec![broken],
         };
-        assert!(pick_view_candidate(&[group]).is_none());
+        assert!(pick_view_candidate(&[group], None).is_none());
     }
 
     #[test]
@@ -813,5 +870,37 @@ mod tests {
         assert_eq!(backoff(2), Duration::from_secs(2));
         assert_eq!(backoff(4), Duration::from_secs(8));
         assert_eq!(backoff(9), RETRY_MAX);
+    }
+
+    fn line_group(name: &str, url: Option<&str>) -> StreamGroup {
+        let mut item = candidate(StreamFormat::Flv, Codec::H264, 10000);
+        item.url = url.map(str::to_string);
+        StreamGroup {
+            name: name.into(),
+            priority: 0,
+            candidates: vec![item],
+        }
+    }
+
+    #[test]
+    fn preferred_line_wins() {
+        let groups = vec![line_group("A", Some("https://a/1.flv")), line_group("B", Some("https://b/1.flv"))];
+        let (picked, group) = pick_view_candidate(&groups, Some("B")).expect("应该挑到候选");
+        assert_eq!(group.name, "B");
+        assert_eq!(picked.url.as_deref(), Some("https://b/1.flv"));
+    }
+
+    #[test]
+    fn preferred_line_without_url_falls_back() {
+        let groups = vec![line_group("A", Some("https://a/1.flv")), line_group("C", None)];
+        let (_, group) = pick_view_candidate(&groups, Some("C")).expect("应该回退到可用线路");
+        assert_eq!(group.name, "A");
+    }
+
+    #[test]
+    fn unknown_preferred_line_falls_back() {
+        let groups = vec![line_group("A", Some("https://a/1.flv"))];
+        let (_, group) = pick_view_candidate(&groups, Some("Z")).expect("应该回退到可用线路");
+        assert_eq!(group.name, "A");
     }
 }

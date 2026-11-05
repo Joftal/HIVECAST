@@ -13,8 +13,11 @@ import {
   viewClose,
   viewOpen,
   viewRetry,
+  viewSetLine,
   viewSetQuality,
   viewSlots,
+  roomLines,
+  type LineInfo,
   type RoomView,
   type ViewSlotInfo,
 } from "../../lib/ipc";
@@ -188,6 +191,14 @@ export default function WatchPage() {
   const changeQuality = async (slot: number, qn: number) => {
     try {
       await viewSetQuality(slot, qn);
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
+  const changeLine = async (slot: number, line: string | null) => {
+    try {
+      await viewSetLine(slot, line);
     } catch (err) {
       setError(describeError(err));
     }
@@ -421,6 +432,7 @@ export default function WatchPage() {
                 onVolume={(value) => setVolume(session.slot, value)}
                 onToggleDanmaku={() => toggleDanmaku(session.slot)}
                 onQuality={(qn) => void changeQuality(session.slot, qn)}
+                onLine={(line) => void changeLine(session.slot, line)}
                 onClose={() => void closeSlot(session.slot)}
                 onRetry={() => void retrySlot(session.slot)}
               />
@@ -456,6 +468,7 @@ type CellProps = {
   onVolume: (volume: number) => void;
   onToggleDanmaku: () => void;
   onQuality: (qn: number) => void;
+  onLine: (line: string | null) => void;
   onClose: () => void;
   onRetry: () => void;
 };
@@ -469,11 +482,22 @@ function SlotCell({
   onVolume,
   onToggleDanmaku,
   onQuality,
+  onLine,
   onClose,
   onRetry,
 }: CellProps) {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
+  // 线路列表按需拉取：点开下拉时才解析线路，免得 4 路同屏一上来就打平台接口。
+  const [lines, setLines] = useState<LineInfo[] | null>(null);
+  const loadLines = useCallback(async () => {
+    if (lines) return;
+    try {
+      setLines(await roomLines(session.roomId, session.requestedQn || undefined));
+    } catch {
+      setLines([]);
+    }
+  }, [lines, session.roomId, session.requestedQn]);
   const retryIn = useSecondsLeft(session.retryAt);
   const sounding = volume > 0;
   // 平台不一定给到请求的画质（未登录 B 站会把原画降到超清），要如实告诉用户。
@@ -526,6 +550,26 @@ function SlotCell({
           {QN_OPTIONS.map((qn) => (
             <option key={qn} value={qn}>
               {qn === 0 ? t("watch.qn.auto") : t(`watch.qn.${qn}`)}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={session.preferredLine ?? ""}
+          onChange={(event) => onLine(event.target.value || null)}
+          onPointerDown={() => void loadLines()}
+          onFocus={() => void loadLines()}
+          aria-label={t("watch.line")}
+          title={t("watch.lineHint")}
+          className="focus-ring max-w-[92px] rounded-md border hairline bg-ink-800/80 px-1 py-0.5 text-[10px] text-zinc-300"
+        >
+          <option value="">{t("watch.lineAuto")}</option>
+          {session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine) ? (
+            <option value={session.preferredLine}>{session.preferredLine}</option>
+          ) : null}
+          {(lines ?? []).map((line) => (
+            <option key={line.name} value={line.name}>
+              {line.name}
             </option>
           ))}
         </select>

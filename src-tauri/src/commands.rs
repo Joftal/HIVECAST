@@ -345,6 +345,16 @@ pub async fn view_set_quality(
 }
 
 #[tauri::command]
+pub fn view_set_line(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: u8,
+    line: Option<String>,
+) -> Result<ViewSlotInfo, AppError> {
+    state.view.set_line(&app, state.broker.clone(), slot, line)
+}
+
+#[tauri::command]
 pub async fn view_retry(
     app: AppHandle,
     state: State<'_, AppState>,

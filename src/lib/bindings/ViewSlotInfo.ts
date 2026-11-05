@@ -21,7 +21,15 @@ requestedQn: number,
 /**
  * 平台实际给的画质
  */
-actualQn: number, quality: string | null, line: string | null, error: string | null, 
+actualQn: number, quality: string | null, 
+/**
+ * 实际使用的线路组名
+ */
+line: string | null, 
+/**
+ * 用户手选的线路组名；None 表示自动
+ */
+preferredLine: string | null, error: string | null, 
 /**
  * 断线重连的锚点（epoch 毫秒）；None 表示当前不在等待重连
  */
