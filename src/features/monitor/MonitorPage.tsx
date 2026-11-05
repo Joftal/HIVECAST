@@ -11,10 +11,15 @@ import {
   roomRefresh,
   roomRemove,
   roomSetAutoRecord,
+  roomMergeSessions,
   roomSetQuality,
   roomsList,
+  sessionExportDanmaku,
+  sessionRemux,
+  sessionScreenshot,
   sessionsList,
   type AppInfo,
+  type PostResult,
   type RecordSession,
   type RoomView,
 } from "../../lib/ipc";
@@ -53,6 +58,20 @@ function formatDateTime(seconds: number | null, locale: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// 后处理按钮：小尺寸、只在历史行里出现，忙的时候禁用并转成省略号。
+function PostButton(props: { label: string; busy: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      disabled={props.busy}
+      className="focus-ring rounded border hairline px-1 text-[10px] text-zinc-400 transition-colors hover:border-amber-400/50 hover:text-amber-200 disabled:opacity-40"
+    >
+      {props.busy ? "…" : props.label}
+    </button>
+  );
 }
 
 function IconButton(props: {
@@ -104,6 +123,13 @@ function Switch(props: { checked: boolean; onChange: (next: boolean) => void; la
   );
 }
 
+type PostKind = "mp4" | "shot" | "ass" | "merge";
+
+// 后处理按钮的忙碌 key：同一行里一次只跑一个，键里带房间与会话，避免串位。
+function postKey(roomId: string, kind: PostKind, sessionId?: string): string {
+  return roomId + ":" + kind + ":" + (sessionId ?? "");
+}
+
 type RowProps = {
   view: RoomView;
   busy: boolean;
@@ -116,6 +142,8 @@ type RowProps = {
   onToggleAuto: (next: boolean) => void;
   onQuality: (qn: number) => void;
   onHistory: () => void;
+  postBusy: string | null;
+  onPost: (kind: PostKind, sessionId?: string) => void;
 };
 
 function RoomRow(props: RowProps) {
@@ -124,6 +152,10 @@ function RoomRow(props: RowProps) {
   const room = view.room;
   const recording = view.recording;
   const elapsed = recording ? props.now / 1000 - recording.startedAt : 0;
+  // 只有已结束、且文件还在的会话才能合并。
+  const mergeable = (props.history ?? []).filter(
+    (session) => session.status !== "recording" && session.filePath,
+  ).length;
 
   return (
     <article className="group border-b hairline px-4 py-3 transition-colors last:border-b-0 hover:bg-ink-800/40">
@@ -186,6 +218,16 @@ function RoomRow(props: RowProps) {
               {props.history.length === 0 && (
                 <div className="px-1 py-1 text-[11px] text-zinc-600">{t("monitor.noHistory")}</div>
               )}
+              {mergeable > 1 && (
+                <div className="flex items-center justify-between gap-2 px-1">
+                  <span className="text-[10px] text-zinc-600">{t("monitor.post.mergeHint", { n: mergeable })}</span>
+                  <PostButton
+                    label={t("monitor.post.merge")}
+                    busy={props.postBusy === postKey(room.id, "merge")}
+                    onClick={() => props.onPost("merge")}
+                  />
+                </div>
+              )}
               {props.history.map((session) => (
                 <div key={session.id} className="flex items-center gap-2 text-[11px]">
                   <span className="w-[92px] shrink-0 text-zinc-500">{formatDateTime(session.startedAt, props.locale)}</span>
@@ -211,6 +253,27 @@ function RoomRow(props: RowProps) {
                   </span>
                   {session.reason && <span className="truncate text-zinc-600">{t("monitor.reason." + session.reason)}</span>}
                   {session.error && <span className="truncate text-amber-300/80">{session.error}</span>}
+                  {session.status !== "recording" && session.filePath && (
+                    <span className="ml-auto flex shrink-0 items-center gap-1">
+                      <PostButton
+                        label={t("monitor.post.mp4")}
+                        busy={props.postBusy === postKey(room.id, "mp4", session.id)}
+                        onClick={() => props.onPost("mp4", session.id)}
+                      />
+                      <PostButton
+                        label={t("monitor.post.shot")}
+                        busy={props.postBusy === postKey(room.id, "shot", session.id)}
+                        onClick={() => props.onPost("shot", session.id)}
+                      />
+                      {session.danmakuPath && session.danmakuCount > 0 && (
+                        <PostButton
+                          label={t("monitor.post.ass")}
+                          busy={props.postBusy === postKey(room.id, "ass", session.id)}
+                          onClick={() => props.onPost("ass", session.id)}
+                        />
+                      )}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -320,6 +383,45 @@ export default function MonitorPage() {
     };
   }, [load]);
 
+  // 后处理（转 mp4 / 截图 / 弹幕 ASS / 合并）一次只跑一个，避免同时压满 CPU。
+  const [postBusy, setPostBusy] = useState<string | null>(null);
+  const [postMsg, setPostMsg] = useState<{ text: string; error: boolean } | null>(null);
+
+  const doPost = useCallback(
+    async (roomId: string, kind: PostKind, sessionId?: string) => {
+      const key = postKey(roomId, kind, sessionId);
+      const pick = (id: string | undefined, run: (id: string) => Promise<PostResult>) => {
+        if (!id) return Promise.reject(new Error("missing session"));
+        return run(id);
+      };
+      const action = () => {
+        switch (kind) {
+          case "mp4":
+            return pick(sessionId, sessionRemux);
+          case "shot":
+            return pick(sessionId, sessionScreenshot);
+          case "ass":
+            return pick(sessionId, sessionExportDanmaku);
+          case "merge":
+            return roomMergeSessions(roomId);
+        }
+      };
+      setPostBusy(key);
+      setPostMsg(null);
+      try {
+        const result = await action();
+        const name = result.path.split(/[\\/]/).pop() ?? result.path;
+        setPostMsg({ text: formatSize(result.size) + " · " + name, error: false });
+        void load();
+      } catch (err) {
+        setPostMsg({ text: describeError(err), error: true });
+      } finally {
+        setPostBusy(null);
+      }
+    },
+    [load],
+  );
+
   const recordingActive = useMemo(() => views.some((view) => view.recording), [views]);
 
   useEffect(() => {
@@ -423,6 +525,11 @@ export default function MonitorPage() {
           </form>
 
           {error && <p className="break-all text-[11px] text-red-300">{error}</p>}
+          {postMsg && (
+            <p className={["break-all text-[11px]", postMsg.error ? "text-red-300" : "text-emerald-300/90"].join(" ")}>
+              {postMsg.text}
+            </p>
+          )}
           {!isTauri() && <p className="text-[11px] text-amber-300/80">browser preview — IPC unavailable</p>}
         </div>
 
@@ -457,6 +564,8 @@ export default function MonitorPage() {
                 onToggleAuto={(next) => void run(view.room.id, () => roomSetAutoRecord(view.room.id, next))}
                 onQuality={(qn) => void run(view.room.id, () => roomSetQuality(view.room.id, qn, view.room.viewQn))}
                 onHistory={() => void toggleHistory(view.room.id)}
+                postBusy={postBusy}
+                onPost={(kind, sessionId) => void doPost(view.room.id, kind, sessionId)}
               />
             ))
           )}

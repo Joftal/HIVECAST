@@ -1,7 +1,9 @@
 //! 平台适配层：只做「用户输入 → 房间引用 → 房间信息 / 流候选」，
 //! 不打开连接、不写文件、不碰数据库与 UI（见 docs/04）。
 
+pub mod abogus;
 pub mod bilibili;
+pub mod douyin;
 pub mod douyu;
 pub mod http;
 pub mod huya;
@@ -176,6 +178,7 @@ fn registry() -> &'static Vec<Arc<dyn PlatformAdapter>> {
             Arc::new(bilibili::BilibiliAdapter::new()) as Arc<dyn PlatformAdapter>,
             Arc::new(douyu::DouyuAdapter::new()) as Arc<dyn PlatformAdapter>,
             Arc::new(huya::HuyaAdapter::new()),
+            Arc::new(douyin::DouyinAdapter::new()),
         ]
     })
 }

@@ -47,8 +47,15 @@
     "refreshOne": "立即刷新",
     "remove": "移除",
     "noHistory": "暂无录制记录",
+    "post": {
+      "mp4": "转 MP4",
+      "shot": "截图",
+      "ass": "弹幕 ASS",
+      "merge": "合并",
+      "mergeHint": "把 {{n}} 段按时间合并为一个 mp4"
+    },
     "tipsTitle": "使用提示",
-    "tipInput": "目前支持哔哩哔哩（含 b23.tv 短链）、斗鱼、虎牙的直播间链接或房间号。",
+    "tipInput": "目前支持哔哩哔哩（含 b23.tv 短链）、斗鱼、虎牙、抖音的直播间链接或房间号。",
     "tipAuto": "关闭自动录制后仍可手动开录；停录会先发送 SIGINT，让 ffmpeg 写完文件尾。",
     "tipQuality": "录制画质独立于观看画质；未登录时平台常把画质降到它能给的最高档，界面上会用 ↓ 标出实际画质。",
     "status": {
@@ -154,6 +161,7 @@
   "platformName": {
     "bilibili": "哔哩哔哩",
     "douyu": "斗鱼",
-    "huya": "虎牙"
+    "huya": "虎牙",
+    "douyin": "抖音"
   }
 }

@@ -1,0 +1,420 @@
+//! 本地后处理（D5）：转 mp4 / 截图 / 弹幕转 ASS / 多段合并。
+//!
+//! 全部在本地 ffmpeg 上跑，不上传任何数据；产物默认落在源文件旁边，
+//! 命名沿用录制文件名，方便在访达里直接对照。
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use hivecast_ipc::PostResult;
+use tokio::process::Command;
+
+use crate::error::AppError;
+use crate::ffmpeg;
+
+/// 单个产物最长容忍 10 分钟：4 小时录像的 remux 也只是 IO 时间。
+const TASK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 估算弹幕滚动速度（像素/秒），1080p 下观感接近 B 站。
+const SCROLL_SPEED: f64 = 190.0;
+/// ASS 画布宽度：与常见 16:9 一致，播放器会按视频等比缩放。
+const PLAY_RES_X: i64 = 1280;
+const PLAY_RES_Y: i64 = 720;
+const FONT_SIZE: u32 = 42;
+const LANE_HEIGHT: i64 = 54;
+const LANE_TOP: i64 = 20;
+
+fn sibling(src: &Path, suffix: &str, ext: &str) -> PathBuf {
+    let stem = src
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    let name = if suffix.is_empty() {
+        format!("{stem}.{ext}")
+    } else {
+        format!("{stem}{suffix}.{ext}")
+    };
+    src.with_file_name(name)
+}
+
+fn size_of(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .map(|meta| meta.len() as i64)
+        .unwrap_or(0)
+}
+
+async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
+    let mut command = Command::new(ffmpeg::binary());
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(TASK_TIMEOUT, command.output())
+        .await
+        .map_err(|_| AppError::Ffmpeg(format!("{label} 超时")))?
+        .map_err(AppError::Io)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(AppError::Ffmpeg(if tail.is_empty() {
+        format!("{label} 失败（ffmpeg 无输出）")
+    } else {
+        format!("{label} 失败：{tail}")
+    }))
+}
+
+fn ensure_file(src: &Path) -> Result<(), AppError> {
+    if !src.is_file() {
+        return Err(AppError::Path(format!("源文件不存在：{}", src.display())));
+    }
+    Ok(())
+}
+
+/// FLV → MP4：只换容器不重编码，几秒完成，生成的 mp4 能直接拖进剪辑软件。
+pub async fn remux(src: &Path) -> Result<PostResult, AppError> {
+    ensure_file(src)?;
+    if src.extension().and_then(|value| value.to_str()) == Some("mp4") {
+        return Err(AppError::User("源文件已经是 mp4".into()));
+    }
+    let out = sibling(src, "", "mp4");
+    let args: Vec<OsString> = vec![
+        "-hide_banner".into(),
+        "-nostdin".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        src.as_os_str().to_os_string(),
+        "-c".into(),
+        "copy".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
+        out.as_os_str().to_os_string(),
+    ];
+    run_ffmpeg(args, "转封装").await?;
+    Ok(PostResult {
+        kind: "mp4".into(),
+        path: out.to_string_lossy().to_string(),
+        size: size_of(&out),
+        message: None,
+    })
+}
+
+/// 截图：默认取 10% 处，避开刚开播的黑帧。
+pub async fn screenshot(src: &Path, at_secs: Option<f64>) -> Result<PostResult, AppError> {
+    ensure_file(src)?;
+    let seconds = at_secs.unwrap_or(10.0).max(0.0);
+    let stamp = format!("-{seconds:.0}s");
+    let out = sibling(src, &format!(" 截图{stamp}"), "jpg");
+    let args: Vec<OsString> = vec![
+        "-hide_banner".into(),
+        "-nostdin".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-ss".into(),
+        format!("{seconds:.3}").into(),
+        "-i".into(),
+        src.as_os_str().to_os_string(),
+        "-frames:v".into(),
+        "1".into(),
+        "-q:v".into(),
+        "2".into(),
+        out.as_os_str().to_os_string(),
+    ];
+    run_ffmpeg(args, "截图").await?;
+    Ok(PostResult {
+        kind: "screenshot".into(),
+        path: out.to_string_lossy().to_string(),
+        size: size_of(&out),
+        message: None,
+    })
+}
+
+/// 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
+pub async fn merge(sources: &[PathBuf]) -> Result<PostResult, AppError> {
+    if sources.len() < 2 {
+        return Err(AppError::User("至少需要两段录像才能合并".into()));
+    }
+    for src in sources {
+        ensure_file(src)?;
+    }
+    let first = &sources[0];
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let out = first.with_file_name(format!("合并-{stamp}.mp4"));
+    let list_path = out.with_extension("concat.txt");
+    let mut list = String::new();
+    for src in sources {
+        let escaped = src.to_string_lossy().replace('\'', "'\\''");
+        list.push_str(&format!("file '{escaped}'\n"));
+    }
+    std::fs::write(&list_path, list)?;
+
+    let args: Vec<OsString> = vec![
+        "-hide_banner".into(),
+        "-nostdin".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_path.as_os_str().to_os_string(),
+        "-c".into(),
+        "copy".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        out.as_os_str().to_os_string(),
+    ];
+    let result = run_ffmpeg(args, "合并").await;
+    let _ = std::fs::remove_file(&list_path);
+    result?;
+    Ok(PostResult {
+        kind: "merge".into(),
+        path: out.to_string_lossy().to_string(),
+        size: size_of(&out),
+        message: Some(format!("共 {} 段", sources.len())),
+    })
+}
+
+/// 弹幕 JSONL → ASS 字幕：右上角滚动，供播放器或压制使用。
+pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
+    ensure_file(jsonl)?;
+    let raw = std::fs::read_to_string(jsonl)?;
+    let mut lines: Vec<(i64, String, u32)> = Vec::new();
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let text = value["c"].as_str().unwrap_or("").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let at = value["t"].as_i64().unwrap_or(0);
+        let color = value["col"].as_u64().unwrap_or(0) as u32;
+        lines.push((at, text, color));
+    }
+    if lines.is_empty() {
+        return Err(AppError::User("这场没有弹幕".into()));
+    }
+    lines.sort_by_key(|(at, _, _)| *at);
+
+    let mut ass = String::new();
+    ass.push_str("[Script Info]\n");
+    ass.push_str("ScriptType: v4.00+\n");
+    ass.push_str(&format!("PlayResX: {PLAY_RES_X}\n"));
+    ass.push_str(&format!("PlayResY: {PLAY_RES_Y}\n"));
+    ass.push_str("WrapStyle: 2\n");
+    ass.push_str("ScaledBorderAndShadow: yes\n\n");
+    ass.push_str("[V4+ Styles]\n");
+    ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+    ass.push_str(&format!(
+        "Style: Danmaku,PingFang SC,{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,7,0,0,0,1\n\n"
+    ));
+    ass.push_str("[Events]\n");
+    ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+
+    let lane_count = ((PLAY_RES_Y - LANE_TOP) / LANE_HEIGHT).max(1);
+    let mut lane_free = vec![0i64; lane_count as usize];
+    for (at, text, color) in lines {
+        let width = estimate_width(&text);
+        let lane = pick_lane(&lane_free, at);
+        let y = LANE_TOP + lane as i64 * LANE_HEIGHT;
+        let duration = ((PLAY_RES_X as f64 + width as f64) / SCROLL_SPEED * 1000.0) as i64;
+        lane_free[lane] = at + duration.min(4000);
+        let colour = ass_colour(color);
+        let body = escape_text(&text);
+        ass.push_str(&format!(
+            "Dialogue: 0,{},{},Danmaku,,0,0,0,,{{\\move({PLAY_RES_X},{y},-{width},{y})\\c{colour}}}{body}\n",
+            ass_time(at),
+            ass_time(at + duration)
+        ));
+    }
+
+    let out = sibling(jsonl, "", "ass");
+    std::fs::write(&out, ass)?;
+    Ok(PostResult {
+        kind: "ass".into(),
+        path: out.to_string_lossy().to_string(),
+        size: size_of(&out),
+        message: None,
+    })
+}
+
+fn pick_lane(free: &[i64], at: i64) -> usize {
+    if let Some(index) = free.iter().position(|until| *until <= at) {
+        return index;
+    }
+    free.iter()
+        .enumerate()
+        .min_by_key(|(_, until)| **until)
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// 粗略估宽：中日韩字符按字宽算，ASCII 折半。
+fn estimate_width(text: &str) -> u32 {
+    let mut width = 0.0f64;
+    for ch in text.chars() {
+        width += if (ch as u32) < 0x2e80 { FONT_SIZE as f64 * 0.55 } else { FONT_SIZE as f64 };
+    }
+    width.max(40.0) as u32
+}
+
+fn ass_time(ms: i64) -> String {
+    let ms = ms.max(0);
+    let hours = ms / 3_600_000;
+    let minutes = (ms % 3_600_000) / 60_000;
+    let seconds = (ms % 60_000) / 1000;
+    let centis = (ms % 1000) / 10;
+    format!("{hours}:{minutes:02}:{seconds:02}.{centis:02}")
+}
+
+/// ASS 用 BGR 顺序；0 表示默认白色（B 站把白色存成 0xFFFFFF，也有用 0 的）。
+fn ass_colour(value: u32) -> String {
+    let rgb = if value == 0 { 0xFFFFFF } else { value & 0xFFFFFF };
+    let r = (rgb >> 16) & 0xFF;
+    let g = (rgb >> 8) & 0xFF;
+    let b = rgb & 0xFF;
+    format!("&H00{b:02X}{g:02X}{r:02X}&")
+}
+
+fn escape_text(text: &str) -> String {
+    text.replace('\\', "＼")
+        .replace('{', "｛")
+        .replace('}', "｝")
+        .replace(['\n', '\r'], " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ass_time_pads_centiseconds() {
+        assert_eq!(ass_time(0), "0:00:00.00");
+        assert_eq!(ass_time(3_723_456), "1:02:03.45");
+    }
+
+    #[test]
+    fn ass_colour_swaps_to_bgr() {
+        assert_eq!(ass_colour(0), "&H00FFFFFF&");
+        assert_eq!(ass_colour(0xFF0000), "&H000000FF&");
+    }
+
+    #[test]
+    fn lane_prefers_free_row_then_earliest() {
+        let mut free = vec![0, 5_000, 0];
+        assert_eq!(pick_lane(&free, 100), 0);
+        free[0] = 9_000;
+        free[2] = 9_000;
+        assert_eq!(pick_lane(&free, 100), 1);
+    }
+
+    async fn make_clip(path: &Path, seconds: u32) {
+        let mut command = Command::new(ffmpeg::binary());
+        command
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-t",
+                &seconds.to_string(),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-f",
+                "flv",
+            ])
+            .arg(path);
+        let status = command.status().await.unwrap();
+        assert!(status.success(), "生成测试片失败");
+    }
+
+    /// 真跑 ffmpeg 的端到端冒烟：转封装 / 截图 / 合并都要产出可读文件。
+    /// 依赖本机 ffmpeg，默认跳过；手动跑时加 --ignored。
+    #[tokio::test]
+    #[ignore = "需要本机 ffmpeg"]
+    async fn ffmpeg_pipeline_on_synthetic_clips() {
+        let dir = std::env::temp_dir().join(format!("hivecast-post-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.flv");
+        let second = dir.join("b.flv");
+        make_clip(&first, 3).await;
+        make_clip(&second, 3).await;
+
+        let mp4 = remux(&first).await.unwrap();
+        assert!(mp4.path.ends_with(".mp4"));
+        assert!(mp4.size > 1000, "mp4 太小：{}", mp4.size);
+
+        let shot = screenshot(&first, Some(1.0)).await.unwrap();
+        assert!(shot.path.ends_with(".jpg"));
+        assert!(shot.size > 500, "截图太小：{}", shot.size);
+
+        let merged = merge(&[first.clone(), second.clone()]).await.unwrap();
+        let source_total = size_of(&first) + size_of(&second);
+        assert_eq!(merged.kind, "merge");
+        assert!(
+            merged.size as f64 > source_total as f64 * 0.6,
+            "合并结果偏小：{} vs {}",
+            merged.size,
+            source_total
+        );
+        assert!(Path::new(&merged.path).is_file());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn writes_ass_for_sample_danmaku() {
+        let dir = std::env::temp_dir().join(format!("hivecast-ass-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"t":1200,"k":"chat","u":"小明","c":"哈哈哈","col":16711680}
+{"t":9000,"k":"chat","u":"小红","c":"{\\move(0,0)} 注入","col":0}
+"#,
+        )
+        .unwrap();
+        let result = danmaku_to_ass(&file).unwrap();
+        let text = std::fs::read_to_string(&result.path).unwrap();
+        assert!(text.contains("Dialogue: 0,0:00:01.20"));
+        assert!(text.contains("&H000000FF&"));
+        assert!(text.contains("｛"));
+        assert!(!text.contains("{\\move(0,0)}"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

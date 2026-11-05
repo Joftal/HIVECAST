@@ -136,6 +136,20 @@ pub struct RecordSession {
     pub danmaku_count: i64,
 }
 
+/// 本地后处理的产物：转封装 / 截图 / 弹幕 ASS / 合并。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct PostResult {
+    /// mp4 | screenshot | ass | merge
+    pub kind: String,
+    pub path: String,
+    #[ts(type = "number")]
+    pub size: i64,
+    /// 额外说明（例如合并了几段），前端直接展示
+    pub message: Option<String>,
+}
+
 /// 录制状态播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

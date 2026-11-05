@@ -7,6 +7,7 @@ mod error;
 mod ffmpeg;
 mod monitor;
 mod platform;
+mod postprocess;
 mod process;
 mod recorder;
 mod state;
@@ -75,7 +76,11 @@ pub fn run() {
             commands::view_open,
             commands::view_close,
             commands::view_set_quality,
-            commands::view_retry
+            commands::view_retry,
+            commands::session_remux,
+            commands::session_screenshot,
+            commands::session_export_danmaku,
+            commands::room_merge_sessions
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIVECAST");

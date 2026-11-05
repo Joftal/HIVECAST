@@ -255,6 +255,18 @@ impl Db {
         Ok(())
     }
 
+    pub fn get_session(&self, id: &str) -> Result<Option<RecordSession>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!("{SESSION_SELECT} WHERE id = ?1"))
+            .map_err(db_err)?;
+        let mut rows = stmt.query_map(params![id], map_session).map_err(db_err)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(db_err)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn list_sessions(
         &self,
         room_id: Option<&str>,

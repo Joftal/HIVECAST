@@ -1,9 +1,14 @@
-use hivecast_ipc::{AppInfo, RecordSession, RoomRecord, RoomView, StreamDescriptor, ViewSlotInfo};
+use std::path::PathBuf;
+
+use hivecast_ipc::{
+    AppInfo, PostResult, RecordSession, RoomRecord, RoomView, StreamDescriptor, ViewSlotInfo,
+};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db::now_ts;
 use crate::error::AppError;
 use crate::monitor::room_ref;
+use crate::postprocess;
 use crate::platform::resolve_input;
 use crate::recorder::EVENT_ROOMS_CHANGED;
 use crate::state::AppState;
@@ -303,3 +308,82 @@ pub async fn view_retry(
         .retry(&app, state.broker.clone(), slot)
         .await
 }
+
+// ---- M5 本地后处理 ----
+
+fn session_file(state: &AppState, session_id: &str) -> Result<RecordSession, AppError> {
+    state
+        .db
+        .get_session(session_id)?
+        .ok_or_else(|| AppError::Internal("录像不存在".into()))
+}
+
+fn session_video(session: &RecordSession, active: bool) -> Result<PathBuf, AppError> {
+    if active {
+        return Err(AppError::User("这段还在录制，先停下再处理".into()));
+    }
+    let path = session
+        .file_path
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("这段录像没有文件".into()))?;
+    Ok(PathBuf::from(path))
+}
+
+/// 转封装成 mp4（只换容器，不重编码）。
+#[tauri::command]
+pub async fn session_remux(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<PostResult, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session_video(&session, session.status == "recording")?;
+    postprocess::remux(&path).await
+}
+
+/// 截图：默认第 10 秒，避开刚开播的黑帧。
+#[tauri::command]
+pub async fn session_screenshot(
+    state: State<'_, AppState>,
+    session_id: String,
+    at_secs: Option<f64>,
+) -> Result<PostResult, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session_video(&session, session.status == "recording")?;
+    postprocess::screenshot(&path, at_secs).await
+}
+
+/// 弹幕 JSONL → ASS 字幕。
+#[tauri::command]
+pub async fn session_export_danmaku(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<PostResult, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session
+        .danmaku_path
+        .as_ref()
+        .ok_or_else(|| AppError::User("这场没有弹幕存档".into()))?;
+    postprocess::danmaku_to_ass(std::path::Path::new(path))
+}
+
+/// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
+#[tauri::command]
+pub async fn room_merge_sessions(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<PostResult, AppError> {
+    let mut sessions: Vec<_> = state
+        .db
+        .list_sessions(Some(&room_id), 200)?
+        .into_iter()
+        .filter(|session| session.status != "recording" && session.file_path.is_some())
+        .collect();
+    sessions.sort_by_key(|session| session.started_at);
+    let files: Vec<PathBuf> = sessions
+        .into_iter()
+        .filter_map(|session| session.file_path.map(PathBuf::from))
+        .filter(|path| path.is_file())
+        .collect();
+    postprocess::merge(&files).await
+}
+

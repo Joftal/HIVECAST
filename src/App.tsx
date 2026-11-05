@@ -79,7 +79,7 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-          <span className="rounded-full border hairline px-2 py-1">M4</span>
+          <span className="rounded-full border hairline px-2 py-1">M5</span>
           {!isTauri() && (
             <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300">
               browser preview

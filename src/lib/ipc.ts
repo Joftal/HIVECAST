@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
+import type { PostResult } from "./bindings/PostResult";
 import type { RecordNotice } from "./bindings/RecordNotice";
 import type { RecordSession } from "./bindings/RecordSession";
 import type { RoomView } from "./bindings/RoomView";
@@ -13,6 +14,7 @@ export type {
   AppInfo,
   DanmakuBatch,
   DanmakuMessage,
+  PostResult,
   RecordNotice,
   RecordSession,
   RoomView,
@@ -82,6 +84,24 @@ export async function recordStop(id: string): Promise<void> {
 
 export async function sessionsList(roomId?: string, limit = 50): Promise<RecordSession[]> {
   return invoke<RecordSession[]>("sessions_list", { roomId, limit });
+}
+
+// ---- M5 本地后处理 ----
+
+export async function sessionRemux(sessionId: string): Promise<PostResult> {
+  return invoke<PostResult>("session_remux", { sessionId });
+}
+
+export async function sessionScreenshot(sessionId: string, atSecs?: number): Promise<PostResult> {
+  return invoke<PostResult>("session_screenshot", { sessionId, atSecs });
+}
+
+export async function sessionExportDanmaku(sessionId: string): Promise<PostResult> {
+  return invoke<PostResult>("session_export_danmaku", { sessionId });
+}
+
+export async function roomMergeSessions(roomId: string): Promise<PostResult> {
+  return invoke<PostResult>("room_merge_sessions", { roomId });
 }
 
 // 后端在任何房间状态变化（开播/下播/开录/停录/出错）时广播，前端只刷新列表。

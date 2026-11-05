@@ -47,8 +47,15 @@
     "refreshOne": "Refresh now",
     "remove": "Remove",
     "noHistory": "No recordings yet",
+    "post": {
+      "mp4": "To MP4",
+      "shot": "Snapshot",
+      "ass": "Danmaku ASS",
+      "merge": "Merge",
+      "mergeHint": "Merge {{n}} sessions into one mp4"
+    },
     "tipsTitle": "Tips",
-    "tipInput": "Supports Bilibili (including b23.tv short links), Douyu, and Huya live links or room ids.",
+    "tipInput": "Supports Bilibili (including b23.tv short links), Douyu, Huya, and Douyin live links or room ids.",
     "tipAuto": "Manual recording still works with auto record off. Stop sends SIGINT so ffmpeg can finalize the file.",
     "tipQuality": "Record quality is independent of playback quality. Without login platforms often downgrade; the actual quality is marked with ↓.",
     "status": {
@@ -154,6 +161,7 @@
   "platformName": {
     "bilibili": "Bilibili",
     "douyu": "Douyu",
-    "huya": "Huya"
+    "huya": "Huya",
+    "douyin": "Douyin"
   }
 }
