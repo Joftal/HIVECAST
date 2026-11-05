@@ -177,16 +177,12 @@
     "sortTitle": "按名称",
     "filterAll": "全部",
     "onlyRecording": "仅看录制中",
-    "density": "密度",
-    "densityComfortable": "舒适",
-    "densityCompact": "紧凑",
     "addRoom": "添加房间",
     "cancel": "取消",
     "colStatus": "状态",
     "colPlatform": "平台",
     "colRoom": "房间",
     "colArea": "分区",
-    "colOnline": "人气",
     "colQuality": "画质",
     "colDuration": "录制时长",
     "colRecent": "最近录制",
@@ -204,7 +200,9 @@
     "removeRoom": "移除房间",
     "confirmRemove": "再点一次",
     "noMatch": "没有匹配的房间",
-    "footerLibrary": "媒体库 {{n}} 个文件 · {{size}}"
+    "footerLibrary": "媒体库 {{n}} 个文件 · {{size}}",
+    "panelSettings": "录制设置",
+    "more": "更多"
   },
   "watch": {
     "title": "多屏观看",

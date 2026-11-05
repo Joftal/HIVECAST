@@ -38,8 +38,8 @@
   --c-line-strong: #d2d7df;
   --c-ink: #14171c;
   --c-ink-soft: #39404b;
-  --c-muted: #65707f;
-  --c-faint: #8f97a4;
+  --c-muted: #57616e;
+  --c-faint: #7b8593;
   --c-accent: #2f6bff;
   --c-accent-ink: #ffffff;
   --c-accent-soft: #eef3ff;
@@ -62,8 +62,8 @@
   --c-line-strong: #3c362e;
   --c-ink: #f2ede6;
   --c-ink-soft: #d8cfc3;
-  --c-muted: #a79c8f;
-  --c-faint: #7d7365;
+  --c-muted: #b3a695;
+  --c-faint: #8b8073;
   --c-accent: #f0a23c;
   --c-accent-ink: #221603;
   --c-accent-soft: rgba(240, 162, 60, 0.13);
@@ -112,6 +112,18 @@ body {
 .focus-ring:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--c-accent) 75%, transparent);
   outline-offset: 2px;
+}
+
+/* 文本类控件在鼠标点击时也会命中 :focus-visible（因为可以继续键入），
+   于是搜索框会出现一整圈蓝框。输入框只保留一档更深的描边，键盘 Tab 时也一样克制。 */
+input.focus-ring:focus,
+input.focus-ring:focus-visible,
+select.focus-ring:focus,
+select.focus-ring:focus-visible,
+textarea.focus-ring:focus,
+textarea.focus-ring:focus-visible {
+  outline: none;
+  border-color: var(--c-line-strong);
 }
 
 /* 数字输入框的原生上下箭头在浅色主题里很脏，统一去掉，靠键入与自绘控件。 */

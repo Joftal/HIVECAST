@@ -177,16 +177,12 @@
     "sortTitle": "By name",
     "filterAll": "All",
     "onlyRecording": "Recording only",
-    "density": "Density",
-    "densityComfortable": "Comfortable",
-    "densityCompact": "Compact",
     "addRoom": "Add room",
     "cancel": "Cancel",
     "colStatus": "Status",
     "colPlatform": "Platform",
     "colRoom": "Room",
     "colArea": "Category",
-    "colOnline": "Viewers",
     "colQuality": "Quality",
     "colDuration": "Recorded",
     "colRecent": "Last rec",
@@ -204,7 +200,9 @@
     "removeRoom": "Remove room",
     "confirmRemove": "Click again",
     "noMatch": "No rooms match",
-    "footerLibrary": "Library {{n}} files · {{size}}"
+    "footerLibrary": "Library {{n}} files · {{size}}",
+    "panelSettings": "Recording",
+    "more": "More"
   },
   "watch": {
     "title": "Multi-view",

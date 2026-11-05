@@ -9,7 +9,7 @@ type ButtonProps = {
   onClick?: () => void;
   onBlur?: () => void;
   variant?: "primary" | "secondary" | "ghost" | "danger" | "recording";
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   disabled?: boolean;
   title?: string;
   type?: "button" | "submit";
@@ -45,7 +45,7 @@ export function Button({
       disabled={disabled}
       className={cx(
         "focus-ring inline-flex shrink-0 items-center justify-center gap-1.5 rounded-ctl font-medium transition-[background-color,color,box-shadow,filter,transform] duration-150 active:scale-[0.985]",
-        size === "sm" ? "h-7 px-2.5 text-[11.5px]" : "h-8 px-3 text-[12px]",
+        size === "sm" ? "h-7 px-2.5 text-[11.5px]" : size === "lg" ? "h-9 px-3.5 text-[12.5px]" : "h-8 px-3 text-[12px]",
         BUTTON_VARIANT[variant],
         disabled ? "pointer-events-none opacity-45" : "",
         className,
@@ -203,6 +203,7 @@ export function Select({
   options,
   title,
   disabled,
+  size = "sm",
   className,
 }: {
   value: string;
@@ -210,6 +211,8 @@ export function Select({
   options: Array<{ value: string; label: string }>;
   title?: string;
   disabled?: boolean;
+  /** sm 用于表格/工具栏，md 用于详情面板与设置里的独立字段。 */
+  size?: "sm" | "md";
   className?: string;
 }) {
   return (
@@ -220,7 +223,8 @@ export function Select({
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         className={cx(
-          "focus-ring h-7 w-full cursor-pointer appearance-none rounded-ctl border border-line bg-surface pl-2 pr-6 text-[11.5px] text-ink-soft transition-colors hover:border-line-strong disabled:pointer-events-none disabled:opacity-45",
+          "focus-ring w-full cursor-pointer appearance-none rounded-ctl border border-line bg-surface text-ink-soft transition-colors hover:border-line-strong disabled:pointer-events-none disabled:opacity-45",
+          size === "md" ? "h-9 pl-3 pr-8 text-[13px]" : "h-7 pl-2 pr-6 text-[11.5px]",
         )}
       >
         {options.map((option) => (
@@ -236,7 +240,7 @@ export function Select({
         fill="none"
         stroke="currentColor"
         strokeWidth="1.4"
-        className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-faint"
+        className={cx("pointer-events-none absolute top-1/2 -translate-y-1/2 text-faint", size === "md" ? "right-2.5" : "right-2")}
         aria-hidden
       >
         <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
