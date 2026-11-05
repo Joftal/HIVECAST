@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::jce;
 use crate::platform::http;
 
 /// 实时弹幕事件名：前端按 roomId 分发给对应格子。
@@ -200,9 +201,9 @@ impl DanmakuHub {
     }
 }
 
-/// 是否已有该平台的弹幕接入（M3 只做了 B 站；斗鱼/虎牙在 M4 不接弹幕）。
+/// 是否已有该平台的弹幕接入（M3 B 站；M7.3 起加斗鱼、虎牙）。
 pub fn supports(room: &RoomRecord) -> bool {
-    room.platform == "bilibili"
+    matches!(room.platform.as_str(), "bilibili" | "douyu" | "huya")
 }
 
 /// 单个录制会话的 JSONL 写入器。
@@ -505,7 +506,50 @@ async fn fetch_conf(real_id: i64) -> Result<DanmuSession, String> {
     })
 }
 
+/// 单房间限速 + 打时间戳 + 写盘 + 攒批。
+fn accept(
+    conn: &RoomConn,
+    window_start: &mut Instant,
+    count: &mut u32,
+    batch: &mut Vec<DanmakuMessage>,
+    mut message: DanmakuMessage,
+) {
+    if window_start.elapsed() >= Duration::from_secs(1) {
+        *window_start = Instant::now();
+        *count = 0;
+    }
+    if *count >= MAX_PER_SECOND {
+        conn.dropped.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    *count += 1;
+    message.offset_ms = conn.started.elapsed().as_millis() as i64;
+    conn.fan_out(&message);
+    batch.push(message);
+}
+
+fn flush(app: &AppHandle, conn: &RoomConn, batch: &mut Vec<DanmakuMessage>) {
+    if batch.is_empty() {
+        return;
+    }
+    tracing::debug!(room = %conn.room.room_key, n = batch.len(), "弹幕批量下发");
+    let payload = DanmakuBatch {
+        room_id: conn.room.id.clone(),
+        messages: std::mem::take(batch),
+    };
+    let _ = app.emit(EVENT_DANMAKU_BATCH, payload);
+}
+
 async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
+    if conn.room.platform == "douyu" {
+        run_douyu_room(app, conn).await;
+        return;
+    }
+    if conn.room.platform == "huya" {
+        run_huya_room(app, conn).await;
+        return;
+    }
+
     let mut session: Option<DanmuSession> = None;
     let mut failures = 0u32;
     let mut backoff = Duration::from_secs(1);
@@ -591,19 +635,8 @@ async fn run_once(
                             }
                             *backoff = Duration::from_secs(1);
                         }
-                        for mut message in outcome.messages {
-                            if window_start.elapsed() >= Duration::from_secs(1) {
-                                window_start = Instant::now();
-                                count = 0;
-                            }
-                            if count >= MAX_PER_SECOND {
-                                conn.dropped.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                            count += 1;
-                            message.offset_ms = conn.started.elapsed().as_millis() as i64;
-                            conn.fan_out(&message);
-                            batch.push(message);
+                        for message in outcome.messages {
+                            accept(conn, &mut window_start, &mut count, &mut batch, message);
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) => return Err("弹幕连接被服务端关闭".into()),
@@ -613,14 +646,7 @@ async fn run_once(
                 }
             }
             _ = tokio::time::sleep(BATCH_WINDOW) => {
-                if !batch.is_empty() {
-                    tracing::debug!(room = %conn.room.room_key, n = batch.len(), "弹幕批量下发");
-                    let payload = DanmakuBatch {
-                        room_id: conn.room.id.clone(),
-                        messages: std::mem::take(&mut batch),
-                    };
-                    let _ = app.emit(EVENT_DANMAKU_BATCH, payload);
-                }
+                flush(app, conn, &mut batch);
             }
         }
 
@@ -983,5 +1009,792 @@ mod tests {
         }
         println!("frames={frames} messages={messages} auth={auth:?}");
         assert!(messages > 0, "8 秒内没有解析出任何弹幕");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 斗鱼弹幕（M7.3）
+//
+// 协议是「自定义二进制帧 + STT 文本」：
+//   [len: u32 LE][len: u32 LE][0x02B1: u16 LE][0x00][0x00][payload][0x00]
+// len 从帧首算起（含自身 4 字节），payload 是 key@=value/ 串，值里的 "/" 与 "@"
+// 分别转义成 @S / @A。登录两步：loginreq 认房间，joingroup 进 -9999 分组
+// （-9999 = 不分组，能收到全房间弹幕）；心跳 45 秒发一次 mrkl。
+// ---------------------------------------------------------------------------
+
+const DOUYU_HEARTBEAT: Duration = Duration::from_secs(45);
+const DOUYU_PORTS: std::ops::Range<u16> = 8501..8507;
+
+fn douyu_frame(payload: &str) -> Vec<u8> {
+    // 帧尾补一个 0，payload 之间用 NUL 分隔。
+    let body = payload.as_bytes();
+    let len = 8 + body.len() + 1;
+    let mut out = Vec::with_capacity(len + 4);
+    out.extend_from_slice(&(len as u32).to_le_bytes());
+    out.extend_from_slice(&(len as u32).to_le_bytes());
+    out.extend_from_slice(&0x02B1u16.to_le_bytes());
+    out.push(0);
+    out.push(0);
+    out.extend_from_slice(body);
+    out.push(0);
+    out
+}
+
+/// 从累积缓冲里取出所有完整帧的文本部分。
+fn douyu_drain(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    loop {
+        if buffer.len() < 4 {
+            break;
+        }
+        let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        if len < 9 || len > 1024 * 1024 {
+            // 帧头不可信说明流已经错位，交给上层断开重连。
+            buffer.clear();
+            break;
+        }
+        if buffer.len() < len + 4 {
+            break;
+        }
+        // 帧头 12 字节之后是 payload，末尾那个 NUL 不计入文本。
+        let text = String::from_utf8_lossy(&buffer[12..len + 3]).to_string();
+        buffer.drain(0..len + 4);
+        out.push(text);
+    }
+    out
+}
+
+fn douyu_unescape(raw: &str) -> String {
+    raw.replace("@S", "/").replace("@A", "@")
+}
+
+fn douyu_fields(raw: &str) -> HashMap<&str, &str> {
+    let mut fields = HashMap::new();
+    for part in raw.split('/') {
+        if let Some((key, value)) = part.split_once("@=") {
+            fields.insert(key, value);
+        }
+    }
+    fields
+}
+
+fn douyu_color(raw: &str) -> u32 {
+    match raw.parse::<u32>() {
+        Ok(0) | Err(_) => 0xFF_FF_FF,
+        Ok(value) => value & 0xFF_FF_FF,
+    }
+}
+
+fn douyu_message(raw: &str) -> Option<DanmakuMessage> {
+    let fields = douyu_fields(raw);
+    match fields.get("type").copied() {
+        Some("chatmsg") => {
+            let content = douyu_unescape(fields.get("txt")?);
+            if content.trim().is_empty() {
+                return None;
+            }
+            Some(DanmakuMessage {
+                offset_ms: 0,
+                kind: "chat".into(),
+                user: fields.get("nn").map(|name| douyu_unescape(name)),
+                content,
+                color: douyu_color(fields.get("col").copied().unwrap_or("0")),
+            })
+        }
+        Some("dgb") => {
+            // 礼物：gfid 是礼物 id，gfcnt 是数量，hits 是连击。
+            let name = fields.get("gfn").map(|name| douyu_unescape(name))?;
+            let count = fields.get("gfcnt").copied().unwrap_or("1");
+            Some(DanmakuMessage {
+                offset_ms: 0,
+                kind: "gift".into(),
+                user: fields.get("nn").map(|name| douyu_unescape(name)),
+                content: format!("{name} x{count}"),
+                color: 0xFF_C8_5C,
+            })
+        }
+        _ => None,
+    }
+}
+
+async fn run_douyu_room(app: AppHandle, conn: Arc<RoomConn>) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        if conn.closed.load(Ordering::SeqCst) {
+            break;
+        }
+        match douyu_once(&app, &conn, &mut backoff).await {
+            Ok(()) => break,
+            Err(err) => {
+                tracing::warn!(room = %conn.room.room_key, %err, "斗鱼弹幕连接中断");
+                conn.set_error(err);
+                sleep_interruptible(&conn, backoff).await;
+                backoff = (backoff * 2).min(RETRY_MAX);
+            }
+        }
+    }
+
+    let writers = conn.writers.lock().expect("弹幕写入器被污染");
+    for writer in writers.iter() {
+        writer.finish();
+    }
+}
+
+async fn douyu_once(
+    app: &AppHandle,
+    conn: &Arc<RoomConn>,
+    backoff: &mut Duration,
+) -> Result<(), String> {
+    let room_id: i64 = conn
+        .room
+        .room_key
+        .parse()
+        .map_err(|_| format!("斗鱼房间号不是数字：{}", conn.room.room_key))?;
+
+    let mut ws = douyu_connect().await?;
+    {
+        use futures_util::SinkExt;
+        ws.send(WsMessage::Binary(douyu_frame(&format!(
+            "type@=loginreq/roomid@={room_id}/"
+        ))))
+        .await
+        .map_err(|err| format!("发送登录包失败：{err}"))?;
+        ws.send(WsMessage::Binary(douyu_frame(&format!(
+            "type@=joingroup/rid@={room_id}/gid@=-9999/"
+        ))))
+        .await
+        .map_err(|err| format!("发送入组包失败：{err}"))?;
+    }
+    *backoff = Duration::from_secs(1);
+
+    let mut heartbeat = tokio::time::interval(DOUYU_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut window_start = Instant::now();
+    let mut count = 0u32;
+    let mut batch: Vec<DanmakuMessage> = Vec::new();
+    let mut buffer: Vec<u8> = Vec::new();
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                ws.send(WsMessage::Binary(douyu_frame("type@=mrkl/")))
+                    .await
+                    .map_err(|err| format!("弹幕心跳失败：{err}"))?;
+            }
+            incoming = ws.next() => {
+                match incoming {
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        buffer.extend_from_slice(&data);
+                        for raw in douyu_drain(&mut buffer) {
+                            if let Some(message) = douyu_message(&raw) {
+                                accept(conn, &mut window_start, &mut count, &mut batch, message);
+                            }
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) => return Err("斗鱼弹幕连接被服务端关闭".into()),
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(format!("斗鱼弹幕连接异常：{err}")),
+                    None => return Err("斗鱼弹幕连接结束".into()),
+                }
+            }
+            _ = tokio::time::sleep(BATCH_WINDOW) => {
+                flush(app, conn, &mut batch);
+            }
+        }
+
+        if conn.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+    }
+}
+
+async fn douyu_connect() -> Result<WsStream, String> {
+    // 斗鱼弹幕前置网关对 rustls 的 ClientHello 直接回 HandshakeFailure，
+    // 用系统 TLS（macOS Security / Windows SChannel）才握得上，其它平台仍走 rustls。
+    let native = native_tls::TlsConnector::builder()
+        .build()
+        .map_err(|err| format!("初始化系统 TLS 失败：{err}"))?;
+    let connector = tokio_tungstenite::Connector::NativeTls(native);
+
+    let mut last = String::new();
+    for port in DOUYU_PORTS {
+        let url = format!("wss://danmuproxy.douyu.com:{port}/");
+        match tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector.clone())).await {
+            Ok((ws, _)) => return Ok(ws),
+            Err(err) => last = format!("{url} → {err}"),
+        }
+    }
+    Err(format!("斗鱼弹幕服务器全部连接失败：{last}"))
+}
+
+#[cfg(test)]
+mod douyu_tests {
+    use super::*;
+
+    #[test]
+    fn frame_round_trips_through_buffer() {
+        let mut buffer = douyu_frame("type@=loginreq/roomid@=9999/");
+        let frames = douyu_drain(&mut buffer);
+        assert_eq!(frames, vec!["type@=loginreq/roomid@=9999/".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn drain_keeps_partial_frame() {
+        let mut buffer = douyu_frame("type@=mrkl/");
+        let cut = buffer.len() - 3;
+        let tail = buffer.split_off(cut);
+        assert!(douyu_drain(&mut buffer).is_empty());
+        buffer.extend_from_slice(&tail);
+        assert_eq!(douyu_drain(&mut buffer), vec!["type@=mrkl/".to_string()]);
+    }
+
+    #[test]
+    fn drain_handles_two_frames_in_one_read() {
+        let mut buffer = douyu_frame("type@=mrkl/");
+        buffer.extend_from_slice(&douyu_frame("type@=mrkl/"));
+        assert_eq!(douyu_drain(&mut buffer).len(), 2);
+    }
+
+    #[test]
+    fn parses_chat_and_unescapes() {
+        let raw = "type@=chatmsg/rid@=9999/nn@=测试@A用户/txt@=哈哈@S真棒/col@=16777215/";
+        let message = douyu_message(raw).expect("应该解析出弹幕");
+        assert_eq!(message.user.as_deref(), Some("测试@用户"));
+        assert_eq!(message.content, "哈哈/真棒");
+        assert_eq!(message.color, 0xFF_FF_FF);
+        assert_eq!(message.kind, "chat");
+    }
+
+    #[test]
+    fn ignores_unknown_types_and_blank_text() {
+        assert!(douyu_message("type@=uenter/nn@=x/").is_none());
+        assert!(douyu_message("type@=chatmsg/nn@=x/txt@=/").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "需要联网与活跃直播间（9999）"]
+    async fn live_probe() {
+        use futures_util::SinkExt;
+        let room: i64 = 9999;
+        let mut ws = douyu_connect().await.expect("连不上斗鱼弹幕");
+        ws.send(WsMessage::Binary(douyu_frame(&format!(
+            "type@=loginreq/roomid@={room}/"
+        ))))
+        .await
+        .expect("登录包发送失败");
+        ws.send(WsMessage::Binary(douyu_frame(&format!(
+            "type@=joingroup/rid@={room}/gid@=-9999/"
+        ))))
+        .await
+        .expect("入组包发送失败");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut chats = 0usize;
+        let mut samples: Vec<String> = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(left, ws.next()).await {
+                Ok(Some(Ok(WsMessage::Binary(data)))) => {
+                    buffer.extend_from_slice(&data);
+                    for raw in douyu_drain(&mut buffer) {
+                        if let Some(message) = douyu_message(&raw) {
+                            chats += 1;
+                            if samples.len() < 5 {
+                                samples.push(format!(
+                                    "{}: {}",
+                                    message.user.unwrap_or_default(),
+                                    message.content
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(err))) => panic!("连接异常：{err}"),
+                Ok(None) => break,
+                Err(_) => break,
+            }
+            if chats >= 20 && samples.len() >= 5 {
+                break;
+            }
+        }
+        println!("收到弹幕 {chats} 条，样例：{samples:#?}");
+        assert!(chats > 0, "25 秒内没有收到任何斗鱼弹幕");
+    }
+
+    #[test]
+    fn parses_gift() {
+        let raw = "type@=dgb/nn@=老板/gfn@=火箭/gfcnt@=2/";
+        let message = douyu_message(raw).expect("应该解析出礼物");
+        assert_eq!(message.kind, "gift");
+        assert_eq!(message.content, "火箭 x2");
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// 虎牙弹幕（M7.3）
+//
+// 协议是 JCE/TARS：WS 上每条消息都是一个 WebSocketCommand{iCmdType, vData}。
+// - 注册：命令 1，vData = WSUserInfo（房间三元组 + 分组类型 3）
+// - 心跳：命令 3，vData = Wup 信封（onlineui / OnUserHeartBeat）
+// - 弹幕：命令 7，vData = WSPushMessage{iUri, sMsg}：iUri 1400 聊天、6501 礼物。
+// 房间三元组（lUid / lChannelId / lSubChannelId）只能从移动版页面里抠。
+// ---------------------------------------------------------------------------
+
+const HUYA_WS: &str = "ws://ws.api.huya.com";
+const HUYA_HEARTBEAT: Duration = Duration::from_secs(60);
+const HUYA_UA: &str = "Mozilla/5.0 (Linux; Android 5.1.1; Nexus 6 Build/LYZ28E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Mobile Safari/537.36";
+const HUYA_CMD_REGISTER: i64 = 1;
+const HUYA_CMD_WUP_REQ: i64 = 3;
+const HUYA_CMD_MSG_PUSH: i64 = 7;
+const HUYA_URI_CHAT: i64 = 1400;
+const HUYA_URI_GIFT: i64 = 6501;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HuyaIds {
+    uid: i64,
+    tid: i64,
+    sid: i64,
+}
+
+async fn huya_ids(room_key: &str) -> Result<HuyaIds, String> {
+    let url = format!("https://m.huya.com/{room_key}");
+    let (html, _) = http::get_text(&url, "https://m.huya.com/", &[("User-Agent", HUYA_UA)])
+        .await
+        .map_err(|err| format!("虎牙房间页请求失败：{err}"))?;
+    huya_ids_from_html(&html)
+        .ok_or_else(|| "虎牙房间页里没有 lUid / lChannelId / lSubChannelId".to_string())
+}
+
+fn huya_ids_from_html(html: &str) -> Option<HuyaIds> {
+    let uid = huya_number(html, "lUid")?;
+    let tid = huya_number(html, "lChannelId").unwrap_or(uid);
+    let sid = huya_number(html, "lSubChannelId").unwrap_or(uid);
+    Some(HuyaIds {
+        uid,
+        tid: if tid > 0 { tid } else { uid },
+        sid: if sid > 0 { sid } else { uid },
+    })
+}
+
+/// 抠 \"key\": 123 里的数字，兼容值是空串、或裸数字结尾的情况。
+fn huya_number(html: &str, key: &str) -> Option<i64> {
+    let needle = format!("\"{key}\"");
+    let start = html.find(&needle)? + needle.len();
+    let rest = html[start..].trim_start().strip_prefix(':')?.trim_start();
+    if let Some(after) = rest.strip_prefix('"') {
+        let end = after.find('"')?;
+        return after[..end].trim().parse().ok();
+    }
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+fn huya_command(cmd: i64, data: Vec<u8>) -> Vec<u8> {
+    let mut enc = jce::Enc::new();
+    enc.int(0, cmd);
+    enc.bytes(1, &data);
+    enc.into_vec()
+}
+
+fn huya_register_packet(ids: &HuyaIds) -> Vec<u8> {
+    let mut info = jce::Enc::new();
+    info.int(0, ids.uid);
+    info.boolean(1, ids.uid == 0);
+    info.string(2, "");
+    info.string(3, "");
+    info.int(4, ids.tid);
+    info.int(5, ids.sid);
+    info.int(6, ids.uid);
+    info.int(7, 3);
+    huya_command(HUYA_CMD_REGISTER, info.into_vec())
+}
+
+fn huya_heartbeat_packet(ids: &HuyaIds) -> Vec<u8> {
+    // UserId 的 sHuYaUA 必须带上，否则服务端会把连接当成未知客户端。
+    let mut user = jce::Enc::new();
+    user.int(0, 0);
+    user.string(1, "");
+    user.string(2, "");
+    user.string(3, "webh5&1.0.0&websocket");
+    user.string(4, "");
+
+    let mut req = jce::Enc::new();
+    // 外层 UserHeartBeatReq 用 writeStruct(0, ..)，tId 自身也是一个写全的结构体。
+    req.begin_struct(0);
+    req.begin_struct(0);
+    req.raw(user.as_slice());
+    req.end_struct();
+    req.int(1, ids.tid);
+    req.int(2, ids.sid);
+    req.int(3, 0);
+    req.int(4, ids.uid);
+    req.boolean(5, false);
+    req.int(6, 1);
+    req.int(7, 0);
+    req.int(8, 0);
+    req.int(9, 0);
+    req.int(10, 0);
+    req.end_struct();
+
+    let mut data = jce::Enc::new();
+    data.map_bytes(0, &[("tReq", req.into_vec())]);
+    let newdata = data.into_vec();
+
+    let mut header = jce::Enc::new();
+    header.int(1, 3);
+    header.int(2, 0);
+    header.int(3, 0);
+    header.int(4, 0);
+    header.string(5, "onlineui");
+    header.string(6, "OnUserHeartBeat");
+    header.bytes(7, &newdata);
+    header.int(8, 0);
+    header.empty_map(9);
+    header.empty_map(10);
+    let header = header.into_vec();
+
+    // 前缀 4 字节是整个 Wup（前缀 + header）的总长度，不是 header 自身的长度。
+    let mut wup = Vec::with_capacity(header.len() + 4);
+    wup.extend_from_slice(&((header.len() as u32) + 4).to_be_bytes());
+    wup.extend_from_slice(&header);
+    huya_command(HUYA_CMD_WUP_REQ, wup)
+}
+
+/// 虎牙的字体颜色是 0xBBGGRR，转成前端用的 0xRRGGBB；<= 0 表示默认白色。
+fn huya_color(raw: i64) -> u32 {
+    if raw <= 0 {
+        return 0xFF_FF_FF;
+    }
+    let value = raw as u32;
+    let red = value & 0xFF;
+    let green = (value >> 8) & 0xFF;
+    let blue = (value >> 16) & 0xFF;
+    (red << 16) | (green << 8) | blue
+}
+
+fn huya_messages(payload: &[u8]) -> Vec<DanmakuMessage> {
+    let mut out = Vec::new();
+    let Ok(fields) = jce::decode(payload) else {
+        return out;
+    };
+    if jce::get_int(&fields, 0) != Some(HUYA_CMD_MSG_PUSH) {
+        return out;
+    }
+    let Some(body) = jce::get_bytes(&fields, 1) else {
+        return out;
+    };
+    let Ok(push) = jce::decode(body) else {
+        return out;
+    };
+    let uri = jce::get_int(&push, 1).unwrap_or(0);
+    let Some(data) = jce::get_bytes(&push, 2) else {
+        return out;
+    };
+    let Ok(notice) = jce::decode(data) else {
+        return out;
+    };
+
+    match uri {
+        HUYA_URI_CHAT => {
+            let user = jce::get_struct(&notice, 0)
+                .and_then(|fields| jce::get_str(fields, 2))
+                .unwrap_or("")
+                .to_string();
+            let content = jce::get_str(&notice, 3).unwrap_or("").trim().to_string();
+            if content.is_empty() {
+                return out;
+            }
+            let color = jce::get_struct(&notice, 6)
+                .and_then(|fields| jce::get_int(fields, 0))
+                .unwrap_or(-1);
+            out.push(DanmakuMessage {
+                offset_ms: 0,
+                kind: "chat".into(),
+                user: if user.is_empty() { None } else { Some(user) },
+                content,
+                color: huya_color(color),
+            });
+        }
+        HUYA_URI_GIFT => {
+            let user = jce::get_str(&notice, 6).unwrap_or("").to_string();
+            let name = jce::get_str(&notice, 7).unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                return out;
+            }
+            let count = jce::get_int(&notice, 2).unwrap_or(1).max(1);
+            out.push(DanmakuMessage {
+                offset_ms: 0,
+                kind: "gift".into(),
+                user: if user.is_empty() { None } else { Some(user) },
+                content: format!("{name} x{count}"),
+                color: 0xFF_C8_5C,
+            });
+        }
+        _ => {}
+    }
+    out
+}
+
+async fn run_huya_room(app: AppHandle, conn: Arc<RoomConn>) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        if conn.closed.load(Ordering::SeqCst) {
+            break;
+        }
+        match huya_once(&app, &conn, &mut backoff).await {
+            Ok(()) => break,
+            Err(err) => {
+                tracing::warn!(room = %conn.room.room_key, %err, "虎牙弹幕连接中断");
+                conn.set_error(err);
+                sleep_interruptible(&conn, backoff).await;
+                backoff = (backoff * 2).min(RETRY_MAX);
+            }
+        }
+    }
+
+    let writers = conn.writers.lock().expect("弹幕写入器被污染");
+    for writer in writers.iter() {
+        writer.finish();
+    }
+}
+
+async fn huya_once(
+    app: &AppHandle,
+    conn: &Arc<RoomConn>,
+    backoff: &mut Duration,
+) -> Result<(), String> {
+    let ids = huya_ids(&conn.room.room_key).await?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(HUYA_WS)
+        .await
+        .map_err(|err| format!("虎牙弹幕连接失败：{err}"))?;
+    ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+        .await
+        .map_err(|err| format!("发送注册包失败：{err}"))?;
+    ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+        .await
+        .map_err(|err| format!("发送心跳失败：{err}"))?;
+    *backoff = Duration::from_secs(1);
+
+    let mut heartbeat = tokio::time::interval(HUYA_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // 建连时已经手动发过一次，跳过 interval 的立即触发。
+    heartbeat.tick().await;
+
+    let mut window_start = Instant::now();
+    let mut count = 0u32;
+    let mut batch: Vec<DanmakuMessage> = Vec::new();
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+                    .await
+                    .map_err(|err| format!("虎牙弹幕心跳失败：{err}"))?;
+            }
+            incoming = ws.next() => {
+                match incoming {
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        for message in huya_messages(&data) {
+                            accept(conn, &mut window_start, &mut count, &mut batch, message);
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) => return Err("虎牙弹幕连接被服务端关闭".into()),
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(format!("虎牙弹幕连接异常：{err}")),
+                    None => return Err("虎牙弹幕连接结束".into()),
+                }
+            }
+            _ = tokio::time::sleep(BATCH_WINDOW) => {
+                flush(app, conn, &mut batch);
+            }
+        }
+
+        if conn.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(test)]
+mod huya_tests {
+    use super::*;
+
+    fn ids() -> HuyaIds {
+        HuyaIds {
+            uid: 1_346_609_715,
+            tid: 1_346_609_715,
+            sid: 1_346_609_715,
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn register_packet_matches_reference() {
+        // 参考值由 biliLive-tools/packages/huya-danmu/lib.js 生成。
+        assert_eq!(
+            hex(&huya_register_packet(&ids())),
+            "00011d00001b025043a2331c26003600425043a233525043a233625043a2337003"
+        );
+    }
+
+    #[test]
+    fn heartbeat_packet_matches_reference() {
+        assert_eq!(
+            hex(&huya_heartbeat_packet(&ids())),
+            "00031d0000730000007310032c3c4c56086f6e6c696e657569660f4f6e557365724865617274426561747d0000460800010604745265711d0000390a0a0c160026003615776562683526312e302e3026776562736f636b657446000b125043a233225043a2333c425043a2335c60017c8c9cac0b8c980ca80c"
+        );
+    }
+
+    #[test]
+    fn reads_ids_from_mobile_page() {
+        let html = r#"<script>var cfg = {"lChannelId": 1346609715, "lSubChannelId": 1346609715, "lUid": 1346609715}</script>"#;
+        assert_eq!(
+            huya_ids_from_html(html),
+            Some(HuyaIds {
+                uid: 1_346_609_715,
+                tid: 1_346_609_715,
+                sid: 1_346_609_715
+            })
+        );
+    }
+
+    #[test]
+    fn falls_back_to_uid_when_channel_ids_are_blank() {
+        let html = r#"{"lChannelId":"","lSubChannelId":"","lUid":42}"#;
+        assert_eq!(
+            huya_ids_from_html(html),
+            Some(HuyaIds {
+                uid: 42,
+                tid: 42,
+                sid: 42
+            })
+        );
+    }
+
+    fn push_packet(uri: i64, body: Vec<u8>) -> Vec<u8> {
+        let mut push = jce::Enc::new();
+        push.int(0, 0);
+        push.int(1, uri);
+        push.bytes(2, &body);
+        push.int(3, 0);
+        huya_command(HUYA_CMD_MSG_PUSH, push.into_vec())
+    }
+
+    #[test]
+    fn parses_chat_push() {
+        let mut sender = jce::Enc::new();
+        sender.int(0, 123);
+        sender.string(2, "测试用户");
+        let mut notice = jce::Enc::new();
+        notice.begin_struct(0);
+        notice.raw(sender.as_slice());
+        notice.end_struct();
+        notice.int(1, 1_346_609_715);
+        notice.int(2, 1_346_609_715);
+        notice.string(3, "这波很强");
+        notice.int(4, 0);
+        notice.begin_struct(5);
+        notice.end_struct();
+        let mut bullet = jce::Enc::new();
+        bullet.int(0, 0x00_00_FF);
+        notice.begin_struct(6);
+        notice.raw(bullet.as_slice());
+        notice.end_struct();
+
+        let messages = huya_messages(&push_packet(HUYA_URI_CHAT, notice.into_vec()));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, "chat");
+        assert_eq!(messages[0].user.as_deref(), Some("测试用户"));
+        assert_eq!(messages[0].content, "这波很强");
+        assert_eq!(messages[0].color, 0x00_FF_00_00);
+    }
+
+    #[test]
+    fn parses_gift_push() {
+        let mut notice = jce::Enc::new();
+        notice.int(0, 520);
+        notice.string(1, "pay-id");
+        notice.int(2, 3);
+        notice.int(3, 1_346_609_715);
+        notice.int(4, 777);
+        notice.string(5, "主播");
+        notice.string(6, "老板");
+        notice.string(7, "荧光棒");
+        let messages = huya_messages(&push_packet(HUYA_URI_GIFT, notice.into_vec()));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, "gift");
+        assert_eq!(messages[0].user.as_deref(), Some("老板"));
+        assert_eq!(messages[0].content, "荧光棒 x3");
+    }
+
+    #[test]
+    fn ignores_non_push_commands() {
+        let mut command = jce::Enc::new();
+        command.int(0, 2);
+        command.bytes(1, &[]);
+        assert!(huya_messages(command.as_slice()).is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "需要联网与活跃直播间（HUYA_PROBE_ROOM，默认 660000）"]
+    async fn live_probe() {
+        use futures_util::SinkExt;
+        let room = std::env::var("HUYA_PROBE_ROOM").unwrap_or_else(|_| "660000".to_string());
+        let ids = huya_ids(&room).await.expect("抓不到房间三元组");
+        let (mut ws, _) = tokio_tungstenite::connect_async(HUYA_WS)
+            .await
+            .expect("连不上虎牙弹幕");
+        ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+            .await
+            .expect("注册包发送失败");
+        ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+            .await
+            .expect("心跳发送失败");
+
+        // 赛事房间会有系统公告，平时房间则是观众发言，两者都走 1400。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut chats = 0usize;
+        let mut samples: Vec<String> = Vec::new();
+        loop {
+            if chats > 0 && !samples.is_empty() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(left, ws.next()).await {
+                Ok(Some(Ok(WsMessage::Binary(data)))) => {
+                    for message in huya_messages(&data) {
+                        chats += 1;
+                        if samples.len() < 5 {
+                            samples.push(format!(
+                                "{}: {}",
+                                message.user.unwrap_or_default(),
+                                message.content
+                            ));
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(err))) => panic!("连接异常：{err}"),
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        println!("收到虎牙弹幕 {chats} 条，样例：{samples:#?}");
+        assert!(chats > 0, "30 秒内没有收到任何虎牙弹幕");
     }
 }

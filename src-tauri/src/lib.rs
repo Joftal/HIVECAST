@@ -7,6 +7,7 @@ mod db;
 mod disk;
 mod error;
 mod ffmpeg;
+mod jce;
 mod local;
 mod monitor;
 mod platform;
