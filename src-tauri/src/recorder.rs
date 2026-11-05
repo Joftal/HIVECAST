@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use std::time::{Duration, Instant};
 
-use hivecast_ipc::{RecordNotice, RecordSession, RecordingInfo, RoomRecord};
+use hivecast_ipc::{AppNotice, RecordSession, RecordingInfo, RoomRecord};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
 
@@ -38,7 +38,7 @@ const MAX_RESTARTS: u32 = 3;
 
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
-pub const EVENT_RECORD_NOTICE: &str = "record://notice";
+pub const EVENT_APP_NOTICE: &str = "app://notice";
 
 struct Active {
     recording: RecordingInfo,
@@ -813,13 +813,13 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
 }
 
 fn emit_notice(app: &AppHandle, kind: &str, room_id: &str, host_name: &str, detail: Option<String>) {
-    let notice = RecordNotice {
+    let notice = AppNotice {
         kind: kind.to_string(),
         room_id: room_id.to_string(),
         host_name: host_name.to_string(),
         detail,
     };
-    let _ = app.emit(EVENT_RECORD_NOTICE, notice);
+    let _ = app.emit(EVENT_APP_NOTICE, notice);
 }
 
 /// 选线：优先 H.264（FLV 兼容最好），其次第一个有地址的候选。

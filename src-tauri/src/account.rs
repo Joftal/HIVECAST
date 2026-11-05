@@ -7,7 +7,8 @@
 //!
 //! 其余平台没有公开的扫码接口（斗鱼/虎牙/抖音都依赖风控），v1 走粘贴 Cookie。
 
-use hivecast_ipc::{CredentialInfo, QrPoll, QrTicket};
+use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket};
+use tauri::Emitter;
 use serde::Deserialize;
 
 use crate::credential;
@@ -268,7 +269,7 @@ pub fn list(db: &Db) -> Result<Vec<CredentialInfo>, AppError> {
 }
 
 /// 启动后异步复验 B 站登录态：过期就标 expired，设置页会提示重新扫码。
-pub async fn revalidate(db: &Db) {
+pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
     let rows = match db.credentials() {
         Ok(rows) => rows,
         Err(_) => return,
@@ -291,11 +292,23 @@ pub async fn revalidate(db: &Db) {
             }
             Err(err) => {
                 tracing::warn!(error = %err, "B 站登录态复验失败");
+                let was_ok = row.status == "ok";
+                let account_name = row.account_name.clone();
                 let updated = CredentialRow {
                     status: "expired".to_string(),
                     ..row
                 };
                 let _ = db.save_credential(&updated);
+                // 只在「从正常变成过期」时播报，避免每次启动都弹一次。
+                if was_ok {
+                    let notice = AppNotice {
+                        kind: "credential_expired".into(),
+                        room_id: String::new(),
+                        host_name: account_name,
+                        detail: Some("bilibili".into()),
+                    };
+                    let _ = app.emit(crate::recorder::EVENT_APP_NOTICE, notice);
+                }
             }
         }
     }

@@ -70,8 +70,9 @@ impl AppState {
         crate::credential::load_from_db(&db);
         // B 站登录态会过期，启动后异步复验一次；网络慢不该拖住启动。
         let db_for_auth = db.clone();
+        let app_for_auth = app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::account::revalidate(&db_for_auth).await;
+            crate::account::revalidate(&db_for_auth, &app_for_auth).await;
         });
 
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。

@@ -10,6 +10,7 @@ import {
   mediaStop,
   sessionExportDanmaku,
   sessionRemux,
+  sessionsMerge,
   sessionScreenshot,
   type MediaItem,
   type Playback,
@@ -157,6 +158,23 @@ export default function MediaPage() {
       await reload();
     } catch (err) {
       setError(describeError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const mergeSelected = async () => {
+    if (selected.length < 2 || busy) return;
+    setBusy("merge");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await sessionsMerge(selected);
+      setNotice(t("media.mergeDone", { size: formatSize(result.size) }));
+      setSelected([]);
+      await reload();
+    } catch (err) {
+      setError(t("media.postFailed") + "：" + describeError(err));
     } finally {
       setBusy(null);
     }
@@ -310,6 +328,15 @@ export default function MediaPage() {
               className="focus-ring rounded-full border border-amber-300/30 px-3 py-0.5 text-[11px] transition-colors hover:border-amber-200/60"
             >
               {t("media.clearSelection")}
+            </button>
+            <button
+              type="button"
+              disabled={busy !== null || selected.length < 2}
+              onClick={() => void mergeSelected()}
+              title={selected.length < 2 ? t("media.mergeHint") : undefined}
+              className="focus-ring rounded-full border border-sky-300/40 bg-sky-400/10 px-3 py-0.5 text-[11px] text-sky-200 transition-colors hover:bg-sky-400/20 disabled:opacity-40"
+            >
+              {busy === "merge" ? "…" : t("media.merge")}
             </button>
             <button
               type="button"

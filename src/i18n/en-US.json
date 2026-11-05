@@ -44,7 +44,10 @@
     "screenshot": "Snapshot",
     "exportAss": "ASS subs",
     "postDone": "{{what}} created · {{size}}",
-    "postFailed": "Post-processing failed"
+    "postFailed": "Post-processing failed",
+    "merge": "Merge selected",
+    "mergeDone": "Merged: {{size}}",
+    "mergeHint": "Select at least two recordings to merge"
   },
   "settings": {
     "title": "Settings",
@@ -229,6 +232,14 @@
     "diskFull": {
       "title": "Not enough disk space",
       "body": "Recording for {{host}} was stopped. Free up space and start it again"
+    },
+    "viewFailed": {
+      "title": "Playback stopped",
+      "body": "Playback for {{host}} failed after several retries: {{detail}}"
+    },
+    "credentialExpired": {
+      "title": "Session expired",
+      "body": "The Bilibili login for {{host}} expired. Scan the QR code again in Settings"
     }
   },
   "error": {

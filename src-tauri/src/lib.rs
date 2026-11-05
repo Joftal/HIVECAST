@@ -92,6 +92,7 @@ pub fn run() {
             commands::session_screenshot,
             commands::session_export_danmaku,
             commands::room_merge_sessions,
+            commands::sessions_merge,
             commands::settings_get,
             commands::settings_update,
             commands::credentials_list,

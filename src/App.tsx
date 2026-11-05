@@ -6,7 +6,7 @@ import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsPanel from "./features/settings/SettingsPanel";
 import WatchPage from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
-import { isTauri, onRecordNotice, settingsGet, settingsUpdate } from "./lib/ipc";
+import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
 
 type TabKey = "monitor" | "watch" | "media";
 
@@ -66,9 +66,16 @@ export default function App() {
         let granted = await isPermissionGranted();
         if (!granted) granted = (await requestPermission()) === "granted";
 
-        const off = await onRecordNotice((notice) => {
+        const off = await onAppNotice((notice) => {
           if (!granted || !notifyRef.current) return;
-          const key = notice.kind === "disk_full" ? "diskFull" : notice.kind;
+          const key =
+            notice.kind === "disk_full"
+              ? "diskFull"
+              : notice.kind === "view_failed"
+                ? "viewFailed"
+                : notice.kind === "credential_expired"
+                  ? "credentialExpired"
+                  : notice.kind;
           sendNotification({
             title: t(`notice.${key}.title`),
             body: t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" }),
@@ -111,7 +118,7 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-          <span className="rounded-full border hairline px-2 py-1">M7</span>
+          <span className="rounded-full border hairline px-2 py-1">M8</span>
           {!isTauri() && (
             <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300">
               browser preview

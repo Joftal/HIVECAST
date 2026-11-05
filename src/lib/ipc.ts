@@ -11,7 +11,7 @@ import type { MediaItem } from "./bindings/MediaItem";
 import type { Playback } from "./bindings/Playback";
 import type { Settings } from "./bindings/Settings";
 import type { PostResult } from "./bindings/PostResult";
-import type { RecordNotice } from "./bindings/RecordNotice";
+import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
 import type { RoomView } from "./bindings/RoomView";
 import type { StreamDescriptor } from "./bindings/StreamDescriptor";
@@ -28,7 +28,7 @@ export type {
   MediaItem,
   Playback,
   PostResult,
-  RecordNotice,
+  AppNotice,
   RecordSession,
   RoomView,
   Settings,
@@ -128,12 +128,17 @@ export async function roomMergeSessions(roomId: string): Promise<PostResult> {
   return invoke<PostResult>("room_merge_sessions", { roomId });
 }
 
-// 后端在任何房间状态变化（开播/下播/开录/停录/出错）时广播，前端只刷新列表。
-export const EVENT_RECORD_NOTICE = "record://notice";
+/// 合并选中的多段录像（后端按开录时间排序，跨房间也可以）。
+export async function sessionsMerge(sessionIds: string[]): Promise<PostResult> {
+  return invoke<PostResult>("sessions_merge", { sessionIds });
+}
 
-// 录制状态播报：前端拿到后自己用 i18n 组装文案再弹系统通知。
-export function onRecordNotice(handler: (notice: RecordNotice) => void): Promise<UnlistenFn> {
-  return listen<RecordNotice>(EVENT_RECORD_NOTICE, (event) => handler(event.payload));
+// 后端在任何房间状态变化（开播/下播/开录/停录/出错）时广播，前端只刷新列表。
+export const EVENT_APP_NOTICE = "app://notice";
+
+// 应用级播报（录制 / 观看失败 / 登录态过期）：前端自己用 i18n 组装文案再弹系统通知。
+export function onAppNotice(handler: (notice: AppNotice) => void): Promise<UnlistenFn> {
+  return listen<AppNotice>(EVENT_APP_NOTICE, (event) => handler(event.payload));
 }
 
 export function onRoomsChanged(handler: () => void): Promise<UnlistenFn> {

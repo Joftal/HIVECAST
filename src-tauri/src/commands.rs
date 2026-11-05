@@ -434,6 +434,82 @@ pub async fn room_merge_sessions(
     postprocess::merge(&files).await
 }
 
+/// 合并选中的多段录像（按开录时间排序），跨房间也可以。
+#[tauri::command]
+pub async fn sessions_merge(
+    state: State<'_, AppState>,
+    session_ids: Vec<String>,
+) -> Result<PostResult, AppError> {
+    if session_ids.len() < 2 {
+        return Err(AppError::User("至少选两段录像才能合并".into()));
+    }
+    let mut sessions = Vec::new();
+    for id in &session_ids {
+        let session = session_file(&state, id)?;
+        if session.status == "recording" {
+            return Err(AppError::User("有录像还在录制，先停下再合并".into()));
+        }
+        sessions.push(session);
+    }
+    let files = merge_files_in_order(sessions);
+    if files.len() < 2 {
+        return Err(AppError::User("选中的录像里可用文件不足两段".into()));
+    }
+    postprocess::merge(&files).await
+}
+
+/// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的跳过。
+fn merge_files_in_order(mut sessions: Vec<RecordSession>) -> Vec<PathBuf> {
+    sessions.sort_by_key(|session| session.started_at);
+    sessions
+        .into_iter()
+        .filter_map(|session| session.file_path.map(PathBuf::from))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(id: &str, started_at: i64, file: PathBuf) -> RecordSession {
+        RecordSession {
+            id: id.into(),
+            room_id: "room".into(),
+            started_at,
+            ended_at: Some(started_at + 60),
+            status: "finished".into(),
+            reason: Some("stopped".into()),
+            file_path: Some(file.display().to_string()),
+            file_size: 1,
+            duration_ms: 60_000,
+            quality: None,
+            line: None,
+            error: None,
+            danmaku_path: None,
+            danmaku_count: 0,
+        }
+    }
+
+    #[test]
+    fn merge_order_follows_start_time_and_skips_missing() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp4");
+        let b = dir.join("b.mp4");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let missing = dir.join("gone.mp4");
+        // 乱序传入，缺失文件在中间。
+        let files = merge_files_in_order(vec![
+            session("2", 200, b.clone()),
+            session("3", 300, missing),
+            session("1", 100, a.clone()),
+        ]);
+        assert_eq!(files, vec![a, b]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 // ---- 设置 ----
 

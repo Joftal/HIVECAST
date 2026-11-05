@@ -152,12 +152,15 @@ pub struct PostResult {
     pub message: Option<String>,
 }
 
-/// 录制状态播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
+/// 应用级播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
+///
+/// kind 取值：started | ended | failed | disk_full（录制）、
+/// view_failed（观看槽位放弃重连）、credential_expired（登录态复验失败）。
+/// 非录制类的 room_id 为空串，host_name 放房间名或账号名。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/lib/bindings/")]
-pub struct RecordNotice {
-    /// started | ended | failed | disk_full
+pub struct AppNotice {
     pub kind: String,
     pub room_id: String,
     pub host_name: String,

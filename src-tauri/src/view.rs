@@ -115,6 +115,17 @@ impl Slot {
 }
 
 /// 一条管道走完之后的结果，决定监督循环的下一步。
+/// 槽位放弃重连时播报一次：前端据此弹系统通知（观看失败）。
+fn notify_failure(app: &AppHandle, room: &RoomRecord, detail: &str) {
+    let notice = hivecast_ipc::AppNotice {
+        kind: "view_failed".into(),
+        room_id: room.id.clone(),
+        host_name: room.host_name.clone(),
+        detail: Some(detail.to_string()),
+    };
+    let _ = app.emit(crate::recorder::EVENT_APP_NOTICE, notice);
+}
+
 enum Cycle {
     /// 用户关掉了槽位
     Closed,
@@ -395,12 +406,14 @@ impl ViewManager {
                             }
                             attempts += 1;
                             if attempts > MAX_RETRIES {
+                                let message = "转封装多次失败，已停止重连";
                                 {
                                     let mut state = handle.lock();
                                     state.status = "error".into();
-                                    state.error = Some("转封装多次失败，已停止重连".into());
+                                    state.error = Some(message.into());
                                 }
                                 self.emit(&app);
+                                notify_failure(&app, &room, message);
                                 break;
                             }
                             {
@@ -434,9 +447,10 @@ impl ViewManager {
                         {
                             let mut state = handle.lock();
                             state.status = "error".into();
-                            state.error = Some(message);
+                            state.error = Some(message.clone());
                         }
                         self.emit(&app);
+                        notify_failure(&app, &room, &message);
                         self.teardown(&handle).await;
                         break;
                     }
