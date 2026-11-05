@@ -331,15 +331,15 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const prefs = useDanmakuPrefs();
 
   return (
-    <div data-theme="dark" className="flex h-full min-h-0 bg-[#0b0c0e] text-ink">
+    <div className="flex h-full min-h-0 bg-canvas text-ink">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/8 px-3">
-          <span className="font-mono text-[11px] tabular-nums text-white/45">
-            {count} <span className="text-white/25">/ 4</span>
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
+          <span className="font-mono text-[11px] tabular-nums text-muted">
+            {count} <span className="text-faint">/ 4</span>
           </span>
 
           {count >= 2 && count <= 3 ? (
-            <div className="flex items-center rounded-[6px] border border-white/10 p-0.5">
+            <div className="flex items-center rounded-[6px] border border-line p-0.5">
               {(["default", "alt"] as Variant[]).map((option) => (
                 <button
                   key={option}
@@ -347,7 +347,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                   onClick={() => switchVariant(option)}
                   className={[
                     "focus-ring rounded-[4px] px-2 py-0.5 text-[11px] transition-colors",
-                    variant === option ? "bg-white/12 text-white/90" : "text-white/45 hover:text-white/80",
+                    variant === option ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
                   ].join(" ")}
                 >
                   {t(
@@ -368,7 +368,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
             <button
               type="button"
               onClick={usePortrait}
-              className="focus-ring rounded-[6px] px-2 py-1 text-[11px] text-white/45 transition-colors hover:bg-white/8 hover:text-white/85"
+              className="focus-ring rounded-[6px] px-2 py-1 text-[11px] text-muted transition-colors hover:bg-raised hover:text-ink"
             >
               {t("watch.portrait")}
             </button>
@@ -401,7 +401,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
         ) : null}
 
         {sounding >= 3 && loudHint ? (
-          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2 rounded-[6px] border border-white/12 bg-white/6 px-2.5 py-1.5 text-[11px] text-white/75">
+          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2 rounded-[6px] border border-line bg-raised px-2.5 py-1.5 text-[11px] text-ink-soft">
             <span className="flex-1">{t("watch.multiSound")}</span>
             <Button
               size="sm"
@@ -417,7 +417,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
               type="button"
               aria-label={t("watch.dismissHint")}
               onClick={() => setLoudHint(false)}
-              className="text-white/40 hover:text-white/80"
+              className="text-faint hover:text-ink-soft"
             >
               ✕
             </button>
@@ -425,7 +425,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
         ) : null}
 
         {danmakuOpen && count > 0 ? (
-          <div className="mx-3 mt-2 grid shrink-0 gap-3 rounded-[8px] border border-white/10 bg-white/[0.03] p-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mx-3 mt-2 grid shrink-0 gap-3 rounded-[8px] border border-line bg-surface p-3 sm:grid-cols-2 lg:grid-cols-4">
             {(
               [
                 ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
@@ -435,9 +435,9 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
               ] as const
             ).map(([key, label, min, max, step, digits]) => (
               <label key={key} className="flex flex-col gap-1">
-                <span className="flex items-baseline justify-between text-[11px] text-white/55">
+                <span className="flex items-baseline justify-between text-[11px] text-muted">
                   {label}
-                  <span className="font-mono text-[10px] tabular-nums text-white/35">
+                  <span className="font-mono text-[10px] tabular-nums text-faint">
                     {(prefs[key] as number).toFixed(digits)}
                   </span>
                 </span>
@@ -463,12 +463,12 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
             <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
               <div className="grid grid-cols-2 gap-1.5 opacity-50">
                 {[0, 1, 2, 3].map((index) => (
-                  <span key={index} className="h-6 w-10 rounded-[4px] border border-white/25 bg-white/5" />
+                  <span key={index} className="h-6 w-10 rounded-[4px] border border-line-strong bg-raised" />
                 ))}
               </div>
               <div className="space-y-1">
-                <p className="text-[13px] font-medium text-white/85">{t("watch.emptyTitle")}</p>
-                <p className="max-w-[380px] text-[11.5px] leading-5 text-white/45">{t("watch.emptyBody")}</p>
+                <p className="text-[13px] font-medium text-ink">{t("watch.emptyTitle")}</p>
+                <p className="max-w-[380px] text-[11.5px] leading-5 text-muted">{t("watch.emptyBody")}</p>
               </div>
               {isTauri() ? (
                 <Button variant="primary" onClick={() => setPanelOpen(true)}>
@@ -489,7 +489,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                 const view = roomId ? roomById.get(roomId) : undefined;
                 if (!session) {
                   return (
-                    <div className="flex h-full items-center justify-center rounded-[8px] border border-dashed border-white/10 bg-white/[0.02] text-[11px] text-white/30">
+                    <div className="flex h-full items-center justify-center rounded-[8px] border border-dashed border-line bg-surface/60 text-[11px] text-faint">
                       {t("watch.stage.empty")}
                     </div>
                   );
@@ -518,17 +518,17 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
           )}
 
           {panelOpen ? (
-            <div className="absolute inset-y-0 right-0 z-30 flex w-[300px] flex-col border-l border-white/10 bg-[#141416]/95 shadow-2xl backdrop-blur-md">
-              <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/8 px-3">
-                <span className="text-[12px] font-medium text-white/85">{t("watch.panel.title")}</span>
-                <span className="font-mono text-[10px] tabular-nums text-white/35">
+            <div className="absolute inset-y-0 right-0 z-30 flex w-[300px] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md">
+              <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
+                <span className="text-[12px] font-medium text-ink">{t("watch.panel.title")}</span>
+                <span className="font-mono text-[10px] tabular-nums text-faint">
                   {count} / 4
                 </span>
                 <button
                   type="button"
                   onClick={() => setPanelOpen(false)}
                   aria-label={t("watch.close")}
-                  className="focus-ring ml-auto flex h-6 w-6 items-center justify-center rounded-[5px] text-white/40 hover:bg-white/10 hover:text-white/80"
+                  className="focus-ring ml-auto flex h-6 w-6 items-center justify-center rounded-[5px] text-faint hover:bg-raised hover:text-ink-soft"
                 >
                   ✕
                 </button>
@@ -539,45 +539,45 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={t("watch.panel.search")}
-                  className="focus-ring h-8 w-full rounded-[6px] border border-white/10 bg-white/5 px-2.5 text-[11.5px] text-white/85 placeholder:text-white/30"
+                  className="focus-ring h-8 w-full rounded-[6px] border border-line bg-raised px-2.5 text-[11.5px] text-ink placeholder:text-faint"
                 />
               </div>
-              <p className="shrink-0 px-3 pb-1 pt-1.5 text-[10px] leading-4 text-white/30">
+              <p className="shrink-0 px-3 pb-1 pt-1.5 text-[10px] leading-4 text-faint">
                 {t("watch.panel.dragHint")}
               </p>
 
               <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-2">
                 {filtered.length === 0 ? (
-                  <p className="px-2 py-6 text-center text-[11px] text-white/30">{t("watch.panel.empty")}</p>
+                  <p className="px-2 py-6 text-center text-[11px] text-faint">{t("watch.panel.empty")}</p>
                 ) : (
                   filtered.map((view) => (
                     <div
                       key={view.room.id}
                       draggable
                       onDragStart={(event) => writeDrag(event, { kind: "room", roomId: view.room.id })}
-                      className="group flex cursor-grab items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-white/6 active:cursor-grabbing"
+                      className="group flex cursor-grab items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised active:cursor-grabbing"
                     >
                       {view.room.avatarUrl ? (
                         <img
                           src={view.room.avatarUrl}
                           alt=""
                           referrerPolicy="no-referrer"
-                          className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-white/15"
+                          className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-line"
                         />
                       ) : (
-                        <span className="h-6 w-6 shrink-0 rounded-full bg-white/12" />
+                        <span className="h-6 w-6 shrink-0 rounded-full bg-raised" />
                       )}
                       <div className="min-w-0 flex-1 leading-tight">
-                        <div className="truncate text-[11.5px] text-white/85">
+                        <div className="truncate text-[11.5px] text-ink">
                           {view.room.title || view.room.hostName}
                         </div>
-                        <div className="truncate text-[10px] text-white/40">{view.room.hostName}</div>
+                        <div className="truncate text-[10px] text-faint">{view.room.hostName}</div>
                       </div>
                       <button
                         type="button"
                         disabled={busy || count >= MAX_SLOTS}
                         onClick={() => void watchRoom(view.room.id)}
-                        className="focus-ring shrink-0 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-white/45 transition-colors hover:bg-white/10 hover:text-white/90 disabled:opacity-35"
+                        className="focus-ring shrink-0 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-muted transition-colors hover:bg-raised hover:text-ink disabled:opacity-35"
                       >
                         {count >= MAX_SLOTS ? t("watch.panel.full") : t("watch.panel.join")}
                       </button>
@@ -586,7 +586,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                 )}
               </div>
 
-              <div className="shrink-0 space-y-1.5 border-t border-white/8 p-2">
+              <div className="shrink-0 space-y-1.5 border-t border-line p-2">
                 <div className="flex gap-1.5">
                   <input
                     value={input}
@@ -595,7 +595,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                       if (event.key === "Enter") void addAndWatch();
                     }}
                     placeholder={t("watch.inputPlaceholder")}
-                    className="focus-ring h-8 min-w-0 flex-1 rounded-[6px] border border-white/10 bg-white/5 px-2.5 text-[11.5px] text-white/85 placeholder:text-white/30"
+                    className="focus-ring h-8 min-w-0 flex-1 rounded-[6px] border border-line bg-raised px-2.5 text-[11.5px] text-ink placeholder:text-faint"
                   />
                   <Button
                     size="md"
@@ -612,12 +612,12 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
         </div>
       </div>
 
-      <aside className="flex w-11 shrink-0 flex-col items-center border-l border-white/8 bg-[#0d0e10] py-1.5">
+      <aside className="flex w-11 shrink-0 flex-col items-center border-l border-line bg-surface py-1.5">
         <button
           type="button"
           onClick={() => setPanelOpen((open) => !open)}
           title={t("watch.panel.title")}
-          className="focus-ring flex w-full flex-col items-center gap-1 rounded-[6px] py-1 text-white/50 hover:text-white/85"
+          className="focus-ring flex w-full flex-col items-center gap-1 rounded-[6px] py-1 text-muted hover:text-ink"
         >
           <span className="flex flex-col -space-y-1.5">
             {candidates.slice(0, 3).map((view) =>
@@ -627,15 +627,15 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                   src={view.room.avatarUrl}
                   alt=""
                   referrerPolicy="no-referrer"
-                  className="h-[22px] w-[22px] rounded-full object-cover ring-2 ring-[#0d0e10]"
+                  className="h-[22px] w-[22px] rounded-full object-cover ring-2 ring-surface"
                 />
               ) : (
-                <span key={view.room.id} className="h-[22px] w-[22px] rounded-full bg-white/15 ring-2 ring-[#0d0e10]" />
+                <span key={view.room.id} className="h-[22px] w-[22px] rounded-full bg-raised ring-2 ring-surface" />
               ),
             )}
           </span>
-          <span className="font-mono text-[10px] tabular-nums text-white/40">{candidates.length}</span>
-          <span className="rounded-[4px] border border-white/12 px-1 text-[10px] leading-4 text-white/45">
+          <span className="font-mono text-[10px] tabular-nums text-faint">{candidates.length}</span>
+          <span className="rounded-[4px] border border-line px-1 text-[10px] leading-4 text-muted">
             {panelOpen ? "»" : "«"}
           </span>
         </button>
