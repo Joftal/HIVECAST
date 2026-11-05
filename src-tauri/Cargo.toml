@@ -31,6 +31,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tauri-plugin-notification = "2"
 fs4 = { version = "0.13", features = ["sync"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+brotli = "7"
+flate2 = "1"
+md5 = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

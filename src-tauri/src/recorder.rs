@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 
 use crate::broker::StreamBroker;
+use crate::danmaku::{DanmakuHub, RecordWriter};
 use crate::db::Db;
 use crate::disk;
 use crate::error::AppError;
@@ -42,6 +43,9 @@ struct Active {
     started: Instant,
     /// 通知里要显示的主播名，收尾时从内存取，避免再查一次库
     host_name: String,
+    /// 本场录制的弹幕写入器（与视频同名 .jsonl）
+    danmaku: Option<Arc<RecordWriter>>,
+    danmaku_path: Option<String>,
 }
 
 pub struct Recorder {
@@ -56,10 +60,12 @@ pub struct Recorder {
     start_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// 用户手动停录过的房间：在主播下播前不再自动开录，避免「停了又被拉起来」。
     suppressed: Mutex<HashSet<String>>,
+    /// 弹幕扇出中心：录制与观看共用一条房间连接。测试里可以不挂。
+    danmaku: Option<Arc<DanmakuHub>>,
 }
 
 impl Recorder {
-    pub fn new(db: Arc<Db>, media_root: PathBuf) -> Self {
+    pub fn new(db: Arc<Db>, media_root: PathBuf, danmaku: Option<Arc<DanmakuHub>>) -> Self {
         Self {
             db,
             media_root,
@@ -68,6 +74,7 @@ impl Recorder {
             errors: Mutex::new(HashMap::new()),
             start_locks: Mutex::new(HashMap::new()),
             suppressed: Mutex::new(HashSet::new()),
+            danmaku,
         }
     }
 
@@ -239,6 +246,16 @@ impl Recorder {
             .spawn()
             .map_err(|err| AppError::Ffmpeg(format!("启动 ffmpeg 失败：{err}")))?;
 
+        // 弹幕落盘与视频同名，只换扩展名；后处理阶段按这个约定找旁挂文件。
+        let danmaku_path = path.with_extension("jsonl");
+        let danmaku = self
+            .danmaku
+            .as_ref()
+            .and_then(|hub| hub.attach_record(room, &danmaku_path));
+        if self.danmaku.is_some() && danmaku.is_none() {
+            tracing::warn!(path = %danmaku_path.display(), "弹幕文件创建失败，本场只录视频");
+        }
+
         let session_id = uuid::Uuid::new_v4().to_string();
         self.db
             .create_session(&RecordSession {
@@ -254,6 +271,8 @@ impl Recorder {
                 quality: Some(candidate.name.clone()),
                 line: Some(group.name.clone()),
                 error: None,
+                danmaku_path: danmaku.as_ref().map(|_| danmaku_path.display().to_string()),
+                danmaku_count: 0,
             })
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
@@ -276,6 +295,8 @@ impl Recorder {
                     stop_reason: None,
                     started: Instant::now(),
                     host_name: room.host_name.clone(),
+                    danmaku,
+                    danmaku_path: Some(danmaku_path.display().to_string()),
                 },
             );
         }
@@ -432,11 +453,22 @@ impl Recorder {
             }
         };
 
+        // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
+        let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
+            (Some(hub), Some(writer)) => match hub.detach_record(room_id, writer) {
+                Some((path, count)) => (Some(path.display().to_string()), count as i64),
+                None => (active.danmaku_path.clone(), 0),
+            },
+            _ => (active.danmaku_path.clone(), 0),
+        };
+
         if let Err(err) = self.db.finish_session(
             &active.recording.session_id,
             final_status,
             reason,
             file_size,
+            danmaku_path.as_deref(),
+            danmaku_count,
             error.as_deref(),
         ) {
             tracing::warn!(%err, "写入录制历史失败");
@@ -602,7 +634,7 @@ mod tests {
     #[test]
     fn manual_stop_suppresses_auto_start() {
         let db = Arc::new(Db::open(Path::new(":memory:")).expect("内存库"));
-        let recorder = Recorder::new(db, PathBuf::from("/tmp"));
+        let recorder = Recorder::new(db, PathBuf::from("/tmp"), None);
         assert!(!recorder.auto_suppressed("r1"));
         recorder
             .suppressed

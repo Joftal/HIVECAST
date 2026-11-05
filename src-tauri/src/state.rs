@@ -5,6 +5,7 @@ use hivecast_ipc::{AppInfo, StreamDescriptor};
 use tauri::{AppHandle, Manager};
 
 use crate::broker::StreamBroker;
+use crate::danmaku::DanmakuHub;
 use crate::db::Db;
 use crate::error::AppError;
 use crate::ffmpeg;
@@ -23,6 +24,8 @@ pub struct AppState {
     pub broker: Arc<StreamBroker>,
     pub recorder: Arc<Recorder>,
     pub view: Arc<ViewManager>,
+    /// 弹幕扇出中心：一房间一条连接，录制与观看共用。
+    pub danmaku: Arc<DanmakuHub>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
 }
@@ -62,8 +65,13 @@ impl AppState {
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
         let broker = Arc::new(StreamBroker::new());
-        let recorder = Arc::new(Recorder::new(db.clone(), media_root.clone()));
-        let view = ViewManager::new(cache_root.join("view"), server.clone());
+        let danmaku = DanmakuHub::new(app.clone());
+        let recorder = Arc::new(Recorder::new(
+            db.clone(),
+            media_root.clone(),
+            Some(danmaku.clone()),
+        ));
+        let view = ViewManager::new(cache_root.join("view"), server.clone(), danmaku.clone());
         view.clean_cache().await;
 
         monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
@@ -88,6 +96,7 @@ impl AppState {
             broker,
             recorder,
             view,
+            danmaku,
             demo: tokio::sync::Mutex::new(None),
         })
     }

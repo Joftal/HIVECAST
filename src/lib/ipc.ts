@@ -1,13 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo } from "./bindings/AppInfo";
+import type { DanmakuBatch } from "./bindings/DanmakuBatch";
+import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { RecordNotice } from "./bindings/RecordNotice";
 import type { RecordSession } from "./bindings/RecordSession";
 import type { RoomView } from "./bindings/RoomView";
 import type { StreamDescriptor } from "./bindings/StreamDescriptor";
 import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
 
-export type { AppInfo, RecordNotice, RecordSession, RoomView, StreamDescriptor, ViewSlotInfo };
+export type {
+  AppInfo,
+  DanmakuBatch,
+  DanmakuMessage,
+  RecordNotice,
+  RecordSession,
+  RoomView,
+  StreamDescriptor,
+  ViewSlotInfo,
+};
 
 // 浏览器里跑 Vite 预览时没有 Tauri 运行时，界面上要给出明确提示而不是空白。
 export function isTauri(): boolean {
@@ -113,4 +124,13 @@ export async function viewRetry(slot: number): Promise<ViewSlotInfo> {
 
 export function onViewChanged(handler: (slots: ViewSlotInfo[]) => void): Promise<UnlistenFn> {
   return listen<ViewSlotInfo[]>(EVENT_VIEW_CHANGED, (event) => handler(event.payload));
+}
+
+// ---- M3 弹幕 ----
+
+// 后端每 200ms 合并一批，前端按 roomId 分发给对应格子的 Canvas。
+export const EVENT_DANMAKU_BATCH = "danmaku://batch";
+
+export function onDanmakuBatch(handler: (batch: DanmakuBatch) => void): Promise<UnlistenFn> {
+  return listen<DanmakuBatch>(EVENT_DANMAKU_BATCH, (event) => handler(event.payload));
 }

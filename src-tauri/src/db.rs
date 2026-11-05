@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -30,6 +30,7 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -206,8 +207,9 @@ impl Db {
             .execute(
                 "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
-                    file_size, duration_ms, quality, line, error
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    file_size, duration_ms, quality, line, error,
+                    danmaku_path, danmaku_count
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     session.id,
                     session.room_id,
@@ -221,6 +223,8 @@ impl Db {
                     session.quality,
                     session.line,
                     session.error,
+                    session.danmaku_path,
+                    session.danmaku_count,
                 ],
             )
             .map_err(db_err)?;
@@ -233,6 +237,8 @@ impl Db {
         status: &str,
         reason: &str,
         file_size: i64,
+        danmaku_path: Option<&str>,
+        danmaku_count: i64,
         error: Option<&str>,
     ) -> Result<(), AppError> {
         let now = now_ts();
@@ -240,9 +246,10 @@ impl Db {
             .execute(
                 "UPDATE record_session SET
                     status = ?2, reason = ?3, ended_at = ?4, file_size = ?5,
-                    duration_ms = MAX(0, (?4 - started_at) * 1000), error = ?6
+                    duration_ms = MAX(0, (?4 - started_at) * 1000), error = ?6,
+                    danmaku_path = ?7, danmaku_count = ?8
                   WHERE id = ?1",
-                params![id, status, reason, now, file_size, error],
+                params![id, status, reason, now, file_size, error, danmaku_path, danmaku_count],
             )
             .map_err(db_err)?;
         Ok(())
@@ -280,6 +287,33 @@ impl Db {
     }
 }
 
+/// 轻量迁移：老库缺弹幕列时补上。
+///
+/// 不用 migration 框架——目前只有两张表，直接按 PRAGMA 检查足够，
+/// 失败时保留旧数据比重建表更安全。
+fn migrate(conn: &Connection) -> Result<(), AppError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(record_session)")
+        .map_err(db_err)?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    if !columns.iter().any(|name| name == "danmaku_path") {
+        conn.execute("ALTER TABLE record_session ADD COLUMN danmaku_path TEXT", [])
+            .map_err(db_err)?;
+    }
+    if !columns.iter().any(|name| name == "danmaku_count") {
+        conn.execute(
+            "ALTER TABLE record_session ADD COLUMN danmaku_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(db_err)?;
+    }
+    Ok(())
+}
+
 fn db_err(err: rusqlite::Error) -> AppError {
     AppError::Db(err.to_string())
 }
@@ -296,7 +330,7 @@ const ROOM_SELECT: &str = "SELECT
 
 const SESSION_SELECT: &str = "SELECT
     id, room_id, started_at, ended_at, status, reason, file_path, file_size,
-    duration_ms, quality, line, error
+    duration_ms, quality, line, error, danmaku_path, danmaku_count
   FROM record_session";
 
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
@@ -336,6 +370,8 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
         quality: row.get(9)?,
         line: row.get(10)?,
         error: row.get(11)?,
+        danmaku_path: row.get(12)?,
+        danmaku_count: row.get(13)?,
     })
 }
 

@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 
 use crate::broker::StreamBroker;
+use crate::danmaku::DanmakuHub;
 use crate::error::AppError;
 use crate::ffmpeg;
 use crate::platform::{Codec, RoomRef, StreamCandidate, StreamFormat, StreamGroup};
@@ -125,15 +126,18 @@ pub struct ViewManager {
     slots: Mutex<HashMap<u8, Arc<Slot>>>,
     /// 串行化 open：StrictMode 下同一个 effect 会跑两遍，并发 open 会占掉两个格子。
     open_gate: tokio::sync::Mutex<()>,
+    /// 弹幕扇出：槽位存在期间持有引用，关掉最后一个消费者才断 WS。
+    danmaku: Arc<DanmakuHub>,
 }
 
 impl ViewManager {
-    pub fn new(root: PathBuf, server: Arc<StreamServer>) -> Arc<Self> {
+    pub fn new(root: PathBuf, server: Arc<StreamServer>, danmaku: Arc<DanmakuHub>) -> Arc<Self> {
         Arc::new(Self {
             root,
             server,
             slots: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),
+            danmaku,
         })
     }
 
@@ -174,6 +178,8 @@ impl ViewManager {
             (slot, handle)
         };
 
+        // 先占住弹幕引用再起管道：这样弹幕能覆盖到第一帧，而不是等 ffmpeg 就绪。
+        self.danmaku.retain(room);
         self.emit(app);
         self.restart_supervisor(app, broker, slot, handle.clone(), room.clone());
         Ok(handle.info(slot))
@@ -187,6 +193,7 @@ impl ViewManager {
         let Some(handle) = handle else {
             return Ok(());
         };
+        self.danmaku.release(&handle.room.id);
 
         {
             let mut state = handle.lock();
@@ -270,6 +277,7 @@ impl ViewManager {
         };
 
         for handle in &handles {
+            self.danmaku.release(&handle.room.id);
             let mut state = handle.lock();
             state.closed = true;
             state.generation += 1;

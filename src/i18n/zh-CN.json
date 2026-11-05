@@ -106,7 +106,8 @@
     "retry": "重新连接",
     "audioOn": "有声",
     "muted": "静音",
-    "danmakuLocked": "弹幕将在 M3 开放",
+    "danmakuShow": "显示弹幕",
+    "danmakuHide": "隐藏弹幕",
     "stats": {
       "dropped": "丢帧"
     },

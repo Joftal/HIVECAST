@@ -1,5 +1,5 @@
 import Hls from "hls.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 type Props = {
@@ -8,6 +8,10 @@ type Props = {
   volume: number;
   onVolumeChange: (volume: number) => void;
   onFatal?: (detail: string) => void;
+  /** 叠在画面上的弹幕层（由外部注入，播放器本身不关心实现）。 */
+  overlay?: ReactNode;
+  danmakuEnabled?: boolean;
+  onToggleDanmaku?: () => void;
 };
 
 type Stats = {
@@ -19,7 +23,15 @@ type Stats = {
 
 const EMPTY_STATS: Stats = { width: 0, height: 0, kbps: 0, dropped: 0 };
 
-export default function Player({ url, volume, onVolumeChange, onFatal }: Props) {
+export default function Player({
+  url,
+  volume,
+  onVolumeChange,
+  onFatal,
+  overlay,
+  danmakuEnabled = true,
+  onToggleDanmaku,
+}: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -181,6 +193,9 @@ export default function Player({ url, volume, onVolumeChange, onFatal }: Props) 
         onClick={toggle}
       />
 
+      {/* 弹幕层在视频之上、控件之下：不拦截点击，全屏时也保留。 */}
+      {overlay}
+
       {stats.width > 0 ? (
         <div className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/55 px-2 py-1 font-mono text-[10px] leading-4 text-zinc-300 opacity-80">
           {stats.width + "x" + stats.height}
@@ -241,9 +256,17 @@ export default function Player({ url, volume, onVolumeChange, onFatal }: Props) 
         <div className="ml-auto flex items-center gap-1">
           <button
             type="button"
-            disabled
-            title={t("watch.danmakuLocked")}
-            className="cursor-not-allowed rounded-md px-1.5 py-1 text-[10px] text-zinc-500"
+            onClick={onToggleDanmaku}
+            disabled={!onToggleDanmaku}
+            title={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
+            aria-pressed={danmakuEnabled}
+            className={[
+              "focus-ring rounded-md px-1.5 py-1 text-[10px] transition-colors",
+              danmakuEnabled
+                ? "text-hive-300 hover:bg-white/10"
+                : "text-zinc-500 hover:bg-white/10 hover:text-zinc-300",
+              onToggleDanmaku ? "" : "cursor-not-allowed opacity-40",
+            ].join(" ")}
           >
             弹
           </button>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import DanmakuCanvas from "./DanmakuCanvas";
 import Player from "./Player";
 import {
   describeError,
@@ -60,6 +61,8 @@ export default function WatchPage() {
   const [rooms, setRooms] = useState<RoomView[]>([]);
   const [slots, setSlots] = useState<ViewSlotInfo[]>([]);
   const [volumes, setVolumes] = useState<Record<number, number>>({});
+  // 弹幕按槽位独立开关：关掉一路不影响其它路（与音量同理）。
+  const [danmaku, setDanmaku] = useState<Record<number, boolean>>({});
   const [layoutChoice, setLayoutChoice] = useState<Layout | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -121,6 +124,10 @@ export default function WatchPage() {
 
   const setVolume = (slot: number, volume: number) => {
     setVolumes((prev) => ({ ...prev, [slot]: volume }));
+  };
+
+  const toggleDanmaku = (slot: number) => {
+    setDanmaku((prev) => ({ ...prev, [slot]: !(prev[slot] ?? true) }));
   };
 
   const muteAll = () => {
@@ -329,8 +336,10 @@ export default function WatchPage() {
                 session={session}
                 room={view?.room}
                 volume={volume}
+                danmaku={danmaku[session.slot] ?? true}
                 span={spanClass(layout, index)}
                 onVolume={(value) => setVolume(session.slot, value)}
+                onToggleDanmaku={() => toggleDanmaku(session.slot)}
                 onQuality={(qn) => void changeQuality(session.slot, qn)}
                 onClose={() => void closeSlot(session.slot)}
                 onRetry={() => void retrySlot(session.slot)}
@@ -349,14 +358,27 @@ type CellProps = {
   session: ViewSlotInfo;
   room?: RoomView["room"];
   volume: number;
+  danmaku: boolean;
   span: string;
   onVolume: (volume: number) => void;
+  onToggleDanmaku: () => void;
   onQuality: (qn: number) => void;
   onClose: () => void;
   onRetry: () => void;
 };
 
-function SlotCell({ session, room, volume, span, onVolume, onQuality, onClose, onRetry }: CellProps) {
+function SlotCell({
+  session,
+  room,
+  volume,
+  danmaku,
+  span,
+  onVolume,
+  onToggleDanmaku,
+  onQuality,
+  onClose,
+  onRetry,
+}: CellProps) {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
   const sounding = volume > 0;
@@ -437,6 +459,9 @@ function SlotCell({ session, room, volume, span, onVolume, onQuality, onClose, o
             volume={volume}
             onVolumeChange={onVolume}
             onFatal={(detail) => setFatal(detail)}
+            danmakuEnabled={danmaku}
+            onToggleDanmaku={onToggleDanmaku}
+            overlay={<DanmakuCanvas roomId={session.roomId} enabled={danmaku} />}
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">

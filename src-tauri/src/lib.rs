@@ -1,5 +1,6 @@
 mod broker;
 mod commands;
+mod danmaku;
 mod db;
 mod disk;
 mod error;
@@ -52,6 +53,7 @@ pub fn run() {
                     let state = handle.state::<AppState>();
                     state.recorder.shutdown_all(&handle).await;
                     state.view.shutdown_all(&handle).await;
+                    state.danmaku.shutdown_all();
                     handle.exit(0);
                 });
             }
@@ -84,6 +86,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(async {
                     state.recorder.shutdown_all(handle).await;
                     state.view.shutdown_all(handle).await;
+                    state.danmaku.shutdown_all();
                 });
             }
         }

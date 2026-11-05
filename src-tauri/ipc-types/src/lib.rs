@@ -129,6 +129,11 @@ pub struct RecordSession {
     pub quality: Option<String>,
     pub line: Option<String>,
     pub error: Option<String>,
+    /// 与视频同名的弹幕存档（JSONL），未开启弹幕时为空
+    pub danmaku_path: Option<String>,
+    /// 本场落盘的弹幕条数
+    #[ts(type = "number")]
+    pub danmaku_count: i64,
 }
 
 /// 录制状态播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
@@ -163,4 +168,29 @@ pub struct ViewSlotInfo {
     pub quality: Option<String>,
     pub line: Option<String>,
     pub error: Option<String>,
+}
+
+/// 一条弹幕（已归一化，平台差异在客户端层消化）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DanmakuMessage {
+    /// 相对连接建立（或录制开始）的毫秒偏移
+    #[ts(type = "number")]
+    pub offset_ms: i64,
+    /// chat | gift | super_chat | guard
+    pub kind: String,
+    pub user: Option<String>,
+    pub content: String,
+    /// 0xRRGGBB
+    pub color: u32,
+}
+
+/// 批量推送：每 200ms 合并一次，避免高频事件把 webview 打满。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DanmakuBatch {
+    pub room_id: String,
+    pub messages: Vec<DanmakuMessage>,
 }

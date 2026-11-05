@@ -106,7 +106,8 @@
     "retry": "Reconnect",
     "audioOn": "Audio on",
     "muted": "Muted",
-    "danmakuLocked": "Danmaku lands in M3",
+    "danmakuShow": "Show danmaku",
+    "danmakuHide": "Hide danmaku",
     "stats": {
       "dropped": "Dropped"
     },

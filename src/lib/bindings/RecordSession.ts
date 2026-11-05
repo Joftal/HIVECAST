@@ -11,4 +11,12 @@ status: string,
 /**
  * stream_ended | stopped | error | app_exit
  */
-reason: string | null, filePath: string | null, fileSize: number, durationMs: number, quality: string | null, line: string | null, error: string | null, };
+reason: string | null, filePath: string | null, fileSize: number, durationMs: number, quality: string | null, line: string | null, error: string | null, 
+/**
+ * 与视频同名的弹幕存档（JSONL），未开启弹幕时为空
+ */
+danmakuPath: string | null, 
+/**
+ * 本场落盘的弹幕条数
+ */
+danmakuCount: number, };
