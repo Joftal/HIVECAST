@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { IconButton, Segmented } from "./components/ui/Controls";
+import { IconButton, cx } from "./components/ui/Controls";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsPanel from "./features/settings/SettingsPanel";
@@ -10,21 +10,6 @@ import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 
 type TabKey = "monitor" | "watch" | "media";
-
-function BrandMark() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden>
-      <defs>
-        <linearGradient id="hive" x1="4" y1="2" x2="28" y2="30" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#FFD37A" />
-          <stop offset="1" stopColor="#E08B00" />
-        </linearGradient>
-      </defs>
-      <path d="M16 2.6 27.2 9v14L16 29.4 4.8 23V9L16 2.6Z" stroke="url(#hive)" strokeWidth="1.6" />
-      <path d="M16 9.4 21.8 12.7v6.6L16 22.6l-5.8-3.3v-6.6L16 9.4Z" fill="url(#hive)" fillOpacity="0.9" />
-    </svg>
-  );
-}
 
 export default function App() {
   const { t, i18n } = useTranslation();
@@ -121,24 +106,47 @@ export default function App() {
   }, [t]);
 
   const dark = theme === "dark";
+  // macOS 用 Overlay 标题栏，红绿灯浮在自绘顶栏左侧，需要给它让位。
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas text-ink">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-3.5">
-        <div className="flex items-center gap-2 pr-1">
-          <BrandMark />
-          <span className="text-[12px] font-semibold tracking-[0.14em] text-ink">HIVECAST</span>
+      <header
+        data-tauri-drag-region
+        style={{ paddingLeft: isMac ? 78 : 14 }}
+        className="flex h-12 shrink-0 items-stretch border-b border-line pr-3"
+      >
+        <div data-tauri-drag-region className="flex items-center gap-2 pr-2">
+          <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[5px] bg-accent text-[12px] font-bold leading-none text-accent-ink">
+            H
+          </span>
+          <span data-tauri-drag-region className="text-[11.5px] font-semibold tracking-[0.16em] text-ink">HIVECAST</span>
         </div>
 
-        <Segmented
-          value={tab}
-          onChange={(next) => setTab(next)}
-          items={[
-            { key: "monitor", label: t("tab.monitor") },
-            { key: "watch", label: t("tab.watch") },
-            { key: "media", label: t("tab.media") },
-          ]}
-        />
+        <nav className="ml-2 flex items-stretch">
+          {(
+            [
+              { key: "monitor", label: t("tab.monitor") },
+              { key: "watch", label: t("tab.watch") },
+              { key: "media", label: t("tab.media") },
+            ] as Array<{ key: TabKey; label: string }>
+          ).map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setTab(item.key)}
+              className={cx(
+                "focus-ring relative px-3 text-[12px] font-medium transition-colors",
+                tab === item.key ? "text-ink" : "text-muted hover:text-ink-soft",
+              )}
+            >
+              {item.label}
+              {tab === item.key ? (
+                <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-t-[2px] bg-accent" />
+              ) : null}
+            </button>
+          ))}
+        </nav>
 
         <div className="ml-auto flex items-center gap-1">
           {!isTauri() && (
@@ -175,7 +183,7 @@ export default function App() {
 
       <main key={tab} className="animate-fade-rise flex min-h-0 flex-1 flex-col">
         {tab === "monitor" ? (
-          <MonitorPage />
+          <MonitorPage onOpenWatch={() => setTab("watch")} />
         ) : tab === "watch" ? (
           <WatchPage />
         ) : (
