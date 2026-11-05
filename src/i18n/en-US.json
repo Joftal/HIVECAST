@@ -5,9 +5,8 @@
   },
   "tab": {
     "monitor": "Monitor",
-    "watch": "Multi-view",
-    "media": "Library",
-    "settings": "Settings"
+    "watch": "Watch",
+    "media": "Library"
   },
   "media": {
     "title": "Library",
@@ -48,7 +47,8 @@
     "merge": "Merge selected",
     "mergeDone": "Merged: {{size}}",
     "mergeHint": "Select at least two recordings to merge",
-    "progress": "Playback position"
+    "progress": "Playback position",
+    "selectAll": "Select all"
   },
   "settings": {
     "title": "Settings",
@@ -79,7 +79,12 @@
     "saveFailed": "Failed to save",
     "groupRecord": "Playback & recording",
     "groupStorage": "Storage & retention",
-    "groupInterface": "Interface & alerts"
+    "groupInterface": "Interface & alerts",
+    "theme": "Appearance",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "themeSystem": "Follow system",
+    "notifyHint": "Notify on recording start, finish, and playback errors"
   },
   "common": {
     "retry": "Retry",
@@ -95,7 +100,7 @@
     "title": "Monitor",
     "subtitle": "Add rooms to watch for going live, record automatically, and post-process.",
     "emptyTitle": "No rooms monitored yet",
-    "emptyBody": "Paste a live room link or room id (Bilibili / Douyu / Huya) to start monitoring. Recordings land in your media library.",
+    "emptyBody": "Paste a room link or ID to start monitoring.",
     "envTitle": "Environment check",
     "envBody": "Values come from the Rust side and confirm the runtime is ready.",
     "ffmpeg": "ffmpeg",
@@ -106,7 +111,7 @@
     "listTitle": "Monitored rooms",
     "listBody": "Recording starts when a room goes live and wraps up when it ends. The list refreshes every 15s.",
     "count": "{{n}} rooms",
-    "inputPlaceholder": "Paste a live room link or room id, e.g. live.bilibili.com/545068",
+    "inputPlaceholder": "Paste a room link or ID",
     "add": "Add",
     "adding": "Adding…",
     "live": "Live",
@@ -154,14 +159,23 @@
       "250": "HD",
       "400": "Blu-ray",
       "10000": "Source"
-    }
+    },
+    "onlineCount": "{{n}} live",
+    "recordingCount": "{{n}} recording",
+    "overview": "Overview",
+    "statRooms": "Rooms",
+    "statOnline": "Live",
+    "statRecording": "Recording",
+    "detailEmpty": "Pick a room on the left to see quality, line and recent recordings.",
+    "sessions": "Recent recordings",
+    "lineLoad": "Load available lines"
   },
   "watch": {
     "title": "Multi-view",
     "subtitle": "Up to 4 live rooms at once, with independent audio, quality, and lines.",
     "addRoom": "Add room",
     "addAndWatch": "Add & watch",
-    "inputPlaceholder": "Paste a live room link or room ID, e.g. live.bilibili.com/545068",
+    "inputPlaceholder": "Paste a room link or ID",
     "watchNow": "Watch",
     "noCandidates": "Every monitored room is already on screen, or there are no rooms yet.",
     "unknownRoom": "Unknown room",
@@ -170,7 +184,7 @@
     "muteAll": "Mute all",
     "multiSound": "3+ streams are audible. HIVECAST never mutes automatically — use Mute all when you need silence.",
     "emptyTitle": "Nothing on screen yet",
-    "emptyBody": "Pick a room from the monitor list or paste a link. Each tile has its own stream lease and remuxer, so switching quality never interrupts recording.",
+    "emptyBody": "Pick a room from the monitor list or paste a link. Each tile streams independently, so switching quality never interrupts recording.",
     "hint": "Watching and recording are independent sessions: changing quality or closing a tile never interrupts an active recording.",
     "layout": {
       "single": "Single",
@@ -218,7 +232,9 @@
     "danmakuReset": "Reset",
     "line": "Line",
     "lineAuto": "Auto",
-    "lineHint": "Pick a line manually; Auto chooses the fastest"
+    "lineHint": "Pick a line manually; Auto chooses the fastest",
+    "danmakuShort": "DM",
+    "fullscreen": "Fullscreen"
   },
   "notice": {
     "started": {

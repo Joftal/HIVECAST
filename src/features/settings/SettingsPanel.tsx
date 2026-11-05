@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import { isTauri, settingsGet, settingsUpdate, type Settings } from "../../lib/ipc";
+import { Button, Segmented, Switch } from "../../components/ui/Controls";
 import AccountSection from "./AccountSection";
 
 function describeError(err: unknown): string {
@@ -24,6 +25,50 @@ type Props = {
   onClose: () => void;
   onSaved: (settings: Settings) => void;
 };
+
+const FIELD =
+  "focus-ring h-8 w-full rounded-ctl border border-line bg-surface px-2.5 text-[12px] text-ink transition-colors placeholder:text-faint hover:border-line-strong";
+const LABEL = "block text-[11px] font-medium text-muted";
+const GROUP = "text-[10.5px] font-semibold uppercase tracking-[0.1em] text-faint";
+const HINT = "mt-1 block text-[10.5px] leading-4 text-faint";
+
+const CHEVRON = (
+  <svg
+    width="10"
+    height="10"
+    viewBox="0 0 12 12"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.4"
+    aria-hidden
+    className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-faint"
+  >
+    <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+function SelectField({
+  value,
+  onChange,
+  children,
+}: {
+  value: number;
+  onChange: (next: number) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className={FIELD + " cursor-pointer appearance-none pr-7"}
+      >
+        {children}
+      </select>
+      {CHEVRON}
+    </div>
+  );
+}
 
 export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   const { t } = useTranslation();
@@ -101,192 +146,188 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     }
   };
 
-  const fieldClass =
-    "w-full rounded-lg border hairline bg-ink-800/80 px-2.5 py-1.5 text-[12px] text-zinc-100 outline-none transition-colors focus:border-amber-400/50";
-  const labelClass = "text-[11px] font-medium tracking-wide text-zinc-400";
-  // 分组标题：抽屉只有一列，靠它把长表单切成三段。
-  const groupClass = "text-[11px] font-semibold tracking-[0.08em] text-zinc-200";
-
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <button
         type="button"
         aria-label={t("settings.close")}
         onClick={onClose}
-        className="absolute inset-0 bg-black/50 backdrop-blur-[2px]"
+        className="absolute inset-0 animate-fade-in bg-black/35 backdrop-blur-[2px]"
       />
-      <aside className="relative flex h-full w-[min(430px,92vw)] flex-col border-l hairline bg-ink-900/95 shadow-2xl">
-        <div className="flex items-start justify-between gap-3 border-b hairline px-5 py-4">
+      <aside className="relative flex h-full w-[min(440px,94vw)] animate-sheet flex-col border-l border-line bg-surface shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div>
-            <h2 className="text-[15px] font-semibold text-zinc-100">{t("settings.title")}</h2>
-            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{t("settings.subtitle")}</p>
+            <h2 className="text-[14px] font-semibold text-ink">{t("settings.title")}</h2>
+            <p className="mt-0.5 text-[11px] leading-4 text-muted">{t("settings.subtitle")}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="focus-ring rounded-full border hairline px-2.5 py-1 text-[12px] text-zinc-400 hover:text-white"
+            aria-label={t("settings.close")}
+            className="focus-ring -mr-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
           >
-            {t("settings.close")}
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
           {!settings ? (
-            <div className="text-[12px] text-zinc-500">{t("common.loading")}</div>
+            <div className="text-[12px] text-muted">{t("common.loading")}</div>
           ) : (
-            <>
-              <p className={groupClass}>{t("settings.groupRecord")}</p>
-
-              <label className="block space-y-1.5">
-                <span className={labelClass}>{t("settings.recordQuality")}</span>
-                <select
-                  value={settings.defaultRecordQn}
-                  onChange={(event) => patch({ defaultRecordQn: Number(event.target.value) })}
-                  className={fieldClass}
-                >
-                  {QN_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {t("settings." + option.key)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block space-y-1.5">
-                <span className={labelClass}>{t("settings.viewQuality")}</span>
-                <select
-                  value={settings.defaultViewQn}
-                  onChange={(event) => patch({ defaultViewQn: Number(event.target.value) })}
-                  className={fieldClass}
-                >
-                  {QN_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {t("settings." + option.key)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <p className={groupClass + " border-t hairline pt-3.5"}>{t("settings.groupStorage")}</p>
-
-              <div className="space-y-1.5">
-                <span className={labelClass}>{t("settings.mediaRoot")}</span>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    value={settings.mediaRoot}
-                    onChange={(event) => patch({ mediaRoot: event.target.value })}
-                    className={fieldClass + " font-mono text-[11px]"}
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void chooseFolder()}
-                    className="focus-ring shrink-0 rounded-lg border hairline px-2.5 py-1.5 text-[12px] text-zinc-300 hover:border-white/25 hover:text-white"
+            <div className="space-y-6">
+              <section className="space-y-3">
+                <h3 className={GROUP}>{t("settings.groupRecord")}</h3>
+                <label className="block space-y-1.5">
+                  <span className={LABEL}>{t("settings.recordQuality")}</span>
+                  <SelectField
+                    value={settings.defaultRecordQn}
+                    onChange={(next) => patch({ defaultRecordQn: next })}
                   >
-                    {t("settings.choose")}
-                  </button>
-                </div>
-              </div>
+                    {QN_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {t("settings." + option.key)}
+                      </option>
+                    ))}
+                  </SelectField>
+                </label>
+                <label className="block space-y-1.5">
+                  <span className={LABEL}>{t("settings.viewQuality")}</span>
+                  <SelectField
+                    value={settings.defaultViewQn}
+                    onChange={(next) => patch({ defaultViewQn: next })}
+                  >
+                    {QN_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {t("settings." + option.key)}
+                      </option>
+                    ))}
+                  </SelectField>
+                </label>
+                <label className="block space-y-1.5">
+                  <span className={LABEL}>{t("settings.maxConcurrent")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={8}
+                    value={settings.maxConcurrentRecords}
+                    onChange={(event) => patch({ maxConcurrentRecords: Number(event.target.value) })}
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                  <span className={HINT}>{t("settings.maxConcurrentHint")}</span>
+                </label>
+              </section>
 
-              <label className="block space-y-1.5">
-                <span className={labelClass}>{t("settings.maxConcurrent")}</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={8}
-                  value={settings.maxConcurrentRecords}
-                  onChange={(event) => patch({ maxConcurrentRecords: Number(event.target.value) })}
-                  className={fieldClass}
-                />
-                <span className="block text-[11px] leading-relaxed text-zinc-500">
-                  {t("settings.maxConcurrentHint")}
-                </span>
-              </label>
-
-              <div className="space-y-1.5">
-                <span className={labelClass}>{t("settings.retention")}</span>
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="block space-y-1">
-                    <span className="text-[11px] text-zinc-500">{t("settings.retentionDays")}</span>
+              <section className="space-y-3 border-t border-line pt-5">
+                <h3 className={GROUP}>{t("settings.groupStorage")}</h3>
+                <div className="space-y-1.5">
+                  <span className={LABEL}>{t("settings.mediaRoot")}</span>
+                  <div className="flex items-center gap-1.5">
                     <input
-                      type="number"
-                      min={0}
-                      max={3650}
-                      value={settings.retentionDays}
-                      onChange={(event) => patch({ retentionDays: Number(event.target.value) })}
-                      className={fieldClass}
+                      value={settings.mediaRoot}
+                      onChange={(event) => patch({ mediaRoot: event.target.value })}
+                      className={FIELD + " font-mono text-[11px]"}
+                      spellCheck={false}
                     />
-                  </label>
-                  <label className="block space-y-1">
-                    <span className="text-[11px] text-zinc-500">{t("settings.retentionGb")}</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={100000}
-                      value={settings.maxTotalGb}
-                      onChange={(event) => patch({ maxTotalGb: Number(event.target.value) })}
-                      className={fieldClass}
-                    />
-                  </label>
+                    <Button size="md" variant="secondary" onClick={() => void chooseFolder()}>
+                      {t("settings.choose")}
+                    </Button>
+                  </div>
                 </div>
-                <span className="block text-[11px] leading-relaxed text-zinc-500">
-                  {t("settings.retentionHint")}
-                </span>
-              </div>
 
-              <p className={groupClass + " border-t hairline pt-3.5"}>{t("settings.groupInterface")}</p>
+                <div className="space-y-1.5">
+                  <span className={LABEL}>{t("settings.retention")}</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <span className="text-[10.5px] text-faint">{t("settings.retentionDays")}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={3650}
+                        value={settings.retentionDays}
+                        onChange={(event) => patch({ retentionDays: Number(event.target.value) })}
+                        className={FIELD + " font-mono tabular-nums"}
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10.5px] text-faint">{t("settings.retentionGb")}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100000}
+                        value={settings.maxTotalGb}
+                        onChange={(event) => patch({ maxTotalGb: Number(event.target.value) })}
+                        className={FIELD + " font-mono tabular-nums"}
+                      />
+                    </label>
+                  </div>
+                  <span className={HINT}>{t("settings.retentionHint")}</span>
+                </div>
+              </section>
 
-              <label className="block space-y-1.5">
-                <span className={labelClass}>{t("settings.language")}</span>
-                <select
-                  value={settings.language}
-                  onChange={(event) => patch({ language: event.target.value })}
-                  className={fieldClass}
-                >
-                  <option value="system">{t("settings.languageSystem")}</option>
-                  <option value="zh-CN">中文</option>
-                  <option value="en-US">English</option>
-                </select>
-              </label>
+              <section className="space-y-3 border-t border-line pt-5">
+                <h3 className={GROUP}>{t("settings.groupInterface")}</h3>
+                <div className="flex items-center justify-between gap-3">
+                  <span className={LABEL}>{t("settings.theme")}</span>
+                  <Segmented
+                    items={[
+                      { key: "light", label: t("settings.themeLight") },
+                      { key: "dark", label: t("settings.themeDark") },
+                      { key: "system", label: t("settings.themeSystem") },
+                    ]}
+                    value={(settings.theme as "light" | "dark" | "system") ?? "light"}
+                    onChange={(next) => patch({ theme: next })}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className={LABEL}>{t("settings.language")}</span>
+                  <Segmented
+                    items={[
+                      { key: "system", label: t("settings.languageSystem") },
+                      { key: "zh-CN", label: "中文" },
+                      { key: "en-US", label: "English" },
+                    ]}
+                    value={settings.language}
+                    onChange={(next) => patch({ language: next })}
+                  />
+                </div>
+              </section>
 
-              <AccountSection />
+              <section className="space-y-3 border-t border-line pt-5">
+                <h3 className={GROUP}>{t("account.title")}</h3>
+                <AccountSection />
+              </section>
 
-              <label className="flex items-start gap-2.5 rounded-xl border hairline bg-ink-850/60 px-3 py-2.5">
-                <input
-                  type="checkbox"
-                  checked={settings.notifyEnabled}
-                  onChange={(event) => patch({ notifyEnabled: event.target.checked })}
-                  className="mt-0.5 h-3.5 w-3.5 accent-amber-500"
-                />
-                <span className="text-[12px] leading-relaxed text-zinc-300">{t("settings.notify")}</span>
-              </label>
-            </>
+              <section className="border-t border-line pt-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <span className="block text-[11.5px] font-medium text-ink">{t("settings.notify")}</span>
+                    <span className="mt-0.5 block text-[10.5px] leading-4 text-faint">{t("settings.notifyHint")}</span>
+                  </div>
+                  <Switch
+                    checked={settings.notifyEnabled}
+                    onChange={(next) => patch({ notifyEnabled: next })}
+                    label={t("settings.notify")}
+                  />
+                </div>
+              </section>
+            </div>
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">
-              {error}
-            </div>
+            <div className="mt-4 rounded-ctl border border-rec/30 bg-rec/8 px-3 py-2 text-[11.5px] text-rec">{error}</div>
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t hairline px-5 py-3">
-          {saved && <span className="mr-auto text-[11px] text-emerald-400">{t("settings.saved")}</span>}
-          <button
-            type="button"
-            onClick={onClose}
-            className="focus-ring rounded-full border hairline px-3.5 py-1.5 text-[12px] text-zinc-300 hover:border-white/25 hover:text-white"
-          >
+        <div className="flex items-center gap-2 border-t border-line px-5 py-3">
+          {saved && <span className="mr-auto animate-fade-rise text-[11px] text-live">{t("settings.saved")}</span>}
+          <Button variant="ghost" onClick={onClose} className="ml-auto">
             {t("settings.close")}
-          </button>
-          <button
-            type="button"
-            disabled={!settings || busy}
-            onClick={() => void save()}
-            className="focus-ring rounded-full border border-amber-400/40 bg-amber-400/15 px-4 py-1.5 text-[12px] font-medium text-amber-200 transition-colors hover:bg-amber-400/25 disabled:cursor-not-allowed disabled:opacity-40"
-          >
+          </Button>
+          <Button variant="primary" disabled={!settings || busy} onClick={() => void save()}>
             {busy ? t("settings.saving") : t("settings.save")}
-          </button>
+          </Button>
         </div>
       </aside>
     </div>

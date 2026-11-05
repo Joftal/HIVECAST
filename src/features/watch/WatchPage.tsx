@@ -4,6 +4,7 @@ import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player from "./Player";
+import { Button, Segmented } from "../../components/ui/Controls";
 import {
   describeError,
   isTauri,
@@ -60,6 +61,9 @@ function spanClass(layout: Layout, index: number): string {
   if (layout === "main" && index === 0) return "row-span-3";
   return "";
 }
+
+const GLASS_SELECT =
+  "focus-ring h-6 max-w-[104px] cursor-pointer appearance-none rounded-[6px] border border-white/15 bg-black/45 px-1.5 pr-5 text-[10px] text-white/85 outline-none transition-colors hover:bg-black/65";
 
 export default function WatchPage() {
   const { t } = useTranslation();
@@ -217,98 +221,66 @@ export default function WatchPage() {
   const prefs = useDanmakuPrefs();
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-[15px] font-semibold text-zinc-100">{t("watch.title")}</h1>
-          <p className="mt-0.5 text-[12px] text-zinc-500">{t("watch.subtitle")}</p>
-        </div>
+    <div data-theme="dark" className="flex h-full min-h-0 flex-col gap-2.5 bg-canvas p-3 text-ink">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <span className="font-mono text-[11px] tabular-nums text-muted">
+          {count} <span className="text-faint">/ 4</span>
+        </span>
 
-        <div className="flex items-center gap-2">
-          {count > 1 && layouts.length > 1 && (
-            <div className="flex overflow-hidden rounded-lg border hairline p-0.5">
-              {layouts.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setLayoutChoice(option)}
-                  className={[
-                    "focus-ring rounded-md px-2 py-1 text-[11px] transition-colors",
-                    layout === option
-                      ? "bg-ink-700 text-zinc-100"
-                      : "text-zinc-500 hover:text-zinc-300",
-                  ].join(" ")}
-                >
-                  {t(LAYOUT_LABEL[option])}
-                </button>
-              ))}
-            </div>
-          )}
+        {count > 1 && layouts.length > 1 && (
+          <Segmented
+            value={layout}
+            onChange={(next) => setLayoutChoice(next)}
+            items={layouts.map((option) => ({ key: option, label: t(LAYOUT_LABEL[option]) }))}
+          />
+        )}
 
+        <div className="ml-auto flex items-center gap-1.5">
           {count > 0 && (
-            <button
-              type="button"
-              onClick={() => setDanmakuOpen((open) => !open)}
-              className={[
-                "focus-ring rounded-lg border px-2.5 py-1.5 text-[11px] transition-colors",
-                danmakuOpen
-                  ? "border-hive-500/50 bg-hive-500/10 text-hive-200"
-                  : "border-white/10 text-zinc-300 hover:bg-ink-700",
-              ].join(" ")}
-            >
+            <Button size="sm" variant="ghost" onClick={() => setDanmakuOpen((open) => !open)}>
               {t("watch.danmakuSettings")}
-            </button>
+            </Button>
           )}
-
           {sounding > 0 && (
-            <button
-              type="button"
-              onClick={muteAll}
-              className="focus-ring rounded-lg border hairline px-2.5 py-1.5 text-[11px] text-zinc-300 transition-colors hover:bg-ink-700"
-            >
+            <Button size="sm" variant="ghost" onClick={muteAll}>
               {t("watch.muteAll")}
-            </button>
+            </Button>
           )}
-
           {isTauri() && (
-            <button
-              type="button"
-              onClick={() => setPickerOpen((open) => !open)}
-              className="focus-ring rounded-lg border border-hive-500/40 bg-hive-500/10 px-3 py-1.5 text-[11px] text-hive-300 transition-colors hover:bg-hive-500/20"
-            >
-              + {t("watch.addRoom")}
-            </button>
+            <Button size="sm" variant="primary" onClick={() => setPickerOpen((open) => !open)}>
+              {t("watch.addRoom")}
+            </Button>
           )}
         </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+        <div className="flex shrink-0 items-center gap-2 rounded-ctl border border-rec/30 bg-rec/10 px-2.5 py-1.5 text-[11px] text-rec">
           <span className="flex-1 break-all">{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-red-300/70 hover:text-red-200">
+          <button type="button" onClick={() => setError(null)} className="text-rec/70 hover:text-rec">
             ✕
           </button>
         </div>
       )}
 
       {sounding >= 3 && loudHint && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
+        <div className="flex shrink-0 items-center gap-2 rounded-ctl border border-accent-line bg-accent-soft px-2.5 py-1.5 text-[11px] text-accent-text">
           <span className="flex-1">{t("watch.multiSound")}</span>
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={() => {
               muteAll();
               setLoudHint(false);
             }}
-            className="focus-ring rounded-md border border-amber-300/40 px-2 py-0.5 text-[11px] transition-colors hover:bg-amber-300/15"
           >
             {t("watch.muteAll")}
-          </button>
+          </Button>
           <button
             type="button"
             aria-label={t("watch.dismissHint")}
             onClick={() => setLoudHint(false)}
-            className="focus-ring rounded-md px-1.5 py-0.5 text-amber-300/70 transition-colors hover:text-amber-100"
+            className="text-accent-text/70 hover:text-accent-text"
           >
             ✕
           </button>
@@ -316,17 +288,19 @@ export default function WatchPage() {
       )}
 
       {danmakuOpen && count > 0 && (
-        <div className="panel grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4">
-          {([
-            ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
-            ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
-            ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
-            ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
-          ] as const).map(([key, label, min, max, step, digits]) => (
+        <div className="panel grid shrink-0 gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4">
+          {(
+            [
+              ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
+              ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
+              ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
+              ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
+            ] as const
+          ).map(([key, label, min, max, step, digits]) => (
             <label key={key} className="flex flex-col gap-1">
-              <span className="flex items-baseline justify-between text-[11px] text-zinc-400">
+              <span className="flex items-baseline justify-between text-[11px] text-muted">
                 {label}
-                <span className="font-mono text-[10px] text-zinc-500">
+                <span className="font-mono text-[10px] tabular-nums text-faint">
                   {(prefs[key] as number).toFixed(digits)}
                 </span>
               </span>
@@ -337,22 +311,18 @@ export default function WatchPage() {
                 step={step}
                 value={prefs[key] as number}
                 onChange={(event) => prefs.set({ [key]: Number(event.target.value) })}
-                className="accent-hive-400"
+                className="accent-accent"
               />
             </label>
           ))}
-          <button
-            type="button"
-            onClick={() => prefs.reset()}
-            className="focus-ring self-end justify-self-start rounded-lg border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-zinc-200"
-          >
+          <Button size="sm" variant="ghost" className="self-end justify-self-start" onClick={() => prefs.reset()}>
             {t("watch.danmakuReset")}
-          </button>
+          </Button>
         </div>
       )}
 
       {pickerOpen && isTauri() && (
-        <div className="panel space-y-3 p-3">
+        <div className="panel shrink-0 space-y-3 p-3">
           <div className="flex gap-2">
             <input
               value={input}
@@ -361,64 +331,66 @@ export default function WatchPage() {
                 if (event.key === "Enter") void addAndWatch();
               }}
               placeholder={t("watch.inputPlaceholder")}
-              className="focus-ring min-w-0 flex-1 rounded-lg border hairline bg-ink-800/70 px-3 py-2 text-[12px] text-zinc-200 placeholder:text-zinc-600"
+              className="focus-ring h-8 min-w-0 flex-1 rounded-ctl border border-line bg-raised px-2.5 text-[12px] text-ink placeholder:text-faint"
             />
-            <button
-              type="button"
+            <Button
+              size="md"
+              variant="primary"
               disabled={busy || input.trim().length === 0}
               onClick={() => void addAndWatch()}
-              className="focus-ring rounded-lg bg-hive-500 px-3 py-2 text-[11px] font-medium text-ink-900 disabled:opacity-40"
             >
               {t("watch.addAndWatch")}
-            </button>
+            </Button>
           </div>
 
           {candidates.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-1.5">
               {candidates.map((view) => (
                 <button
                   key={view.room.id}
                   type="button"
                   disabled={busy || !view.room.isLive}
                   onClick={() => void watchRoom(view.room.id)}
-                  className="focus-ring flex max-w-[260px] items-center gap-2 rounded-lg border hairline bg-ink-800/50 px-2.5 py-1.5 text-left text-[11px] text-zinc-300 transition-colors hover:bg-ink-700 disabled:opacity-40"
+                  className="focus-ring flex max-w-[260px] items-center gap-2 rounded-ctl border border-line bg-raised px-2.5 py-1.5 text-left text-[11px] text-ink-soft transition-colors hover:border-line-strong disabled:opacity-40"
                 >
                   <span
-                    className={[
-                      "h-1.5 w-1.5 shrink-0 rounded-full",
-                      view.room.isLive ? "bg-emerald-400" : "bg-zinc-600",
-                    ].join(" ")}
+                    className={["h-1.5 w-1.5 shrink-0 rounded-full", view.room.isLive ? "bg-live" : "bg-faint"].join(" ")}
                   />
                   <span className="truncate">{view.room.title || view.room.hostName}</span>
-                  <span className="shrink-0 text-[10px] text-zinc-500">
+                  <span className="shrink-0 text-[10px] text-faint">
                     {view.room.isLive ? t("watch.watchNow") : t("monitor.offline")}
                   </span>
                 </button>
               ))}
             </div>
           ) : (
-            <p className="text-[11px] text-zinc-500">{t("watch.noCandidates")}</p>
+            <p className="text-[11px] text-faint">{t("watch.noCandidates")}</p>
           )}
         </div>
       )}
 
       {count === 0 ? (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 text-center">
-          <span className="font-mono text-3xl text-zinc-700">0 / 4</span>
-          <p className="text-[13px] text-zinc-400">{t("watch.emptyTitle")}</p>
-          <p className="max-w-[420px] text-[11px] leading-5 text-zinc-600">{t("watch.emptyBody")}</p>
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 rounded-panel border border-dashed border-line-strong bg-surface/40 px-6 text-center">
+          <div className="grid grid-cols-2 gap-1.5 opacity-60">
+            {[0, 1, 2, 3].map((index) => (
+              <span
+                key={index}
+                className="h-6 w-10 rounded-[4px] border border-line-strong bg-raised"
+              />
+            ))}
+          </div>
+          <div className="space-y-1">
+            <p className="text-[13px] font-medium text-ink">{t("watch.emptyTitle")}</p>
+            <p className="max-w-[360px] text-[11.5px] leading-5 text-muted">{t("watch.emptyBody")}</p>
+          </div>
           {isTauri() && (
-            <button
-              type="button"
-              onClick={() => setPickerOpen(true)}
-              className="focus-ring rounded-full border border-hive-500/40 bg-hive-500/10 px-4 py-1.5 text-[11px] text-hive-300 hover:bg-hive-500/20"
-            >
+            <Button variant="primary" onClick={() => setPickerOpen(true)}>
               {t("watch.addRoom")}
-            </button>
+            </Button>
           )}
         </div>
       ) : (
-        <div className={["grid min-h-0 flex-1 gap-3", LAYOUT_CLASS[layout]].join(" ")}>
+        <div className={["grid min-h-0 flex-1 gap-2.5", LAYOUT_CLASS[layout]].join(" ")}>
           {sessions.map((session, index) => {
             const view = roomById.get(session.roomId);
             const volume = volumes[session.slot] ?? 0;
@@ -441,8 +413,6 @@ export default function WatchPage() {
           })}
         </div>
       )}
-
-      <p className="shrink-0 text-[11px] leading-5 text-zinc-600">{t("watch.hint")}</p>
     </div>
   );
 }
@@ -503,82 +473,95 @@ function SlotCell({
   return (
     <section
       className={[
-        "panel relative flex min-h-0 flex-col overflow-hidden transition-shadow",
+        "group relative flex min-h-0 flex-col overflow-hidden rounded-card border bg-black transition-[border-color,box-shadow] duration-200",
+        sounding ? "border-accent/45 shadow-[0_0_0_1px_rgba(255,180,58,0.18)]" : "border-line",
         span,
-        sounding ? "ring-1 ring-hive-500/60" : "",
       ].join(" ")}
     >
-      <header className="flex shrink-0 items-center gap-2 px-2.5 py-1.5">
-        <span className="font-mono text-[10px] text-zinc-600">0{session.slot + 1}</span>
+      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center gap-1.5 bg-gradient-to-b from-black/80 via-black/45 to-transparent px-2 pb-6 pt-1.5">
+        <span className="pointer-events-auto shrink-0 rounded-[5px] bg-white/12 px-1 font-mono text-[9.5px] leading-4 text-white/75">
+          0{session.slot + 1}
+        </span>
         {room?.avatarUrl ? (
           <img
             src={room.avatarUrl}
             alt=""
             referrerPolicy="no-referrer"
-            className="h-5 w-5 shrink-0 rounded-full object-cover"
+            className="h-[18px] w-[18px] shrink-0 rounded-full object-cover ring-1 ring-white/20"
           />
         ) : (
-          <span className="h-5 w-5 shrink-0 rounded-full bg-ink-700" />
+          <span className="h-[18px] w-[18px] shrink-0 rounded-full bg-white/15" />
         )}
-        <div className="min-w-0 flex-1 leading-tight">
-          <div className="truncate text-[11.5px] text-zinc-200">{room?.title ?? t("watch.unknownRoom")}</div>
-          <div className="truncate text-[10px] text-zinc-500">
+        <div className="pointer-events-auto min-w-0 flex-1 leading-tight">
+          <div className="truncate text-[11.5px] font-medium text-white/92 [text-shadow:0_1px_2px_rgba(0,0,0,0.5)]">
+            {room?.title ?? t("watch.unknownRoom")}
+          </div>
+          <div className="truncate text-[10px] text-white/55">
             {room?.hostName}
-            {session.quality ? " · " + session.quality : ""}
             {sounding ? " · " + t("watch.audioOn") : ""}
           </div>
         </div>
 
-        <select
-          value={session.requestedQn}
-          onChange={(event) => onQuality(Number(event.target.value))}
-          aria-label={t("watch.quality")}
-          className="focus-ring rounded-md border hairline bg-ink-800/80 px-1 py-0.5 text-[10px] text-zinc-300"
-        >
-          {QN_OPTIONS.map((qn) => (
-            <option key={qn} value={qn}>
-              {qn === 0 ? t("watch.qn.auto") : t(`watch.qn.${qn}`)}
-            </option>
-          ))}
-        </select>
+        <div className="pointer-events-auto flex items-center gap-1">
+          <div className="relative">
+            <select
+              value={session.requestedQn}
+              onChange={(event) => onQuality(Number(event.target.value))}
+              aria-label={t("watch.quality")}
+              className={GLASS_SELECT}
+            >
+              {QN_OPTIONS.map((qn) => (
+                <option key={qn} value={qn}>
+                  {qn === 0 ? t("watch.qn.auto") : t(`watch.qn.${qn}`)}
+                </option>
+              ))}
+            </select>
+            <Chevron />
+          </div>
 
-        <select
-          value={session.preferredLine ?? ""}
-          onChange={(event) => onLine(event.target.value || null)}
-          onPointerDown={() => void loadLines()}
-          onFocus={() => void loadLines()}
-          aria-label={t("watch.line")}
-          title={t("watch.lineHint")}
-          className="focus-ring max-w-[92px] rounded-md border hairline bg-ink-800/80 px-1 py-0.5 text-[10px] text-zinc-300"
-        >
-          <option value="">{t("watch.lineAuto")}</option>
-          {session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine) ? (
-            <option value={session.preferredLine}>{session.preferredLine}</option>
-          ) : null}
-          {(lines ?? []).map((line) => (
-            <option key={line.name} value={line.name}>
-              {line.name}
-            </option>
-          ))}
-        </select>
+          <div className="relative">
+            <select
+              value={session.preferredLine ?? ""}
+              onChange={(event) => onLine(event.target.value || null)}
+              onPointerDown={() => void loadLines()}
+              onFocus={() => void loadLines()}
+              aria-label={t("watch.line")}
+              title={t("watch.lineHint")}
+              className={[GLASS_SELECT, "max-w-[92px]"].join(" ")}
+            >
+              <option value="">{t("watch.lineAuto")}</option>
+              {session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine) ? (
+                <option value={session.preferredLine}>{session.preferredLine}</option>
+              ) : null}
+              {(lines ?? []).map((line) => (
+                <option key={line.name} value={line.name}>
+                  {line.name}
+                </option>
+              ))}
+            </select>
+            <Chevron />
+          </div>
 
-        {degraded && (
-          <span
-            title={t("watch.degradedHint")}
-            className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 font-mono text-[10px] text-amber-300/90"
+          {degraded && (
+            <span
+              title={t("watch.degradedHint")}
+              className="shrink-0 rounded-[5px] border border-warn/35 bg-warn/15 px-1 py-0.5 font-mono text-[9.5px] leading-4 text-warn"
+            >
+              ↓ {actualQuality}
+            </span>
+          )}
+
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("watch.close")}
+            className="focus-ring flex h-6 w-6 items-center justify-center rounded-[6px] text-white/50 transition-colors hover:bg-white/15 hover:text-white"
           >
-            ↓ {actualQuality}
-          </span>
-        )}
-
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={t("watch.close")}
-          className="focus-ring rounded-md px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-white/10 hover:text-zinc-200"
-        >
-          ✕
-        </button>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       <div className="relative min-h-0 flex-1 bg-black">
@@ -588,34 +571,39 @@ function SlotCell({
             url={session.url}
             volume={volume}
             onVolumeChange={onVolume}
+            statsCorner="bottom-left"
             onFatal={(detail) => setFatal(detail)}
             danmakuEnabled={danmaku}
             onToggleDanmaku={onToggleDanmaku}
-            overlay={<DanmakuCanvas roomId={session.roomId} enabled={danmaku} />}
+            overlay={
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 top-7">
+                <DanmakuCanvas roomId={session.roomId} enabled={danmaku} />
+              </div>
+            }
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
             {session.status === "error" || fatal ? (
               <>
-                <span className="text-[12px] text-red-300">{t("watch.status.error")}</span>
-                <span className="max-w-full break-all font-mono text-[10px] text-zinc-500">
+                <span className="text-[12px] text-rec">{t("watch.status.error")}</span>
+                <span className="max-w-full break-all font-mono text-[10px] text-white/40">
                   {fatal ?? session.error}
                 </span>
-                <button
-                  type="button"
+                <Button
+                  size="sm"
+                  variant="secondary"
                   onClick={() => {
                     setFatal(null);
                     onRetry();
                   }}
-                  className="focus-ring rounded-full border hairline bg-ink-700 px-3 py-1 text-[11px] text-zinc-200 hover:bg-ink-600"
                 >
                   {t("watch.retry")}
-                </button>
+                </Button>
               </>
             ) : (
               <>
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-hive-400" />
-                <span className="text-[11px] text-zinc-400">
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-accent" />
+                <span className="text-[11px] text-white/60">
                   {session.status === "reconnecting"
                     ? retryIn && retryIn > 0
                       ? t("watch.status.retryIn", { n: retryIn })
@@ -623,7 +611,7 @@ function SlotCell({
                     : t("watch.status.starting")}
                 </span>
                 {session.error && (
-                  <span className="max-w-full break-all font-mono text-[10px] text-zinc-600">
+                  <span className="max-w-full break-all font-mono text-[10px] text-white/35">
                     {session.error}
                   </span>
                 )}
@@ -633,5 +621,22 @@ function SlotCell({
         )}
       </div>
     </section>
+  );
+}
+
+function Chevron() {
+  return (
+    <svg
+      width="8"
+      height="8"
+      viewBox="0 0 8 8"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      aria-hidden
+      className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-white/45"
+    >
+      <path d="M1.5 2.8 4 5.3l2.5-2.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }

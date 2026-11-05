@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
+import { Button, Chip } from "../../components/ui/Controls";
 import {
   isTauri,
   mediaDelete,
@@ -74,11 +75,12 @@ function loadVolume(): number {
   }
 }
 
-const PLATFORM_TONE: Record<string, string> = {
-  bilibili: "border-sky-400/30 bg-sky-400/10 text-sky-300",
-  douyu: "border-orange-400/30 bg-orange-400/10 text-orange-300",
-  huya: "border-amber-400/30 bg-amber-400/10 text-amber-300",
-  douyin: "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-300",
+// 平台只负责一个小圆点：色块在深浅两套主题下都能读，不用两套色class。
+const PLATFORM_DOT: Record<string, string> = {
+  bilibili: "#22a7f0",
+  douyu: "#ff7a1a",
+  huya: "#f5a623",
+  douyin: "#ff2d6f",
 };
 
 export default function MediaPage() {
@@ -303,243 +305,265 @@ export default function MediaPage() {
     }
   };
 
+  const allSelected = view.length > 0 && view.every((item) => selected.includes(item.id));
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
+    <div className="flex min-h-0 flex-col gap-3.5">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-100">{t("media.title")}</h1>
-          <p className="mt-1 text-[12px] text-zinc-500">{t("media.subtitle")}</p>
+          <h1 className="text-[15px] font-semibold text-ink">{t("media.title")}</h1>
+          <p className="mt-0.5 text-[11.5px] text-muted">{t("media.subtitle")}</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border hairline px-2.5 py-1 text-[11px] text-zinc-400">
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-[11px] tabular-nums text-faint">
             {t("media.count", { n: items.length })}
           </span>
-          <button
-            type="button"
-            onClick={() => void reload()}
-            className="focus-ring rounded-full border hairline px-3 py-1 text-[12px] text-zinc-300 transition-colors hover:border-white/25 hover:text-white"
-          >
+          <Button size="sm" variant="secondary" onClick={() => void reload()}>
             {t("common.refresh")}
-          </button>
+          </Button>
         </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={t("media.search")}
-          className="focus-ring w-52 rounded-full border hairline bg-ink-900/60 px-3 py-1 text-[12px] text-zinc-200 placeholder:text-zinc-600"
-        />
-        <div className="flex items-center gap-0.5 rounded-full border hairline p-0.5">
-          <button
-            type="button"
-            onClick={() => setPlatform("all")}
-            className={[
-              "focus-ring rounded-full px-2.5 py-0.5 text-[11px] transition-colors",
-              platform === "all" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200",
-            ].join(" ")}
+        <label className="relative">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            aria-hidden
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
           >
-            {t("media.filterAll")}
-          </button>
-          {platforms.map((one) => (
+            <circle cx="7" cy="7" r="4.2" />
+            <path d="m10.2 10.2 3 3" strokeLinecap="round" />
+          </svg>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("media.search")}
+            className="focus-ring h-8 w-56 rounded-ctl border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink placeholder:text-faint"
+          />
+        </label>
+
+        <div className="flex items-center gap-0.5 rounded-ctl border border-line bg-surface p-[3px]">
+          {[{ key: "all", label: t("media.filterAll") }, ...platforms.map((one) => ({
+            key: one,
+            label: t("platformName." + one, { defaultValue: one }),
+          }))].map((option) => (
             <button
-              key={one}
+              key={option.key}
               type="button"
-              onClick={() => setPlatform(one)}
+              onClick={() => setPlatform(option.key)}
               className={[
-                "focus-ring rounded-full px-2.5 py-0.5 text-[11px] transition-colors",
-                platform === one ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200",
+                "focus-ring h-6 rounded-[6px] px-2 text-[11px] transition-colors",
+                platform === option.key ? "bg-raised text-ink shadow-[0_1px_2px_rgba(16,24,40,0.08)]" : "text-muted hover:text-ink",
               ].join(" ")}
             >
-              {t("platformName." + one, { defaultValue: one })}
+              {option.label}
             </button>
           ))}
         </div>
+
         <select
           value={sort}
           onChange={(event) => setSort(event.target.value as "recent" | "duration" | "size")}
-          className="focus-ring rounded-full border hairline bg-ink-900/60 px-2.5 py-1 text-[11px] text-zinc-300"
+          className="focus-ring h-8 cursor-pointer appearance-none rounded-ctl border border-line bg-surface px-2.5 pr-6 text-[11px] text-ink-soft"
         >
           <option value="recent">{t("media.sortRecent")}</option>
           <option value="duration">{t("media.sortDuration")}</option>
           <option value="size">{t("media.sortSize")}</option>
         </select>
-        <span className="ml-auto text-[11px] text-zinc-500">
+
+        <span className="ml-auto font-mono text-[11px] tabular-nums text-faint">
           {t("media.summary", { n: view.length, size: formatSize(totalSize) })}
         </span>
       </div>
 
       {selected.length > 0 && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-200">
+        <div className="flex animate-fade-rise items-center justify-between gap-3 rounded-ctl border border-accent-line bg-accent-soft px-3 py-1.5 text-[11.5px] text-accent-text">
           <span>{t("media.selected", { n: selected.length })}</span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setSelected([])}
-              className="focus-ring rounded-full border border-amber-300/30 px-3 py-0.5 text-[11px] transition-colors hover:border-amber-200/60"
-            >
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
               {t("media.clearSelection")}
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
               disabled={busy !== null || selected.length < 2}
               onClick={() => void mergeSelected()}
               title={selected.length < 2 ? t("media.mergeHint") : undefined}
-              className="focus-ring rounded-full border border-sky-300/40 bg-sky-400/10 px-3 py-0.5 text-[11px] text-sky-200 transition-colors hover:bg-sky-400/20 disabled:opacity-40"
             >
               {busy === "merge" ? (postPercent === null ? "…" : postPercent + "%") : t("media.merge")}
-            </button>
-            <button
-              type="button"
-              disabled={busy === "batch"}
-              onClick={() => void removeSelected()}
-              className="focus-ring rounded-full border border-red-400/50 bg-red-500/15 px-3 py-0.5 text-[11px] text-red-200 transition-colors hover:bg-red-500/25 disabled:opacity-40"
-            >
+            </Button>
+            <Button size="sm" variant="danger" disabled={busy === "batch"} onClick={() => void removeSelected()}>
               {busy === "batch" ? "…" : t("media.deleteSelected")}
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">{error}</div>
+        <div className="animate-fade-rise rounded-ctl border border-rec/30 bg-rec/8 px-3 py-1.5 text-[11.5px] text-rec">
+          {error}
+        </div>
       )}
       {notice && (
-        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-300">{notice}</div>
+        <div className="animate-fade-rise rounded-ctl border border-live/30 bg-live/8 px-3 py-1.5 text-[11.5px] text-live">
+          {notice}
+        </div>
       )}
 
       {loading ? (
-        <div className="rounded-2xl border hairline bg-ink-850/60 px-4 py-10 text-center text-[12px] text-zinc-500">
+        <div className="rounded-panel border border-line bg-surface px-4 py-12 text-center text-[12px] text-muted">
           {t("common.loading")}
         </div>
       ) : items.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed hairline bg-ink-850/40 px-6 py-16 text-center">
-          <div className="text-[14px] font-medium text-zinc-200">{t("media.emptyTitle")}</div>
-          <div className="max-w-[420px] text-[12px] leading-relaxed text-zinc-500">{t("media.emptyBody")}</div>
+        <div className="flex flex-col items-center justify-center gap-2 rounded-panel border border-dashed border-line-strong bg-surface/50 px-6 py-20 text-center">
+          <div className="text-[13px] font-medium text-ink">{t("media.emptyTitle")}</div>
+          <div className="max-w-[400px] text-[11.5px] leading-5 text-muted">{t("media.emptyBody")}</div>
         </div>
       ) : view.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed hairline bg-ink-850/40 px-6 py-16 text-center">
-          <div className="text-[14px] font-medium text-zinc-200">{t("media.noMatchTitle")}</div>
-          <div className="max-w-[380px] text-[12px] leading-relaxed text-zinc-500">{t("media.noMatchBody")}</div>
+        <div className="flex flex-col items-center justify-center gap-2 rounded-panel border border-dashed border-line-strong bg-surface/50 px-6 py-20 text-center">
+          <div className="text-[13px] font-medium text-ink">{t("media.noMatchTitle")}</div>
+          <div className="max-w-[360px] text-[11.5px] leading-5 text-muted">{t("media.noMatchBody")}</div>
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 gap-3 overflow-auto pb-2 md:grid-cols-2 xl:grid-cols-3">
-          {view.map((item) => {
-            const tone = PLATFORM_TONE[item.platform] ?? "border-white/15 bg-white/5 text-zinc-300";
-            const isPlaying = Boolean(playbacks[item.id]);
-            const busyItem = busy === item.id;
-            return (
-              <div
-                key={item.id}
-                className={[
-                  "flex flex-col gap-2.5 rounded-2xl border bg-ink-850/70 p-3.5 transition-colors",
-                  isPlaying ? "border-amber-400/50" : "hairline hover:border-white/20",
-                  item.hasFile ? "" : "opacity-60",
-                ].join(" ")}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <label className="flex items-center gap-1.5">
+        <>
+          <div className="flex items-center gap-2">
+            <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={() =>
+                  setSelected(allSelected ? [] : view.map((item) => item.id))
+                }
+                className="h-3.5 w-3.5 accent-accent"
+              />
+              {t("media.selectAll")}
+            </label>
+          </div>
+
+          <div className="grid auto-rows-max grid-cols-1 gap-3 pb-2 md:grid-cols-2 xl:grid-cols-3">
+            {view.map((item) => {
+              const isPlaying = Boolean(playbacks[item.id]);
+              const busyItem = busy === item.id;
+              const dot = PLATFORM_DOT[item.platform] ?? "#8a8f99";
+              return (
+                <article
+                  key={item.id}
+                  className={[
+                    "flex flex-col gap-2.5 rounded-panel border bg-surface p-3 shadow-[var(--shadow-card)] transition-colors",
+                    isPlaying ? "border-accent/45" : "border-line hover:border-line-strong",
+                    item.hasFile ? "" : "opacity-65",
+                  ].join(" ")}
+                >
+                  <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={selected.includes(item.id)}
                       onChange={() => toggleSelected(item.id)}
-                      className="h-3.5 w-3.5 accent-amber-400"
+                      aria-label={t("media.selected", { n: 1 })}
+                      className="h-3.5 w-3.5 shrink-0 accent-accent"
                     />
-                    <span className={"rounded-full border px-2 py-0.5 text-[10px] font-medium " + tone}>
+                    <Chip tone="neutral">
+                      <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full" style={{ background: dot }} />
                       {t("platformName." + item.platform, { defaultValue: item.platform })}
-                    </span>
-                  </label>
-                  <span className="text-[11px] text-zinc-500">{formatDate(item.startedAt)}</span>
-                </div>
+                    </Chip>
+                    {isPlaying && <Chip tone="accent" dot>{t("media.playing")}</Chip>}
+                    <span className="ml-auto font-mono text-[10px] tabular-nums text-faint">{formatDate(item.startedAt)}</span>
+                  </div>
 
-                {isPlaying && (
-                  <div className="overflow-hidden rounded-xl border hairline bg-black">
-                    <div className="aspect-video w-full">
-                      <Player
-                        url={playbacks[item.id].url}
-                        volume={volume}
-                        onVolumeChange={changeVolume}
-                        onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
-                        durationMs={item.durationMs}
-                        startMs={playbacks[item.id].startMs}
-                        leadMs={playbacks[item.id].leadMs}
-                        startAtSec={playbacks[item.id].offsetMs / 1000}
-                        onSeek={(positionMs) => void seekTo(item, positionMs)}
-                      />
+                  {isPlaying && (
+                    <div className="overflow-hidden rounded-ctl border border-line bg-black">
+                      <div className="aspect-video w-full">
+                        <Player
+                          url={playbacks[item.id].url}
+                          volume={volume}
+                          onVolumeChange={changeVolume}
+                          onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
+                          durationMs={item.durationMs}
+                          startMs={playbacks[item.id].startMs}
+                          leadMs={playbacks[item.id].leadMs}
+                          startAtSec={playbacks[item.id].offsetMs / 1000}
+                          onSeek={(positionMs) => void seekTo(item, positionMs)}
+                        />
+                      </div>
                     </div>
+                  )}
+
+                  <div>
+                    <div className="line-clamp-2 text-[13px] font-medium leading-snug text-ink">
+                      {item.title || item.hostName || item.id}
+                    </div>
+                    <div className="mt-0.5 truncate text-[11px] text-muted">{item.hostName}</div>
                   </div>
-                )}
 
-                <div className="min-h-[38px]">
-                  <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">
-                    {item.title || item.hostName || item.id}
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-[10.5px] tabular-nums text-faint">
+                    <span>{formatDuration(item.durationMs)}</span>
+                    <span className="text-line-strong">·</span>
+                    <span>{formatSize(item.size)}</span>
+                    {item.danmakuCount > 0 && (
+                      <>
+                        <span className="text-line-strong">·</span>
+                        <span className="font-sans">{t("media.danmakuCount", { n: item.danmakuCount })}</span>
+                      </>
+                    )}
+                    {!item.hasFile && <span className="font-sans text-warn">{t("media.missing")}</span>}
                   </div>
-                  <div className="mt-0.5 truncate text-[11px] text-zinc-500">{item.hostName}</div>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
-                  <span>{formatDuration(item.durationMs)}</span>
-                  <span>{formatSize(item.size)}</span>
-                  {item.danmakuCount > 0 && <span>{t("media.danmakuCount", { n: item.danmakuCount })}</span>}
-                  {!item.hasFile && <span className="text-amber-400">{t("media.missing")}</span>}
-                </div>
+                  <div className="flex items-center gap-1">
+                    {(["mp4", "screenshot", "ass"] as const).map((kind) => {
+                      const key = item.id + ":" + kind;
+                      const label =
+                        kind === "mp4" ? t("media.remux") : kind === "screenshot" ? t("media.screenshot") : t("media.exportAss");
+                      return (
+                        <button
+                          key={kind}
+                          type="button"
+                          disabled={!item.hasFile || posting !== null}
+                          onClick={() => void post(item, kind)}
+                          className="focus-ring rounded-[6px] border border-line px-1.5 py-0.5 text-[10.5px] text-muted transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {posting === key ? (postPercent === null ? "…" : postPercent + "%") : label}
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                <div className="flex items-center gap-1.5">
-                  {(["mp4", "screenshot", "ass"] as const).map((kind) => {
-                    const key = item.id + ":" + kind;
-                    const label =
-                      kind === "mp4" ? t("media.remux") : kind === "screenshot" ? t("media.screenshot") : t("media.exportAss");
-                    return (
-                      <button
-                        key={kind}
-                        type="button"
-                        disabled={!item.hasFile || posting !== null}
-                        onClick={() => void post(item, kind)}
-                        className="focus-ring rounded-md border hairline px-2 py-0.5 text-[11px] text-zinc-400 transition-colors hover:border-white/25 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {posting === key ? (postPercent === null ? "…" : postPercent + "%") : label}
-                      </button>
-                    );
-                  })}
-                  <span className="ml-auto text-[11px] text-zinc-600">{isPlaying ? t("media.playing") : ""}</span>
-                </div>
-
-                <div className="mt-auto flex items-center gap-1.5 pt-1">
-                  <button
-                    type="button"
-                    disabled={!item.hasFile || busyItem}
-                    onClick={() => void play(item)}
-                    className="focus-ring rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-[12px] font-medium text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {busyItem ? "…" : isPlaying ? t("media.stop") : t("media.play")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void mediaReveal(item.id).catch((err) => setError(describeError(err)))}
-                    className="focus-ring rounded-full border hairline px-3 py-1 text-[12px] text-zinc-300 transition-colors hover:border-white/25 hover:text-white"
-                  >
-                    {t("media.reveal")}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busyItem}
-                    onClick={() => void remove(item)}
-                    onBlur={() => setConfirmId(null)}
-                    className={[
-                      "focus-ring ml-auto rounded-full border px-3 py-1 text-[12px] transition-colors disabled:opacity-40",
-                      confirmId === item.id
-                        ? "border-red-400/60 bg-red-500/15 text-red-300"
-                        : "hairline text-zinc-400 hover:border-red-400/40 hover:text-red-300",
-                    ].join(" ")}
-                  >
-                    {confirmId === item.id ? t("media.confirmDelete") : t("media.delete")}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                  <div className="mt-auto flex items-center gap-1.5 pt-0.5">
+                    <Button
+                      size="sm"
+                      variant={isPlaying ? "secondary" : "primary"}
+                      disabled={!item.hasFile || busyItem}
+                      onClick={() => void play(item)}
+                    >
+                      {busyItem ? "…" : isPlaying ? t("media.stop") : t("media.play")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void mediaReveal(item.id).catch((err) => setError(describeError(err)))}
+                    >
+                      {t("media.reveal")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className={confirmId === item.id ? "ml-auto text-rec" : "ml-auto"}
+                      disabled={busyItem}
+                      onClick={() => void remove(item)}
+                      onBlur={() => setConfirmId(null)}
+                    >
+                      {confirmId === item.id ? t("media.confirmDelete") : t("media.delete")}
+                    </Button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );

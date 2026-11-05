@@ -32,6 +32,10 @@ notifyEnabled: boolean,
  */
 language: string, 
 /**
+ * light | dark | system（默认 light）
+ */
+theme: string, 
+/**
  * 录像保留天数（0 = 不按天删除）
  */
 retentionDays: number, 

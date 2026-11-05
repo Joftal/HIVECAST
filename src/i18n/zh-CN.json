@@ -4,10 +4,9 @@
     "tagline": "直播录制与同屏观看"
   },
   "tab": {
-    "monitor": "主播监控",
-    "watch": "多屏观看",
-    "media": "媒体库",
-    "settings": "设置"
+    "monitor": "监控",
+    "watch": "观看",
+    "media": "媒体库"
   },
   "media": {
     "title": "媒体库",
@@ -48,7 +47,8 @@
     "merge": "合并选中",
     "mergeDone": "已合并：{{size}}",
     "mergeHint": "至少选两段录像才能合并",
-    "progress": "播放进度"
+    "progress": "播放进度",
+    "selectAll": "全选"
   },
   "settings": {
     "title": "设置",
@@ -79,7 +79,12 @@
     "saveFailed": "保存失败",
     "groupRecord": "录制与观看",
     "groupStorage": "存储与保留",
-    "groupInterface": "界面与通知"
+    "groupInterface": "界面与通知",
+    "theme": "外观主题",
+    "themeLight": "浅色",
+    "themeDark": "深色",
+    "themeSystem": "跟随系统",
+    "notifyHint": "录制开始、录制结束与播放异常时发送系统通知"
   },
   "common": {
     "retry": "重试",
@@ -95,7 +100,7 @@
     "title": "主播监控",
     "subtitle": "添加直播间后自动监听开播、录制与后处理。",
     "emptyTitle": "还没有监控中的直播间",
-    "emptyBody": "粘贴直播间链接或房间号开始监控（哔哩哔哩 / 斗鱼 / 虎牙），开播后会自动录制到媒体库。",
+    "emptyBody": "粘贴直播间链接或房间号开始监控。",
     "envTitle": "环境自检",
     "envBody": "以下信息来自 Rust 侧，用于确认运行环境可用。",
     "ffmpeg": "ffmpeg",
@@ -106,7 +111,7 @@
     "listTitle": "监控列表",
     "listBody": "开播自动开录，下播自动收尾；列表每 15 秒刷新一次。",
     "count": "{{n}} 个房间",
-    "inputPlaceholder": "粘贴直播间链接或房间号，例如 live.bilibili.com/545068",
+    "inputPlaceholder": "粘贴直播间链接或房间号",
     "add": "添加",
     "adding": "添加中…",
     "live": "直播中",
@@ -154,14 +159,23 @@
       "250": "超清",
       "400": "蓝光",
       "10000": "原画"
-    }
+    },
+    "onlineCount": "在线 {{n}}",
+    "recordingCount": "录制 {{n}}",
+    "overview": "概览",
+    "statRooms": "房间",
+    "statOnline": "在线",
+    "statRecording": "录制中",
+    "detailEmpty": "选择左侧任意房间，查看画质、线路与最近录制。",
+    "sessions": "最近录制",
+    "lineLoad": "加载可用线路"
   },
   "watch": {
     "title": "多屏观看",
     "subtitle": "最多 4 路同屏，音频、画质与线路互相独立。",
     "addRoom": "添加直播间",
     "addAndWatch": "添加并观看",
-    "inputPlaceholder": "粘贴直播间链接或房间号，例如 live.bilibili.com/545068",
+    "inputPlaceholder": "粘贴直播间链接或房间号",
     "watchNow": "观看",
     "noCandidates": "监控列表里的房间都在观看中，或者还没有添加房间。",
     "unknownRoom": "未知直播间",
@@ -170,7 +184,7 @@
     "muteAll": "全部静音",
     "multiSound": "当前有 3 路以上同时发声。HIVECAST 不会自动静音，需要安静时点「全部静音」。",
     "emptyTitle": "还没有正在观看的直播间",
-    "emptyBody": "从监控列表选一个直播间，或直接粘贴链接开始观看。每一路都有独立的取流与转封装，切换画质不会影响录制。",
+    "emptyBody": "从监控列表选一个直播间，或直接粘贴链接。每一路独立取流，切换画质不影响录制。",
     "hint": "观看与录制是两条独立会话：切换画质、关闭槽位都不会打断正在进行的录制。",
     "layout": {
       "single": "单画面",
@@ -218,7 +232,9 @@
     "danmakuReset": "恢复默认",
     "line": "线路",
     "lineAuto": "自动",
-    "lineHint": "手选线路；自动由程序挑最快的"
+    "lineHint": "手选线路；自动由程序挑最快的",
+    "danmakuShort": "弹",
+    "fullscreen": "全屏"
   },
   "notice": {
     "started": {

@@ -265,6 +265,8 @@ pub struct Settings {
     pub notify_enabled: bool,
     /// zh-CN | en-US | system
     pub language: String,
+    /// light | dark | system（默认 light）
+    pub theme: String,
     /// 录像保留天数（0 = 不按天删除）
     pub retention_days: u32,
     /// 媒体库总容量上限 GB（0 = 不限）

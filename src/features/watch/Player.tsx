@@ -22,6 +22,8 @@ type Props = {
   startAtSec?: number;
   /** 请求跳到整段的某个位置；落在窗口外由外层重开一个窗口。 */
   onSeek?: (positionMs: number) => void;
+  /** 状态角标位置。观看页顶部有槽位信息条，角标要挪到左下角，否则会叠字。 */
+  statsCorner?: "top-right" | "bottom-left";
 };
 
 type Stats = {
@@ -46,6 +48,7 @@ export default function Player({
   leadMs = 0,
   startAtSec,
   onSeek,
+  statsCorner = "top-right",
 }: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -60,12 +63,42 @@ export default function Player({
 
   const [playing, setPlaying] = useState(false);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
+  // 视频按 object-contain 居中，黑边不属于画面；弹幕要贴着画面走，不能画在黑边上。
+  const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   // 点播（回放）才有进度条；拖动时先用 scrubMs 显示预览位置，松手再决定要不要换窗口。
   const vod = durationMs !== undefined && durationMs > 0;
   const [positionMs, setPositionMs] = useState(startMs);
   const [scrubMs, setScrubMs] = useState<number | null>(null);
   const startAtRef = useRef(startAtSec ?? 0);
   startAtRef.current = startAtSec ?? 0;
+
+  // 量出画面在容器里的实际矩形（含 16:9 黑边），供弹幕层与进度条对齐。
+  useEffect(() => {
+    const shell = shellRef.current;
+    const video = videoRef.current;
+    if (!shell || !video) return;
+    const measure = () => {
+      const cw = shell.clientWidth;
+      const ch = shell.clientHeight;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!cw || !ch || !vw || !vh) return;
+      const scale = Math.min(cw / vw, ch / vh);
+      const width = Math.round(vw * scale);
+      const height = Math.round(vh * scale);
+      setBox({ left: Math.round((cw - width) / 2), top: Math.round((ch - height) / 2), width, height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(shell);
+    video.addEventListener("loadedmetadata", measure);
+    video.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      video.removeEventListener("loadedmetadata", measure);
+      video.removeEventListener("resize", measure);
+    };
+  }, [url, reloadKey]);
 
   const volumeRef = useRef(volume);
   volumeRef.current = volume;
@@ -270,25 +303,37 @@ export default function Player({
         onClick={toggle}
       />
 
-      {/* 弹幕层在视频之上、控件之下：不拦截点击，全屏时也保留。 */}
-      {overlay}
+      {/* 弹幕层在视频之上、控件之下：不拦截点击，全屏时也保留；只覆盖画面本身。 */}
+      {overlay ? (
+        <div
+          className="pointer-events-none absolute z-[5]"
+          style={box ?? { left: 0, top: 0, width: "100%", height: "100%" }}
+        >
+          {overlay}
+        </div>
+      ) : null}
 
       {stats.width > 0 ? (
-        <div className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/55 px-2 py-1 font-mono text-[10px] leading-4 text-zinc-300 opacity-80">
+        <div
+          className={[
+            "pointer-events-none absolute z-10 rounded-[5px] bg-black/40 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/55 backdrop-blur-[2px]",
+            statsCorner === "bottom-left" ? "bottom-11 left-2" : "right-2 top-2",
+          ].join(" ")}
+        >
           {stats.width + "x" + stats.height}
           {stats.kbps > 0 ? " · " + stats.kbps + " kbps" : ""}
           {stats.dropped > 0 ? " · " + t("watch.stats.dropped") + " " + stats.dropped : ""}
         </div>
       ) : (
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
-          <span className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-600 border-t-hive-400" />
-          <span className="text-[11px] text-zinc-400">{t("watch.buffering")}</span>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/30">
+          <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-accent" />
+          <span className="text-[11px] text-white/55">{t("watch.buffering")}</span>
         </div>
       )}
 
       {vod ? (
-        <div className="absolute inset-x-0 bottom-9 flex items-center gap-2 bg-gradient-to-t from-black/70 to-transparent px-3 pb-1 pt-6 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
-          <span className="w-10 text-right font-mono text-[10px] text-zinc-400">
+        <div className="absolute inset-x-0 bottom-9 z-10 flex items-center gap-2 bg-gradient-to-t from-black/70 to-transparent px-2.5 pb-1 pt-6 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+          <span className="w-10 text-right font-mono text-[10px] text-white/55">
             {clock(scrubMs ?? positionMs)}
           </span>
           <input
@@ -301,26 +346,26 @@ export default function Player({
             onPointerUp={commitScrub}
             onKeyUp={commitScrub}
             aria-label={t("media.progress")}
-            className="h-1 flex-1 cursor-pointer accent-hive-500"
+            className="h-1 flex-1 cursor-pointer accent-accent"
           />
-          <span className="w-10 font-mono text-[10px] text-zinc-400">{clock(durationMs ?? 0)}</span>
+          <span className="w-10 font-mono text-[10px] text-white/55">{clock(durationMs ?? 0)}</span>
         </div>
       ) : null}
 
-      <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-3 pb-2 pt-8 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+      <div className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-2 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-1.5 pt-9 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
         <button
           type="button"
           onClick={toggle}
           aria-label={playing ? t("watch.paused") : t("watch.playing")}
-          className="focus-ring flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-zinc-100 hover:bg-white/20"
+          className="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-[2px] transition-colors hover:bg-white/25"
         >
           {playing ? (
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
               <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
               <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
             </svg>
           ) : (
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
               <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
             </svg>
           )}
@@ -331,11 +376,21 @@ export default function Player({
           onClick={toggleMute}
           aria-label={muted ? t("watch.muted") : t("watch.audioOn")}
           className={[
-            "focus-ring rounded-md px-1 py-1 text-[11px] transition-colors",
-            muted ? "text-zinc-400 hover:bg-white/10" : "text-hive-300 hover:bg-white/10",
+            "focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] transition-colors hover:bg-white/12",
+            muted ? "text-white/55" : "text-accent",
           ].join(" ")}
         >
-          {muted ? "🔇" : "🔊"}
+          {muted ? (
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+              <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
+              <path d="M11.4 6.2 14 8.8M14 6.2l-2.6 2.6" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+              <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
+              <path d="M11.2 5.4a3.7 3.7 0 0 1 0 5.2M13.2 3.6a6.2 6.2 0 0 1 0 8.8" strokeLinecap="round" />
+            </svg>
+          )}
         </button>
 
         <input
@@ -345,11 +400,8 @@ export default function Player({
           value={Math.round(volume * 100)}
           onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}
           aria-label={t("watch.audioOn")}
-          className="h-1 w-16 cursor-pointer accent-hive-500"
+          className="h-1 w-12 shrink-0 cursor-pointer accent-accent"
         />
-        <span className="w-8 font-mono text-[10px] text-zinc-400">
-          {muted ? t("watch.muted") : Math.round(volume * 100)}
-        </span>
 
         <div className="ml-auto flex items-center gap-1">
           <button
@@ -359,22 +411,24 @@ export default function Player({
             title={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
             aria-pressed={danmakuEnabled}
             className={[
-              "focus-ring rounded-md px-1.5 py-1 text-[10px] transition-colors",
+              "focus-ring rounded-[5px] px-1 py-0.5 text-[9.5px] leading-4 transition-colors",
               danmakuEnabled
-                ? "text-hive-300 hover:bg-white/10"
-                : "text-zinc-500 hover:bg-white/10 hover:text-zinc-300",
+                ? "bg-white/12 text-white/85 hover:bg-white/20"
+                : "text-white/40 hover:bg-white/10 hover:text-white/70",
               onToggleDanmaku ? "" : "cursor-not-allowed opacity-40",
             ].join(" ")}
           >
-            弹
+            {t("watch.danmakuShort")}
           </button>
           <button
             type="button"
             onClick={fullscreen}
-            aria-label="fullscreen"
-            className="focus-ring rounded-md px-1.5 py-1 text-[10px] text-zinc-300 hover:bg-white/10"
+            aria-label={t("watch.fullscreen")}
+            className="focus-ring flex h-6 w-6 items-center justify-center rounded-[6px] text-white/55 transition-colors hover:bg-white/12 hover:text-white"
           >
-            ⤢
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+              <path d="M1.5 4.2V1.5h2.7M10.5 4.2V1.5H7.8M1.5 7.8v2.7h2.7M10.5 7.8v2.7H7.8" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
       </div>
