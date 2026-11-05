@@ -1,6 +1,7 @@
 mod broker;
 mod commands;
 mod db;
+mod disk;
 mod error;
 mod ffmpeg;
 mod monitor;
@@ -27,6 +28,7 @@ pub fn run() {
     init_tracing();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。

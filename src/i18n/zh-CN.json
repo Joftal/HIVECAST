@@ -100,6 +100,12 @@
     "language": "语言",
     "open": "设置"
   },
+  "notice": {
+    "started": { "title": "开始录制", "body": "{{host}} 正在直播，已开始录制" },
+    "ended": { "title": "录制结束", "body": "{{host}} 的直播已结束，文件已保存到媒体库" },
+    "failed": { "title": "录制中断", "body": "{{host}} 的录制异常中断：{{detail}}" },
+    "diskFull": { "title": "磁盘空间不足", "body": "{{host}} 的录制已停止，请清理磁盘后手动开录" }
+  },
   "error": {
     "ffmpegMissing": "未找到 ffmpeg，请检查安装或稍后在设置中指定路径。",
     "generic": "操作失败：{{message}}"

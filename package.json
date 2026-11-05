@@ -16,24 +16,25 @@
     "check:docs": "node scripts/check-docs.mjs"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-notification": "^2.8.0",
     "hls.js": "^1.6.13",
     "i18next": "^25.5.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-i18next": "^16.0.0",
-    "zustand": "^5.0.8",
-    "@tauri-apps/api": "^2.9.0"
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/cli": "^2.9.1",
+    "@types/node": "^24.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.4",
     "tailwindcss": "^4.1.14",
     "typescript": "^5.9.3",
-    "vite": "^7.1.9",
-    "@types/node": "^24.10.0"
+    "vite": "^7.1.9"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

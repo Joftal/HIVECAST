@@ -29,6 +29,8 @@ async-trait = "0.1"
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
+tauri-plugin-notification = "2"
+fs4 = { version = "0.13", features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

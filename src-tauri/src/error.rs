@@ -19,6 +19,10 @@ pub enum AppError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    /// 面向用户的拒绝原因（磁盘不足、冷却中等），message 直接展示，不加前缀。
+    #[error("{0}")]
+    User(String),
+
     #[error("database error: {0}")]
     Db(String),
 
@@ -38,6 +42,7 @@ impl AppError {
             AppError::FfmpegMissing => "ffmpeg_missing",
             AppError::Path(_) => "path_invalid",
             AppError::Internal(_) => "internal",
+            AppError::User(_) => "user",
             AppError::Db(_) => "db",
             AppError::Platform { code, .. } => code,
         }

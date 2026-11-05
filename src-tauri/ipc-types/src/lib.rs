@@ -130,3 +130,15 @@ pub struct RecordSession {
     pub line: Option<String>,
     pub error: Option<String>,
 }
+
+/// 录制状态播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RecordNotice {
+    /// started | ended | failed | disk_full
+    pub kind: String,
+    pub room_id: String,
+    pub host_name: String,
+    pub detail: Option<String>,
+}

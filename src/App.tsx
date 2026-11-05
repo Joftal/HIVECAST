@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import TabBar from "./components/TabBar";
 import MonitorPage from "./features/monitor/MonitorPage";
 import WatchPage from "./features/watch/WatchPage";
 import { setLanguage } from "./i18n";
-import { isTauri } from "./lib/ipc";
+import { isTauri, onRecordNotice } from "./lib/ipc";
 
 type TabKey = "monitor" | "watch";
 
@@ -27,6 +27,41 @@ export default function App() {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<TabKey>("monitor");
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
+
+  // 录制播报走系统通知；文案在前端 i18n，切语言即时生效。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+
+    void (async () => {
+      try {
+        const { isPermissionGranted, requestPermission, sendNotification } = await import(
+          "@tauri-apps/plugin-notification"
+        );
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === "granted";
+
+        const off = await onRecordNotice((notice) => {
+          if (!granted) return;
+          const key = notice.kind === "disk_full" ? "diskFull" : notice.kind;
+          sendNotification({
+            title: t(`notice.${key}.title`),
+            body: t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" }),
+          });
+        });
+        if (disposed) off();
+        else unlisten = off;
+      } catch (err) {
+        console.warn("notification unavailable", err);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [t]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

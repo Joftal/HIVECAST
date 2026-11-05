@@ -13,12 +13,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use std::time::{Duration, Instant};
 
-use hivecast_ipc::{RecordSession, RecordingInfo, RoomRecord};
+use hivecast_ipc::{RecordNotice, RecordSession, RecordingInfo, RoomRecord};
 use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 
 use crate::broker::StreamBroker;
 use crate::db::Db;
+use crate::disk;
 use crate::error::AppError;
 use crate::ffmpeg;
 use crate::platform::StreamGroup;
@@ -29,6 +30,8 @@ const EARLY_EXIT: Duration = Duration::from_secs(12);
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
+/// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
+pub const EVENT_RECORD_NOTICE: &str = "record://notice";
 
 struct Active {
     recording: RecordingInfo,
@@ -36,6 +39,8 @@ struct Active {
     /// 用户主动停止 / 平台下播时写入，用于收尾判定
     stop_reason: Option<String>,
     started: Instant,
+    /// 通知里要显示的主播名，收尾时从内存取，避免再查一次库
+    host_name: String,
 }
 
 pub struct Recorder {
@@ -153,7 +158,17 @@ impl Recorder {
             return Ok(existing);
         }
         if self.cooling_down(&room.id) {
-            return Err(AppError::Internal("该房间刚刚连续失败，稍后再试".into()));
+            return Err(AppError::User("该房间刚刚连续失败，稍后再试".into()));
+        }
+
+        // 磁盘写满会让 ffmpeg 直接退出，还会把系统拖死，所以先拦一道。
+        // can_start 是开录门槛，is_low 是录制红线：两个都得过，
+        // 否则「已有录制被红线停掉、监控又立刻重新开录」会变成反复起停。
+        if !disk::can_start(&self.media_root) || disk::is_low(&self.media_root) {
+            let message = disk::start_blocked_message(&self.media_root);
+            self.set_error(&room.id, message.clone());
+            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+            return Err(AppError::User(message));
         }
 
         let groups = broker
@@ -170,7 +185,7 @@ impl Recorder {
             .map_err(AppError::from)?;
 
         let (candidate, group) = pick_candidate(&groups)
-            .ok_or_else(|| AppError::Internal("没有可用的线路".into()))?;
+            .ok_or_else(|| AppError::User("没有可用的线路".into()))?;
 
         let started_at = crate::db::now_ts();
         let path = session_path(
@@ -259,6 +274,7 @@ impl Recorder {
                     child,
                     stop_reason: None,
                     started: Instant::now(),
+                    host_name: room.host_name.clone(),
                 },
             );
         }
@@ -271,6 +287,7 @@ impl Recorder {
         );
         self.clear_error(&room.id);
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        emit_notice(app, "started", &room.id, &room.host_name, None);
         self.spawn_watcher(app.clone(), room.id.clone());
         Ok(recording)
     }
@@ -402,6 +419,7 @@ impl Recorder {
             Some("stopped") => ("finished", "stopped", None),
             Some("stream_ended") => ("finished", "stream_ended", None),
             Some("app_exit") => ("aborted", "app_exit", None),
+            Some("disk_full") => ("aborted", "disk_full", None),
             _ if status.success() => ("finished", "stream_ended", None),
             _ => {
                 let message = format!("ffmpeg 异常退出：{status}");
@@ -435,6 +453,17 @@ impl Recorder {
             "录制结束"
         );
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+
+        match (final_status, reason) {
+            ("finished", "stream_ended") => {
+                emit_notice(app, "ended", room_id, &active.host_name, None)
+            }
+            ("aborted", "disk_full") => {
+                emit_notice(app, "disk_full", room_id, &active.host_name, None)
+            }
+            ("failed", _) => emit_notice(app, "failed", room_id, &active.host_name, error.clone()),
+            _ => {}
+        }
     }
 
     fn record_failure(&self, room_id: &str) {
@@ -460,6 +489,16 @@ impl Recorder {
             None => false,
         }
     }
+}
+
+fn emit_notice(app: &AppHandle, kind: &str, room_id: &str, host_name: &str, detail: Option<String>) {
+    let notice = RecordNotice {
+        kind: kind.to_string(),
+        room_id: room_id.to_string(),
+        host_name: host_name.to_string(),
+        detail,
+    };
+    let _ = app.emit(EVENT_RECORD_NOTICE, notice);
 }
 
 /// 选线：优先 H.264（FLV 兼容最好），其次第一个有地址的候选。

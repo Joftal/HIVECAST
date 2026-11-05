@@ -100,6 +100,12 @@
     "language": "Language",
     "open": "Settings"
   },
+  "notice": {
+    "started": { "title": "Recording started", "body": "{{host}} is live — recording started" },
+    "ended": { "title": "Recording finished", "body": "{{host}} ended the stream. The file is saved to your library" },
+    "failed": { "title": "Recording interrupted", "body": "{{host}} stopped unexpectedly: {{detail}}" },
+    "diskFull": { "title": "Not enough disk space", "body": "Recording for {{host}} was stopped. Free up space and start it again" }
+  },
   "error": {
     "ffmpegMissing": "ffmpeg was not found. Install it or set its path in Settings later.",
     "generic": "Action failed: {{message}}"
