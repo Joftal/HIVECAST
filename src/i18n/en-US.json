@@ -47,7 +47,8 @@
     "postFailed": "Post-processing failed",
     "merge": "Merge selected",
     "mergeDone": "Merged: {{size}}",
-    "mergeHint": "Select at least two recordings to merge"
+    "mergeHint": "Select at least two recordings to merge",
+    "progress": "Playback position"
   },
   "settings": {
     "title": "Settings",
@@ -280,8 +281,8 @@
     "qrHint": "Signing in unlocks 1080P and above.",
     "qrWaiting": "Generating QR code…",
     "qrRefresh": "Refresh QR code",
-  "qrExpiresIn": "Expires in {{time}}",
-  "qrExpired": "QR code expired, please refresh",
+    "qrExpiresIn": "Expires in {{time}}",
+    "qrExpired": "QR code expired, please refresh",
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
   }
 }

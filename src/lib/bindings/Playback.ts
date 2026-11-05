@@ -3,4 +3,20 @@
 /**
  * 本地回放的地址与标题。
  */
-export type Playback = { url: string, sessionId: string, title: string, durationMs: number, };
+export type Playback = { url: string, sessionId: string, title: string, durationMs: number, 
+/**
+ * 本次窗口从录像的第几毫秒开始（M13 滑窗回放）
+ */
+startMs: number, 
+/**
+ * 本次窗口的长度（毫秒）
+ */
+windowMs: number, 
+/**
+ * 窗口起点比播放点提前的毫秒数（用于「继续往后看」时无缝衔接）
+ */
+leadMs: number, 
+/**
+ * 起播时刻在窗口内的偏移（毫秒）：新窗口应该从这里开始播
+ */
+offsetMs: number, };

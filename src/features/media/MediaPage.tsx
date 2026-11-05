@@ -248,6 +248,16 @@ export default function MediaPage() {
     }
   };
 
+  // 拖到当前窗口外：后端换一个窗口重开，播放器从新窗口的偏移起播。
+  const seekTo = async (item: MediaItem, positionMs: number) => {
+    try {
+      const playback = await mediaPlay(item.id, positionMs);
+      setPlaybacks((prev) => ({ ...prev, [item.id]: playback }));
+    } catch (err) {
+      setError(t("media.playFailed") + "：" + describeError(err));
+    }
+  };
+
   const post = async (item: MediaItem, kind: "mp4" | "screenshot" | "ass") => {
     if (posting) return;
     setPosting(item.id + ":" + kind);
@@ -451,6 +461,11 @@ export default function MediaPage() {
                         volume={volume}
                         onVolumeChange={changeVolume}
                         onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
+                        durationMs={item.durationMs}
+                        startMs={playbacks[item.id].startMs}
+                        leadMs={playbacks[item.id].leadMs}
+                        startAtSec={playbacks[item.id].offsetMs / 1000}
+                        onSeek={(positionMs) => void seekTo(item, positionMs)}
                       />
                     </div>
                   </div>

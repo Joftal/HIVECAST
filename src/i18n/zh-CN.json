@@ -47,7 +47,8 @@
     "postFailed": "后处理失败",
     "merge": "合并选中",
     "mergeDone": "已合并：{{size}}",
-    "mergeHint": "至少选两段录像才能合并"
+    "mergeHint": "至少选两段录像才能合并",
+    "progress": "播放进度"
   },
   "settings": {
     "title": "设置",
@@ -280,8 +281,8 @@
     "qrHint": "登录后可解锁 1080P 及以上清晰度。",
     "qrWaiting": "正在生成二维码…",
     "qrRefresh": "刷新二维码",
-  "qrExpiresIn": "{{time}} 后失效",
-  "qrExpired": "二维码已过期，请刷新",
+    "qrExpiresIn": "{{time}} 后失效",
+    "qrExpired": "二维码已过期，请刷新",
     "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。"
   }
 }

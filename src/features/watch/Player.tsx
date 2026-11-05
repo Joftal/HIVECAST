@@ -12,6 +12,16 @@ type Props = {
   overlay?: ReactNode;
   danmakuEnabled?: boolean;
   onToggleDanmaku?: () => void;
+  /** 整段时长（毫秒）。给了才显示进度条：直播没有总时长，不给拖动。 */
+  durationMs?: number;
+  /** 当前窗口从整段的第几毫秒开始（滑窗回放）。 */
+  startMs?: number;
+  /** 窗口起点比播放点提前了多少毫秒，续窗时用来衔接。 */
+  leadMs?: number;
+  /** 新窗口应该从流内第几秒开始播（不传就从头播）。 */
+  startAtSec?: number;
+  /** 请求跳到整段的某个位置；落在窗口外由外层重开一个窗口。 */
+  onSeek?: (positionMs: number) => void;
 };
 
 type Stats = {
@@ -31,6 +41,11 @@ export default function Player({
   overlay,
   danmakuEnabled = true,
   onToggleDanmaku,
+  durationMs,
+  startMs = 0,
+  leadMs = 0,
+  startAtSec,
+  onSeek,
 }: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -45,6 +60,12 @@ export default function Player({
 
   const [playing, setPlaying] = useState(false);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
+  // 点播（回放）才有进度条；拖动时先用 scrubMs 显示预览位置，松手再决定要不要换窗口。
+  const vod = durationMs !== undefined && durationMs > 0;
+  const [positionMs, setPositionMs] = useState(startMs);
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const startAtRef = useRef(startAtSec ?? 0);
+  startAtRef.current = startAtSec ?? 0;
 
   const volumeRef = useRef(volume);
   volumeRef.current = volume;
@@ -68,10 +89,12 @@ export default function Player({
       });
   };
 
-  // 换流（切画质/换房间）时重置自救预算。
+  // 换流（切画质/换房间/换窗口）时重置自救预算和进度显示。
   useEffect(() => {
     reloadsRef.current = 0;
-  }, [url]);
+    setScrubMs(null);
+    setPositionMs(startMs);
+  }, [url, startMs]);
 
   // 每个播放器实例独立持有自己的 hls 实例：这是「互不打架」的最小单元。
   useEffect(() => {
@@ -88,6 +111,8 @@ export default function Player({
         backBufferLength: 30,
         liveSyncDurationCount: 3,
         maxBufferLength: 12,
+        // 点播窗口从窗口内的指定位置起播；直播保持 -1（贴直播边缘）。
+        startPosition: startAtRef.current > 0 ? startAtRef.current : -1,
       });
       let recovered = 0;
       hlsRef.current = hls;
@@ -119,7 +144,8 @@ export default function Player({
           return;
         }
         stalls += 1;
-        const live = hls.liveSyncPosition;
+        // 点播没有「直播边缘」可回，卡住只能重载分片。
+        const live = vod ? null : hls.liveSyncPosition;
         if (stalls === 2 || stalls === 4) {
           hls.startLoad();
           if (live !== null && Math.abs(live - video.currentTime) > 2) video.currentTime = live;
@@ -148,7 +174,7 @@ export default function Player({
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, reloadKey]);
+  }, [url, reloadKey, vod]);
 
   // 统计信息每秒刷新一次，不参与 React 的高频路径。
   useEffect(() => {
@@ -173,6 +199,36 @@ export default function Player({
     video.muted = volume === 0;
     video.volume = volume;
   }, [volume]);
+
+  const clock = (value: number) => {
+    const total = Math.max(0, Math.round(value / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+    return (h > 0 ? h + ":" : "") + mm + ":" + String(sec).padStart(2, "0");
+  };
+
+  const withinWindow = (targetMs: number) => {
+    const video = videoRef.current;
+    if (!video) return false;
+    const local = (targetMs - startMs) / 1000;
+    const total = Number.isFinite(video.duration) ? video.duration : 0;
+    return local >= 0 && (total <= 0 || local <= total);
+  };
+
+  const scrub = (targetMs: number) => {
+    setScrubMs(targetMs);
+    const video = videoRef.current;
+    // 窗口内的位置直接就地拖动，不用惊动后端。
+    if (video && withinWindow(targetMs)) video.currentTime = Math.max(0, (targetMs - startMs) / 1000);
+  };
+
+  const commitScrub = () => {
+    const target = scrubMs;
+    setScrubMs(null);
+    if (target !== null && onSeek && !withinWindow(target)) onSeek(target);
+  };
 
   const toggle = () => {
     const video = videoRef.current;
@@ -203,6 +259,14 @@ export default function Player({
         className="h-full w-full object-contain"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
+        onTimeUpdate={(event) => setPositionMs(startMs + event.currentTarget.currentTime * 1000)}
+        onEnded={() => {
+          if (!vod || !onSeek || durationMs === undefined) return;
+          const video = videoRef.current;
+          const end = startMs + (video?.duration ?? 0) * 1000;
+          // 窗口放完自动续下一窗：多带一个 lead 的提前量，衔接处不重复。
+          if (end < durationMs - 800) onSeek(Math.min(durationMs, end + leadMs));
+        }}
         onClick={toggle}
       />
 
@@ -221,6 +285,27 @@ export default function Player({
           <span className="text-[11px] text-zinc-400">{t("watch.buffering")}</span>
         </div>
       )}
+
+      {vod ? (
+        <div className="absolute inset-x-0 bottom-9 flex items-center gap-2 bg-gradient-to-t from-black/70 to-transparent px-3 pb-1 pt-6 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+          <span className="w-10 text-right font-mono text-[10px] text-zinc-400">
+            {clock(scrubMs ?? positionMs)}
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={durationMs ?? 0}
+            step={1000}
+            value={Math.round(Math.min(scrubMs ?? positionMs, durationMs ?? 0))}
+            onChange={(event) => scrub(Number(event.target.value))}
+            onPointerUp={commitScrub}
+            onKeyUp={commitScrub}
+            aria-label={t("media.progress")}
+            className="h-1 flex-1 cursor-pointer accent-hive-500"
+          />
+          <span className="w-10 font-mono text-[10px] text-zinc-400">{clock(durationMs ?? 0)}</span>
+        </div>
+      ) : null}
 
       <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-3 pb-2 pt-8 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
         <button

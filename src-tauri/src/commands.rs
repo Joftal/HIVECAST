@@ -659,8 +659,9 @@ pub async fn media_reveal(state: State<'_, AppState>, session_id: String) -> Res
 pub async fn media_play(
     state: State<'_, AppState>,
     session_id: String,
+    position_ms: Option<i64>,
 ) -> Result<Playback, AppError> {
-    state.local.open(&state.db, &session_id).await
+    state.local.open(&state.db, &session_id, position_ms).await
 }
 
 /// 停止一条回放；只影响这一条，其余各格继续放。

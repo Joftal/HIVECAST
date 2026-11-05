@@ -211,8 +211,8 @@ export async function mediaList(limit?: number): Promise<MediaItem[]> {
   return invoke<MediaItem[]>("media_list", { limit });
 }
 
-export async function mediaPlay(sessionId: string): Promise<Playback> {
-  return invoke<Playback>("media_play", { sessionId });
+export async function mediaPlay(sessionId: string, positionMs?: number | null): Promise<Playback> {
+  return invoke<Playback>("media_play", { sessionId, positionMs: positionMs ?? null });
 }
 
 export async function mediaStop(sessionId: string): Promise<void> {

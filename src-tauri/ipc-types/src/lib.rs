@@ -306,6 +306,18 @@ pub struct Playback {
     pub title: String,
     #[ts(type = "number")]
     pub duration_ms: i64,
+    /// 本次窗口从录像的第几毫秒开始（M13 滑窗回放）
+    #[ts(type = "number")]
+    pub start_ms: i64,
+    /// 本次窗口的长度（毫秒）
+    #[ts(type = "number")]
+    pub window_ms: i64,
+    /// 窗口起点比播放点提前的毫秒数（用于「继续往后看」时无缝衔接）
+    #[ts(type = "number")]
+    pub lead_ms: i64,
+    /// 起播时刻在窗口内的偏移（毫秒）：新窗口应该从这里开始播
+    #[ts(type = "number")]
+    pub offset_ms: i64,
 }
 
 
