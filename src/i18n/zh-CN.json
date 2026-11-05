@@ -135,7 +135,10 @@
       "shot": "截图",
       "ass": "弹幕 ASS",
       "merge": "合并",
-      "mergeHint": "把 {{n}} 段按时间合并为一个 mp4"
+      "mergeHint": "把 {{n}} 段按时间合并为一个 mp4",
+      "mp4Hint": "把这场录像转封装成 MP4，不重新编码",
+      "shotHint": "从这场录像里截一张图",
+      "assHint": "把这场弹幕导出为 ASS 字幕文件"
     },
     "tipsTitle": "使用提示",
     "tipInput": "目前支持哔哩哔哩（含 b23.tv 短链）、斗鱼、虎牙、抖音的直播间链接或房间号。",
@@ -171,10 +174,6 @@
     "lineLoad": "加载可用线路",
     "summary": "{{rooms}} 个房间 · {{online}} 在线 · {{recording}} 录制中",
     "searchPlaceholder": "搜索房间或主播",
-    "sortLabel": "排序",
-    "sortDefault": "默认排序",
-    "sortOnline": "按人气",
-    "sortTitle": "按名称",
     "filterAll": "全部",
     "onlyRecording": "仅看录制中",
     "addRoom": "添加房间",
@@ -202,7 +201,9 @@
     "noMatch": "没有匹配的房间",
     "footerLibrary": "媒体库 {{n}} 个文件 · {{size}}",
     "panelSettings": "录制设置",
-    "more": "更多"
+    "more": "更多",
+    "toggleOn": "开",
+    "toggleOff": "关"
   },
   "watch": {
     "title": "多屏观看",

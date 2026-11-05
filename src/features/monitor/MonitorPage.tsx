@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Button, Select, Switch, cx } from "../../components/ui/Controls";
+import { Button, Select, cx } from "../../components/ui/Controls";
 import {
   describeError,
   isTauri,
@@ -38,7 +38,6 @@ const THUMB_W = 120;
 const THUMB_H = 68;
 
 type PostKind = "mp4" | "shot" | "ass" | "merge";
-type SortKey = "default" | "online" | "title";
 
 function pad(value: number): string {
   return value < 10 ? "0" + value : String(value);
@@ -155,7 +154,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
   const [onlyRecording, setOnlyRecording] = useState(false);
-  const [sort, setSort] = useState<SortKey>("default");
   const [addOpen, setAddOpen] = useState(false);
   const [input, setInput] = useState("");
   const [adding, setAdding] = useState(false);
@@ -165,6 +163,17 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
   const [now, setNow] = useState(() => Date.now());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!addOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAddOpen(false);
+        setInput("");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [addOpen]);
   const [lines, setLines] = useState<LineInfo[] | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
   const [postBusy, setPostBusy] = useState<string | null>(null);
@@ -250,14 +259,10 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
       if (!needle) return true;
       return (view.room.title + " " + view.room.hostName + " " + view.room.roomKey).toLowerCase().includes(needle);
     });
-    const rank = (view: RoomView) => (view.recording ? 0 : view.room.isLive ? 1 : 2);
-    return list.sort((a, b) => {
-      if (sort === "online") return b.room.online - a.room.online;
-      if (sort === "title") return (a.room.title || a.room.roomKey).localeCompare(b.room.title || b.room.roomKey);
-      const delta = rank(a) - rank(b);
-      return delta !== 0 ? delta : b.room.lastCheckedAt - a.room.lastCheckedAt;
-    });
-  }, [views, query, platform, onlyRecording, sort]);
+    // 固定按主播名称排序（中文按拼音、数字按数值），不再提供排序入口。
+    const label = (view: RoomView) => view.room.hostName || view.room.title || view.room.roomKey;
+    return list.sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true }));
+  }, [views, query, platform, onlyRecording]);
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
   const selectedSessions = useMemo(
@@ -489,7 +494,27 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
           {menuId === room.id ? (
             <>
               <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
-              <div className="absolute right-0 top-9 z-40 w-[136px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
+              <div className="absolute right-0 top-9 z-40 w-[176px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuId(null);
+                    void run(room.id, () => roomSetAutoRecord(room.id, !room.autoRecord));
+                  }}
+                  className="flex h-8 w-full items-center gap-2 px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
+                >
+                  <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-accent-text">
+                    {room.autoRecord ? (
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                        <path d="M2.5 6.4l2.3 2.3 4.7-4.9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    ) : null}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{t("monitor.autoRecord")}</span>
+                  <span className="shrink-0 text-[11.5px] text-faint">
+                    {room.autoRecord ? t("monitor.toggleOn") : t("monitor.toggleOff")}
+                  </span>
+                </button>
                 <button
                   type="button"
                   disabled={!last}
@@ -521,7 +546,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
     const busy = busyId === room.id;
     const last = lastByRoom.get(room.id);
     const isRecording = Boolean(view.recording);
-    const confirm = confirmId === room.id;
     return (
       <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface">
         <div className="p-4">
@@ -611,14 +635,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
             ) : lines.length === 0 ? (
               <span className="block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
             ) : null}
-            <div className="flex items-center justify-between pt-0.5">
-              <span className="text-[12.5px] text-muted">{t("monitor.autoRecord")}</span>
-              <Switch
-                checked={room.autoRecord}
-                label={t("monitor.autoRecord")}
-                onChange={(next) => void run(room.id, () => roomSetAutoRecord(room.id, next))}
-              />
-            </div>
           </div>
 
           <div className="mt-4 flex items-center gap-2 border-t border-line pt-3">
@@ -658,6 +674,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                           <button
                             type="button"
                             disabled={postBusy === postKey(room.id, "mp4", session.id)}
+                            title={t("monitor.post.mp4Hint")}
                             onClick={() => void doPost(room.id, "mp4", session.id)}
                             className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
                           >
@@ -666,6 +683,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                           <button
                             type="button"
                             disabled={postBusy === postKey(room.id, "shot", session.id)}
+                            title={t("monitor.post.shotHint")}
                             onClick={() => void doPost(room.id, "shot", session.id)}
                             className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
                           >
@@ -675,6 +693,7 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
                             <button
                               type="button"
                               disabled={postBusy === postKey(room.id, "ass", session.id)}
+                              title={t("monitor.post.assHint")}
                               onClick={() => void doPost(room.id, "ass", session.id)}
                               className="focus-ring h-6 rounded-ctl border border-line px-1.5 text-[11px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
                             >
@@ -689,17 +708,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               })}
             </div>
           )}
-
-          <div className="mt-4 border-t border-line pt-3">
-            <Button
-              variant="ghost"
-              className="h-8 px-2 text-[12.5px] text-muted hover:text-rec"
-              onBlur={() => setConfirmId(null)}
-              onClick={() => void removeRoom(room)}
-            >
-              {confirm ? t("monitor.confirmRemove") : t("monitor.removeRoom")}
-            </Button>
-          </div>
         </div>
       </aside>
     );
@@ -736,18 +744,6 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
               className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
             />
           </div>
-          <Select
-            value={sort}
-            onChange={(next) => setSort(next as SortKey)}
-            size="md"
-            title={t("monitor.sortLabel")}
-            options={[
-              { value: "default", label: t("monitor.sortDefault") },
-              { value: "online", label: t("monitor.sortOnline") },
-              { value: "title", label: t("monitor.sortTitle") },
-            ]}
-            className="w-[124px]"
-          />
           <Button size="lg" variant="primary" onClick={() => setAddOpen((open) => !open)}>
             <span className="text-[15px] leading-none">+</span>
             {t("monitor.addRoom")}
@@ -756,35 +752,63 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: () => void 
       </div>
 
       {addOpen ? (
-        <form
-          className="flex shrink-0 items-center gap-2 border-y border-line bg-raised/50 px-5 py-2.5"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void add();
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 px-6 pt-[88px] backdrop-blur-[2px] animate-fade-in"
+          onMouseDown={() => {
+            setAddOpen(false);
+            setInput("");
           }}
         >
-          <input
-            autoFocus
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder={t("monitor.inputPlaceholder")}
-            spellCheck={false}
-            className="focus-ring h-9 w-full max-w-[560px] rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
-          />
-          <Button size="lg" type="submit" variant="primary" disabled={adding || !input.trim()}>
-            {adding ? t("monitor.adding") : t("monitor.add")}
-          </Button>
-          <Button
-            size="lg"
-            variant="ghost"
-            onClick={() => {
-              setAddOpen(false);
-              setInput("");
+          <form
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void add();
             }}
+            className="w-[560px] max-w-full rounded-panel border border-line bg-surface p-5 shadow-pop animate-pop"
           >
-            {t("monitor.cancel")}
-          </Button>
-        </form>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-[15px] font-semibold text-ink">{t("monitor.addRoom")}</h2>
+                <p className="mt-1 text-[12px] leading-relaxed text-muted">{t("monitor.inputPlaceholder")}</p>
+              </div>
+              <button
+                type="button"
+                aria-label={t("monitor.cancel")}
+                onClick={() => {
+                  setAddOpen(false);
+                  setInput("");
+                }}
+                className="focus-ring -mr-1 -mt-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint hover:bg-raised hover:text-ink"
+              >
+                ✕
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="https://live.bilibili.com/6"
+              spellCheck={false}
+              className="focus-ring mt-4 h-10 w-full rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                size="lg"
+                variant="ghost"
+                onClick={() => {
+                  setAddOpen(false);
+                  setInput("");
+                }}
+              >
+                {t("monitor.cancel")}
+              </Button>
+              <Button size="lg" type="submit" variant="primary" disabled={adding || !input.trim()}>
+                {adding ? t("monitor.adding") : t("monitor.add")}
+              </Button>
+            </div>
+          </form>
+        </div>
       ) : null}
 
       {error ? (

@@ -135,7 +135,10 @@
       "shot": "Snapshot",
       "ass": "Danmaku ASS",
       "merge": "Merge",
-      "mergeHint": "Merge {{n}} sessions into one mp4"
+      "mergeHint": "Merge {{n}} sessions into one mp4",
+      "mp4Hint": "Remux this recording to MP4 without re-encoding",
+      "shotHint": "Grab one frame from this recording",
+      "assHint": "Export this recording's danmaku as an ASS subtitle"
     },
     "tipsTitle": "Tips",
     "tipInput": "Supports Bilibili (including b23.tv short links), Douyu, Huya, and Douyin live links or room ids.",
@@ -171,10 +174,6 @@
     "lineLoad": "Load available lines",
     "summary": "{{rooms}} rooms · {{online}} live · {{recording}} recording",
     "searchPlaceholder": "Search rooms or hosts",
-    "sortLabel": "Sort",
-    "sortDefault": "Default",
-    "sortOnline": "By viewers",
-    "sortTitle": "By name",
     "filterAll": "All",
     "onlyRecording": "Recording only",
     "addRoom": "Add room",
@@ -202,7 +201,9 @@
     "noMatch": "No rooms match",
     "footerLibrary": "Library {{n}} files · {{size}}",
     "panelSettings": "Recording",
-    "more": "More"
+    "more": "More",
+    "toggleOn": "On",
+    "toggleOff": "Off"
   },
   "watch": {
     "title": "Multi-view",
