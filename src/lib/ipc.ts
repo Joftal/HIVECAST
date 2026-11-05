@@ -10,6 +10,7 @@ import type { LineInfo } from "./bindings/LineInfo";
 import type { MediaItem } from "./bindings/MediaItem";
 import type { Playback } from "./bindings/Playback";
 import type { Settings } from "./bindings/Settings";
+import type { PostProgress } from "./bindings/PostProgress";
 import type { PostResult } from "./bindings/PostResult";
 import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
@@ -27,6 +28,7 @@ export type {
   LineInfo,
   MediaItem,
   Playback,
+  PostProgress,
   PostResult,
   AppNotice,
   RecordSession,
@@ -139,6 +141,13 @@ export const EVENT_APP_NOTICE = "app://notice";
 // 应用级播报（录制 / 观看失败 / 登录态过期）：前端自己用 i18n 组装文案再弹系统通知。
 export function onAppNotice(handler: (notice: AppNotice) => void): Promise<UnlistenFn> {
   return listen<AppNotice>(EVENT_APP_NOTICE, (event) => handler(event.payload));
+}
+
+// 后处理进度（转封装 / 合并）：task 是录像 id，合并任务为 "merge"。
+export const EVENT_POST_PROGRESS = "post://progress";
+
+export function onPostProgress(handler: (progress: PostProgress) => void): Promise<UnlistenFn> {
+  return listen<PostProgress>(EVENT_POST_PROGRESS, (event) => handler(event.payload));
 }
 
 export function onRoomsChanged(handler: () => void): Promise<UnlistenFn> {

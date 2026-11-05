@@ -8,6 +8,7 @@ import {
   mediaPlay,
   mediaReveal,
   mediaStop,
+  onPostProgress,
   sessionExportDanmaku,
   sessionRemux,
   sessionsMerge,
@@ -60,6 +61,19 @@ function describeError(err: unknown): string {
   return String(err);
 }
 
+// 媒体库统一音量：所有卡片共用一份，存 localStorage，下次打开还是这个音量。
+const VOLUME_KEY = "hivecast.mediaVolume";
+
+function loadVolume(): number {
+  try {
+    const raw = window.localStorage.getItem(VOLUME_KEY);
+    const value = raw === null ? 0 : Number(raw);
+    return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 const PLATFORM_TONE: Record<string, string> = {
   bilibili: "border-sky-400/30 bg-sky-400/10 text-sky-300",
   douyu: "border-orange-400/30 bg-orange-400/10 text-orange-300",
@@ -74,7 +88,7 @@ export default function MediaPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [playbacks, setPlaybacks] = useState<Record<string, Playback>>({});
-  const [volumes, setVolumes] = useState<Record<string, number>>({});
+  const [volume, setVolume] = useState(loadVolume);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -83,6 +97,8 @@ export default function MediaPage() {
   const [selected, setSelected] = useState<string[]>([]);
   // 后处理任务（转封装/截图/ASS）：一次只跑一个，避免 ffmpeg 抢 IO。
   const [posting, setPosting] = useState<string | null>(null);
+  // 后处理进度（0..99）：合并任务用 "merge"，与录像 id 不冲突。
+  const [postPercent, setPostPercent] = useState<number | null>(null);
   // 卸载清理要用最新值，但不能再触发 effect，所以放 ref。
   const playbacksRef = useRef<Record<string, Playback>>({});
   playbacksRef.current = playbacks;
@@ -106,6 +122,28 @@ export default function MediaPage() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // 进度事件是全局的，只负责更新数字，显示与否看 posting / busy。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let dispose: (() => void) | undefined;
+    void onPostProgress((progress) => setPostPercent(progress.percent))
+      .then((off) => {
+        dispose = off;
+      })
+      .catch(() => undefined);
+    return () => dispose?.();
+  }, []);
+
+  const changeVolume = (next: number) => {
+    const value = Math.min(1, Math.max(0, next));
+    setVolume(value);
+    try {
+      window.localStorage.setItem(VOLUME_KEY, String(value));
+    } catch {
+      // 隐私模式下写不进去，只影响下次启动的默认值。
+    }
+  };
 
   // 离开媒体库时把回放全部停掉：缓存目录要清，不能留 ffmpeg 在后台。
   useEffect(
@@ -166,6 +204,7 @@ export default function MediaPage() {
   const mergeSelected = async () => {
     if (selected.length < 2 || busy) return;
     setBusy("merge");
+    setPostPercent(0);
     setError(null);
     setNotice(null);
     try {
@@ -177,6 +216,7 @@ export default function MediaPage() {
       setError(t("media.postFailed") + "：" + describeError(err));
     } finally {
       setBusy(null);
+      setPostPercent(null);
     }
   };
 
@@ -211,6 +251,7 @@ export default function MediaPage() {
   const post = async (item: MediaItem, kind: "mp4" | "screenshot" | "ass") => {
     if (posting) return;
     setPosting(item.id + ":" + kind);
+    setPostPercent(0);
     setError(null);
     setNotice(null);
     try {
@@ -228,6 +269,7 @@ export default function MediaPage() {
       setError(t("media.postFailed") + "：" + describeError(err));
     } finally {
       setPosting(null);
+      setPostPercent(null);
     }
   };
 
@@ -336,7 +378,7 @@ export default function MediaPage() {
               title={selected.length < 2 ? t("media.mergeHint") : undefined}
               className="focus-ring rounded-full border border-sky-300/40 bg-sky-400/10 px-3 py-0.5 text-[11px] text-sky-200 transition-colors hover:bg-sky-400/20 disabled:opacity-40"
             >
-              {busy === "merge" ? "…" : t("media.merge")}
+              {busy === "merge" ? (postPercent === null ? "…" : postPercent + "%") : t("media.merge")}
             </button>
             <button
               type="button"
@@ -406,8 +448,8 @@ export default function MediaPage() {
                     <div className="aspect-video w-full">
                       <Player
                         url={playbacks[item.id].url}
-                        volume={volumes[item.id] ?? 0}
-                        onVolumeChange={(next) => setVolumes((prev) => ({ ...prev, [item.id]: next }))}
+                        volume={volume}
+                        onVolumeChange={changeVolume}
                         onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
                       />
                     </div>
@@ -441,7 +483,7 @@ export default function MediaPage() {
                         onClick={() => void post(item, kind)}
                         className="focus-ring rounded-md border hairline px-2 py-0.5 text-[11px] text-zinc-400 transition-colors hover:border-white/25 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {posting === key ? "…" : label}
+                        {posting === key ? (postPercent === null ? "…" : postPercent + "%") : label}
                       </button>
                     );
                   })}

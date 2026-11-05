@@ -389,12 +389,18 @@ fn session_video(session: &RecordSession, active: bool) -> Result<PathBuf, AppEr
 /// 转封装成 mp4（只换容器，不重编码）。
 #[tauri::command]
 pub async fn session_remux(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<PostResult, AppError> {
     let session = session_file(&state, &session_id)?;
     let path = session_video(&session, session.status == "recording")?;
-    postprocess::remux(&path).await
+    let progress = postprocess::Progress {
+        app: &app,
+        task: &session_id,
+        total_ms: session.duration_ms,
+    };
+    postprocess::remux(&path, Some(&progress)).await
 }
 
 /// 截图：默认第 10 秒，避开刚开播的黑帧。
@@ -441,12 +447,13 @@ pub async fn room_merge_sessions(
         .filter_map(|session| session.file_path.map(PathBuf::from))
         .filter(|path| path.is_file())
         .collect();
-    postprocess::merge(&files).await
+    postprocess::merge(&files, None).await
 }
 
 /// 合并选中的多段录像（按开录时间排序），跨房间也可以。
 #[tauri::command]
 pub async fn sessions_merge(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_ids: Vec<String>,
 ) -> Result<PostResult, AppError> {
@@ -461,11 +468,17 @@ pub async fn sessions_merge(
         }
         sessions.push(session);
     }
+    let total_ms: i64 = sessions.iter().map(|session| session.duration_ms.max(0)).sum();
     let files = merge_files_in_order(sessions);
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
-    postprocess::merge(&files).await
+    let progress = postprocess::Progress {
+        app: &app,
+        task: "merge",
+        total_ms,
+    };
+    postprocess::merge(&files, Some(&progress)).await
 }
 
 /// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的跳过。

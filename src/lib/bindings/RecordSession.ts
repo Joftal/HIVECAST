@@ -15,11 +15,7 @@ reason: string | null, filePath: string | null, fileSize: number, durationMs: nu
 /**
  * 实际使用的线路组名
  */
-line: string | null, 
-/**
- * 用户手选的线路组名；None 表示自动
- */
-preferredLine: string | null, error: string | null, 
+line: string | null, error: string | null, 
 /**
  * 与视频同名的弹幕存档（JSONL），未开启弹幕时为空
  */

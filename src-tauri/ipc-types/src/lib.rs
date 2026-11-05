@@ -153,6 +153,18 @@ pub struct PostResult {
     pub message: Option<String>,
 }
 
+/// 后处理进度：task 是录像 id，合并任务用 "merge"。
+///
+/// 只在 ffmpeg 能算出进度时发送（有总时长），0..99，任务结束由返回值表示。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct PostProgress {
+    pub task: String,
+    #[ts(type = "number")]
+    pub percent: i64,
+}
+
 /// 应用级播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
 ///
 /// kind 取值：started | ended | failed | disk_full（录制）、

@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use hivecast_ipc::PostResult;
+use hivecast_ipc::{PostProgress, PostResult};
+use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
 
 use crate::error::AppError;
 use crate::ffmpeg;
+
+/// 后处理进度事件：前端据此在按钮上显示百分比。
+pub const EVENT_POST_PROGRESS: &str = "post://progress";
 
 /// 单个产物最长容忍 10 分钟：4 小时录像的 remux 也只是 IO 时间。
 const TASK_TIMEOUT: Duration = Duration::from_secs(600);
@@ -42,6 +46,28 @@ fn sibling(src: &Path, suffix: &str, ext: &str) -> PathBuf {
     src.with_file_name(name)
 }
 
+/// ffmpeg 的 out_time 是微秒；进度封顶 99，100 由「任务成功返回」表达。
+fn percent_for(micros: i64, total_ms: i64) -> i64 {
+    (micros / 1000 * 100 / total_ms.max(1)).clamp(0, 99)
+}
+
+fn describe_failure(label: &str, stderr: &str) -> String {
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if tail.is_empty() {
+        format!("{label} 失败（ffmpeg 无输出）")
+    } else {
+        format!("{label} 失败：{tail}")
+    }
+}
+
 fn size_of(path: &Path) -> i64 {
     std::fs::metadata(path)
         .map(|meta| meta.len() as i64)
@@ -63,20 +89,76 @@ async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let tail: String = stderr
-        .lines()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join(" | ");
-    Err(AppError::Ffmpeg(if tail.is_empty() {
-        format!("{label} 失败（ffmpeg 无输出）")
-    } else {
-        format!("{label} 失败：{tail}")
-    }))
+    Err(AppError::Ffmpeg(describe_failure(label, &stderr)))
+}
+
+/// 进度上下文：有总时长才发进度（否则 ffmpeg 的 out_time 没有参照）。
+pub struct Progress<'a> {
+    pub app: &'a AppHandle,
+    pub task: &'a str,
+    pub total_ms: i64,
+}
+
+async fn run_ffmpeg_progress(
+    args: Vec<OsString>,
+    label: &str,
+    progress: &Progress<'_>,
+) -> Result<(), AppError> {
+    let mut command = Command::new(ffmpeg::binary());
+    command
+        .args(&args)
+        .args(["-progress", "pipe:1", "-stats_period", "0.2", "-nostats"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(AppError::Io)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        if let Some(mut stream) = stderr {
+            let _ = stream.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    let mut last = 0i64;
+    if let Some(stream) = stdout {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let value = match line.strip_prefix("out_time_us=") {
+                Some(value) => value,
+                None => continue,
+            };
+            let Ok(micros) = value.trim().parse::<i64>() else {
+                continue;
+            };
+            let percent = percent_for(micros, progress.total_ms);
+            if percent > last {
+                last = percent;
+                let _ = progress.app.emit(
+                    EVENT_POST_PROGRESS,
+                    PostProgress {
+                        task: progress.task.to_string(),
+                        percent,
+                    },
+                );
+            }
+        }
+    }
+
+    let status = tokio::time::timeout(TASK_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| AppError::Ffmpeg(format!("{label} 超时")))?
+        .map_err(AppError::Io)?;
+    let stderr = stderr_task.await.unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&stderr);
+    Err(AppError::Ffmpeg(describe_failure(label, &text)))
 }
 
 fn ensure_file(src: &Path) -> Result<(), AppError> {
@@ -87,7 +169,7 @@ fn ensure_file(src: &Path) -> Result<(), AppError> {
 }
 
 /// FLV → MP4：只换容器不重编码，几秒完成，生成的 mp4 能直接拖进剪辑软件。
-pub async fn remux(src: &Path) -> Result<PostResult, AppError> {
+pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostResult, AppError> {
     ensure_file(src)?;
     if src.extension().and_then(|value| value.to_str()) == Some("mp4") {
         return Err(AppError::User("源文件已经是 mp4".into()));
@@ -109,7 +191,10 @@ pub async fn remux(src: &Path) -> Result<PostResult, AppError> {
         "make_zero".into(),
         out.as_os_str().to_os_string(),
     ];
-    run_ffmpeg(args, "转封装").await?;
+    match progress {
+        Some(progress) if progress.total_ms > 0 => run_ffmpeg_progress(args, "转封装", progress).await?,
+        _ => run_ffmpeg(args, "转封装").await?,
+    }
     Ok(PostResult {
         kind: "mp4".into(),
         path: out.to_string_lossy().to_string(),
@@ -150,7 +235,7 @@ pub async fn screenshot(src: &Path, at_secs: Option<f64>) -> Result<PostResult, 
 }
 
 /// 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
-pub async fn merge(sources: &[PathBuf]) -> Result<PostResult, AppError> {
+pub async fn merge(sources: &[PathBuf], progress: Option<&Progress<'_>>) -> Result<PostResult, AppError> {
     if sources.len() < 2 {
         return Err(AppError::User("至少需要两段录像才能合并".into()));
     }
@@ -186,7 +271,10 @@ pub async fn merge(sources: &[PathBuf]) -> Result<PostResult, AppError> {
         "+faststart".into(),
         out.as_os_str().to_os_string(),
     ];
-    let result = run_ffmpeg(args, "合并").await;
+    let result = match progress {
+        Some(progress) if progress.total_ms > 0 => run_ffmpeg_progress(args, "合并", progress).await,
+        _ => run_ffmpeg(args, "合并").await,
+    };
     let _ = std::fs::remove_file(&list_path);
     result?;
     Ok(PostResult {
@@ -337,6 +425,14 @@ mod tests {
     }
 
     #[test]
+    fn percent_clamps_between_zero_and_ninety_nine() {
+        assert_eq!(percent_for(0, 60_000), 0);
+        assert_eq!(percent_for(30_000_000, 60_000), 50);
+        assert_eq!(percent_for(90_000_000, 60_000), 99);
+        assert_eq!(percent_for(-1_000, 60_000), 0);
+    }
+
+    #[test]
     fn ass_colour_swaps_to_bgr() {
         assert_eq!(ass_colour(0), "&H00FFFFFF&");
         assert_eq!(ass_colour(0xFF0000), "&H000000FF&");
@@ -398,7 +494,7 @@ mod tests {
         make_clip(&first, 3).await;
         make_clip(&second, 3).await;
 
-        let mp4 = remux(&first).await.unwrap();
+        let mp4 = remux(&first, None).await.unwrap();
         assert!(mp4.path.ends_with(".mp4"));
         assert!(mp4.size > 1000, "mp4 太小：{}", mp4.size);
 
@@ -406,7 +502,7 @@ mod tests {
         assert!(shot.path.ends_with(".jpg"));
         assert!(shot.size > 500, "截图太小：{}", shot.size);
 
-        let merged = merge(&[first.clone(), second.clone()]).await.unwrap();
+        let merged = merge(&[first.clone(), second.clone()], None).await.unwrap();
         let source_total = size_of(&first) + size_of(&second);
         assert_eq!(merged.kind, "merge");
         assert!(
