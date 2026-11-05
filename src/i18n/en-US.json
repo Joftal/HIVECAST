@@ -234,7 +234,11 @@
     "lineAuto": "Auto",
     "lineHint": "Pick a line manually; Auto chooses the fastest",
     "danmakuShort": "DM",
-    "fullscreen": "Fullscreen"
+    "fullscreen": "Fullscreen",
+    "reload": "Reconnect",
+    "pip": "Picture in picture",
+    "autoQuality": "Auto ({{q}})",
+    "lineN": "Line {{n}}"
   },
   "notice": {
     "started": {

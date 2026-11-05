@@ -234,7 +234,11 @@
     "lineAuto": "自动",
     "lineHint": "手选线路；自动由程序挑最快的",
     "danmakuShort": "弹",
-    "fullscreen": "全屏"
+    "fullscreen": "全屏",
+    "reload": "重新连接",
+    "pip": "画中画",
+    "autoQuality": "自动（{{q}}）",
+    "lineN": "线路 {{n}}"
   },
   "notice": {
     "started": {

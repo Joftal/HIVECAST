@@ -62,9 +62,6 @@ function spanClass(layout: Layout, index: number): string {
   return "";
 }
 
-const GLASS_SELECT =
-  "focus-ring h-6 max-w-[104px] cursor-pointer appearance-none rounded-[6px] border border-white/15 bg-black/45 px-1.5 pr-5 text-[10px] text-white/85 outline-none transition-colors hover:bg-black/65";
-
 export default function WatchPage() {
   const { t } = useTranslation();
   const [rooms, setRooms] = useState<RoomView[]>([]);
@@ -406,6 +403,7 @@ export default function WatchPage() {
                 onToggleDanmaku={() => toggleDanmaku(session.slot)}
                 onQuality={(qn) => void changeQuality(session.slot, qn)}
                 onLine={(line) => void changeLine(session.slot, line)}
+                onDanmakuSettings={() => setDanmakuOpen(true)}
                 onClose={() => void closeSlot(session.slot)}
                 onRetry={() => void retrySlot(session.slot)}
               />
@@ -427,6 +425,7 @@ type CellProps = {
   onToggleDanmaku: () => void;
   onQuality: (qn: number) => void;
   onLine: (line: string | null) => void;
+  onDanmakuSettings: () => void;
   onClose: () => void;
   onRetry: () => void;
 };
@@ -441,6 +440,7 @@ function SlotCell({
   onToggleDanmaku,
   onQuality,
   onLine,
+  onDanmakuSettings,
   onClose,
   onRetry,
 }: CellProps) {
@@ -503,45 +503,6 @@ function SlotCell({
         </div>
 
         <div className="pointer-events-auto flex items-center gap-1">
-          <div className="relative">
-            <select
-              value={session.requestedQn}
-              onChange={(event) => onQuality(Number(event.target.value))}
-              aria-label={t("watch.quality")}
-              className={GLASS_SELECT}
-            >
-              {QN_OPTIONS.map((qn) => (
-                <option key={qn} value={qn}>
-                  {qn === 0 ? t("watch.qn.auto") : t(`watch.qn.${qn}`)}
-                </option>
-              ))}
-            </select>
-            <Chevron />
-          </div>
-
-          <div className="relative">
-            <select
-              value={session.preferredLine ?? ""}
-              onChange={(event) => onLine(event.target.value || null)}
-              onPointerDown={() => void loadLines()}
-              onFocus={() => void loadLines()}
-              aria-label={t("watch.line")}
-              title={t("watch.lineHint")}
-              className={[GLASS_SELECT, "max-w-[92px]"].join(" ")}
-            >
-              <option value="">{t("watch.lineAuto")}</option>
-              {session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine) ? (
-                <option value={session.preferredLine}>{session.preferredLine}</option>
-              ) : null}
-              {(lines ?? []).map((line) => (
-                <option key={line.name} value={line.name}>
-                  {line.name}
-                </option>
-              ))}
-            </select>
-            <Chevron />
-          </div>
-
           {degraded && (
             <span
               title={t("watch.degradedHint")}
@@ -572,6 +533,34 @@ function SlotCell({
             volume={volume}
             onVolumeChange={onVolume}
             statsCorner="bottom-left"
+            onReload={onRetry}
+            onMenuOpen={() => void loadLines()}
+            onOpenDanmakuSettings={onDanmakuSettings}
+            quality={{
+              value: session.requestedQn,
+              options: QN_OPTIONS.map((qn) => ({
+                value: qn,
+                label: qn === 0 ? t("watch.qn.auto") : t("watch.qn." + qn),
+              })),
+              actual: degraded ? actualQuality : undefined,
+              onChange: onQuality,
+            }}
+            lines={{
+              value: session.preferredLine ?? null,
+              options: [
+                { value: null, label: t("watch.lineAuto") },
+                ...(lines ?? []).map((line, index) => ({
+                  value: line.name,
+                  label: t("watch.lineN", { n: index + 1 }),
+                  hint: line.name,
+                })),
+                // 已选线路不在本次解析结果里（线路下线/平台换 CDN）时也要能显示出来。
+                ...(session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine)
+                  ? [{ value: session.preferredLine, label: session.preferredLine, hint: session.preferredLine }]
+                  : []),
+              ],
+              onChange: onLine,
+            }}
             onFatal={(detail) => setFatal(detail)}
             danmakuEnabled={danmaku}
             onToggleDanmaku={onToggleDanmaku}
@@ -624,19 +613,3 @@ function SlotCell({
   );
 }
 
-function Chevron() {
-  return (
-    <svg
-      width="8"
-      height="8"
-      viewBox="0 0 8 8"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      aria-hidden
-      className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-white/45"
-    >
-      <path d="M1.5 2.8 4 5.3l2.5-2.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}

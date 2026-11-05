@@ -24,6 +24,25 @@ type Props = {
   onSeek?: (positionMs: number) => void;
   /** 状态角标位置。观看页顶部有槽位信息条，角标要挪到左下角，否则会叠字。 */
   statsCorner?: "top-right" | "bottom-left";
+  /** 画质菜单（直播才有）。给了就在控制条右侧显示画质入口。 */
+  quality?: {
+    value: number;
+    options: { value: number; label: string }[];
+    actual?: string;
+    onChange: (value: number) => void;
+  };
+  /** 线路菜单：与画质放在同一个浮层里，先选线路再选档位。 */
+  lines?: {
+    value: string | null;
+    options: { value: string | null; label: string; hint?: string }[];
+    onChange: (value: string | null) => void;
+  };
+  /** 重新解析并重连当前流；不传就只重建播放器。 */
+  onReload?: () => void;
+  /** 打开弹幕观感设置（外层抽屉）。 */
+  onOpenDanmakuSettings?: () => void;
+  /** 画质浮层展开时回调：外层借此按需拉线路列表。 */
+  onMenuOpen?: () => void;
 };
 
 type Stats = {
@@ -49,6 +68,11 @@ export default function Player({
   startAtSec,
   onSeek,
   statsCorner = "top-right",
+  quality,
+  lines,
+  onReload,
+  onOpenDanmakuSettings,
+  onMenuOpen,
 }: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -69,6 +93,10 @@ export default function Player({
   const vod = durationMs !== undefined && durationMs > 0;
   const [positionMs, setPositionMs] = useState(startMs);
   const [scrubMs, setScrubMs] = useState<number | null>(null);
+  // 控制条：画质浮层、音量滑杆展开、观看时长（对齐 B 站直播控制条的信息位）。
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [volOpen, setVolOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const startAtRef = useRef(startAtSec ?? 0);
   startAtRef.current = startAtSec ?? 0;
 
@@ -282,6 +310,32 @@ export default function Player({
   };
 
   const muted = volume === 0;
+  const pipSupported = typeof document !== "undefined" && document.pictureInPictureEnabled !== false;
+
+  useEffect(() => {
+    setElapsed(0);
+    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [url, reloadKey]);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [url]);
+
+  const reload = () => {
+    if (onReload) onReload();
+    else setReloadKey((value) => value + 1);
+  };
+
+  const togglePip = () => {
+    const video = videoRef.current;
+    if (!video || !pipSupported) return;
+    if (document.pictureInPictureElement) void document.exitPictureInPicture();
+    else void video.requestPictureInPicture().catch(() => undefined);
+  };
+
+  const qualityLabel = quality?.options.find((option) => option.value === quality.value)?.label;
+  const playbackPct = durationMs && durationMs > 0 ? Math.min(100, ((scrubMs ?? positionMs) / durationMs) * 100) : 0;
 
   return (
     <div ref={shellRef} className="group relative h-full w-full overflow-hidden bg-black">
@@ -331,107 +385,292 @@ export default function Player({
         </div>
       )}
 
-      {vod ? (
-        <div className="absolute inset-x-0 bottom-9 z-10 flex items-center gap-2 bg-gradient-to-t from-black/70 to-transparent px-2.5 pb-1 pt-6 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
-          <span className="w-10 text-right font-mono text-[10px] text-white/55">
-            {clock(scrubMs ?? positionMs)}
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={durationMs ?? 0}
-            step={1000}
-            value={Math.round(Math.min(scrubMs ?? positionMs, durationMs ?? 0))}
-            onChange={(event) => scrub(Number(event.target.value))}
-            onPointerUp={commitScrub}
-            onKeyUp={commitScrub}
-            aria-label={t("media.progress")}
-            className="h-1 flex-1 cursor-pointer accent-accent"
-          />
-          <span className="w-10 font-mono text-[10px] text-white/55">{clock(durationMs ?? 0)}</span>
-        </div>
-      ) : null}
-
-      <div className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-2 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-1.5 pt-9 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
-        <button
-          type="button"
-          onClick={toggle}
-          aria-label={playing ? t("watch.paused") : t("watch.playing")}
-          className="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-[2px] transition-colors hover:bg-white/25"
-        >
-          {playing ? (
-            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-              <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
-              <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
-            </svg>
+      {/* 控制条：结构对齐 B 站直播——细进度线在上、单行图标在下，悬停才浮出。 */}
+      <div className="absolute inset-x-0 bottom-0 z-20 select-none opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+        <div className="bg-gradient-to-t from-black/85 via-black/55 to-transparent pb-0.5 pt-10">
+          {vod ? (
+            <div className="relative mx-2.5 flex h-4 items-center">
+              <div className="absolute inset-x-0 h-[3px] overflow-hidden rounded-full bg-white/20">
+                <div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: playbackPct + "%" }} />
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={durationMs ?? 0}
+                step={1000}
+                value={Math.round(Math.min(scrubMs ?? positionMs, durationMs ?? 0))}
+                onChange={(event) => scrub(Number(event.target.value))}
+                onPointerUp={commitScrub}
+                onKeyUp={commitScrub}
+                aria-label={t("media.progress")}
+                className="absolute inset-x-0 h-4 w-full cursor-pointer appearance-none bg-transparent opacity-0"
+              />
+            </div>
           ) : (
-            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-              <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
-            </svg>
+            <div className="mx-2.5 flex h-4 items-center">
+              <div className="relative h-[3px] w-full overflow-hidden rounded-full bg-white/[0.14]">
+                <div className="absolute inset-y-0 right-0 w-1/4 bg-gradient-to-l from-accent/80 via-accent/30 to-transparent" />
+              </div>
+            </div>
           )}
-        </button>
 
-        <button
-          type="button"
-          onClick={toggleMute}
-          aria-label={muted ? t("watch.muted") : t("watch.audioOn")}
-          className={[
-            "focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] transition-colors hover:bg-white/12",
-            muted ? "text-white/55" : "text-accent",
-          ].join(" ")}
-        >
-          {muted ? (
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-              <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
-              <path d="M11.4 6.2 14 8.8M14 6.2l-2.6 2.6" strokeLinecap="round" />
-            </svg>
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-              <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
-              <path d="M11.2 5.4a3.7 3.7 0 0 1 0 5.2M13.2 3.6a6.2 6.2 0 0 1 0 8.8" strokeLinecap="round" />
-            </svg>
-          )}
-        </button>
+          <div className="flex h-9 items-center gap-0.5 px-1.5 pb-1">
+            <button
+              type="button"
+              onClick={toggle}
+              aria-label={playing ? t("watch.paused") : t("watch.playing")}
+              className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white/85 transition-colors hover:bg-white/15 hover:text-white"
+            >
+              {playing ? (
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                  <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
+                  <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
+                </svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                  <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
+                </svg>
+              )}
+            </button>
 
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={Math.round(volume * 100)}
-          onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}
-          aria-label={t("watch.audioOn")}
-          className="h-1 w-12 shrink-0 cursor-pointer accent-accent"
-        />
+            <button
+              type="button"
+              onClick={reload}
+              aria-label={t("watch.reload")}
+              title={t("watch.reload")}
+              className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                <path d="M13.2 6.4A5.4 5.4 0 1 0 13 9.6" strokeLinecap="round" />
+                <path d="M13.4 2.9v3.7H9.7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
 
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            type="button"
-            onClick={onToggleDanmaku}
-            disabled={!onToggleDanmaku}
-            title={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
-            aria-pressed={danmakuEnabled}
-            className={[
-              "focus-ring rounded-[5px] px-1 py-0.5 text-[9.5px] leading-4 transition-colors",
-              danmakuEnabled
-                ? "bg-white/12 text-white/85 hover:bg-white/20"
-                : "text-white/40 hover:bg-white/10 hover:text-white/70",
-              onToggleDanmaku ? "" : "cursor-not-allowed opacity-40",
-            ].join(" ")}
-          >
-            {t("watch.danmakuShort")}
-          </button>
-          <button
-            type="button"
-            onClick={fullscreen}
-            aria-label={t("watch.fullscreen")}
-            className="focus-ring flex h-6 w-6 items-center justify-center rounded-[6px] text-white/55 transition-colors hover:bg-white/12 hover:text-white"
-          >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-              <path d="M1.5 4.2V1.5h2.7M10.5 4.2V1.5H7.8M1.5 7.8v2.7h2.7M10.5 7.8v2.7H7.8" strokeLinecap="round" />
-            </svg>
-          </button>
+            <div
+              className="flex shrink-0 items-center"
+              onMouseEnter={() => setVolOpen(true)}
+              onMouseLeave={() => setVolOpen(false)}
+            >
+              <button
+                type="button"
+                onClick={toggleMute}
+                aria-label={muted ? t("watch.muted") : t("watch.audioOn")}
+                className={[
+                  "focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] transition-colors hover:bg-white/15",
+                  muted ? "text-white/55" : "text-white/85 hover:text-white",
+                ].join(" ")}
+              >
+                {muted ? (
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+                    <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
+                    <path d="M11.4 6.2 14 8.8M14 6.2l-2.6 2.6" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+                    <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
+                    <path d="M11.2 5.4a3.7 3.7 0 0 1 0 5.2M13.2 3.6a6.2 6.2 0 0 1 0 8.8" strokeLinecap="round" />
+                  </svg>
+                )}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(volume * 100)}
+                onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}
+                aria-label={t("watch.audioOn")}
+                className={[
+                  "h-1 cursor-pointer accent-accent transition-all duration-200",
+                  volOpen ? "w-16 opacity-100" : "w-0 opacity-0",
+                ].join(" ")}
+              />
+            </div>
+
+            <span className="ml-1.5 shrink-0 font-mono text-[10.5px] tabular-nums text-white/65">
+              {vod
+                ? clock(scrubMs ?? positionMs) + " / " + clock(durationMs ?? 0)
+                : clock(elapsed * 1000)}
+            </span>
+
+            <div className="ml-auto flex items-center gap-0.5">
+              {quality ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen((open) => !open);
+                    onMenuOpen?.();
+                  }}
+                  aria-label={t("watch.quality")}
+                  aria-expanded={menuOpen}
+                  className={[
+                    "focus-ring flex h-7 items-center gap-1 rounded-[6px] px-1.5 text-[11px] transition-colors hover:bg-white/15 hover:text-white",
+                    menuOpen ? "bg-white/15 text-white" : "text-white/85",
+                  ].join(" ")}
+                >
+                  <span className="max-w-[76px] truncate">{qualityLabel ?? t("watch.qn.auto")}</span>
+                  <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                    <path d="M2 4l3 3 3-3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={togglePip}
+                disabled={!pipSupported}
+                aria-label={t("watch.pip")}
+                title={t("watch.pip")}
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-[6px] text-white/70 transition-colors hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+                  <rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6" />
+                  <rect x="8.2" y="8.2" width="5.2" height="4.4" rx="0.9" fill="currentColor" stroke="none" opacity="0.85" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                onClick={onToggleDanmaku}
+                disabled={!onToggleDanmaku}
+                title={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
+                aria-pressed={danmakuEnabled}
+                className={[
+                  "focus-ring flex h-7 items-center justify-center rounded-[6px] px-1.5 text-[10px] font-medium leading-none transition-colors",
+                  danmakuEnabled
+                    ? "bg-white/15 text-white hover:bg-white/25"
+                    : "text-white/40 hover:bg-white/10 hover:text-white/70",
+                  onToggleDanmaku ? "" : "cursor-not-allowed opacity-40",
+                ].join(" ")}
+              >
+                {t("watch.danmakuShort")}
+              </button>
+
+              {onOpenDanmakuSettings ? (
+                <button
+                  type="button"
+                  onClick={onOpenDanmakuSettings}
+                  aria-label={t("watch.danmakuSettings")}
+                  title={t("watch.danmakuSettings")}
+                  className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                    <path d="M2 4.6h12M2 8h12M2 11.4h12" strokeLinecap="round" opacity="0.55" />
+                    <circle cx="5.6" cy="4.6" r="1.5" fill="currentColor" stroke="none" />
+                    <circle cx="10.4" cy="8" r="1.5" fill="currentColor" stroke="none" />
+                    <circle cx="7" cy="11.4" r="1.5" fill="currentColor" stroke="none" />
+                  </svg>
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={fullscreen}
+                aria-label={t("watch.fullscreen")}
+                title={t("watch.fullscreen")}
+                className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+              >
+                <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                  <path d="M1.5 4.2V1.5h2.7M10.5 4.2V1.5H7.8M1.5 7.8v2.7h2.7M10.5 7.8v2.7H7.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
+
+      {menuOpen && quality ? (
+        <button
+          type="button"
+          aria-label={t("watch.close")}
+          onClick={() => setMenuOpen(false)}
+          className="absolute inset-0 z-30 cursor-default"
+        />
+      ) : null}
+
+      {menuOpen && quality ? (
+        <div className="absolute bottom-14 right-2 z-40 w-[208px] overflow-hidden rounded-[10px] border border-white/10 bg-[#111114]/95 p-1.5 text-white shadow-[0_18px_44px_-14px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+          {lines && lines.options.length > 0 ? (
+            <>
+              <div className="px-2 pb-1 pt-1 text-[9.5px] uppercase tracking-[0.12em] text-white/40">
+                {t("watch.line")}
+              </div>
+              <div className="flex flex-wrap gap-1 px-1.5 pb-1">
+                {lines.options.map((option) => (
+                  <button
+                    key={option.value ?? "__auto"}
+                    type="button"
+                    title={option.hint ?? option.label}
+                    onClick={() => lines.onChange(option.value)}
+                    className={[
+                      "rounded-full border px-2 py-[3px] text-[10px] transition-colors",
+                      (lines.value ?? null) === option.value
+                        ? "border-white/25 bg-white/18 text-white"
+                        : "border-white/10 text-white/65 hover:bg-white/10 hover:text-white",
+                    ].join(" ")}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="mx-1 my-1 h-px bg-white/10" />
+            </>
+          ) : null}
+
+          <div className="px-2 pb-1 pt-1 text-[9.5px] uppercase tracking-[0.12em] text-white/40">
+            {t("watch.quality")}
+          </div>
+          {quality.options
+            .filter((option) => option.value !== 0)
+            .map((option) => {
+              const active = quality.value === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => {
+                    quality.onChange(option.value);
+                    setMenuOpen(false);
+                  }}
+                  className={[
+                    "flex w-full items-center justify-between rounded-[6px] px-2 py-[6px] text-left text-[11.5px] transition-colors",
+                    active ? "text-accent" : "text-white/80 hover:bg-white/10 hover:text-white",
+                  ].join(" ")}
+                >
+                  <span>{option.label}</span>
+                  {active ? (
+                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                      <path d="M2.2 6.3 4.8 8.9l5-5.4" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : null}
+                </button>
+              );
+            })}
+
+          <div className="mx-1 my-1 h-px bg-white/10" />
+          <button
+            type="button"
+            onClick={() => {
+              quality.onChange(0);
+              setMenuOpen(false);
+            }}
+            className={[
+              "flex w-full items-center justify-between rounded-[6px] px-2 py-[6px] text-left text-[11.5px] transition-colors",
+              quality.value === 0 ? "text-accent" : "text-white/80 hover:bg-white/10 hover:text-white",
+            ].join(" ")}
+          >
+            <span>
+              {quality.actual
+                ? t("watch.autoQuality", { q: quality.actual })
+                : t("watch.qn.auto")}
+            </span>
+            {quality.value === 0 ? (
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                <path d="M2.2 6.3 4.8 8.9l5-5.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : null}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
