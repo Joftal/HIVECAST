@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { onDanmakuBatch, type DanmakuMessage } from "../../lib/ipc";
+import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 
 type Props = {
   roomId: string;
@@ -25,7 +26,12 @@ const LANE_GAP = 18;
 const MAX_LANES = 9;
 const MAX_ITEMS = 160;
 const DURATION = 9000;
-const FONT = '600 15px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+const BASE_FONT = 15;
+const FONT_FAMILY = '"PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+
+function fontOf(scale: number): string {
+  return "600 " + Math.round(BASE_FONT * scale) + "px " + FONT_FAMILY;
+}
 
 function colorOf(value: number): string {
   const rgb = (value & 0xffffff).toString(16).padStart(6, "0");
@@ -49,6 +55,10 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+  const opacity = useDanmakuPrefs((state) => state.opacity);
+  const fontScale = useDanmakuPrefs((state) => state.fontScale);
+  const speedScale = useDanmakuPrefs((state) => state.speed);
+  const area = useDanmakuPrefs((state) => state.area);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -64,6 +74,9 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     let laneReadyAt: number[] = [];
     let raf = 0;
     let disposed = false;
+    // 用户改字号/速度/区域时整体重建绘制循环：参数少、重建便宜，比在循环里读 ref 更不容易出错。
+    const font = fontOf(fontScale);
+    const duration = DURATION / speedScale;
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
@@ -73,7 +86,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      lanes = Math.max(1, Math.min(MAX_LANES, Math.floor((height * 0.72) / LANE_HEIGHT)));
+      lanes = Math.max(1, Math.min(MAX_LANES, Math.floor((height * area) / LANE_HEIGHT)));
       laneReadyAt = new Array(lanes).fill(0);
       // 尺寸变了就把在飞的清掉，避免坐标错位。
       items.length = 0;
@@ -92,7 +105,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
         const text = labelOf(message);
         if (!text.trim()) continue;
 
-        ctx.font = FONT;
+        ctx.font = font;
         const textWidth = ctx.measureText(text).width;
         if (textWidth > width * 1.35) continue;
 
@@ -109,7 +122,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
           continue;
         }
 
-        const speed = (width + textWidth) / DURATION;
+        const speed = (width + textWidth) / duration;
         laneReadyAt[lane] = now + (textWidth + LANE_GAP) / speed;
         items.push({
           text,
@@ -148,7 +161,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
           continue;
         }
         const y = 8 + item.lane * LANE_HEIGHT;
-        ctx.font = FONT;
+        ctx.font = font;
         ctx.lineWidth = 3;
         ctx.lineJoin = "round";
         ctx.strokeStyle = "rgba(0, 0, 0, 0.78)";
@@ -178,16 +191,14 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       items.length = 0;
       queue.length = 0;
     };
-  }, [roomId]);
+  }, [roomId, fontScale, speedScale, area]);
 
   return (
     <canvas
       ref={canvasRef}
       aria-hidden
-      className={[
-        "pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-200",
-        enabled ? "opacity-100" : "opacity-0",
-      ].join(" ")}
+      className="pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-200"
+      style={{ opacity: enabled ? opacity : 0 }}
     />
   );
 }

@@ -74,6 +74,8 @@ pub struct RoomRecord {
     pub record_qn: u32,
     /// 观看清晰度（0 = 跟随自动降级）
     pub view_qn: u32,
+    /// 录制线路偏好（线路组名，None = 自动选最优）
+    pub record_line: Option<String>,
     #[ts(type = "number")]
     pub last_checked_at: Option<i64>,
     #[ts(type = "number")]
@@ -182,6 +184,21 @@ pub struct ViewSlotInfo {
     pub quality: Option<String>,
     pub line: Option<String>,
     pub error: Option<String>,
+    /// 断线重连的锚点（epoch 毫秒）；None 表示当前不在等待重连
+    #[ts(type = "number | null")]
+    pub retry_at: Option<i64>,
+}
+
+/// 一条可用线路（来自取流结果的分组），用于手动指定录制线路。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct LineInfo {
+    pub name: String,
+    pub priority: u32,
+    /// 该线路首选的画质名（用于在选择器里给用户一点判断依据）
+    pub quality: String,
+    pub candidates: usize,
 }
 
 /// 一条弹幕（已归一化，平台差异在客户端层消化）。

@@ -110,6 +110,10 @@
     "online": "人气 {{n}}",
     "recordingClock": "录制中 {{time}}",
     "quality": "录制画质",
+    "line": "录制线路",
+    "lineAuto": "自动",
+    "lineHint": "只影响下一次开录与断流续录",
+    "lineEmpty": "没解析到可用线路",
     "autoRecord": "自动录制",
     "startRecord": "开录",
     "stopRecord": "停录",
@@ -176,6 +180,7 @@
     "status": {
       "starting": "正在起播…",
       "reconnecting": "正在重连…",
+      "retryIn": "{{n}} 秒后重连",
       "error": "播放失败"
     },
     "playing": "播放中",
@@ -200,7 +205,13 @@
     },
     "buffering": "缓冲中…",
     "degradedHint": "请求的画质不可用，平台已自动降级",
-    "dismissHint": "关闭提示"
+    "dismissHint": "关闭提示",
+    "danmakuSettings": "弹幕设置",
+    "danmakuOpacity": "不透明度",
+    "danmakuFont": "字号",
+    "danmakuSpeed": "滚动速度",
+    "danmakuArea": "显示区域",
+    "danmakuReset": "恢复默认"
   },
   "notice": {
     "started": {

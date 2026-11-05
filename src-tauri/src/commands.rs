@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, CredentialInfo, MediaItem, Playback, PostResult, QrPoll, QrTicket, RecordSession,
-    RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
+    AppInfo, CredentialInfo, LineInfo, MediaItem, Playback, PostResult, QrPoll, QrTicket,
+    RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -93,6 +93,7 @@ pub async fn room_add(
         auto_record: true,
         record_qn: settings.default_record_qn,
         view_qn: settings.default_view_qn,
+        record_line: None,
         last_checked_at: Some(timestamp),
         created_at: timestamp,
         updated_at: timestamp,
@@ -201,6 +202,50 @@ pub async fn room_set_quality(
     view_qn: u32,
 ) -> Result<(), AppError> {
     state.db.set_quality(&id, record_qn, view_qn)?;
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(())
+}
+
+/// 列出某房间当前可用的线路组（需要触网解析，所以只在用户展开选择器时调）。
+#[tauri::command]
+pub async fn room_lines(
+    state: State<'_, AppState>,
+    id: String,
+    qn: Option<u32>,
+) -> Result<Vec<LineInfo>, AppError> {
+    let room = state
+        .db
+        .get_room(&id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    let groups = state
+        .broker
+        .groups(&room_ref(&room), qn.unwrap_or(room.record_qn))
+        .await?;
+    Ok(groups
+        .iter()
+        .map(|group| LineInfo {
+            name: group.name.clone(),
+            priority: group.priority,
+            quality: group
+                .candidates
+                .iter()
+                .find(|candidate| candidate.url.is_some())
+                .map(|candidate| candidate.name.clone())
+                .unwrap_or_else(|| "—".into()),
+            candidates: group.candidates.iter().filter(|c| c.url.is_some()).count(),
+        })
+        .collect())
+}
+
+/// 指定录制线路；传 None 回到自动选择。只影响下一次开录/续录，不打断当前录制。
+#[tauri::command]
+pub async fn room_set_line(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    line: Option<String>,
+) -> Result<(), AppError> {
+    state.db.set_record_line(&id, line.as_deref())?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
 }

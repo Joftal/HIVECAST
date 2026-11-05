@@ -243,7 +243,7 @@ impl Recorder {
             .await
             .map_err(AppError::from)?;
 
-        let (candidate, group) = pick_candidate(&groups)
+        let (candidate, group) = pick_candidate(&groups, room.record_line.as_deref())
             .ok_or_else(|| AppError::User("没有可用的线路".into()))?;
 
         let started_at = crate::db::now_ts();
@@ -519,7 +519,7 @@ impl Recorder {
                 return false;
             }
         };
-        let Some((candidate, _group)) = pick_candidate(&groups) else {
+        let Some((candidate, _group)) = pick_candidate(&groups, room.record_line.as_deref()) else {
             tracing::warn!(room_id, "续录没有可用线路");
             return false;
         };
@@ -823,7 +823,20 @@ fn emit_notice(app: &AppHandle, kind: &str, room_id: &str, host_name: &str, deta
 }
 
 /// 选线：优先 H.264（FLV 兼容最好），其次第一个有地址的候选。
-fn pick_candidate(groups: &[StreamGroup]) -> Option<(&crate::platform::StreamCandidate, &StreamGroup)> {
+fn pick_candidate<'a>(
+    groups: &'a [StreamGroup],
+    preferred: Option<&str>,
+) -> Option<(&'a crate::platform::StreamCandidate, &'a StreamGroup)> {
+    // 用户指定了线路就只在那条线上挑；线路上没有可用地址时再退回全局最优，
+    // 否则「手动选了一条挂掉的线路」会让录制直接启动失败，反而更难用。
+    if let Some(name) = preferred {
+        if let Some(group) = groups.iter().find(|group| group.name == name) {
+            if let Some(picked) = pick_in_group(group) {
+                return Some(picked);
+            }
+            tracing::warn!(line = name, "指定线路没有可用地址，改用其它线路");
+        }
+    }
     let mut fallback = None;
     for group in groups {
         for candidate in &group.candidates {
@@ -835,6 +848,20 @@ fn pick_candidate(groups: &[StreamGroup]) -> Option<(&crate::platform::StreamCan
             }
             fallback.get_or_insert((candidate, group));
         }
+    }
+    fallback
+}
+
+fn pick_in_group(group: &StreamGroup) -> Option<(&crate::platform::StreamCandidate, &StreamGroup)> {
+    let mut fallback = None;
+    for candidate in &group.candidates {
+        if candidate.url.is_none() {
+            continue;
+        }
+        if candidate.codec == Some(crate::platform::Codec::H264) {
+            return Some((candidate, group));
+        }
+        fallback.get_or_insert((candidate, group));
     }
     fallback
 }
@@ -909,6 +936,57 @@ mod tests {
         assert_eq!(sanitize("  多   空格  ", "x", 40), "多 空格");
         assert_eq!(sanitize("", "兜底", 40), "兜底");
         assert_eq!(sanitize("...", "兜底", 40), "兜底");
+    }
+
+    #[test]
+    fn preferred_line_wins_and_falls_back() {
+        use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+        let candidate = |name: &str, url: Option<&str>| StreamCandidate {
+            id: name.into(),
+            name: name.into(),
+            weight: 1.0,
+            format: StreamFormat::Flv,
+            codec: Some(Codec::H264),
+            width: None,
+            height: None,
+            fps: None,
+            bitrate_kbps: None,
+            url: url.map(|value| value.to_string()),
+            headers: Default::default(),
+            attrs: Default::default(),
+        };
+        let groups = vec![
+            StreamGroup {
+                name: "线路A".into(),
+                priority: 0,
+                candidates: vec![candidate("a", Some("http://a"))],
+            },
+            StreamGroup {
+                name: "线路B".into(),
+                priority: 1,
+                candidates: vec![candidate("b", Some("http://b"))],
+            },
+        ];
+        let (picked, group) = pick_candidate(&groups, Some("线路B")).expect("应能选到指定线路");
+        assert_eq!(group.name, "线路B");
+        assert_eq!(picked.url.as_deref(), Some("http://b"));
+
+        // 指定线路没有可用地址时退回全局最优，而不是直接失败。
+        let broken = vec![
+            StreamGroup {
+                name: "线路A".into(),
+                priority: 0,
+                candidates: vec![candidate("a", Some("http://a"))],
+            },
+            StreamGroup {
+                name: "线路B".into(),
+                priority: 1,
+                candidates: vec![candidate("b", None)],
+            },
+        ];
+        let (picked, group) = pick_candidate(&broken, Some("线路B")).expect("应退回其它线路");
+        assert_eq!(group.name, "线路A");
+        assert_eq!(picked.url.as_deref(), Some("http://a"));
     }
 
     #[test]

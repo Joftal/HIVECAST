@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -211,6 +211,18 @@ impl Db {
             .execute(
                 "UPDATE room SET record_qn = ?2, view_qn = ?3, updated_at = ?4 WHERE id = ?1",
                 params![id, record_qn, view_qn, now_ts()],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 录制线路偏好；None 表示自动选最优。
+    pub fn set_record_line(&self, id: &str, line: Option<&str>) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE room SET record_line = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, line, now],
             )
             .map_err(db_err)?;
         Ok(())
@@ -546,6 +558,17 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         )
         .map_err(db_err)?;
     }
+
+    let mut stmt = conn.prepare("PRAGMA table_info(room)").map_err(db_err)?;
+    let room_columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    if !room_columns.iter().any(|name| name == "record_line") {
+        conn.execute("ALTER TABLE room ADD COLUMN record_line TEXT", [])
+            .map_err(db_err)?;
+    }
     Ok(())
 }
 
@@ -563,7 +586,7 @@ pub fn now_ts() -> i64 {
 const ROOM_SELECT: &str = "SELECT
     id, platform, room_key, canonical_url, title, host_name, avatar_url, cover_url,
     area_name, is_live, started_at, online, auto_record, record_qn, view_qn,
-    last_checked_at, created_at, updated_at
+    record_line, last_checked_at, created_at, updated_at
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -588,9 +611,10 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         auto_record: row.get::<_, i64>(12)? != 0,
         record_qn: row.get(13)?,
         view_qn: row.get(14)?,
-        last_checked_at: row.get(15)?,
-        created_at: row.get(16)?,
-        updated_at: row.get(17)?,
+        record_line: row.get(15)?,
+        last_checked_at: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
     })
 }
 

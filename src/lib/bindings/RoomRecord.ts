@@ -18,4 +18,8 @@ recordQn: number,
 /**
  * 观看清晰度（0 = 跟随自动降级）
  */
-viewQn: number, lastCheckedAt: number, createdAt: number, updatedAt: number, };
+viewQn: number, 
+/**
+ * 录制线路偏好（线路组名，None = 自动选最优）
+ */
+recordLine: string | null, lastCheckedAt: number, createdAt: number, updatedAt: number, };

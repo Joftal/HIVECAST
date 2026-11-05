@@ -6,6 +6,7 @@ import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
+import type { LineInfo } from "./bindings/LineInfo";
 import type { MediaItem } from "./bindings/MediaItem";
 import type { Playback } from "./bindings/Playback";
 import type { Settings } from "./bindings/Settings";
@@ -23,6 +24,7 @@ export type {
   QrTicket,
   DanmakuBatch,
   DanmakuMessage,
+  LineInfo,
   MediaItem,
   Playback,
   PostResult,
@@ -84,6 +86,16 @@ export async function roomSetAutoRecord(id: string, enabled: boolean): Promise<v
 
 export async function roomSetQuality(id: string, recordQn: number, viewQn: number): Promise<void> {
   return invoke("room_set_quality", { id, recordQn, viewQn });
+}
+
+/** 列出当前可用线路（需要触网解析，展开选择器时才调）。 */
+export async function roomLines(id: string, qn?: number): Promise<LineInfo[]> {
+  return invoke<LineInfo[]>("room_lines", { id, qn: qn ?? null });
+}
+
+/** 指定录制线路；null 回到自动。 */
+export async function roomSetLine(id: string, line: string | null): Promise<void> {
+  return invoke("room_set_line", { id, line });
 }
 
 export async function recordStart(id: string): Promise<void> {

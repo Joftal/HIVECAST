@@ -110,6 +110,10 @@
     "online": "{{n}} viewers",
     "recordingClock": "REC {{time}}",
     "quality": "Record quality",
+    "line": "Recording line",
+    "lineAuto": "Auto",
+    "lineHint": "Applies to the next recording and resumes",
+    "lineEmpty": "No usable line found",
     "autoRecord": "Auto record",
     "startRecord": "Record",
     "stopRecord": "Stop",
@@ -176,6 +180,7 @@
     "status": {
       "starting": "Starting…",
       "reconnecting": "Reconnecting…",
+      "retryIn": "Reconnecting in {{n}}s",
       "error": "Playback failed"
     },
     "playing": "Playing",
@@ -200,7 +205,13 @@
     },
     "buffering": "Buffering…",
     "degradedHint": "Requested quality is unavailable; downgraded by the platform",
-    "dismissHint": "Dismiss"
+    "dismissHint": "Dismiss",
+    "danmakuSettings": "Danmaku",
+    "danmakuOpacity": "Opacity",
+    "danmakuFont": "Font size",
+    "danmakuSpeed": "Speed",
+    "danmakuArea": "Area",
+    "danmakuReset": "Reset"
   },
   "notice": {
     "started": {

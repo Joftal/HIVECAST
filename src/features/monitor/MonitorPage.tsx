@@ -11,7 +11,9 @@ import {
   roomRefresh,
   roomRemove,
   roomSetAutoRecord,
+  roomLines,
   roomMergeSessions,
+  roomSetLine,
   roomSetQuality,
   roomsList,
   sessionExportDanmaku,
@@ -19,6 +21,7 @@ import {
   sessionScreenshot,
   sessionsList,
   type AppInfo,
+  type LineInfo,
   type PostResult,
   type RecordSession,
   type RoomView,
@@ -156,6 +159,42 @@ function RoomRow(props: RowProps) {
   const mergeable = (props.history ?? []).filter(
     (session) => session.status !== "recording" && session.filePath,
   ).length;
+  // 线路选择器：展开时才触网解析，避免列表轮询顺手打平台接口。
+  const [linesOpen, setLinesOpen] = useState(false);
+  const [lines, setLines] = useState<LineInfo[] | null>(null);
+  const [lineError, setLineError] = useState<string | null>(null);
+  const [lineBusy, setLineBusy] = useState(false);
+
+  const toggleLines = async () => {
+    if (linesOpen) {
+      setLinesOpen(false);
+      return;
+    }
+    setLinesOpen(true);
+    setLineBusy(true);
+    setLineError(null);
+    try {
+      setLines(await roomLines(room.id, room.recordQn));
+    } catch (err) {
+      setLineError(describeError(err));
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  const pickLine = async (line: string | null) => {
+    setLineBusy(true);
+    setLineError(null);
+    try {
+      await roomSetLine(room.id, line);
+      setLinesOpen(false);
+      props.onRefresh();
+    } catch (err) {
+      setLineError(describeError(err));
+    } finally {
+      setLineBusy(false);
+    }
+  };
 
   return (
     <article className="group border-b hairline px-4 py-3 transition-colors last:border-b-0 hover:bg-ink-800/40">
@@ -295,6 +334,24 @@ function RoomRow(props: RowProps) {
             ))}
           </select>
 
+          <button
+            type="button"
+            onClick={() => void toggleLines()}
+            disabled={busy}
+            title={t("monitor.lineHint")}
+            className={[
+              "focus-ring flex max-w-[92px] items-center gap-1 rounded-lg border px-1.5 py-1 text-[11px] transition-colors disabled:opacity-40",
+              room.recordLine
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                : "border-zinc-700 bg-ink-800 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200",
+            ].join(" ")}
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              <path d="M2.5 5.5h11M2.5 10.5h11M5.5 2.5v11M10.5 2.5v11" strokeLinecap="round" />
+            </svg>
+            <span className="truncate">{room.recordLine ?? t("monitor.lineAuto")}</span>
+          </button>
+
           <Switch
             checked={room.autoRecord}
             onChange={props.onToggleAuto}
@@ -335,6 +392,54 @@ function RoomRow(props: RowProps) {
           </IconButton>
         </div>
       </div>
+
+      {linesOpen && (
+        <div className="mt-2 rounded-xl border hairline bg-ink-900/70 p-2">
+          <div className="mb-1 flex items-center justify-between px-1">
+            <span className="text-[10px] uppercase tracking-[0.08em] text-zinc-500">{t("monitor.line")}</span>
+            <span className="text-[10px] text-zinc-600">{t("monitor.lineHint")}</span>
+          </div>
+          {lineBusy && <div className="px-1 py-1 text-[11px] text-zinc-500">{t("common.loading")}</div>}
+          {lineError && <div className="px-1 py-1 text-[11px] text-amber-300/90">{lineError}</div>}
+          {!lineBusy && !lineError && lines && lines.length === 0 && (
+            <div className="px-1 py-1 text-[11px] text-zinc-500">{t("monitor.lineEmpty")}</div>
+          )}
+          {!lineBusy && lines && lines.length > 0 && (
+            <div className="grid grid-cols-2 gap-1 lg:grid-cols-3">
+              <button
+                type="button"
+                onClick={() => void pickLine(null)}
+                className={[
+                  "focus-ring rounded-lg border px-2 py-1 text-left text-[11px] transition-colors",
+                  room.recordLine === null
+                    ? "border-amber-500/50 bg-amber-500/10 text-amber-200"
+                    : "border-zinc-700/70 text-zinc-300 hover:border-zinc-600",
+                ].join(" ")}
+              >
+                {t("monitor.lineAuto")}
+              </button>
+              {lines.map((line) => (
+                <button
+                  key={line.name}
+                  type="button"
+                  onClick={() => void pickLine(line.name)}
+                  className={[
+                    "focus-ring rounded-lg border px-2 py-1 text-left transition-colors",
+                    room.recordLine === line.name
+                      ? "border-amber-500/50 bg-amber-500/10 text-amber-200"
+                      : "border-zinc-700/70 text-zinc-300 hover:border-zinc-600",
+                  ].join(" ")}
+                >
+                  <span className="block truncate text-[11px]">{line.name}</span>
+                  <span className="block truncate text-[10px] text-zinc-500">
+                    {line.quality} · {line.candidates}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </article>
   );
 }

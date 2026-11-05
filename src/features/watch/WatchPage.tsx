@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import DanmakuCanvas from "./DanmakuCanvas";
+import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import Player from "./Player";
 import {
   describeError,
@@ -67,6 +68,7 @@ export default function WatchPage() {
   const [danmaku, setDanmaku] = useState<Record<number, boolean>>({});
   const [layoutChoice, setLayoutChoice] = useState<Layout | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [danmakuOpen, setDanmakuOpen] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,6 +202,7 @@ export default function WatchPage() {
   };
 
   const candidates = rooms.filter((view) => !watchedIds.has(view.room.id));
+  const prefs = useDanmakuPrefs();
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -228,6 +231,21 @@ export default function WatchPage() {
                 </button>
               ))}
             </div>
+          )}
+
+          {count > 0 && (
+            <button
+              type="button"
+              onClick={() => setDanmakuOpen((open) => !open)}
+              className={[
+                "focus-ring rounded-lg border px-2.5 py-1.5 text-[11px] transition-colors",
+                danmakuOpen
+                  ? "border-hive-500/50 bg-hive-500/10 text-hive-200"
+                  : "border-white/10 text-zinc-300 hover:bg-ink-700",
+              ].join(" ")}
+            >
+              {t("watch.danmakuSettings")}
+            </button>
           )}
 
           {sounding > 0 && (
@@ -281,6 +299,42 @@ export default function WatchPage() {
             className="focus-ring rounded-md px-1.5 py-0.5 text-amber-300/70 transition-colors hover:text-amber-100"
           >
             ✕
+          </button>
+        </div>
+      )}
+
+      {danmakuOpen && count > 0 && (
+        <div className="panel grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4">
+          {([
+            ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
+            ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
+            ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
+            ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
+          ] as const).map(([key, label, min, max, step, digits]) => (
+            <label key={key} className="flex flex-col gap-1">
+              <span className="flex items-baseline justify-between text-[11px] text-zinc-400">
+                {label}
+                <span className="font-mono text-[10px] text-zinc-500">
+                  {(prefs[key] as number).toFixed(digits)}
+                </span>
+              </span>
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={prefs[key] as number}
+                onChange={(event) => prefs.set({ [key]: Number(event.target.value) })}
+                className="accent-hive-400"
+              />
+            </label>
+          ))}
+          <button
+            type="button"
+            onClick={() => prefs.reset()}
+            className="focus-ring self-end justify-self-start rounded-lg border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-zinc-200"
+          >
+            {t("watch.danmakuReset")}
           </button>
         </div>
       )}
@@ -380,6 +434,19 @@ export default function WatchPage() {
   );
 }
 
+/** 重连倒计时：retryAt 是后端给的绝对时刻，这里只负责每秒重算。 */
+function useSecondsLeft(target: number | null | undefined): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!target) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [target]);
+  if (!target) return null;
+  return Math.max(0, Math.ceil((target - now) / 1000));
+}
+
 type CellProps = {
   session: ViewSlotInfo;
   room?: RoomView["room"];
@@ -407,6 +474,7 @@ function SlotCell({
 }: CellProps) {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
+  const retryIn = useSecondsLeft(session.retryAt);
   const sounding = volume > 0;
   // 平台不一定给到请求的画质（未登录 B 站会把原画降到超清），要如实告诉用户。
   const degraded =
@@ -517,7 +585,9 @@ function SlotCell({
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-hive-400" />
                 <span className="text-[11px] text-zinc-400">
                   {session.status === "reconnecting"
-                    ? t("watch.status.reconnecting")
+                    ? retryIn && retryIn > 0
+                      ? t("watch.status.retryIn", { n: retryIn })
+                      : t("watch.status.reconnecting")
                     : t("watch.status.starting")}
                 </span>
                 {session.error && (

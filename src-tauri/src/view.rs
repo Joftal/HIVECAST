@@ -47,6 +47,8 @@ struct SlotState {
     quality: Option<String>,
     line: Option<String>,
     error: Option<String>,
+    /// 重连倒计时的目标时刻（epoch 毫秒）；不在等待重连时为 None。
+    retry_at: Option<i64>,
     /// 每次切画质/重试自增；监督循环据此判断该重启了。
     generation: u64,
     closed: bool,
@@ -67,6 +69,7 @@ impl SlotState {
             quality: None,
             line: None,
             error: None,
+            retry_at: None,
             generation: 0,
             closed: false,
             alive: false,
@@ -84,6 +87,7 @@ impl SlotState {
             quality: self.quality.clone(),
             line: self.line.clone(),
             error: self.error.clone(),
+            retry_at: self.retry_at,
         }
     }
 }
@@ -404,10 +408,17 @@ impl ViewManager {
                                 state.status = "reconnecting".into();
                                 state.error = Some(format!("转封装中断，正在第 {attempts} 次重连"));
                             }
+                            let wait = backoff(attempts);
+                            {
+                                let mut state = handle.lock();
+                                state.retry_at =
+                                    Some(chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64);
+                            }
                             self.emit(&app);
                             // 丢掉缓存，重连时拿一条新线路
                             broker.invalidate(&room_ref(&room));
-                            tokio::time::sleep(backoff(attempts)).await;
+                            tokio::time::sleep(wait).await;
+                            handle.lock().retry_at = None;
                         }
                     }
                 }
@@ -434,9 +445,16 @@ impl ViewManager {
                         state.status = "reconnecting".into();
                         state.error = Some(message);
                     }
+                    let wait = backoff(attempts);
+                    {
+                        let mut state = handle.lock();
+                        state.retry_at =
+                            Some(chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64);
+                    }
                     self.emit(&app);
                     broker.invalidate(&room_ref(&room));
-                    tokio::time::sleep(backoff(attempts)).await;
+                    tokio::time::sleep(wait).await;
+                    handle.lock().retry_at = None;
                 }
             }
         }
@@ -454,6 +472,7 @@ impl ViewManager {
         qn: u32,
         generation: u64,
     ) -> Result<(), AppError> {
+        handle.lock().retry_at = None;
         if ffmpeg::resolve().is_none() {
             return Err(AppError::FfmpegMissing);
         }
