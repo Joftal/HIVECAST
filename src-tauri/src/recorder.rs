@@ -50,7 +50,10 @@ struct Active {
 
 pub struct Recorder {
     db: Arc<Db>,
-    media_root: PathBuf,
+    /// 媒体库根目录：设置页可以改，开录时现取，避免改完要重启。
+    media_root: std::sync::RwLock<PathBuf>,
+    /// 同时录制上限；0 表示不限。
+    max_concurrent: std::sync::atomic::AtomicUsize,
     inner: Mutex<HashMap<String, Active>>,
     failures: Mutex<HashMap<String, (u32, Instant)>>,
     /// 最近一次失败原因，展示在监控页行内
@@ -68,7 +71,8 @@ impl Recorder {
     pub fn new(db: Arc<Db>, media_root: PathBuf, danmaku: Option<Arc<DanmakuHub>>) -> Self {
         Self {
             db,
-            media_root,
+            media_root: std::sync::RwLock::new(media_root),
+            max_concurrent: std::sync::atomic::AtomicUsize::new(4),
             inner: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
@@ -78,9 +82,31 @@ impl Recorder {
         }
     }
 
-    #[allow(dead_code)] // M2 媒体库扫描会用
-    pub fn media_root(&self) -> &Path {
-        &self.media_root
+    pub fn media_root(&self) -> PathBuf {
+        self.media_root
+            .read()
+            .expect("媒体目录被污染")
+            .clone()
+    }
+
+    /// 设置页改目录后立即对新录制生效；正在录制的进程仍写旧路径。
+    pub fn set_media_root(&self, root: PathBuf) {
+        *self.media_root.write().expect("媒体目录被污染") = root;
+    }
+
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_max_concurrent(&self, value: usize) {
+        self.max_concurrent
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 当前正在录制的路数。
+    pub fn active_count(&self) -> usize {
+        self.inner.lock().expect("录制状态被污染").len()
     }
 
     pub fn active(&self, room_id: &str) -> Option<RecordingInfo> {
@@ -169,11 +195,20 @@ impl Recorder {
             return Err(AppError::User("该房间刚刚连续失败，稍后再试".into()));
         }
 
+        // 并发上限：4 路 1080p 已经能吃掉一块 SSD 的写入带宽，默认不再往上加。
+        let limit = self.max_concurrent();
+        if limit > 0 && self.active_count() >= limit {
+            return Err(AppError::User(format!(
+                "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
+            )));
+        }
+
         // 磁盘写满会让 ffmpeg 直接退出，还会把系统拖死，所以先拦一道。
         // can_start 是开录门槛，is_low 是录制红线：两个都得过，
         // 否则「已有录制被红线停掉、监控又立刻重新开录」会变成反复起停。
-        if !disk::can_start(&self.media_root) || disk::is_low(&self.media_root) {
-            let message = disk::start_blocked_message(&self.media_root);
+        let media_root = self.media_root();
+        if !disk::can_start(&media_root) || disk::is_low(&media_root) {
+            let message = disk::start_blocked_message(&media_root);
             self.set_error(&room.id, message.clone());
             let _ = app.emit(EVENT_ROOMS_CHANGED, ());
             return Err(AppError::User(message));
@@ -197,7 +232,7 @@ impl Recorder {
 
         let started_at = crate::db::now_ts();
         let path = session_path(
-            &self.media_root,
+            &media_root,
             platform_label(&room.platform),
             &room.host_name,
             &room.title,

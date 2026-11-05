@@ -3,6 +3,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
+import type { MediaItem } from "./bindings/MediaItem";
+import type { Playback } from "./bindings/Playback";
+import type { Settings } from "./bindings/Settings";
 import type { PostResult } from "./bindings/PostResult";
 import type { RecordNotice } from "./bindings/RecordNotice";
 import type { RecordSession } from "./bindings/RecordSession";
@@ -14,10 +17,13 @@ export type {
   AppInfo,
   DanmakuBatch,
   DanmakuMessage,
+  MediaItem,
+  Playback,
   PostResult,
   RecordNotice,
   RecordSession,
   RoomView,
+  Settings,
   StreamDescriptor,
   ViewSlotInfo,
 };
@@ -154,3 +160,34 @@ export const EVENT_DANMAKU_BATCH = "danmaku://batch";
 export function onDanmakuBatch(handler: (batch: DanmakuBatch) => void): Promise<UnlistenFn> {
   return listen<DanmakuBatch>(EVENT_DANMAKU_BATCH, (event) => handler(event.payload));
 }
+
+// ---- M6 设置与媒体库 ----
+
+export async function settingsGet(): Promise<Settings> {
+  return invoke<Settings>("settings_get");
+}
+
+export async function settingsUpdate(settings: Settings): Promise<Settings> {
+  return invoke<Settings>("settings_update", { settings });
+}
+
+export async function mediaList(limit?: number): Promise<MediaItem[]> {
+  return invoke<MediaItem[]>("media_list", { limit });
+}
+
+export async function mediaPlay(sessionId: string): Promise<Playback> {
+  return invoke<Playback>("media_play", { sessionId });
+}
+
+export async function mediaStop(): Promise<void> {
+  return invoke("media_stop");
+}
+
+export async function mediaReveal(sessionId: string): Promise<void> {
+  return invoke("media_reveal", { sessionId });
+}
+
+export async function mediaDelete(sessionId: string, deleteFile: boolean): Promise<void> {
+  return invoke("media_delete", { sessionId, deleteFile });
+}
+

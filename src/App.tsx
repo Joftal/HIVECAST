@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import TabBar from "./components/TabBar";
+import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
+import SettingsPanel from "./features/settings/SettingsPanel";
 import WatchPage from "./features/watch/WatchPage";
-import { setLanguage } from "./i18n";
-import { isTauri, onRecordNotice } from "./lib/ipc";
+import { setLanguage, type Language } from "./i18n";
+import { isTauri, onRecordNotice, settingsGet, settingsUpdate } from "./lib/ipc";
 
-type TabKey = "monitor" | "watch";
+type TabKey = "monitor" | "watch" | "media";
 
 function BrandMark() {
   return (
@@ -26,7 +28,30 @@ function BrandMark() {
 export default function App() {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<TabKey>("monitor");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const notifyRef = useRef(true);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
+
+  // 启动时读一次性设置：语言与通知开关。读失败就保持默认，不打扰用户。
+  useEffect(() => {
+    if (!isTauri()) return;
+    void settingsGet()
+      .then((settings) => {
+        notifyRef.current = settings.notifyEnabled;
+        if (settings.language !== "system") setLanguage(settings.language as Language);
+      })
+      .catch(() => undefined);
+  }, []);
+
+
+  // 顶栏语言切换也写回设置，免得重启后被设置里的旧值覆盖。
+  const pickLanguage = (code: Language) => {
+    setLanguage(code);
+    if (!isTauri()) return;
+    void settingsGet()
+      .then((settings) => settingsUpdate({ ...settings, language: code }))
+      .catch(() => undefined);
+  };
 
   // 录制播报走系统通知；文案在前端 i18n，切语言即时生效。
   useEffect(() => {
@@ -43,7 +68,7 @@ export default function App() {
         if (!granted) granted = (await requestPermission()) === "granted";
 
         const off = await onRecordNotice((notice) => {
-          if (!granted) return;
+          if (!granted || !notifyRef.current) return;
           const key = notice.kind === "disk_full" ? "diskFull" : notice.kind;
           sendNotification({
             title: t(`notice.${key}.title`),
@@ -75,11 +100,19 @@ export default function App() {
         </div>
 
         <div className="mx-auto">
-          <TabBar value={tab} onChange={setTab} labels={{ monitor: t("tab.monitor"), watch: t("tab.watch") }} />
+          <TabBar
+            value={tab}
+            onChange={(next) => setTab(next as TabKey)}
+            items={[
+              { key: "monitor", label: t("tab.monitor") },
+              { key: "watch", label: t("tab.watch") },
+              { key: "media", label: t("tab.media") },
+            ]}
+          />
         </div>
 
         <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-          <span className="rounded-full border hairline px-2 py-1">M5</span>
+          <span className="rounded-full border hairline px-2 py-1">M6</span>
           {!isTauri() && (
             <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300">
               browser preview
@@ -90,7 +123,7 @@ export default function App() {
               <button
                 key={code}
                 type="button"
-                onClick={() => setLanguage(code)}
+                onClick={() => pickLanguage(code)}
                 className={[
                   "focus-ring px-2 py-1 transition-colors",
                   lang === code ? "bg-ink-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300",
@@ -100,14 +133,38 @@ export default function App() {
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label={t("settings.title")}
+            className="focus-ring rounded-full border hairline px-2 py-1 text-zinc-400 transition-colors hover:border-white/25 hover:text-white"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="12" cy="12" r="3.2" stroke="currentColor" strokeWidth="1.7" />
+              <path
+                d="M12 3.4v2.2M12 18.4v2.2M20.6 12h-2.2M5.6 12H3.4M18.1 5.9l-1.6 1.6M7.5 16.5l-1.6 1.6M18.1 18.1l-1.6-1.6M7.5 7.5 5.9 5.9"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
         </div>
       </header>
 
       <main className="min-h-0 flex-1 overflow-auto">
         <div key={tab} className="animate-fade-rise mx-auto flex h-full w-full max-w-[1400px] flex-col px-6 py-6">
-          {tab === "monitor" ? <MonitorPage /> : <WatchPage />}
+          {tab === "monitor" ? <MonitorPage /> : tab === "watch" ? <WatchPage /> : <MediaPage />}
         </div>
       </main>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={(settings) => {
+          notifyRef.current = settings.notifyEnabled;
+        }}
+      />
     </div>
   );
 }

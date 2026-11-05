@@ -5,7 +5,53 @@
   },
   "tab": {
     "monitor": "主播监控",
-    "watch": "多屏观看"
+    "watch": "多屏观看",
+    "media": "媒体库",
+    "settings": "设置"
+  },
+  "media": {
+    "title": "媒体库",
+    "subtitle": "所有已结束的录像都在这里；点一条即可在本机回放。",
+    "emptyTitle": "媒体库还是空的",
+    "emptyBody": "在「主播监控」里添加直播间，开播后会自动录制到这里。",
+    "count": "{{n}} 条录像",
+    "play": "播放",
+    "playing": "播放中",
+    "stop": "停止播放",
+    "reveal": "在 Finder 中显示",
+    "delete": "删除",
+    "confirmDelete": "再点一次确认",
+    "cancel": "取消",
+    "missing": "文件已缺失",
+    "loadFailed": "媒体库加载失败",
+    "noFile": "录像文件已不存在，只能删除记录",
+    "deleted": "已删除",
+    "playFailed": "回放失败",
+    "danmakuCount": "{{n}} 条弹幕"
+  },
+  "settings": {
+    "title": "设置",
+    "subtitle": "这些设置保存在本地数据库，重启后仍然有效。",
+    "recordQuality": "新房间默认录制画质",
+    "viewQuality": "新房间默认观看画质",
+    "mediaRoot": "媒体库目录",
+    "choose": "选择目录…",
+    "maxConcurrent": "同时录制上限",
+    "maxConcurrentHint": "达到上限后新的开录会被拒绝，已在录的不受影响。",
+    "notify": "录制开始/结束时发送系统通知",
+    "language": "界面语言",
+    "languageSystem": "跟随系统",
+    "save": "保存",
+    "saving": "保存中…",
+    "saved": "已保存",
+    "close": "关闭",
+    "qnAuto": "自动（平台决定）",
+    "qnOrigin": "原画",
+    "qnBluray": "蓝光",
+    "qnUltra": "超清",
+    "qnHigh": "高清",
+    "qnStandard": "标清",
+    "saveFailed": "保存失败"
   },
   "common": {
     "retry": "重试",
@@ -130,11 +176,6 @@
     },
     "buffering": "缓冲中…",
     "degradedHint": "请求的画质不可用，平台已自动降级"
-  },
-  "settings": {
-    "title": "设置",
-    "language": "语言",
-    "open": "设置"
   },
   "notice": {
     "started": {

@@ -37,6 +37,7 @@ brotli = "7"
 flate2 = "1"
 md5 = "0.7"
 base64 = "0.22"
+tauri-plugin-dialog = "2.0.0-rc.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

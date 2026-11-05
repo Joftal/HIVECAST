@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use hivecast_ipc::{RecordSession, RoomRecord};
+use hivecast_ipc::{MediaItem, RecordSession, RoomRecord};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
@@ -15,6 +15,15 @@ use crate::error::AppError;
 use crate::platform::RoomInfo;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+
+/// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
+const EXTRA_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS app_setting (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+";
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -30,6 +39,7 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        conn.execute_batch(EXTRA_SCHEMA).map_err(db_err)?;
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -297,6 +307,78 @@ impl Db {
         }
         Ok(sessions)
     }
+
+    // ---- 设置（v1 单一作用域，key 用点分命名，例如 record.default_qn） ----
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT value FROM app_setting WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_err)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "INSERT INTO app_setting (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, now_ts()],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 媒体库列表：会话左连房间，按开始时间倒序。
+    ///
+    /// has_file 在这里就判断好：前端逐个文件调元数据接口太慢，
+    /// 每次进媒体库查一次磁盘，量级是几百条，可以接受。
+    pub fn media_list(&self, limit: usize) -> Result<Vec<MediaItem>, AppError> {
+        let conn = self.lock();
+        let limit = limit.clamp(1, 500) as i64;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
+                        s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count
+                   FROM record_session s
+                   JOIN room r ON r.id = s.room_id
+                  WHERE s.file_path IS NOT NULL AND s.file_path <> ''
+                  ORDER BY s.started_at DESC
+                  LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let path: String = row.get(5)?;
+                Ok(MediaItem {
+                    id: row.get(0)?,
+                    room_id: row.get(1)?,
+                    platform: row.get(2)?,
+                    title: row.get(3)?,
+                    host_name: row.get(4)?,
+                    path: path.clone(),
+                    size: row.get(6)?,
+                    duration_ms: row.get(7)?,
+                    started_at: row.get(8)?,
+                    status: row.get(9)?,
+                    danmaku_count: row.get(10)?,
+                    has_file: std::path::Path::new(&path).is_file(),
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 删除一条会话记录（只删数据库行，不动文件）。
+    pub fn delete_session(&self, id: &str) -> Result<(), AppError> {
+        self.lock()
+            .execute("DELETE FROM record_session WHERE id = ?1", params![id])
+            .map_err(db_err)?;
+        Ok(())
+    }
 }
 
 /// 轻量迁移：老库缺弹幕列时补上。
@@ -329,6 +411,9 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
 fn db_err(err: rusqlite::Error) -> AppError {
     AppError::Db(err.to_string())
 }
+
+
+
 
 pub fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()

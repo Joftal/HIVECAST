@@ -47,7 +47,7 @@ async fn tick(app: &AppHandle, db: &Db, broker: &StreamBroker, recorder: &Arc<Re
     };
 
     // 磁盘红线：录制中的房间要主动收尾，否则会一路写到系统盘满。
-    if disk::is_low(recorder.media_root()) {
+    if disk::is_low(&recorder.media_root()) {
         for room in &rooms {
             if recorder.is_recording(&room.id) {
                 tracing::warn!(room = %room.host_name, "磁盘剩余空间低于红线，停止录制");
@@ -86,7 +86,7 @@ async fn tick(app: &AppHandle, db: &Db, broker: &StreamBroker, recorder: &Arc<Re
                     if room.auto_record
                         && !recorder.is_recording(&room.id)
                         && !recorder.auto_suppressed(&room.id)
-                        && disk::can_start(recorder.media_root())
+                        && disk::can_start(&recorder.media_root())
                     {
                         if let Err(err) = recorder.start(app, broker, &room).await {
                             tracing::warn!(room = %room.host_name, %err, "自动开录失败");

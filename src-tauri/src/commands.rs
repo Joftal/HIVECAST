@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, PostResult, RecordSession, RoomRecord, RoomView, StreamDescriptor, ViewSlotInfo,
+    AppInfo, MediaItem, Playback, PostResult, RecordSession, RoomRecord, RoomView, Settings,
+    StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -74,6 +75,7 @@ pub async fn room_add(
     }
 
     let info = state.broker.room_info(&reference).await?;
+    let settings = crate::settings::load(&state.db);
     let timestamp = now_ts();
     let draft = RoomRecord {
         id: uuid::Uuid::new_v4().to_string(),
@@ -89,8 +91,8 @@ pub async fn room_add(
         started_at: info.started_at,
         online: info.online,
         auto_record: true,
-        record_qn: 10000,
-        view_qn: 0,
+        record_qn: settings.default_record_qn,
+        view_qn: settings.default_view_qn,
         last_checked_at: Some(timestamp),
         created_at: timestamp,
         updated_at: timestamp,
@@ -385,5 +387,131 @@ pub async fn room_merge_sessions(
         .filter(|path| path.is_file())
         .collect();
     postprocess::merge(&files).await
+}
+
+
+// ---- 设置 ----
+
+#[tauri::command]
+pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppError> {
+    Ok(crate::settings::load(&state.db))
+}
+
+/// 保存设置；返回规范化后的值（并发数夹到 1..=8、目录会被创建）。
+#[tauri::command]
+pub async fn settings_update(
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<Settings, AppError> {
+    let saved = crate::settings::save(&state.db, &settings)?;
+    crate::settings::apply(&saved, &state.recorder);
+    Ok(saved)
+}
+
+// ---- 媒体库 ----
+
+#[tauri::command]
+pub fn media_list(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<MediaItem>, AppError> {
+    state.db.media_list(limit.unwrap_or(200) as usize)
+}
+
+/// 删除一条录像：先停掉可能正在回放的它，再按需删文件，最后删库。
+#[tauri::command]
+pub async fn media_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    delete_file: bool,
+) -> Result<(), AppError> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| AppError::User("录像不存在".into()))?;
+    if session.status == "recording" {
+        return Err(AppError::User("这段还在录制，先停下再删除".into()));
+    }
+
+    state.local.stop().await;
+
+    if delete_file {
+        if let Some(path) = session.file_path.as_deref() {
+            let path = std::path::Path::new(path);
+            if path.is_file() {
+                tokio::fs::remove_file(path)
+                    .await
+                    .map_err(|err| AppError::from_io(err, path))?;
+            }
+        }
+        if let Some(path) = session.danmaku_path.as_deref() {
+            let path = std::path::Path::new(path);
+            if path.is_file() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+    }
+
+    state.db.delete_session(&session_id)?;
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(())
+}
+
+/// 在系统文件管理器里定位文件。
+#[tauri::command]
+pub async fn media_reveal(state: State<'_, AppState>, session_id: String) -> Result<(), AppError> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| AppError::User("录像不存在".into()))?;
+    let path = session
+        .file_path
+        .filter(|p| std::path::Path::new(p).is_file())
+        .ok_or_else(|| AppError::User("录像文件已不存在".into()))?;
+    reveal_in_file_manager(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn media_play(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Playback, AppError> {
+    state.local.open(&state.db, &session_id).await
+}
+
+#[tauri::command]
+pub async fn media_stop(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.local.stop().await;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开 Finder：{err}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开资源管理器：{err}")))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
+    let dir = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open")
+        .arg(dir)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开文件管理器：{err}")))?;
+    Ok(())
 }
 

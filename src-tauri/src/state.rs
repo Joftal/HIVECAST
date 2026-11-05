@@ -9,6 +9,7 @@ use crate::danmaku::DanmakuHub;
 use crate::db::Db;
 use crate::error::AppError;
 use crate::ffmpeg;
+use crate::local::LocalPlayer;
 use crate::monitor;
 use crate::recorder::Recorder;
 use crate::stream::StreamServer;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub broker: Arc<StreamBroker>,
     pub recorder: Arc<Recorder>,
     pub view: Arc<ViewManager>,
+    /// 媒体库的本地回放（同一时刻只有一个）。
+    pub local: Arc<LocalPlayer>,
     /// 弹幕扇出中心：一房间一条连接，录制与观看共用。
     pub danmaku: Arc<DanmakuHub>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
@@ -55,10 +58,14 @@ impl AppState {
             }
         }
 
-        let media_root = default_media_root();
-        tokio::fs::create_dir_all(&media_root)
-            .await
-            .map_err(|err| AppError::from_io(err, &media_root))?;
+        // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
+        let mut settings = crate::settings::load(&db);
+        let mut media_root = PathBuf::from(&settings.media_root);
+        if tokio::fs::create_dir_all(&media_root).await.is_err() {
+            media_root = default_media_root();
+            let _ = tokio::fs::create_dir_all(&media_root).await;
+            settings.media_root = media_root.display().to_string();
+        }
 
         let server = StreamServer::start()
             .await
@@ -73,6 +80,9 @@ impl AppState {
         ));
         let view = ViewManager::new(cache_root.join("view"), server.clone(), danmaku.clone());
         view.clean_cache().await;
+        crate::settings::apply(&settings, &recorder);
+        let local = LocalPlayer::new(cache_root.join("play"), server.clone());
+        let _ = tokio::fs::remove_dir_all(cache_root.join("play")).await;
 
         monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
 
@@ -96,6 +106,7 @@ impl AppState {
             broker,
             recorder,
             view,
+            local,
             danmaku,
             demo: tokio::sync::Mutex::new(None),
         })

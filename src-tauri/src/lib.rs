@@ -5,11 +5,13 @@ mod db;
 mod disk;
 mod error;
 mod ffmpeg;
+mod local;
 mod monitor;
 mod platform;
 mod postprocess;
 mod process;
 mod recorder;
+mod settings;
 mod state;
 mod stream;
 mod view;
@@ -60,6 +62,7 @@ pub fn run() {
             }
             Ok(())
         })
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::demo_stream,
@@ -80,7 +83,14 @@ pub fn run() {
             commands::session_remux,
             commands::session_screenshot,
             commands::session_export_danmaku,
-            commands::room_merge_sessions
+            commands::room_merge_sessions,
+            commands::settings_get,
+            commands::settings_update,
+            commands::media_list,
+            commands::media_delete,
+            commands::media_reveal,
+            commands::media_play,
+            commands::media_stop
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIVECAST");
@@ -89,6 +99,7 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 tauri::async_runtime::block_on(async {
+                    state.local.stop().await;
                     state.recorder.shutdown_all(handle).await;
                     state.view.shutdown_all(handle).await;
                     state.danmaku.shutdown_all();

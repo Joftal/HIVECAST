@@ -350,6 +350,7 @@ export default function MonitorPage() {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<Record<string, RecordSession[] | null>>({});
   const [now, setNow] = useState(() => Date.now());
+
   const load = useCallback(async () => {
     if (!isTauri()) return;
     try {

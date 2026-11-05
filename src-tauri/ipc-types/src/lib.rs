@@ -208,3 +208,63 @@ pub struct DanmakuBatch {
     pub room_id: String,
     pub messages: Vec<DanmakuMessage>,
 }
+
+/// 全局设置（v1 只有一个作用域，即「全局」）。
+///
+/// 为什么不用 docs/19 里的四级作用域表：v1 只有单账号单库，
+/// 四级覆盖没有真实使用场景；等会话级覆盖真正出现时再拆表。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct Settings {
+    /// 新房间的默认录制画质（qn，10000 = 原画）
+    pub default_record_qn: u32,
+    /// 新房间的默认观看画质（0 = 自动）
+    pub default_view_qn: u32,
+    /// 媒体库根目录
+    pub media_root: String,
+    /// 同时录制的上限
+    pub max_concurrent_records: u32,
+    /// 录制开始/结束时是否发系统通知
+    pub notify_enabled: bool,
+    /// zh-CN | en-US | system
+    pub language: String,
+}
+
+/// 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct MediaItem {
+    pub id: String,
+    pub room_id: String,
+    pub platform: String,
+    pub title: String,
+    pub host_name: String,
+    /// 视频文件绝对路径（可能已不存在，配合 has_file 判断）
+    pub path: String,
+    #[ts(type = "number")]
+    pub size: i64,
+    #[ts(type = "number")]
+    pub duration_ms: i64,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    pub status: String,
+    #[ts(type = "number")]
+    pub danmaku_count: i64,
+    /// 磁盘上还能不能找到这个文件
+    pub has_file: bool,
+}
+
+/// 本地回放的地址与标题。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct Playback {
+    pub url: String,
+    pub session_id: String,
+    pub title: String,
+    #[ts(type = "number")]
+    pub duration_ms: i64,
+}
+

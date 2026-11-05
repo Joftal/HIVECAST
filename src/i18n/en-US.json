@@ -5,7 +5,53 @@
   },
   "tab": {
     "monitor": "Monitor",
-    "watch": "Multi-view"
+    "watch": "Multi-view",
+    "media": "Library",
+    "settings": "Settings"
+  },
+  "media": {
+    "title": "Library",
+    "subtitle": "Every finished recording lands here; click one to play it locally.",
+    "emptyTitle": "The library is empty",
+    "emptyBody": "Add a room on Monitor; finished recordings will appear here automatically.",
+    "count": "{{n}} recordings",
+    "play": "Play",
+    "playing": "Playing",
+    "stop": "Stop",
+    "reveal": "Show in Finder",
+    "delete": "Delete",
+    "confirmDelete": "Click again to confirm",
+    "cancel": "Cancel",
+    "missing": "File missing",
+    "loadFailed": "Failed to load the library",
+    "noFile": "The file is gone; only the record can be deleted",
+    "deleted": "Deleted",
+    "playFailed": "Playback failed",
+    "danmakuCount": "{{n}} danmaku"
+  },
+  "settings": {
+    "title": "Settings",
+    "subtitle": "Stored in the local database and kept across restarts.",
+    "recordQuality": "Default record quality for new rooms",
+    "viewQuality": "Default view quality for new rooms",
+    "mediaRoot": "Library folder",
+    "choose": "Choose folder…",
+    "maxConcurrent": "Concurrent recordings",
+    "maxConcurrentHint": "New recordings are refused past the limit; running ones are untouched.",
+    "notify": "Send a system notification when recording starts or stops",
+    "language": "Language",
+    "languageSystem": "Follow system",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "close": "Close",
+    "qnAuto": "Auto (platform decides)",
+    "qnOrigin": "Original",
+    "qnBluray": "Blu-ray",
+    "qnUltra": "Ultra HD",
+    "qnHigh": "HD",
+    "qnStandard": "SD",
+    "saveFailed": "Failed to save"
   },
   "common": {
     "retry": "Retry",
@@ -130,11 +176,6 @@
     },
     "buffering": "Buffering…",
     "degradedHint": "Requested quality is unavailable; downgraded by the platform"
-  },
-  "settings": {
-    "title": "Settings",
-    "language": "Language",
-    "open": "Settings"
   },
   "notice": {
     "started": {
