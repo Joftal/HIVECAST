@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#131722"/>
+      <stop offset="1" stop-color="#08090C"/>
+    </linearGradient>
+    <linearGradient id="hive" x1="300" y1="240" x2="740" y2="800" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD37A"/>
+      <stop offset="0.55" stop-color="#FFB02E"/>
+      <stop offset="1" stop-color="#D97E00"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <path d="M512 176 760 320v288L512 752 264 608V320L512 176Z" fill="none" stroke="url(#hive)" stroke-width="40" stroke-linejoin="round"/>
+  <path d="M512 336 640 410v148L512 632 384 558V410L512 336Z" fill="url(#hive)" fill-opacity="0.92"/>
+</svg>

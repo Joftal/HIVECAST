@@ -55,3 +55,6 @@ Thumbs.db
 *.msi
 *.AppImage
 *.app
+
+# TypeScript 增量构建信息
+*.tsbuildinfo

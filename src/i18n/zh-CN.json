@@ -1,0 +1,68 @@
+{
+  "app": {
+    "name": "HIVECAST",
+    "tagline": "直播录制与同屏观看"
+  },
+  "tab": {
+    "monitor": "主播监控",
+    "watch": "多屏观看"
+  },
+  "common": {
+    "retry": "重试",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "notAvailable": "暂不可用",
+    "copy": "复制",
+    "copied": "已复制",
+    "unknown": "未知",
+    "back": "返回"
+  },
+  "monitor": {
+    "title": "主播监控",
+    "subtitle": "添加直播间后自动监听开播、录制与后处理。",
+    "emptyTitle": "还没有监控中的直播间",
+    "emptyBody": "M1 将开放添加直播间：支持房间号、短链、主播主页三种输入方式。",
+    "addRoom": "添加直播间",
+    "pending": "M1 开放",
+    "envTitle": "环境自检",
+    "envBody": "以下信息来自 Rust 侧，用于确认运行环境可用。",
+    "ffmpeg": "ffmpeg",
+    "dataDir": "数据目录",
+    "cacheDir": "缓存目录",
+    "platform": "平台",
+    "version": "版本"
+  },
+  "watch": {
+    "title": "多屏观看",
+    "subtitle": "最多 4 路同屏，音频与画质互不干扰。",
+    "slot": "槽位 {{index}}",
+    "empty": "空槽位",
+    "pickRoom": "选择直播间",
+    "loadDemo": "载入演示流",
+    "demoTip": "演示流由本机 ffmpeg 生成，经由本地 HTTP 服务交给 hls.js 播放，用于验证 M0 管道。",
+    "playing": "播放中",
+    "paused": "已暂停",
+    "connecting": "连接中",
+    "error": "播放失败",
+    "retry": "重新连接",
+    "audioOn": "有声",
+    "muted": "静音",
+    "qualityLocked": "画质切换将在 M2 开放",
+    "danmakuLocked": "弹幕将在 M3 开放",
+    "stats": {
+      "resolution": "分辨率",
+      "bitrate": "码率",
+      "dropped": "丢帧",
+      "buffer": "缓冲"
+    }
+  },
+  "settings": {
+    "title": "设置",
+    "language": "语言",
+    "open": "设置"
+  },
+  "error": {
+    "ffmpegMissing": "未找到 ffmpeg，请检查安装或稍后在设置中指定路径。",
+    "generic": "操作失败：{{message}}"
+  }
+}
