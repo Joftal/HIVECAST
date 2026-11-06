@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -262,7 +262,9 @@ impl Db {
     pub fn list_rooms(&self) -> Result<Vec<RoomRecord>, AppError> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(&format!("{ROOM_SELECT} ORDER BY created_at ASC"))
+            .prepare(&format!(
+                "{ROOM_SELECT} WHERE removed_at IS NULL ORDER BY created_at ASC"
+            ))
             .map_err(db_err)?;
         let rows = stmt.query_map([], map_room).map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
@@ -315,6 +317,8 @@ impl Db {
                     auto_record = excluded.auto_record,
                     monitor_paused = excluded.monitor_paused,
                     last_checked_at = excluded.last_checked_at,
+                    -- 重新添加同一房间等于恢复：把软删除标记清掉。
+                    removed_at = NULL,
                     updated_at = excluded.updated_at",
                 params![
                     room.id,
@@ -425,11 +429,34 @@ impl Db {
         Ok(())
     }
 
+    /// 移除房间只做软删除。
+    ///
+    /// record_session.room_id 是 ON DELETE CASCADE：真删会把该房间的全部录像历史
+    /// 一起带走（文件还在磁盘上，媒体库却再也看不到）。这里只打 removed_at，
+    /// 监控列表把它过滤掉，媒体库仍按房间聚合历史；重新添加同一房间会恢复它。
     pub fn delete_room(&self, id: &str) -> Result<(), AppError> {
+        let now = now_ts();
         self.lock()
-            .execute("DELETE FROM room WHERE id = ?1", params![id])
+            .execute(
+                "UPDATE room SET removed_at = ?2, monitor_paused = 1, updated_at = ?2
+                  WHERE id = ?1",
+                params![id, now],
+            )
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// 这条房间是否已被移除（软删除）。
+    pub fn room_removed(&self, id: &str) -> Result<bool, AppError> {
+        self.lock()
+            .query_row(
+                "SELECT removed_at IS NOT NULL FROM room WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)
+            .map(|found| found.unwrap_or(0) != 0)
     }
 
     pub fn create_session(&self, session: &RecordSession) -> Result<(), AppError> {
@@ -945,6 +972,10 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         )
         .map_err(db_err)?;
     }
+    if !room_columns.iter().any(|name| name == "removed_at") {
+        conn.execute("ALTER TABLE room ADD COLUMN removed_at INTEGER", [])
+            .map_err(db_err)?;
+    }
     Ok(())
 }
 
@@ -1108,6 +1139,38 @@ fn seed_media(db: &Db) {
             .expect("按房间筛选失败");
         assert_eq!(total, 3);
         assert!(items.iter().all(|one| one.room_id == "rm-a"));
+    }
+
+    #[test]
+    fn removing_a_room_keeps_its_history_and_readding_revives_it() {
+        let (db, _path) = temp_db("softdelete");
+        seed_media(&db);
+
+        db.delete_room("rm-a").expect("移除房间失败");
+        // 软删除：监控列表看不到，但房间行、录像历史都还在。
+        assert!(db.room_removed("rm-a").expect("读标记失败"));
+        assert!(db.get_room("rm-a").expect("读房间失败").is_some());
+        assert_eq!(db.list_rooms().expect("列表失败").len(), 1);
+        let (items, total) = db.media_list(&MediaFilter::default()).expect("媒体库失败");
+        assert_eq!(total, 4);
+        assert!(items.iter().any(|one| one.room_id == "rm-a"));
+
+        // 重新添加同一个房间：insert_room 的 ON CONFLICT 分支要清掉软删除标记。
+        let existing = db.get_room("rm-a").expect("读失败").expect("房间还在");
+        let info = crate::platform::RoomInfo {
+            host_name: "主播甲".into(),
+            room_name: "房间甲".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: Some(5000),
+            online: Some(1),
+            extra: serde_json::Value::Null,
+        };
+        db.insert_room(&existing, &info).expect("恢复房间失败");
+        assert!(!db.room_removed("rm-a").expect("读标记失败"));
+        assert_eq!(db.list_rooms().expect("列表失败").len(), 2);
     }
 
     fn row(platform: &str, cookie: &str) -> CredentialRow {

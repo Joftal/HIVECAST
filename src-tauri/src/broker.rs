@@ -80,6 +80,9 @@ impl StreamBroker {
         qn: u32,
     ) -> Result<Arc<Vec<StreamGroup>>, PlatformError> {
         let key = StreamKey::new(room, qn);
+        // 冷却与限速按「房间」算，而不是按「房间+档位」：以前 info 用房间键、
+        // groups 用裸 room_key，两套键互不相干，invalidate 也就清不干净（C3）。
+        let gate_key = room_gate(room);
         if let Some(groups) = self.cached_groups(&key) {
             return Ok(groups);
         }
@@ -90,10 +93,10 @@ impl StreamBroker {
         if let Some(groups) = self.cached_groups(&key) {
             return Ok(groups);
         }
-        if let Some(err) = self.backoff_error(&key.room_key) {
+        if let Some(err) = self.backoff_error(&gate_key) {
             return Err(err);
         }
-        self.wait_turn(&key.room_key).await;
+        self.wait_turn(&gate_key).await;
 
         let adapter = adapter_for(&room.platform)?;
         let started = Instant::now();
@@ -111,7 +114,7 @@ impl StreamBroker {
         inner.group_inflight.remove(&key);
         match result {
             Ok(groups) => {
-                inner.failures.remove(&key.room_key);
+                inner.failures.remove(&gate_key);
                 let groups = Arc::new(groups);
                 inner.groups.insert(
                     key,
@@ -123,7 +126,7 @@ impl StreamBroker {
                 Ok(groups)
             }
             Err(err) => {
-                self.note_failure(&mut inner, &key.room_key, &err);
+                self.note_failure(&mut inner, &gate_key, &err);
                 Err(err)
             }
         }
@@ -356,5 +359,24 @@ mod tests {
         };
         assert_eq!(room_gate(&room), "bilibili:545068");
         assert_eq!(StreamKey::new(&room, 10000).room_key, "545068");
+    }
+
+    #[test]
+    fn invalidate_clears_the_shared_room_cooldown() {
+        let broker = StreamBroker::new();
+        let room = RoomRef {
+            platform: "douyu".to_string(),
+            room_key: "9999".into(),
+            canonical_url: String::new(),
+            input: String::new(),
+        };
+        // 取流失败与房间信息共用同一把房间键：一处进冷却，另一处也要看得到。
+        {
+            let mut inner = broker.inner.lock().expect("broker 状态被污染");
+            broker.note_failure(&mut inner, &room_gate(&room), &PlatformError::Network("x".into()));
+        }
+        assert!(broker.backoff_error(&room_gate(&room)).is_some());
+        broker.invalidate(&room);
+        assert!(broker.backoff_error(&room_gate(&room)).is_none());
     }
 }

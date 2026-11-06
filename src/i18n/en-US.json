@@ -331,7 +331,8 @@
     "addAutoRecord": "Auto record",
     "addMonitorHint": "When off, this room is never checked automatically and never records on its own.",
     "addAutoRecordHint": "Start recording when the room goes live.",
-    "addAutoRecordDisabled": "Turn monitoring on first."
+    "addAutoRecordDisabled": "Turn monitoring on first.",
+    "removedKept": "Room removed. Its recordings stay in the library."
   },
   "watch": {
     "title": "Multi-view",

@@ -335,10 +335,13 @@ async fn check_room(
             }
 
             if info.is_live {
-                // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位。
+                recorder.clear_offline(&room.id);
+                // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位；
+                // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
                 if room.auto_record
                     && !recorder.is_recording(&room.id)
-                    && !recorder.auto_suppressed(&room.id)
+                    && !recorder.auto_suppressed(&room.id, info.started_at)
+                    && !recorder.auto_blocked(&room.id, info.started_at)
                     && disk::can_start(&recorder.media_root())
                 {
                     if let Err(err) = recorder.start(app, broker, room).await {
@@ -350,7 +353,12 @@ async fn check_room(
             } else {
                 recorder.resume_auto(&room.id);
                 if recorder.is_recording(&room.id) {
-                    let _ = recorder.stop(app, &room.id, "stream_ended").await;
+                    // 一次离线可能只是接口抖动 / 字段缺失，连续两次才停录（S1）。
+                    if recorder.confirm_offline(&room.id) {
+                        let _ = recorder.stop(app, &room.id, "stream_ended").await;
+                    }
+                } else {
+                    recorder.clear_offline(&room.id);
                 }
             }
             Outcome::Ok

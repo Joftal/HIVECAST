@@ -75,11 +75,15 @@ pub async fn room_add(
         .db
         .find_room(&reference.platform, &reference.room_key)?
     {
-        return Ok(RoomView {
-            recording: state.recorder.active(&existing.id),
-            error: state.recorder.last_error(&existing.id),
-            room: existing,
-        });
+        // 之前移除过的房间还在库里（历史录像挂在它上面）：这次当恢复处理，
+        // 走下面的插入分支，ON CONFLICT 会清掉软删除标记。
+        if !state.db.room_removed(&existing.id)? {
+            return Ok(RoomView {
+                recording: state.recorder.active(&existing.id),
+                error: state.recorder.last_error(&existing.id),
+                room: existing,
+            });
+        }
     }
 
     let info = state.broker.room_info(&reference).await?;
@@ -134,6 +138,8 @@ pub async fn room_remove(
         let _ = state.recorder.stop(&app, &id, "stopped").await;
     }
     state.view.close_room(&app, &id).await;
+    // 停止录制会顺手打上「手动停录」标记；房间都移除了，别让它跨到下次重新添加。
+    state.recorder.resume_auto(&id);
     state.db.delete_room(&id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())

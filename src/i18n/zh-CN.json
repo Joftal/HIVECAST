@@ -331,7 +331,8 @@
     "addAutoRecord": "自动录制",
     "addMonitorHint": "关闭后不参与定时检测，也不会自动录制。",
     "addAutoRecordHint": "开播时自动开始录制。",
-    "addAutoRecordDisabled": "先开启监控，才能自动录制。"
+    "addAutoRecordDisabled": "先开启监控，才能自动录制。",
+    "removedKept": "已移除房间，历史录像仍保留在媒体库"
   },
   "watch": {
     "title": "多屏观看",

@@ -489,6 +489,8 @@ export default function MonitorPage({
     setConfirmId(null);
     setMenuId(null);
     await run(room.id, () => roomRemove(room.id));
+    // 移除只隐藏房间，录像历史仍按主播留在媒体库，明确告知免得以为被删了。
+    setNotice({ text: t("monitor.removedKept"), error: false });
   };
 
   const loadLines = async (roomId: string, qn: number) => {

@@ -9,7 +9,7 @@
 //! 意外断流（不是用户停、也不是平台下播）会先在同一个会话里续录最多 3 次，
 //! 分片接着编号，避免一次抖动就把整场切成两条历史；彻底失败才收尾。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
@@ -35,6 +35,14 @@ const EARLY_EXIT: Duration = Duration::from_secs(12);
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 /// 断流自动续录的最大次数：网络抖动通常一次就够，连续 3 次说明源头真断了。
 const MAX_RESTARTS: u32 = 3;
+/// 一个会话里因「长时间没有新数据」重启 ffmpeg 的上限。
+const MAX_STALL_RESTARTS: u32 = 2;
+/// 录制文件连续这么久一个字节都没涨，判定直播源假死（S4）。
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 下播需要连续两次成功检查都报离线（S1），两次最多间隔这么久。
+const OFFLINE_CONFIRM_GAP_SECS: i64 = 180;
+/// 自然结束后的自动开录静默期（S2）；出现新场次会提前解除。
+const ENDED_BLOCK_SECS: i64 = 600;
 
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
@@ -53,6 +61,13 @@ struct Active {
     danmaku_path: Option<String>,
     /// 已续录的次数，达到 MAX_RESTARTS 后不再重开
     restarts: u32,
+    /// 本场直播的开播时间（平台口径）：用来区分「同一场」与「新一场」
+    live_started_at: Option<i64>,
+    /// 已落盘字节数与最后一次增长的时刻，用来发现「连着但不给数据」
+    last_bytes: u64,
+    last_growth: Instant,
+    /// 假死重启次数；只要文件重新增长就清零
+    stalls: u32,
 }
 
 /// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
@@ -88,8 +103,14 @@ pub struct Recorder {
     /// 每房间一把开录锁：监控循环、添加房间、手动开录可能同时触发 start，
     /// 只有先拿到锁的那次能真正拉起 ffmpeg，其余走到里面会发现已有进程直接返回。
     start_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    /// 用户手动停录过的房间：在主播下播前不再自动开录，避免「停了又被拉起来」。
-    suppressed: Mutex<HashSet<String>>,
+    /// 用户手动停录过的房间 → 停录时的开播时间。
+    /// 同一场直播内不再自动开录，换了新场次自动放行（S3）。
+    suppressed: Mutex<HashMap<String, Option<i64>>>,
+    /// 上一场自然结束：房间 →（结束时间, 那场的开播时间）。
+    /// 平台下播状态滞后时先别再开一条秒退的会话（S2）。
+    ended: Mutex<HashMap<String, (i64, Option<i64>)>>,
+    /// 连续「成功检查且离线」的次数，给下播做二次确认（S1）。
+    offline: Mutex<HashMap<String, (u32, i64)>>,
     /// 弹幕扇出中心：录制与观看共用一条房间连接。测试里可以不挂。
     danmaku: Option<Arc<DanmakuHub>>,
     /// 缩略图生成器：录制一收尾就排队生成九宫格封面，媒体库打开时直接有图。
@@ -107,7 +128,9 @@ impl Recorder {
             failures: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
             start_locks: Mutex::new(HashMap::new()),
-            suppressed: Mutex::new(HashSet::new()),
+            suppressed: Mutex::new(HashMap::new()),
+            ended: Mutex::new(HashMap::new()),
+            offline: Mutex::new(HashMap::new()),
             danmaku,
             thumbs: std::sync::RwLock::new(None),
         }
@@ -219,17 +242,91 @@ impl Recorder {
     }
 
     /// 手动停录后是否仍处于「不要再自动开录」状态。
-    pub fn auto_suppressed(&self, room_id: &str) -> bool {
-        self.suppressed
-            .lock()
-            .expect("停录标记被污染")
-            .contains(room_id)
+    ///
+    /// live_started 是本轮检查到的开播时间：与停录时不同就说明已经换了一场直播，
+    /// 标记自动失效（S3：下播后快速重开不会被上一场的停录卡住）。
+    pub fn auto_suppressed(&self, room_id: &str, live_started: Option<i64>) -> bool {
+        let mut map = self.suppressed.lock().expect("停录标记被污染");
+        match map.get(room_id).copied() {
+            None => false,
+            Some(stored) => {
+                if let (Some(stored_at), Some(now_at)) = (stored, live_started) {
+                    if stored_at != now_at {
+                        map.remove(room_id);
+                        return false;
+                    }
+                }
+                true
+            }
+        }
     }
 
+    /// 上一场刚自然结束、平台却还显示在播：先别自动开录（S2）。
+    ///
+    /// 解除条件（任一）：成功看到一次离线（resume_auto）、平台给出新的开播时间、
+    /// 或者过了 ENDED_BLOCK_SECS 的兜底窗口。
+    pub fn auto_blocked(&self, room_id: &str, live_started: Option<i64>) -> bool {
+        let now = crate::db::now_ts();
+        let mut map = self.ended.lock().expect("结束标记被污染");
+        let Some((at, stored)) = map.get(room_id).copied() else {
+            return false;
+        };
+        if now - at > ENDED_BLOCK_SECS {
+            map.remove(room_id);
+            return false;
+        }
+        if let (Some(stored_at), Some(now_at)) = (stored, live_started) {
+            if stored_at != now_at {
+                map.remove(room_id);
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 记下「这一场自然结束了」，用于挡住平台状态滞后引起的二次开录。
+    pub fn mark_ended(&self, room_id: &str, live_started: Option<i64>) {
+        self.ended
+            .lock()
+            .expect("结束标记被污染")
+            .insert(room_id.to_string(), (crate::db::now_ts(), live_started));
+    }
+
+    /// 成功看到离线、或重新开录之后，清掉停录抑制与结束标记。
     pub fn resume_auto(&self, room_id: &str) {
         self.suppressed
             .lock()
             .expect("停录标记被污染")
+            .remove(room_id);
+        self.ended.lock().expect("结束标记被污染").remove(room_id);
+    }
+
+    /// 记录一次「成功检查且离线」；连续两次才认为主播真的下播（S1）。
+    ///
+    /// 一次接口抖动或字段缺失会把状态误报成离线，单次就停录会把一场健康录像
+    /// 切成两条历史。返回 true 表示可以停录；返回后计数清零重新计。
+    pub fn confirm_offline(&self, room_id: &str) -> bool {
+        let now = crate::db::now_ts();
+        let mut map = self.offline.lock().expect("离线确认被污染");
+        let entry = map.entry(room_id.to_string()).or_insert((0, now));
+        if now - entry.1 > OFFLINE_CONFIRM_GAP_SECS {
+            entry.0 = 0;
+        }
+        entry.0 += 1;
+        entry.1 = now;
+        if entry.0 >= 2 {
+            map.remove(room_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 成功看到在播、或本来就没在录：清掉离线计数。
+    pub fn clear_offline(&self, room_id: &str) {
+        self.offline
+            .lock()
+            .expect("离线确认被污染")
             .remove(room_id);
     }
 
@@ -398,9 +495,15 @@ impl Recorder {
                     danmaku,
                     danmaku_path: Some(danmaku_path.display().to_string()),
                     restarts: 0,
+                    live_started_at: room.started_at,
+                    last_bytes: 0,
+                    last_growth: Instant::now(),
+                    stalls: 0,
                 },
             );
         }
+        // 这一场已经开始录了：清掉上一场的停录抑制 / 结束静默。
+        self.resume_auto(&room.id);
 
         tracing::info!(
             room = %room.host_name,
@@ -423,10 +526,17 @@ impl Recorder {
         reason: &str,
     ) -> Result<(), AppError> {
         if reason == "stopped" {
+            // 记住这场的开播时间：同一场不再自动拉起，换新场次自动放行（S3）。
+            let live = self
+                .db
+                .get_room(room_id)
+                .ok()
+                .flatten()
+                .and_then(|room| room.started_at);
             self.suppressed
                 .lock()
                 .expect("停录标记被污染")
-                .insert(room_id.to_string());
+                .insert(room_id.to_string(), live);
         }
         {
             let mut inner = self.inner.lock().expect("录制状态被污染");
@@ -502,7 +612,27 @@ impl Recorder {
                     return;
                 }
                 let Some((status, stop_reason)) = rec.poll_exit(&room_id) else {
-                    continue;
+                    // 进程还活着，但可能卡在「连着却不给数据」：ffmpeg 不退出、
+                    // 文件也不增长，会话会永远停在 recording（S4）。
+                    if !rec.stalled(&room_id) {
+                        continue;
+                    }
+                    tracing::warn!(room_id, "录制长时间没有新数据，重启 ffmpeg");
+                    let killed = rec.kill_and_wait(&room_id).await;
+                    let stalls = rec.bump_stall(&room_id);
+                    let broker = {
+                        let state = app.state::<crate::state::AppState>();
+                        state.broker.clone()
+                    };
+                    if stalls <= MAX_STALL_RESTARTS
+                        && rec.respawn(&app, &broker, &room_id).await
+                    {
+                        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                        continue;
+                    }
+                    rec.finalize(&app, &room_id, killed.unwrap_or_default(), Some("stalled".into()))
+                        .await;
+                    return;
                 };
                 // 意外断流（不是用户停、也不是平台正常下播）先续录，
                 // 网络抖一下不该把整场录像切成两条历史。
@@ -525,6 +655,50 @@ impl Recorder {
                 return;
             }
         });
+    }
+
+    /// 文件是否已经 STALL_TIMEOUT 没有增长；活着且正常写入时顺便刷新基线。
+    fn stalled(&self, room_id: &str) -> bool {
+        let mut inner = self.inner.lock().expect("录制状态被污染");
+        let Some(active) = inner.get_mut(room_id) else {
+            return false;
+        };
+        let bytes = segment::parts_total(Path::new(&active.recording.file_path));
+        if bytes > active.last_bytes {
+            active.last_bytes = bytes;
+            active.last_growth = Instant::now();
+            active.stalls = 0;
+            return false;
+        }
+        active.last_growth.elapsed() >= STALL_TIMEOUT
+    }
+
+    fn bump_stall(&self, room_id: &str) -> u32 {
+        let mut inner = self.inner.lock().expect("录制状态被污染");
+        let Some(active) = inner.get_mut(room_id) else {
+            return u32::MAX;
+        };
+        active.stalls += 1;
+        active.last_growth = Instant::now();
+        active.last_bytes = segment::parts_total(Path::new(&active.recording.file_path));
+        active.stalls
+    }
+
+    /// 杀掉卡住的 ffmpeg 并等它真的退出：否则续录会和旧进程抢同一批分片。
+    async fn kill_and_wait(&self, room_id: &str) -> Option<std::process::ExitStatus> {
+        {
+            let mut inner = self.inner.lock().expect("录制状态被污染");
+            if let Some(active) = inner.get_mut(room_id) {
+                let _ = active.child.start_kill();
+            }
+        }
+        for _ in 0..60 {
+            if let Some((status, _)) = self.poll_exit(room_id) {
+                return Some(status);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
     }
 
     fn poll_exit(&self, room_id: &str) -> Option<(std::process::ExitStatus, Option<String>)> {
@@ -680,6 +854,7 @@ impl Recorder {
             Some("stream_ended") => ("finished", "stream_ended", None),
             Some("app_exit") => ("aborted", "app_exit", None),
             Some("disk_full") => ("aborted", "disk_full", None),
+            Some("stalled") => ("failed", "stalled", Some("直播流长时间没有数据".into())),
             _ if status.success() => ("finished", "stream_ended", None),
             _ => {
                 let message = format!("ffmpeg 异常退出：{status}");
@@ -690,6 +865,12 @@ impl Recorder {
                 ("failed", "error", Some(message))
             }
         };
+
+        // 自然结束（下播 / 断流收尾）后先静默一会儿：平台状态常滞后一两轮，
+        // 不挡住的话监控会立刻再开一条秒退的会话（S2）。
+        if final_status == "finished" && reason == "stream_ended" {
+            self.mark_ended(room_id, active.live_started_at);
+        }
 
         // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
         let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
@@ -792,6 +973,9 @@ fn build_command(
         .arg("-loglevel")
         .arg("warning")
         .arg("-y");
+    // 30 秒收不到任何数据就退出，交给续录逻辑重连。
+    // 没有它时源「连着但不给数据」会把 ffmpeg 永久挂住（S4）。
+    command.arg("-rw_timeout").arg("30000000");
     if !headers.is_empty() {
         let mut raw = String::new();
         for (name, value) in headers {
@@ -1100,18 +1284,63 @@ mod tests {
         assert_eq!(path.parent(), Some(Path::new("/tmp/lib")));
     }
 
+    fn test_recorder(tag: &str) -> Recorder {
+        let db = Arc::new(Db::open(Path::new(":memory:")).expect("内存库"));
+        let _ = tag;
+        Recorder::new(db, PathBuf::from("/tmp"), None)
+    }
+
     #[test]
     fn manual_stop_suppresses_auto_start() {
-        let db = Arc::new(Db::open(Path::new(":memory:")).expect("内存库"));
-        let recorder = Recorder::new(db, PathBuf::from("/tmp"), None);
-        assert!(!recorder.auto_suppressed("r1"));
+        let recorder = test_recorder("suppress");
+        assert!(!recorder.auto_suppressed("r1", Some(100)));
         recorder
             .suppressed
             .lock()
             .expect("锁")
-            .insert("r1".to_string());
-        assert!(recorder.auto_suppressed("r1"));
+            .insert("r1".to_string(), Some(100));
+        assert!(recorder.auto_suppressed("r1", Some(100)));
+        // 平台没给开播时间时保守拦截。
+        assert!(recorder.auto_suppressed("r1", None));
         recorder.resume_auto("r1");
-        assert!(!recorder.auto_suppressed("r1"));
+        assert!(!recorder.auto_suppressed("r1", Some(100)));
+    }
+
+    #[test]
+    fn manual_stop_only_blocks_the_same_live_session() {
+        let recorder = test_recorder("suppress-next");
+        recorder
+            .suppressed
+            .lock()
+            .expect("锁")
+            .insert("r1".to_string(), Some(100));
+        // 换成新一场（开播时间变了）：上一场的停录不该继续挡着。
+        assert!(!recorder.auto_suppressed("r1", Some(200)));
+        assert!(!recorder.auto_suppressed("r1", Some(100)));
+    }
+
+    #[test]
+    fn natural_end_blocks_auto_start_until_offline_or_new_live() {
+        let recorder = test_recorder("ended");
+        recorder.mark_ended("r1", Some(100));
+        assert!(recorder.auto_blocked("r1", Some(100)));
+        // 成功看到离线后解除。
+        recorder.resume_auto("r1");
+        assert!(!recorder.auto_blocked("r1", Some(100)));
+        // 平台给出新的开播时间也解除。
+        recorder.mark_ended("r1", Some(100));
+        assert!(!recorder.auto_blocked("r1", Some(200)));
+        assert!(!recorder.auto_blocked("r1", Some(100)));
+    }
+
+    #[test]
+    fn offline_needs_two_successful_checks() {
+        let recorder = test_recorder("offline");
+        assert!(!recorder.confirm_offline("r1"));
+        assert!(recorder.confirm_offline("r1"));
+        // 确认后计数清零，下一次重新从 1 开始。
+        assert!(!recorder.confirm_offline("r1"));
+        recorder.clear_offline("r1");
+        assert!(!recorder.confirm_offline("r1"));
     }
 }
