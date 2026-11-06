@@ -83,7 +83,11 @@
     "notifyHint": "Notify on recording start, finish, and playback errors",
     "groupPost": "File post-processing",
     "autoRemux": "Remux recordings to MP4 when they finish",
-    "autoRemuxHint": "Joins the segments into a single MP4. Turn off to keep the .ts join for manual editing or recovery."
+    "autoRemuxHint": "Joins the segments into a single MP4. Turn off to keep the .ts join for manual editing or recovery.",
+    "groupAbout": "About",
+    "aboutBuild": "Built with Tauri + React",
+    "aboutHint": "Icons and interface assets are original HIVECAST designs.",
+    "trayHint": "Closing the window keeps HIVECAST in the tray so recordings continue"
   },
   "common": {
     "retry": "Retry",

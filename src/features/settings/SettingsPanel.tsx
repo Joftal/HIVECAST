@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
-import { isTauri, settingsGet, settingsUpdate, type Settings } from "../../lib/ipc";
+import { appInfo, isTauri, settingsGet, settingsUpdate, type Settings } from "../../lib/ipc";
+import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch } from "../../components/ui/Controls";
 import AccountSection from "./AccountSection";
 
@@ -73,9 +74,17 @@ function SelectField({
 export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void appInfo()
+      .then((info) => setVersion(info.version))
+      .catch(() => setVersion(""));
+  }, []);
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -307,6 +316,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                     onChange={(next) => patch({ language: next })}
                   />
                 </div>
+                <p className="text-[10.5px] leading-4 text-faint">{t("settings.trayHint")}</p>
               </section>
 
               <section className="space-y-3 border-t border-line pt-5">
@@ -326,6 +336,28 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                     label={t("settings.notify")}
                   />
                 </div>
+              </section>
+
+              <section className="space-y-3 border-t border-line pt-5">
+                <h3 className={GROUP}>{t("settings.groupAbout")}</h3>
+                <div className="flex items-center gap-3">
+                  <img
+                    src={appIcon}
+                    alt=""
+                    width={48}
+                    height={48}
+                    className="h-12 w-12 shrink-0 select-none rounded-[11px]"
+                    draggable={false}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[12.5px] font-semibold text-ink">HIVECAST</div>
+                    <div className="mt-0.5 font-mono text-[10.5px] text-faint">
+                      {version ? `v${version}` : "—"}
+                      <span className="ml-2 font-sans">{t("settings.aboutBuild")}</span>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10.5px] leading-4 text-faint">{t("settings.aboutHint")}</p>
               </section>
             </div>
           )}

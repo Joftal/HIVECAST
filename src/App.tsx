@@ -6,6 +6,7 @@ import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsPanel from "./features/settings/SettingsPanel";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
+import appMark from "./assets/app-mark.png";
 import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
@@ -131,9 +132,14 @@ export default function App() {
         className="flex h-12 shrink-0 items-stretch border-b border-line pr-3"
       >
         <div data-tauri-drag-region className="flex items-center gap-2 pr-2">
-          <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[5px] bg-accent text-[12px] font-bold leading-none text-accent-ink">
-            H
-          </span>
+          <img
+            src={appMark}
+            alt=""
+            width={24}
+            height={24}
+            draggable={false}
+            className="h-6 w-6 shrink-0 select-none rounded-[6px]"
+          />
           <span data-tauri-drag-region className="text-[11.5px] font-semibold tracking-[0.16em] text-ink">HIVECAST</span>
         </div>
 

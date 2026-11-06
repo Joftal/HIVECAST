@@ -21,6 +21,7 @@ mod segment;
 mod settings;
 mod state;
 mod stream;
+mod tray;
 mod view;
 
 use state::AppState;
@@ -47,6 +48,35 @@ pub fn run() {
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。
             let state = tauri::async_runtime::block_on(AppState::init(&handle))?;
             app.manage(state);
+
+            // 托盘：关闭窗口只隐藏，录制与监控继续跑。托盘建不出来就退回「关窗即退出」。
+            let tray_ready = match crate::tray::build(&handle) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::warn!("托盘创建失败：{err}");
+                    false
+                }
+            };
+            if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                {
+                    let theme = window.theme().unwrap_or(tauri::Theme::Light);
+                    crate::tray::sync_window_icon(&window, theme);
+                }
+                let target = window.clone();
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } if tray_ready => {
+                        api.prevent_close();
+                        let _ = target.hide();
+                    }
+                    #[cfg(target_os = "windows")]
+                    tauri::WindowEvent::ThemeChanged(theme) => {
+                        crate::tray::sync_window_icon(&target, *theme);
+                        crate::tray::refresh(target.app_handle());
+                    }
+                    _ => {}
+                });
+            }
 
             // dev 服务器重启 / 系统注销发的是 SIGTERM，它不会触发 RunEvent::Exit；
             // 不接住就会留下一堆还在写文件的 ffmpeg。
@@ -115,6 +145,14 @@ pub fn run() {
         .expect("failed to build HIVECAST");
 
     app.run(|handle, event| {
+        // macOS：点 Dock 图标把藏起来的窗口拿回来。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 tauri::async_runtime::block_on(async {

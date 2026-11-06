@@ -560,11 +560,14 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppError> {
 /// 保存设置；返回规范化后的值（并发数夹到 1..=8、目录会被创建）。
 #[tauri::command]
 pub async fn settings_update(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, AppError> {
     let saved = crate::settings::save(&state.db, &settings)?;
     crate::settings::apply(&saved, &state.recorder);
+    // 托盘菜单文案跟随界面语言。
+    crate::tray::refresh(&app);
     Ok(saved)
 }
 

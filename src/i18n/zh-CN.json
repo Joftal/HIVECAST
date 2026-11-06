@@ -83,7 +83,11 @@
     "notifyHint": "录制开始、录制结束与播放异常时发送系统通知",
     "groupPost": "文件后处理",
     "autoRemux": "录制结束后自动转成 MP4",
-    "autoRemuxHint": "把录好的分片合成一个 MP4。关闭后保留 .ts 拼接文件，适合手动剪辑或救援。"
+    "autoRemuxHint": "把录好的分片合成一个 MP4。关闭后保留 .ts 拼接文件，适合手动剪辑或救援。",
+    "groupAbout": "关于",
+    "aboutBuild": "基于 Tauri + React 构建",
+    "aboutHint": "图标与界面素材均为 HIVECAST 自有设计。",
+    "trayHint": "关闭窗口不会退出，应用会留在托盘继续录制"
   },
   "common": {
     "retry": "重试",
