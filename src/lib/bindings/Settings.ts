@@ -28,6 +28,14 @@ maxConcurrentRecords: number,
  */
 notifyEnabled: boolean, 
 /**
+ * 播放与录制异常（取流失败、磁盘写满）是否发系统通知
+ */
+notifyError: boolean, 
+/**
+ * 登录失效是否发系统通知
+ */
+notifyAuth: boolean, 
+/**
  * zh-CN | en-US | system
  */
 language: string, 

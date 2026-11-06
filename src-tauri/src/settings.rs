@@ -17,6 +17,10 @@ const KEY_VIEW_QN: &str = "view.default_qn";
 const KEY_MEDIA_ROOT: &str = "media.root";
 const KEY_MAX_CONCURRENT: &str = "record.max_concurrent";
 const KEY_NOTIFY: &str = "ui.notify";
+/// 播放/录制异常（取流失败、磁盘写满）是否通知。
+pub const KEY_NOTIFY_ERROR: &str = "ui.notify_error";
+/// 登录失效是否通知。
+pub const KEY_NOTIFY_AUTH: &str = "ui.notify_auth";
 const KEY_LANGUAGE: &str = "ui.language";
 const KEY_THEME: &str = "ui.theme";
 /// 保留策略：多少天后自动删除；0 表示不按天删。
@@ -38,6 +42,8 @@ pub fn defaults() -> Settings {
             media_root: default_media_root().display().to_string(),
             max_concurrent_records: 4,
             notify_enabled: true,
+        notify_error: true,
+        notify_auth: true,
         language: "system".into(),
         theme: "light".into(),
         retention_days: 0,
@@ -65,6 +71,12 @@ pub fn load(db: &Db) -> Settings {
     }
     if let Some(value) = read(KEY_NOTIFY).and_then(|v| v.parse::<bool>().ok()) {
         settings.notify_enabled = value;
+    }
+    if let Some(value) = read(KEY_NOTIFY_ERROR).and_then(|v| v.parse::<bool>().ok()) {
+        settings.notify_error = value;
+    }
+    if let Some(value) = read(KEY_NOTIFY_AUTH).and_then(|v| v.parse::<bool>().ok()) {
+        settings.notify_auth = value;
     }
     if let Some(value) = read(KEY_LANGUAGE).filter(|v| matches!(v.as_str(), "zh-CN" | "en-US" | "system")) {
         settings.language = value;
@@ -122,6 +134,8 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         &settings.max_concurrent_records.to_string(),
     )?;
     db.set_setting(KEY_NOTIFY, &settings.notify_enabled.to_string())?;
+    db.set_setting(KEY_NOTIFY_ERROR, &settings.notify_error.to_string())?;
+    db.set_setting(KEY_NOTIFY_AUTH, &settings.notify_auth.to_string())?;
     db.set_setting(KEY_LANGUAGE, &settings.language)?;
     db.set_setting(KEY_THEME, &settings.theme)?;
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
@@ -175,6 +189,8 @@ mod tests {
                 media_root: media.display().to_string(),
                 max_concurrent_records: 99,
                 notify_enabled: false,
+                notify_error: false,
+                notify_auth: false,
                 language: "fr-FR".into(),
                 theme: "neon".into(),
                 retention_days: 9_999,
@@ -197,6 +213,8 @@ mod tests {
         assert_eq!(loaded.default_record_qn, 12300);
         assert_eq!(loaded.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert!(!loaded.notify_enabled);
+        assert!(!loaded.notify_error, "异常通知开关应原样保存");
+        assert!(!loaded.notify_auth, "登录失效通知开关应原样保存");
         assert_eq!(loaded.language, "system");
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.retention_days, MAX_RETENTION_DAYS);

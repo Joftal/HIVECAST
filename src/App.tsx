@@ -3,11 +3,11 @@ import { useTranslation } from "react-i18next";
 import { IconButton, cx } from "./components/ui/Controls";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
-import SettingsPanel from "./features/settings/SettingsPanel";
+import SettingsView from "./features/settings/SettingsView";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
-import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
+import { isTauri, onAppNotice, settingsGet, settingsUpdate, type Settings } from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 
@@ -22,7 +22,8 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>("light");
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
-  const notifyRef = useRef(true);
+  // 通知开关按事件分三类：录制、异常、登录失效。
+  const notifyRef = useRef<Settings | null>(null);
   const prevTab = useRef<TabKey>(tab);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
 
@@ -34,13 +35,25 @@ export default function App() {
     }
     void settingsGet()
       .then((settings) => {
-        notifyRef.current = settings.notifyEnabled;
+        notifyRef.current = settings;
         if (settings.language !== "system") setLanguage(settings.language as Language);
         const mode = (settings.theme as ThemeMode) ?? "light";
         setTheme(mode);
         applyTheme(mode);
       })
       .catch(() => applyTheme("light"));
+  }, []);
+
+  // Cmd/Ctrl + , 打开设置，和 macOS 惯例一致。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // 离开观看页就停掉所有观看管道：不拉流、不转封装，但房间与布局留在本地。
@@ -92,7 +105,15 @@ export default function App() {
         if (!granted) granted = (await requestPermission()) === "granted";
 
         const off = await onAppNotice((notice) => {
-          if (!granted || !notifyRef.current) return;
+          const current = notifyRef.current;
+          if (!granted || !current) return;
+          const allowed =
+            notice.kind === "credential_expired"
+              ? current.notifyAuth
+              : notice.kind === "started" || notice.kind === "ended"
+                ? current.notifyEnabled
+                : current.notifyError;
+          if (!allowed) return;
           const key =
             notice.kind === "disk_full"
               ? "diskFull"
@@ -225,11 +246,11 @@ export default function App() {
         )}
       </main>
 
-      <SettingsPanel
+      <SettingsView
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onSaved={(settings) => {
-          notifyRef.current = settings.notifyEnabled;
+          notifyRef.current = settings;
           const mode = (settings.theme as ThemeMode) ?? "light";
           setTheme(mode);
           applyTheme(mode);

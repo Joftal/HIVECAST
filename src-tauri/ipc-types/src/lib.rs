@@ -265,6 +265,10 @@ pub struct Settings {
     pub max_concurrent_records: u32,
     /// 录制开始/结束时是否发系统通知
     pub notify_enabled: bool,
+    /// 播放与录制异常（取流失败、磁盘写满）是否发系统通知
+    pub notify_error: bool,
+    /// 登录失效是否发系统通知
+    pub notify_auth: bool,
     /// zh-CN | en-US | system
     pub language: String,
     /// light | dark | system（默认 light）
