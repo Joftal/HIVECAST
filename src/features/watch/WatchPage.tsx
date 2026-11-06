@@ -15,7 +15,7 @@ import {
   type SplitNode,
   type Variant,
 } from "./split";
-import { Button } from "../../components/ui/Controls";
+import { Button, cx } from "../../components/ui/Controls";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
@@ -70,6 +70,10 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const { compact, setCompact } = useWatchPrefs();
   const [fullscreen, setFullscreen] = useState(false);
   const fullscreenRef = useRef(false);
+  // 全屏时顶栏与候选竖条自动收起，指针进入上/右边缘才滑出；240ms 延迟避免穿出时闪一下。
+  const [hoverTop, setHoverTop] = useState(false);
+  const [hoverRail, setHoverRail] = useState(false);
+  const hoverTimers = useRef<{ top?: number; rail?: number }>({});
   fullscreenRef.current = fullscreen;
   const immersiveRef = useRef(onImmersiveChange);
   immersiveRef.current = onImmersiveChange;
@@ -317,6 +321,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   }
 
   async function watchRoom(roomId: string, replaceAt?: number) {
+    // 选完候选后放置器要立刻收掉：候选行随即从列表里消失，pointerleave 不会再来。
+    window.clearTimeout(pickerTimer.current);
+    setPicker(null);
     if (replaceAt !== undefined) {
       const previous = order[replaceAt];
       if (previous === roomId) return;
@@ -536,8 +543,29 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     window.addEventListener("pointercancel", finish);
   };
 
+  useEffect(() => {
+    if (panelOpen) return;
+    window.clearTimeout(pickerTimer.current);
+    setPicker(null);
+  }, [panelOpen]);
+
+  const hoverChrome = useCallback((area: "top" | "rail", on: boolean) => {
+    const timer = hoverTimers.current[area];
+    if (timer) window.clearTimeout(timer);
+    const set = area === "top" ? setHoverTop : setHoverRail;
+    if (on) {
+      set(true);
+      return;
+    }
+    hoverTimers.current[area] = window.setTimeout(() => set(false), 240);
+  }, []);
+
   const applyFullscreen = useCallback((next: boolean) => {
     setFullscreen(next);
+    if (!next) {
+      setHoverTop(false);
+      setHoverRail(false);
+    }
     immersiveRef.current?.(next);
   }, []);
 
@@ -631,9 +659,18 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
           ];
 
   return (
-    <div className="flex h-full min-h-0 bg-canvas text-ink">
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-5">
+    <div className="relative flex h-full min-h-0 bg-canvas text-ink">
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        <div
+          onPointerEnter={() => hoverChrome("top", true)}
+          onPointerLeave={() => hoverChrome("top", false)}
+          className={cx(
+            "flex h-14 shrink-0 items-center gap-2 border-b border-line px-5",
+            fullscreen &&
+              "absolute inset-x-0 top-0 z-30 bg-surface/92 backdrop-blur-md transition-[transform,opacity] duration-200",
+            fullscreen && !hoverTop && "-translate-y-full opacity-0",
+          )}
+        >
           <span className="font-mono text-[11px] tabular-nums text-muted">
             {count} <span className="text-faint">/ 4</span>
           </span>
@@ -962,7 +999,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
         </div>
       </div>
 
-      {picker
+      {picker && candidates.some((view) => view.room.id === picker.roomId)
         ? createPortal(
             <div
               className="fixed z-[70] w-[208px] rounded-[8px] border border-line bg-surface p-2 shadow-pop animate-pop"
@@ -1015,7 +1052,16 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
           )
         : null}
 
-      <aside className="flex w-11 shrink-0 flex-col border-l border-line bg-surface">
+      <aside
+        onPointerEnter={() => hoverChrome("rail", true)}
+        onPointerLeave={() => hoverChrome("rail", false)}
+        className={cx(
+          "flex w-11 shrink-0 flex-col border-l border-line bg-surface",
+          fullscreen &&
+            "absolute inset-y-0 right-0 z-30 bg-surface/95 backdrop-blur-md transition-transform duration-200",
+          fullscreen && !hoverRail && "translate-x-full",
+        )}
+      >
         <button
           type="button"
           onClick={() => setPanelOpen((open) => !open)}
@@ -1043,6 +1089,23 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
           </span>
         </button>
       </aside>
+
+      {fullscreen ? (
+        <>
+          <div
+            aria-hidden
+            onPointerEnter={() => hoverChrome("top", true)}
+            onPointerLeave={() => hoverChrome("top", false)}
+            className={cx("absolute inset-x-0 top-0 z-40 h-1.5", hoverTop && "pointer-events-none")}
+          />
+          <div
+            aria-hidden
+            onPointerEnter={() => hoverChrome("rail", true)}
+            onPointerLeave={() => hoverChrome("rail", false)}
+            className={cx("absolute inset-y-0 right-0 z-40 w-1.5", hoverRail && "pointer-events-none")}
+          />
+        </>
+      ) : null}
 
       {drag ? (
         <div
