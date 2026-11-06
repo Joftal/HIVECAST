@@ -138,6 +138,7 @@ pub fn run() {
             commands::bilibili_qr_start,
             commands::bilibili_qr_poll,
             commands::media_list,
+            commands::media_hosts,
             commands::media_delete,
             commands::media_reveal,
             commands::media_play,

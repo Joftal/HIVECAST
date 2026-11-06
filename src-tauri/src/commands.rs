@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, CredentialInfo, LineInfo, MediaPage, Playback, PostResult, QrPoll, QrTicket,
+    AppInfo, CredentialInfo, LineInfo, MediaHostPage, MediaPage, Playback, PostResult, QrPoll,
+    QrTicket,
     RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
-use crate::db::{now_ts, MediaFilter};
+use crate::db::{now_ts, MediaFilter, MediaHostFilter};
 use crate::error::AppError;
 use crate::monitor::room_ref;
 use crate::postprocess;
@@ -638,6 +639,7 @@ pub async fn media_list(
     state: State<'_, AppState>,
     query: Option<String>,
     platform: Option<String>,
+    room_id: Option<String>,
     days: Option<i64>,
     only_danmaku: Option<bool>,
     sort: Option<String>,
@@ -647,6 +649,7 @@ pub async fn media_list(
     let filter = MediaFilter {
         query,
         platform,
+        room_id,
         days,
         only_danmaku: only_danmaku.unwrap_or(false),
         sort: sort.unwrap_or_else(|| "recent".into()),
@@ -669,6 +672,28 @@ pub async fn media_list(
         total,
         platform_counts,
     })
+}
+
+/// 主播墙：按房间聚合出主播卡（条数 / 体积 / 最新一条时间）。
+#[tauri::command]
+pub async fn media_hosts(
+    state: State<'_, AppState>,
+    query: Option<String>,
+    platform: Option<String>,
+    days: Option<i64>,
+    sort: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<MediaHostPage, AppError> {
+    let filter = MediaHostFilter {
+        query,
+        platform,
+        days,
+        sort: sort.unwrap_or_else(|| "latest".into()),
+        limit: limit.unwrap_or(60) as usize,
+        offset: offset.unwrap_or(0) as usize,
+    };
+    state.db.media_hosts(&filter)
 }
 
 /// 把这条录像的弹幕 JSONL 导出成 ASS 字幕，返回产物路径。

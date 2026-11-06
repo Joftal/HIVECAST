@@ -7,6 +7,8 @@ import type { QrTicket } from "./bindings/QrTicket";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
+import type { MediaHost } from "./bindings/MediaHost";
+import type { MediaHostPage } from "./bindings/MediaHostPage";
 import type { MediaItem } from "./bindings/MediaItem";
 import type { MediaPage } from "./bindings/MediaPage";
 import type { PlatformCount } from "./bindings/PlatformCount";
@@ -28,6 +30,8 @@ export type {
   DanmakuBatch,
   DanmakuMessage,
   LineInfo,
+  MediaHost,
+  MediaHostPage,
   MediaItem,
   MediaPage,
   PlatformCount,
@@ -222,6 +226,8 @@ export async function settingsUpdate(settings: Settings): Promise<Settings> {
 export type MediaQuery = {
   query?: string | null;
   platform?: string | null;
+  /** 只看某个房间（主播页下钻） */
+  roomId?: string | null;
   /** 最近 N 天 */
   days?: number | null;
   onlyDanmaku?: boolean;
@@ -234,9 +240,31 @@ export async function mediaList(query: MediaQuery = {}): Promise<MediaPage> {
   return invoke<MediaPage>("media_list", {
     query: query.query ?? null,
     platform: query.platform ?? null,
+    roomId: query.roomId ?? null,
     days: query.days ?? null,
     onlyDanmaku: query.onlyDanmaku ?? false,
     sort: query.sort ?? "recent",
+    limit: query.limit ?? 60,
+    offset: query.offset ?? 0,
+  });
+}
+
+/** 主播墙筛选条件。 */
+export type HostQuery = {
+  query?: string | null;
+  platform?: string | null;
+  days?: number | null;
+  sort?: "latest" | "size" | "count";
+  limit?: number;
+  offset?: number;
+};
+
+export async function mediaHosts(query: HostQuery = {}): Promise<MediaHostPage> {
+  return invoke<MediaHostPage>("media_hosts", {
+    query: query.query ?? null,
+    platform: query.platform ?? null,
+    days: query.days ?? null,
+    sort: query.sort ?? "latest",
     limit: query.limit ?? 60,
     offset: query.offset ?? 0,
   });

@@ -9,11 +9,8 @@
     "media": "Library"
   },
   "media": {
-    "title": "Library",
-    "subtitle": "Every finished recording lands here; click one to play it locally.",
     "emptyTitle": "The library is empty",
     "emptyBody": "Add a room on Monitor; finished recordings will appear here automatically.",
-    "count": "{{n}} recordings",
     "play": "Play",
     "playing": "Playing",
     "stop": "Stop",
@@ -32,8 +29,6 @@
     "sortRecent": "By date",
     "sortDuration": "By length",
     "sortSize": "By size",
-    "summary": "{{n}} items · {{size}}",
-    "selected": "{{n}} selected",
     "clearSelection": "Clear",
     "deleteSelected": "Delete selected",
     "deletedBatch": "Deleted {{n}} items",
@@ -73,7 +68,26 @@
     "loadMore": "Load more",
     "deleteConfirm": "Delete {{n}}?",
     "close": "Close",
-    "playingNow": "Now playing"
+    "playingNow": "Now playing",
+    "hosts": {
+      "back": "All hosts",
+      "search": "Search hosts or rooms",
+      "count": "{{n}} recordings",
+      "latest": "Latest {{time}}",
+      "sortLatest": "Latest recording",
+      "sortSize": "Size",
+      "sortCount": "Count",
+      "emptyTitle": "No recordings yet",
+      "emptyBody": "Hosts show up here after their first finished recording.",
+      "noMatchTitle": "No matching hosts",
+      "noMatchBody": "Try another keyword or platform.",
+      "goneTitle": "No recordings left",
+      "goneBody": "The recordings may have been deleted or removed."
+    },
+    "searchFiles": "Search this host's recordings",
+    "colHost": "Host",
+    "colCount": "Recordings",
+    "colLatest": "Latest"
   },
   "settings": {
     "title": "Settings",

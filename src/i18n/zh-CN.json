@@ -9,11 +9,8 @@
     "media": "媒体库"
   },
   "media": {
-    "title": "媒体库",
-    "subtitle": "所有已结束的录像都在这里；点一条即可在本机回放。",
     "emptyTitle": "媒体库还是空的",
     "emptyBody": "在「主播监控」里添加直播间，开播后会自动录制到这里。",
-    "count": "{{n}} 条录像",
     "play": "播放",
     "playing": "播放中",
     "stop": "停止播放",
@@ -32,8 +29,6 @@
     "sortRecent": "按时间",
     "sortDuration": "按时长",
     "sortSize": "按大小",
-    "summary": "{{n}} 条 · {{size}}",
-    "selected": "已选 {{n}} 条",
     "clearSelection": "取消选择",
     "deleteSelected": "删除所选",
     "deletedBatch": "已删除 {{n}} 条",
@@ -73,7 +68,26 @@
     "loadMore": "加载更多",
     "deleteConfirm": "确认删除 {{n}} 条",
     "close": "关闭",
-    "playingNow": "正在回放"
+    "playingNow": "正在回放",
+    "hosts": {
+      "back": "全部主播",
+      "search": "搜索主播或房间",
+      "count": "{{n}} 个录像",
+      "latest": "最新 {{time}}",
+      "sortLatest": "按最新录制",
+      "sortSize": "按体积",
+      "sortCount": "按条数",
+      "emptyTitle": "还没有录像",
+      "emptyBody": "录制完成一场直播后，主播会出现在这里。",
+      "noMatchTitle": "没有匹配的主播",
+      "noMatchBody": "换个关键词或平台再试试。",
+      "goneTitle": "这个主播没有录像了",
+      "goneBody": "录像可能已被删除或移出媒体库。"
+    },
+    "searchFiles": "搜索这个主播的录像",
+    "colHost": "主播",
+    "colCount": "录像",
+    "colLatest": "最新录制"
   },
   "settings": {
     "title": "设置",

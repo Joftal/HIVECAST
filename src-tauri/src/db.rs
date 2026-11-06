@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use hivecast_ipc::{MediaItem, PlatformCount, RecordSession, RoomRecord};
+use hivecast_ipc::{MediaHost, MediaHostPage, MediaItem, PlatformCount, RecordSession, RoomRecord};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS credential (
 pub struct MediaFilter {
     pub query: Option<String>,
     pub platform: Option<String>,
+    /// 只看某个房间（主播页用它下钻），None 表示全库
+    pub room_id: Option<String>,
     /// 只要最近 N 天（None 表示不限）
     pub days: Option<i64>,
     pub only_danmaku: bool,
@@ -56,6 +58,7 @@ impl Default for MediaFilter {
         Self {
             query: None,
             platform: None,
+            room_id: None,
             days: None,
             only_danmaku: false,
             sort: "recent".into(),
@@ -99,6 +102,14 @@ fn media_where(filter: &MediaFilter, include_platform: bool) -> (String, Vec<Sql
             args.push(SqlValue::Text(platform.to_string()));
         }
     }
+    if let Some(room_id) = filter
+        .room_id
+        .as_deref()
+        .filter(|one| !one.is_empty())
+    {
+        where_sql.push_str(" AND s.room_id = ?");
+        args.push(SqlValue::Text(room_id.to_string()));
+    }
     if let Some(days) = filter.days.filter(|days| *days > 0) {
         where_sql.push_str(" AND s.started_at >= ?");
         args.push(SqlValue::Integer(now_ts() - days * 86_400));
@@ -124,6 +135,82 @@ pub struct Db {
     conn: Mutex<Connection>,
     /// 凭据列的加解密器；密钥文件与库文件同目录。
     secret: crate::secret::Secret,
+}
+
+/// 主播墙的筛选条件。与 MediaFilter 分开：主播维度的「条数」是录像条数之和，
+/// 排序也是按主播聚合后的指标（最新/体积/条数）。
+#[derive(Debug, Clone)]
+pub struct MediaHostFilter {
+    pub query: Option<String>,
+    pub platform: Option<String>,
+    /// 只要最近 N 天有录制的房间
+    pub days: Option<i64>,
+    /// latest / size / count，其余值按 latest 处理
+    pub sort: String,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for MediaHostFilter {
+    fn default() -> Self {
+        Self {
+            query: None,
+            platform: None,
+            days: None,
+            sort: "latest".into(),
+            limit: 60,
+            offset: 0,
+        }
+    }
+}
+
+impl MediaHostFilter {
+    fn order_by(&self) -> &'static str {
+        match self.sort.as_str() {
+            "size" => "SUM(s.file_size) DESC, MAX(s.started_at) DESC",
+            "count" => "COUNT(s.id) DESC, MAX(s.started_at) DESC",
+            _ => "MAX(s.started_at) DESC",
+        }
+    }
+}
+
+/// 主播墙的 WHERE 片段：只统计有文件、已结束的会话。
+fn host_where(filter: &MediaHostFilter, include_platform: bool) -> (String, Vec<SqlValue>) {
+    let mut where_sql =
+        String::from(" WHERE s.file_path IS NOT NULL AND s.file_path <> '' AND s.status = 'finished'");
+    let mut args: Vec<SqlValue> = Vec::new();
+    if let Some(keyword) = filter
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|one| !one.is_empty())
+    {
+        where_sql.push_str(r" AND (r.host_name LIKE ? ESCAPE '\' OR r.title LIKE ? ESCAPE '\')");
+        let like = format!(
+            "%{}%",
+            keyword
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        args.push(SqlValue::Text(like.clone()));
+        args.push(SqlValue::Text(like));
+    }
+    if include_platform {
+        if let Some(platform) = filter
+            .platform
+            .as_deref()
+            .filter(|one| !one.is_empty() && *one != "all")
+        {
+            where_sql.push_str(" AND r.platform = ?");
+            args.push(SqlValue::Text(platform.to_string()));
+        }
+    }
+    if let Some(days) = filter.days.filter(|days| *days > 0) {
+        where_sql.push_str(" AND s.started_at >= ?");
+        args.push(SqlValue::Integer(now_ts() - days * 86_400));
+    }
+    (where_sql, args)
 }
 
 impl Db {
@@ -540,6 +627,89 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
+    /// 主播墙：按 room.id 聚合出主播卡（v1 的主播身份就是房间）。
+    pub fn media_hosts(&self, filter: &MediaHostFilter) -> Result<MediaHostPage, AppError> {
+        let conn = self.lock();
+        let (where_sql, args) = host_where(filter, true);
+
+        let total: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM (
+                        SELECT r.id FROM record_session s JOIN room r ON r.id = s.room_id{where_sql}
+                        GROUP BY r.id
+                     )"
+                ),
+                rusqlite::params_from_iter(args.iter()),
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+
+        let mut page_args = args;
+        page_args.push(SqlValue::Integer(filter.limit.clamp(1, 500) as i64));
+        page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
+        let sql = format!(
+            "SELECT r.id, r.platform, r.host_name, r.title, r.avatar_url, r.cover_url,
+                    COUNT(s.id), COALESCE(SUM(s.file_size), 0), MAX(s.started_at)
+               FROM record_session s
+               JOIN room r ON r.id = s.room_id{where_sql}
+              GROUP BY r.id
+              ORDER BY {}
+              LIMIT ? OFFSET ?",
+            filter.order_by()
+        );
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+        let items = stmt
+            .query_map(rusqlite::params_from_iter(page_args.iter()), |row| {
+                Ok(MediaHost {
+                    room_id: row.get(0)?,
+                    platform: row.get(1)?,
+                    host_name: row.get(2)?,
+                    room_title: row.get(3)?,
+                    avatar_url: row.get(4)?,
+                    cover_url: row.get(5)?,
+                    count: row.get(6)?,
+                    bytes: row.get(7)?,
+                    latest_at: row.get(8)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+
+        let platform_counts = Self::host_counts_locked(&conn, filter)?;
+        Ok(MediaHostPage {
+            items,
+            total,
+            platform_counts,
+        })
+    }
+
+    /// 各平台的主播数（忽略平台筛选本身），给平台下拉显示计数。
+    fn host_counts_locked(
+        conn: &Connection,
+        filter: &MediaHostFilter,
+    ) -> Result<Vec<PlatformCount>, AppError> {
+        let (where_sql, args) = host_where(filter, false);
+        let sql = format!(
+            "SELECT r.platform, COUNT(DISTINCT r.id)
+               FROM record_session s
+               JOIN room r ON r.id = s.room_id{where_sql}
+              GROUP BY r.platform
+              ORDER BY COUNT(DISTINCT r.id) DESC, r.platform ASC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+                Ok(PlatformCount {
+                    platform: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
     /// 删除一条会话记录（只删数据库行，不动文件）。
     pub fn delete_session(&self, id: &str) -> Result<(), AppError> {
         self.lock()
@@ -860,6 +1030,70 @@ mod tests {
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("开库失败");
         (db, path)
+    }
+
+fn seed_media(db: &Db) {
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-a', 'bilibili', '1', 'https://live.bilibili.com/1', '主播甲', '房间甲', 0, 0),
+                        ('rm-b', 'douyu', '2', 'https://www.douyu.com/2', '主播乙', '房间乙', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms)
+                 VALUES ('s-a1', 'rm-a', 1000, 'finished', '/tmp/a1.flv', 100, 1000),
+                        ('s-a2', 'rm-a', 3000, 'finished', '/tmp/a2.flv', 300, 2000),
+                        ('s-b1', 'rm-b', 2000, 'finished', '/tmp/b1.flv', 50, 500),
+                        ('s-a3', 'rm-a', 4000, 'recording', '/tmp/a3.flv', 999, 0);",
+            )
+            .expect("播种媒体库失败");
+    }
+
+    #[test]
+    fn media_hosts_aggregates_finished_sessions_per_room() {
+        let (db, _path) = temp_db("hosts");
+        seed_media(&db);
+
+        let page = db.media_hosts(&MediaHostFilter::default()).expect("主播墙查询失败");
+        assert_eq!(page.total, 2);
+        // 最新录制优先：rm-a 的 3000 比 rm-b 的 2000 新。
+        assert_eq!(page.items[0].room_id, "rm-a");
+        assert_eq!(page.items[0].host_name, "主播甲");
+        assert_eq!(page.items[0].count, 2);
+        assert_eq!(page.items[0].bytes, 400);
+        assert_eq!(page.items[0].latest_at, 3000);
+        // 还在录的会话不进主播墙。
+        assert_eq!(page.platform_counts.len(), 2);
+
+        let by_size = db
+            .media_hosts(&MediaHostFilter {
+                sort: "size".into(),
+                ..MediaHostFilter::default()
+            })
+            .expect("按体积排序失败");
+        assert_eq!(by_size.items[0].room_id, "rm-a");
+
+        let only_douyu = db
+            .media_hosts(&MediaHostFilter {
+                platform: Some("douyu".into()),
+                ..MediaHostFilter::default()
+            })
+            .expect("平台筛选失败");
+        assert_eq!(only_douyu.items.len(), 1);
+        // 平台筛选不影响计数：两个平台都要出现。
+        assert_eq!(only_douyu.platform_counts.len(), 2);
+    }
+
+    #[test]
+    fn media_list_can_be_scoped_to_one_room() {
+        let (db, _path) = temp_db("roomfilter");
+        seed_media(&db);
+        let (items, total) = db
+            .media_list(&MediaFilter {
+                room_id: Some("rm-a".into()),
+                ..MediaFilter::default()
+            })
+            .expect("按房间筛选失败");
+        assert_eq!(total, 3);
+        assert!(items.iter().all(|one| one.room_id == "rm-a"));
     }
 
     fn row(platform: &str, cookie: &str) -> CredentialRow {
