@@ -11,8 +11,12 @@ import {
 
 export type DragPayload = { kind: "cell"; index: number };
 
-/** 拖到某一格的上/左半边表示插到它前面，下/右半边表示插到它后面。 */
-export type DropZone = { index: number; side: "before" | "after" };
+/**
+ * 拖到哪一格，就和哪一格交换房间。
+ * 不做「插到前/后」：那种语义下总有一半落点是原地不动（拖到相邻格的近侧半边），
+ * 而且判定横切还是竖切取决于格子宽高比，拖完分割线后同一个位置的行为会变，用户无法预期。
+ */
+export type DropZone = { index: number };
 
 export type SplitStageHandle = {
   /** 指针拖拽时用坐标反查落在哪一格、落在哪半边。 */
@@ -77,20 +81,17 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
       const box = host.getBoundingClientRect();
       const x = clientX - box.left;
       const y = clientY - box.top;
+      // 松手落在舞台外（工具条、候选竖条）视为取消；舞台内则一律吸附到最近的格子。
+      if (x < -8 || y < -8 || x > box.width + 8 || y > box.height + 8) return null;
+      let best: { index: number; distance: number } | null = null;
       for (const [index, rect] of cellsRef.current) {
-        if (x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height) {
-          const horizontal = rect.width >= rect.height;
-          const side = horizontal
-            ? x < rect.left + rect.width / 2
-              ? "before"
-              : "after"
-            : y < rect.top + rect.height / 2
-              ? "before"
-              : "after";
-          return { index, side };
-        }
+        // 点到矩形的距离：格内为 0，格外的缝/外圈按最近边算，避免落在 10px 缝里就丢事件。
+        const dx = Math.max(rect.left - x, 0, x - (rect.left + rect.width));
+        const dy = Math.max(rect.top - y, 0, y - (rect.top + rect.height));
+        const distance = dx * dx + dy * dy;
+        if (!best || distance < best.distance) best = { index, distance };
       }
-      return null;
+      return best ? { index: best.index } : null;
     },
   }));
 

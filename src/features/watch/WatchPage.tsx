@@ -79,6 +79,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const [variant, setVariant] = useState<Variant>("default");
   const [portrait, setPortrait] = useState(false);
   const [order, setOrder] = useState<(string | null)[]>([]);
+
+
   const [panelOpen, setPanelOpen] = useState(false);
   // 首帧还不知道上次的布局，先别把空布局写回去覆盖它。
   const [booted, setBooted] = useState(false);
@@ -98,6 +100,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 
   const seedRef = useRef(0);
   const latestLayout = useRef("");
+  // 存下来的布局解析不出来时不要再写回去，否则一次脏数据就把用户布局抹成空。
+  const persistOk = useRef(true);
 
   const load = useCallback(async () => {
     try {
@@ -121,6 +125,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       await whenViewsIdle();
       // seed 由下面的 effect 应用，这里别抢着恢复旧布局。
       const seeded = Boolean(seed && seed.nonce !== seedRef.current);
+      let canPersist = true;
       try {
         const [raw, nextRooms, nextSlots] = await Promise.all([layoutGet(), roomsList(), viewSlots()]);
         if (disposed) return;
@@ -128,6 +133,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
         setSlots(nextSlots);
         setRoomsLoaded(true);
         const savedLayout = parseLayout(raw);
+        if (raw && !savedLayout) canPersist = false;
         if (seeded) {
           // 等 applySeed 把 order/tree 一次设好。
         } else if (nextSlots.length > 0) {
@@ -145,6 +151,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
         if (!disposed) setError(describeError(err));
       }
       if (disposed) return;
+      persistOk.current = canPersist;
       setBooted(true);
       offView = await onViewChanged((next) => setSlots(next));
       offRooms = await onRoomsChanged(() => {
@@ -162,6 +169,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   }, []);
 
   const sessions = useMemo(() => [...slots].sort((a, b) => a.slot - b.slot), [slots]);
+
   const watchedIds = useMemo(() => new Set(sessions.map((session) => session.roomId)), [sessions]);
   const roomById = useMemo(() => {
     const map = new Map<string, RoomView>();
@@ -180,7 +188,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   }, [count, tree]);
 
   useEffect(() => {
-    if (!isTauri() || !booted) return;
+    if (!isTauri() || !booted || !persistOk.current) return;
     const payload = serializeLayout(count, tree, order);
     latestLayout.current = payload;
     const timer = window.setTimeout(() => {
@@ -202,7 +210,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   // 切 Tab 会卸载本页，防抖还没到点就先把布局落库。
   useEffect(() => {
     return () => {
-      if (isTauri() && latestLayout.current) {
+      if (isTauri() && persistOk.current && latestLayout.current) {
         void layoutSet(latestLayout.current).catch(() => undefined);
       }
     };
@@ -467,22 +475,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     setTree(buildTree(count, kind));
   };
 
-  /** 拖动格子到另一格的前/后半边：把该格插到目标之前或之后，其余格子顺延。 */
-  const moveCell = (from: number, target: number, side: "before" | "after") => {
-    if (from === target) return;
-    setOrder((prev) => {
-      if (from < 0 || from >= prev.length || target < 0 || target >= prev.length) return prev;
-      const next = [...prev];
-      const [item] = next.splice(from, 1);
-      let at = target;
-      if (from < target) at -= 1;
-      if (side === "after") at += 1;
-      next.splice(at, 0, item);
-      return next;
-    });
-  };
-  const moveRef = useRef(moveCell);
-  moveRef.current = moveCell;
+  /** 拖到哪一格就和哪一格交换：语义固定为「换房间」，与位置前后无关，任何落点都会变化。 */
+  const swapRef = useRef(swapCells);
+  swapRef.current = swapCells;
 
   // 监听器在 pointerdown 里同步挂上，不依赖下一次 render，快速拖拽也不会丢事件。
   const startDrag = (payload: DragPayload, event: ReactPointerEvent) => {
@@ -492,7 +487,11 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     // 上一次拖拽若没收尾（指针在窗口外松开），先清掉旧监听，避免下一次拖拽被它吞掉。
     dragCleanupRef.current?.();
     // 把指针捕获在抓手上：即使中途重排/重渲染，pointermove/up 也不会丢。
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // 合成事件没有真实 pointerId，捕获会抛错；window 上的监听已经足够收尾。
+    }
     dragRef.current = { payload, x: event.clientX, y: event.clientY, moved: false };
     dropRef.current = null;
     setDrag({ payload, x: event.clientX, y: event.clientY });
@@ -507,7 +506,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       current.x = moveEvent.clientX;
       current.y = moveEvent.clientY;
       setDrag({ payload: current.payload, x: moveEvent.clientX, y: moveEvent.clientY });
-      const zone = stageRef.current?.hitTest(moveEvent.clientX, moveEvent.clientY) ?? null;
+      const hit = stageRef.current?.hitTest(moveEvent.clientX, moveEvent.clientY) ?? null;
+      // 拖回自己身上不画落点，避免「看起来能放，松手却没变化」。
+      const zone = hit && hit.index !== current.payload.index ? hit : null;
       dropRef.current = zone;
       setDrop(zone);
     };
@@ -523,8 +524,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       dragRef.current = null;
       const zone = dropRef.current;
       dropRef.current = null;
-      if (current && current.moved && zone) {
-        moveRef.current(current.payload.index, zone.index, zone.side);
+      if (current && current.moved && zone && zone.index !== current.payload.index) {
+        swapRef.current(current.payload.index, zone.index);
       }
       setDrag(null);
       setDrop(null);

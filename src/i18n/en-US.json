@@ -291,7 +291,7 @@
     "autoQuality": "Auto ({{q}})",
     "lineN": "Line {{n}}",
     "portrait": "Portrait first",
-    "dragHint": "Drag a cell header to swap, drag a divider to resize",
+    "dragHint": "Drag a cell title onto another cell to swap them; drag a divider to resize",
     "fill": "Fill cell",
     "swapNext": "Swap with next cell",
     "remove": "Stop watching",
