@@ -142,6 +142,10 @@ pub enum PlatformError {
     Network(String),
     #[error("响应解析失败：{0}")]
     Parse(String),
+    /// broker 本地冷却：这次请求根本没出门，按 retry_after 秒后重试即可。
+    /// 它不是平台返回的错误，调用方不该把它计入失败次数。
+    #[error("平台请求过快，请 {retry_after} 秒后重试")]
+    Throttled { retry_after: u64 },
 }
 
 impl PlatformError {
@@ -154,6 +158,15 @@ impl PlatformError {
             PlatformError::Upstream { .. } => "platform_upstream",
             PlatformError::Network(_) => "network",
             PlatformError::Parse(_) => "parse",
+            PlatformError::Throttled { .. } => "platform_throttled",
+        }
+    }
+
+    /// broker 冷却剩余秒数；只有本地合成的冷却错误才有值。
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            PlatformError::Throttled { retry_after } => Some(*retry_after),
+            _ => None,
         }
     }
 
@@ -164,6 +177,7 @@ impl PlatformError {
             PlatformError::Upstream { code, .. } => {
                 matches!(*code, -352 | -412 | -429 | 412 | 429)
             }
+            PlatformError::Throttled { .. } => true,
             _ => false,
         }
     }

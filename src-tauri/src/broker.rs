@@ -243,16 +243,7 @@ impl StreamBroker {
 
     fn backoff_error(&self, gate_key: &str) -> Option<PlatformError> {
         let inner = self.inner.lock().expect("broker 状态被污染");
-        let failure = inner.failures.get(gate_key)?;
-        let now = Instant::now();
-        if now >= failure.until {
-            return None;
-        }
-        let wait = failure.until.saturating_duration_since(now);
-        Some(PlatformError::Network(format!(
-            "平台请求过快，请 {} 秒后重试",
-            wait.as_secs().max(1)
-        )))
+        cooldown_error(inner.failures.get(gate_key)?, Instant::now())
     }
 
     async fn wait_turn(&self, gate_key: &str) {
@@ -296,12 +287,21 @@ impl StreamBroker {
     }
 }
 
-fn should_backoff(err: &PlatformError) -> bool {
-    match err {
-        PlatformError::Network(_) => true,
-        PlatformError::Upstream { code, .. } => matches!(*code, -352 | -429 | 429),
-        _ => false,
+/// 冷却期内的合成错误：调用方据此重排，但不会把它当成一次真失败。
+fn cooldown_error(failure: &Failure, now: Instant) -> Option<PlatformError> {
+    if now >= failure.until {
+        return None;
     }
+    let wait = failure.until.saturating_duration_since(now);
+    Some(PlatformError::Throttled {
+        retry_after: wait.as_secs().max(1),
+    })
+}
+
+/// 与 PlatformError::is_throttle 共用一套判定，避免 broker 与监控对同一个
+/// 错误码一个退避、一个不退避。
+fn should_backoff(err: &PlatformError) -> bool {
+    err.is_throttle()
 }
 
 fn backoff(attempts: u32) -> Duration {
@@ -330,6 +330,20 @@ mod tests {
         }));
         assert!(!should_backoff(&PlatformError::NotLive));
         assert!(!should_backoff(&PlatformError::RoomNotFound("1".into())));
+    }
+
+    #[test]
+    fn cooldown_reports_retry_after_instead_of_a_fake_network_error() {
+        let now = Instant::now();
+        let failure = Failure {
+            attempts: 2,
+            until: now + Duration::from_secs(7),
+        };
+        let err = cooldown_error(&failure, now).expect("冷却期内应返回错误");
+        assert_eq!(err.retry_after(), Some(7));
+        assert_eq!(err.code(), "platform_throttled");
+        // 冷却结束后不再拦截。
+        assert!(cooldown_error(&failure, now + Duration::from_secs(8)).is_none());
     }
 
     #[test]

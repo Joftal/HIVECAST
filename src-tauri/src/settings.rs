@@ -78,7 +78,7 @@ pub fn defaults() -> Settings {
         prevent_sleep: false,
         monitor_interval_sec: 30,
         monitor_backoff_enabled: true,
-        monitor_backoff_cap_sec: 300,
+        monitor_backoff_cap_sec: 120,
         media_filename_template: crate::filename::DEFAULT_TEMPLATE.into(),
         media_strip_emoji: false,
         media_group_dirs: true,
