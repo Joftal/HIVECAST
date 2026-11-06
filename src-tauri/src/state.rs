@@ -112,6 +112,8 @@ impl AppState {
         tokio::fs::create_dir_all(thumbs.dir())
             .await
             .map_err(|err| AppError::from_io(err, thumbs.dir()))?;
+        // 录制收尾时自己生成封面，媒体库不用再等 ffmpeg。
+        recorder.attach_thumbs(thumbs.clone());
 
         monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
 

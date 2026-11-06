@@ -145,7 +145,7 @@ pub struct MediaHostFilter {
     pub platform: Option<String>,
     /// 只要最近 N 天有录制的房间
     pub days: Option<i64>,
-    /// latest / size / count，其余值按 latest 处理
+    /// name / latest / size / count，其余值按 name 处理
     pub sort: String,
     pub limit: usize,
     pub offset: usize,
@@ -157,7 +157,7 @@ impl Default for MediaHostFilter {
             query: None,
             platform: None,
             days: None,
-            sort: "latest".into(),
+            sort: "name".into(),
             limit: 60,
             offset: 0,
         }
@@ -167,9 +167,11 @@ impl Default for MediaHostFilter {
 impl MediaHostFilter {
     fn order_by(&self) -> &'static str {
         match self.sort.as_str() {
+            "latest" => "MAX(s.started_at) DESC",
             "size" => "SUM(s.file_size) DESC, MAX(s.started_at) DESC",
             "count" => "COUNT(s.id) DESC, MAX(s.started_at) DESC",
-            _ => "MAX(s.started_at) DESC",
+            // 默认按主播名：同一屏里找固定的人比按时间扫更快。
+            _ => "r.host_name COLLATE NOCASE ASC, MAX(s.started_at) DESC",
         }
     }
 }
@@ -1054,12 +1056,20 @@ fn seed_media(db: &Db) {
 
         let page = db.media_hosts(&MediaHostFilter::default()).expect("主播墙查询失败");
         assert_eq!(page.total, 2);
+        // 默认按主播名升序（码点序）：乙 在 甲 前面。
+        assert_eq!(page.items[0].room_id, "rm-b");
+        let latest = db
+            .media_hosts(&MediaHostFilter {
+                sort: "latest".into(),
+                ..MediaHostFilter::default()
+            })
+            .expect("按时间排序失败");
         // 最新录制优先：rm-a 的 3000 比 rm-b 的 2000 新。
-        assert_eq!(page.items[0].room_id, "rm-a");
-        assert_eq!(page.items[0].host_name, "主播甲");
-        assert_eq!(page.items[0].count, 2);
-        assert_eq!(page.items[0].bytes, 400);
-        assert_eq!(page.items[0].latest_at, 3000);
+        assert_eq!(latest.items[0].room_id, "rm-a");
+        assert_eq!(latest.items[0].host_name, "主播甲");
+        assert_eq!(latest.items[0].count, 2);
+        assert_eq!(latest.items[0].bytes, 400);
+        assert_eq!(latest.items[0].latest_at, 3000);
         // 还在录的会话不进主播墙。
         assert_eq!(page.platform_counts.len(), 2);
 

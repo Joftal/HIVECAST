@@ -254,7 +254,7 @@ export type HostQuery = {
   query?: string | null;
   platform?: string | null;
   days?: number | null;
-  sort?: "latest" | "size" | "count";
+  sort?: "name" | "latest" | "size" | "count";
   limit?: number;
   offset?: number;
 };
@@ -264,7 +264,7 @@ export async function mediaHosts(query: HostQuery = {}): Promise<MediaHostPage> 
     query: query.query ?? null,
     platform: query.platform ?? null,
     days: query.days ?? null,
-    sort: query.sort ?? "latest",
+    sort: query.sort ?? "name",
     limit: query.limit ?? 60,
     offset: query.offset ?? 0,
   });

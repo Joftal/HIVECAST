@@ -72,6 +72,8 @@ pub struct Recorder {
     suppressed: Mutex<HashSet<String>>,
     /// 弹幕扇出中心：录制与观看共用一条房间连接。测试里可以不挂。
     danmaku: Option<Arc<DanmakuHub>>,
+    /// 缩略图生成器：录制一收尾就排队生成九宫格封面，媒体库打开时直接有图。
+    thumbs: std::sync::RwLock<Option<Arc<crate::thumbs::Thumbs>>>,
 }
 
 impl Recorder {
@@ -86,7 +88,33 @@ impl Recorder {
             start_locks: Mutex::new(HashMap::new()),
             suppressed: Mutex::new(HashSet::new()),
             danmaku,
+            thumbs: std::sync::RwLock::new(None),
         }
+    }
+
+    /// 由 AppState 在启动时挂上缩略图生成器（录制模块不能反向依赖 state）。
+    pub fn attach_thumbs(&self, thumbs: Arc<crate::thumbs::Thumbs>) {
+        *self.thumbs.write().expect("缩略图状态被污染") = Some(thumbs);
+    }
+
+    /// 录制结束后立即生成封面：不等用户打开媒体库。
+    fn queue_thumb(&self, app: &AppHandle, session_id: &str) {
+        let Some(thumbs) = self
+            .thumbs
+            .read()
+            .expect("缩略图状态被污染")
+            .clone()
+        else {
+            return;
+        };
+        // 时长与最终路径都以库里的为准：收尾时可能已经从分片合成成 mp4。
+        let Ok(Some(session)) = self.db.get_session(session_id) else {
+            return;
+        };
+        let Some(path) = session.file_path.filter(|one| !one.is_empty()) else {
+            return;
+        };
+        thumbs.ensure(app.clone(), vec![(session.id, path, session.duration_ms)]);
     }
 
     pub fn media_root(&self) -> PathBuf {
@@ -641,6 +669,7 @@ impl Recorder {
 
         if final_status == "finished" {
             self.clear_failure(room_id);
+            self.queue_thumb(app, &active.recording.session_id);
         }
 
         // 每次收尾跑一次保留策略：录制是媒体库唯一的增长来源。

@@ -40,8 +40,6 @@
     "mergeHint": "Select at least two recordings to merge",
     "progress": "Playback position",
     "selectAll": "Select all",
-    "viewGrid": "Cover wall",
-    "viewList": "List",
     "rangeAll": "All time",
     "rangeToday": "Today",
     "range7": "Last 7 days",
@@ -49,13 +47,10 @@
     "onlyDanmaku": "With danmaku",
     "platformFilter": "Platform",
     "sortLabel": "Sort",
-    "colVideo": "Preview",
     "colPlatform": "Platform",
-    "colTitle": "Title",
     "colDuration": "Length",
     "colSize": "Size",
     "colDate": "Recorded",
-    "colActions": "Actions",
     "thumbsPending": "Generating thumbnail",
     "selectedSize": "{{n}} selected · {{size}}",
     "remux": "Convert to MP4",
@@ -82,12 +77,10 @@
       "noMatchTitle": "No matching hosts",
       "noMatchBody": "Try another keyword or platform.",
       "goneTitle": "No recordings left",
-      "goneBody": "The recordings may have been deleted or removed."
+      "goneBody": "The recordings may have been deleted or removed.",
+      "sortName": "Host name"
     },
-    "searchFiles": "Search this host's recordings",
-    "colHost": "Host",
-    "colCount": "Recordings",
-    "colLatest": "Latest"
+    "searchFiles": "Search this host's recordings"
   },
   "settings": {
     "title": "Settings",

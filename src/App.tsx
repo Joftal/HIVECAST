@@ -218,7 +218,7 @@ export default function App() {
           />
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <div className="mx-auto flex min-h-full w-full max-w-[1360px] flex-col px-6 py-5">
+            <div className="flex min-h-full w-full flex-col">
               <MediaPage />
             </div>
           </div>

@@ -40,8 +40,6 @@
     "mergeHint": "至少选两段录像才能合并",
     "progress": "播放进度",
     "selectAll": "全选",
-    "viewGrid": "封面墙",
-    "viewList": "列表",
     "rangeAll": "全部时间",
     "rangeToday": "今天",
     "range7": "近 7 天",
@@ -49,13 +47,10 @@
     "onlyDanmaku": "仅看有弹幕",
     "platformFilter": "平台",
     "sortLabel": "排序",
-    "colVideo": "画面",
     "colPlatform": "平台",
-    "colTitle": "标题",
     "colDuration": "时长",
     "colSize": "大小",
     "colDate": "录制时间",
-    "colActions": "操作",
     "thumbsPending": "缩略图生成中",
     "selectedSize": "已选 {{n}} 条 · {{size}}",
     "remux": "转 MP4",
@@ -82,12 +77,10 @@
       "noMatchTitle": "没有匹配的主播",
       "noMatchBody": "换个关键词或平台再试试。",
       "goneTitle": "这个主播没有录像了",
-      "goneBody": "录像可能已被删除或移出媒体库。"
+      "goneBody": "录像可能已被删除或移出媒体库。",
+      "sortName": "按主播名"
     },
-    "searchFiles": "搜索这个主播的录像",
-    "colHost": "主播",
-    "colCount": "录像",
-    "colLatest": "最新录制"
+    "searchFiles": "搜索这个主播的录像"
   },
   "settings": {
     "title": "设置",

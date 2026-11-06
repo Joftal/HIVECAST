@@ -23,12 +23,10 @@ import {
 } from "../../lib/ipc";
 
 const PAGE_SIZE = 60;
-const VIEW_KEY = "hivecast.mediaView";
 const VOLUME_KEY = "hivecast.mediaVolume";
 
-type ViewMode = "grid" | "list";
 type SortKey = "recent" | "duration" | "size";
-type HostSortKey = "latest" | "size" | "count";
+type HostSortKey = "name" | "latest" | "size" | "count";
 type Range = 0 | 1 | 7 | 30;
 
 function formatSize(bytes: number): string {
@@ -65,30 +63,16 @@ function formatDate(ts: number): string {
     " " +
     pad(date.getHours()) +
     ":" +
-    pad(date.getMinutes())
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
   );
-}
-
-// 主播卡上的「最新」用短格式：年份占地方，且同一屏里几乎都是今年。
-function formatShort(ts: number): string {
-  if (ts <= 0) return "—";
-  const date = new Date(ts * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
 }
 
 function describeError(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
   return String(err);
-}
-
-function loadView(): ViewMode {
-  try {
-    return window.localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid";
-  } catch {
-    return "grid";
-  }
 }
 
 function loadVolume(): number {
@@ -113,15 +97,12 @@ const PLATFORM_TINT: Record<string, string> = {
 const HOST_GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))" };
 // 录像网格：卡片最小 228。
 const GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(228px, 1fr))" };
-// 列表列宽：表头与行共用。
-const LIST_COLUMNS = "26px 120px 86px minmax(0, 1fr) 78px 86px 138px 96px";
-const HOST_LIST_COLUMNS = "44px minmax(0, 1fr) 86px 88px 96px 150px 24px";
 
 function IconSearch() {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-      <circle cx="7" cy="7" r="4.2" />
-      <path d="m10.2 10.2 3 3" strokeLinecap="round" />
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+      <circle cx="7" cy="7" r="4.4" />
+      <path d="m10.4 10.4 3 3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -142,25 +123,6 @@ function IconCheck() {
   );
 }
 
-function IconGrid() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-      <rect x="1.6" y="1.6" width="4.4" height="4.4" rx="1" />
-      <rect x="8" y="1.6" width="4.4" height="4.4" rx="1" />
-      <rect x="1.6" y="8" width="4.4" height="4.4" rx="1" />
-      <rect x="8" y="8" width="4.4" height="4.4" rx="1" />
-    </svg>
-  );
-}
-
-function IconList() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-      <path d="M2 3.2h10M2 7h10M2 10.8h10" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function IconClose() {
   return (
     <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
@@ -173,14 +135,6 @@ function IconBack() {
   return (
     <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
       <path d="M8.4 3 4.4 7l4 4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconChevron() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-      <path d="m5.4 3.4 3.6 3.6-3.6 3.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -241,7 +195,7 @@ export default function MediaPage() {
   const [hostTotal, setHostTotal] = useState(0);
   const [hostCounts, setHostCounts] = useState<PlatformCount[]>([]);
   const [hostId, setHostId] = useState<string | null>(null);
-  const [hostSort, setHostSort] = useState<HostSortKey>("latest");
+  const [hostSort, setHostSort] = useState<HostSortKey>("name");
   const [hostLoading, setHostLoading] = useState(true);
   const [hostLoadingMore, setHostLoadingMore] = useState(false);
 
@@ -254,7 +208,6 @@ export default function MediaPage() {
   // —— 共用状态 ——
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [view, setView] = useState<ViewMode>(loadView);
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
   const [platform, setPlatform] = useState("all");
@@ -405,15 +358,6 @@ export default function MediaPage() {
       window.localStorage.setItem(VOLUME_KEY, String(value));
     } catch {
       // 隐私模式下写不进去，只影响下次启动的默认值。
-    }
-  };
-
-  const switchView = (next: ViewMode) => {
-    setView(next);
-    try {
-      window.localStorage.setItem(VIEW_KEY, next);
-    } catch {
-      // 同上，存不下也不影响当前会话。
     }
   };
 
@@ -668,38 +612,10 @@ export default function MediaPage() {
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder={placeholder}
-        className="focus-ring h-8 w-56 rounded-ctl border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink placeholder:text-faint"
+        spellCheck={false}
+        className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
       />
     </label>
-  );
-
-  const viewToggle = (
-    <div className="flex items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
-      <button
-        type="button"
-        onClick={() => switchView("grid")}
-        title={t("media.viewGrid")}
-        aria-label={t("media.viewGrid")}
-        className={cx(
-          "focus-ring flex h-6 w-7 items-center justify-center rounded-[5px] transition-colors",
-          view === "grid" ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
-        )}
-      >
-        <IconGrid />
-      </button>
-      <button
-        type="button"
-        onClick={() => switchView("list")}
-        title={t("media.viewList")}
-        aria-label={t("media.viewList")}
-        className={cx(
-          "focus-ring flex h-6 w-7 items-center justify-center rounded-[5px] transition-colors",
-          view === "list" ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
-        )}
-      >
-        <IconList />
-      </button>
-    </div>
   );
 
   const platformMenu = (
@@ -708,7 +624,7 @@ export default function MediaPage() {
         type="button"
         onClick={() => setPlatformOpen((open) => !open)}
         className={cx(
-          "focus-ring inline-flex h-8 items-center gap-1.5 rounded-ctl border px-2.5 text-[11.5px] transition-colors",
+          "focus-ring inline-flex h-9 items-center gap-1.5 rounded-ctl border px-2.5 text-[12.5px] transition-colors",
           platform === "all"
             ? "border-line bg-surface text-ink-soft hover:border-line-strong"
             : "border-accent/40 bg-accent-soft text-accent-text",
@@ -751,7 +667,7 @@ export default function MediaPage() {
   );
 
   return (
-    <div className="flex min-h-0 flex-col gap-3.5">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-5 pb-5 pt-4">
       {hostId ? (
         <div className="flex flex-col gap-3">
           <button
@@ -781,7 +697,7 @@ export default function MediaPage() {
                   <span className="font-mono tabular-nums">{formatSize(active.bytes)}</span>
                   <span className="text-line">·</span>
                   <span className="font-mono tabular-nums">
-                    {t("media.hosts.latest", { time: formatShort(active.latestAt) })}
+                    {t("media.hosts.latest", { time: formatDate(active.latestAt) })}
                   </span>
                   <span className="text-line">·</span>
                   <span className="truncate">{active.roomTitle}</span>
@@ -789,14 +705,14 @@ export default function MediaPage() {
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 <Button
-                  size="sm"
+                  size="lg"
                   variant="secondary"
                   disabled={items.length === 0}
                   onClick={() => setSelected(allSelected ? [] : items.map((one) => one.id))}
                 >
                   {t("media.selectAll")}
                 </Button>
-                <Button size="sm" variant="secondary" disabled={loading} onClick={() => void refreshAll()}>
+                <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshAll()}>
                   {t("common.refresh")}
                 </Button>
               </div>
@@ -804,15 +720,14 @@ export default function MediaPage() {
           ) : null}
 
           <div className="flex flex-wrap items-center gap-2">
-            {searchBox(t("media.searchFiles"))}
-            <div className="flex items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
+            <div className="flex h-9 items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
               {rangeItems.map((one) => (
                 <button
                   key={one.key}
                   type="button"
                   onClick={() => setRange(one.key)}
                   className={cx(
-                    "focus-ring rounded-[5px] px-2 py-[5px] text-[11px] font-medium transition-colors",
+                    "focus-ring rounded-[5px] px-2.5 py-[5px] text-[12px] font-medium transition-colors",
                     range === one.key ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
                   )}
                 >
@@ -824,7 +739,7 @@ export default function MediaPage() {
               type="button"
               onClick={() => setOnlyDanmaku((on) => !on)}
               className={cx(
-                "focus-ring h-8 rounded-ctl border px-2.5 text-[11.5px] transition-colors",
+                "focus-ring h-9 rounded-ctl border px-3 text-[12px] transition-colors",
                 onlyDanmaku
                   ? "border-accent/40 bg-accent-soft text-accent-text"
                   : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink",
@@ -832,46 +747,44 @@ export default function MediaPage() {
             >
               {t("media.onlyDanmaku")}
             </button>
-            <div className="ml-auto flex items-center gap-2">
-              <Select
-                value={sort}
-                onChange={(next) => setSort(next as SortKey)}
-                options={[
-                  { value: "recent", label: t("media.sortRecent") },
-                  { value: "duration", label: t("media.sortDuration") },
-                  { value: "size", label: t("media.sortSize") },
-                ]}
-                title={t("media.sortLabel")}
-                className="w-[104px]"
-              />
-              {viewToggle}
-            </div>
+            <Select
+              size="md"
+              value={sort}
+              onChange={(next) => setSort(next as SortKey)}
+              options={[
+                { value: "recent", label: t("media.sortRecent") },
+                { value: "duration", label: t("media.sortDuration") },
+                { value: "size", label: t("media.sortSize") },
+              ]}
+              title={t("media.sortLabel")}
+              className="ml-auto w-[140px]"
+            />
           </div>
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           {searchBox(t("media.hosts.search"))}
           {platformMenu}
-          <Select
-            value={hostSort}
-            onChange={(next) => setHostSort(next as HostSortKey)}
-            options={[
-              { value: "latest", label: t("media.hosts.sortLatest") },
-              { value: "size", label: t("media.hosts.sortSize") },
-              { value: "count", label: t("media.hosts.sortCount") },
-            ]}
-            title={t("media.sortLabel")}
-            className="w-[128px]"
-          />
           <div className="ml-auto flex items-center gap-2">
-            <Button size="sm" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
+            <Select
+              size="md"
+              value={hostSort}
+              onChange={(next) => setHostSort(next as HostSortKey)}
+              options={[
+                { value: "name", label: t("media.hosts.sortName") },
+                { value: "latest", label: t("media.hosts.sortLatest") },
+                { value: "size", label: t("media.hosts.sortSize") },
+                { value: "count", label: t("media.hosts.sortCount") },
+              ]}
+              title={t("media.sortLabel")}
+              className="w-[140px]"
+            />
+            <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
               {t("common.refresh")}
             </Button>
-            {viewToggle}
           </div>
         </div>
       )}
-
       {error ? (
         <div className="flex items-center justify-between rounded-ctl border border-rec/30 bg-rec/10 px-3 py-2 text-[11.5px] text-rec">
           <span className="truncate">{error}</span>
@@ -911,7 +824,7 @@ export default function MediaPage() {
               {fileFiltersActive ? t("media.noMatchBody") : t("media.emptyBody")}
             </div>
           </div>
-        ) : view === "grid" ? (
+        ) : (
           <div className="grid gap-3" style={GRID_STYLE}>
             {items.map((item) => {
               const isSelected = selected.includes(item.id);
@@ -1000,113 +913,6 @@ export default function MediaPage() {
               );
             })}
           </div>
-        ) : (
-          <div className="overflow-hidden rounded-panel border border-line bg-surface">
-            <div
-              className="grid items-center gap-x-3 border-b border-line px-4 py-2 text-[10.5px] font-medium uppercase tracking-[0.06em] text-faint"
-              style={{ gridTemplateColumns: LIST_COLUMNS }}
-            >
-              <button
-                type="button"
-                onClick={() => setSelected(allSelected ? [] : items.map((item) => item.id))}
-                aria-label={t("media.selectAll")}
-                className={cx(
-                  "focus-ring flex h-[15px] w-[15px] items-center justify-center rounded-[4px] border transition-colors",
-                  allSelected ? "border-accent bg-accent text-accent-ink" : "border-line-strong text-transparent hover:text-faint",
-                )}
-              >
-                <IconCheck />
-              </button>
-              <span>{t("media.colVideo")}</span>
-              <span>{t("media.colPlatform")}</span>
-              <span>{t("media.colTitle")}</span>
-              <span className="text-right">{t("media.colDuration")}</span>
-              <span className="text-right">{t("media.colSize")}</span>
-              <span className="text-right">{t("media.colDate")}</span>
-              <span className="text-right">{t("media.colActions")}</span>
-            </div>
-            <div className="divide-y divide-line">
-              {items.map((item) => {
-                const isSelected = selected.includes(item.id);
-                const isPlaying = playing?.item.id === item.id;
-                return (
-                  <div
-                    key={item.id}
-                    className={cx(
-                      "grid items-center gap-x-3 px-4 py-2.5 transition-colors",
-                      isSelected ? "bg-accent-soft" : "hover:bg-raised/60",
-                    )}
-                    style={{ gridTemplateColumns: LIST_COLUMNS }}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => toggleSelected(item.id)}
-                      aria-label={t("media.selectAll")}
-                      aria-pressed={isSelected}
-                      className={cx(
-                        "focus-ring flex h-[15px] w-[15px] items-center justify-center rounded-[4px] border transition-colors",
-                        isSelected
-                          ? "border-accent bg-accent text-accent-ink"
-                          : "border-line-strong text-transparent hover:text-faint",
-                      )}
-                    >
-                      <IconCheck />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void openPlay(item)}
-                      disabled={!item.hasFile}
-                      className="group relative h-[68px] w-[120px] overflow-hidden rounded-[5px] bg-raised disabled:cursor-not-allowed"
-                      aria-label={t("media.play")}
-                    >
-                      {item.thumbnailUrl ? (
-                        <img src={item.thumbnailUrl} alt="" draggable={false} className="h-full w-full object-cover" />
-                      ) : (
-                        <span className="flex h-full w-full items-center justify-center text-[10px] text-faint">
-                          {item.hasFile ? "…" : t("media.missing")}
-                        </span>
-                      )}
-                      <span className="absolute inset-0 flex items-center justify-center bg-black/35 text-white opacity-0 transition-opacity group-hover:opacity-100">
-                        <IconPlay />
-                      </span>
-                    </button>
-                    <span className="truncate text-[11.5px] text-ink-soft">
-                      {t("platformName." + item.platform, { defaultValue: item.platform })}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="truncate text-[12.5px] font-medium text-ink">{item.title || item.id}</div>
-                      <div className="truncate text-[10.5px] text-muted">
-                        {item.hostName}
-                        {item.danmakuCount > 0 ? " · " + t("media.danmakuCount", { n: item.danmakuCount }) : ""}
-                      </div>
-                    </div>
-                    <span className="text-right font-mono text-[11.5px] tabular-nums text-ink-soft">
-                      {formatDuration(item.durationMs)}
-                    </span>
-                    <span className="text-right font-mono text-[11.5px] tabular-nums text-muted">
-                      {formatSize(item.size)}
-                    </span>
-                    <span className="text-right font-mono text-[11px] tabular-nums text-faint">
-                      {formatDate(item.startedAt)}
-                    </span>
-                    <span className="flex items-center justify-end gap-1">
-                      <Button
-                        size="sm"
-                        variant={isPlaying ? "secondary" : "ghost"}
-                        disabled={!item.hasFile || busy === item.id}
-                        onClick={() => void openPlay(item)}
-                      >
-                        {isPlaying ? t("media.playing") : t("media.play")}
-                      </Button>
-                      <Button size="sm" variant="ghost" className="text-faint hover:text-rec" onClick={() => void removeOne(item)}>
-                        {t("media.delete")}
-                      </Button>
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
         )
       ) : hostLoading ? (
         <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
@@ -1119,7 +925,7 @@ export default function MediaPage() {
             {hostFiltersActive ? t("media.hosts.noMatchBody") : t("media.hosts.emptyBody")}
           </div>
         </div>
-      ) : view === "grid" ? (
+      ) : (
         <div className="grid gap-3" style={HOST_GRID_STYLE}>
           {hosts.map((host) => (
             <button
@@ -1155,59 +961,18 @@ export default function MediaPage() {
                   </div>
                 </div>
               </div>
-              <div className="flex items-center gap-2 px-2.5 py-2 text-[10.5px] text-muted">
-                <span className="font-mono tabular-nums">{t("media.hosts.count", { n: host.count })}</span>
-                <span className="text-line">·</span>
-                <span className="font-mono tabular-nums">{formatSize(host.bytes)}</span>
-                <span className="ml-auto shrink-0 font-mono tabular-nums text-faint">
-                  {t("media.hosts.latest", { time: formatShort(host.latestAt) })}
-                </span>
+              <div className="flex flex-col gap-0.5 px-2.5 py-2 text-[10.5px] text-muted">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono tabular-nums">{t("media.hosts.count", { n: host.count })}</span>
+                  <span className="text-line">·</span>
+                  <span className="font-mono tabular-nums">{formatSize(host.bytes)}</span>
+                </div>
+                <div className="truncate font-mono tabular-nums text-faint">
+                  {t("media.hosts.latest", { time: formatDate(host.latestAt) })}
+                </div>
               </div>
             </button>
           ))}
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-panel border border-line bg-surface">
-          <div
-            className="grid items-center gap-x-3 border-b border-line px-4 py-2 text-[10.5px] font-medium uppercase tracking-[0.06em] text-faint"
-            style={{ gridTemplateColumns: HOST_LIST_COLUMNS }}
-          >
-            <span />
-            <span>{t("media.colHost")}</span>
-            <span>{t("media.colPlatform")}</span>
-            <span className="text-right">{t("media.colCount")}</span>
-            <span className="text-right">{t("media.colSize")}</span>
-            <span className="text-right">{t("media.colLatest")}</span>
-            <span />
-          </div>
-          <div className="divide-y divide-line">
-            {hosts.map((host) => (
-              <button
-                key={host.roomId}
-                type="button"
-                onClick={() => enterHost(host)}
-                className="grid w-full items-center gap-x-3 px-4 py-2.5 text-left transition-colors hover:bg-raised/60"
-                style={{ gridTemplateColumns: HOST_LIST_COLUMNS }}
-              >
-                <HostAvatar host={host} size={36} onCover={false} />
-                <div className="min-w-0">
-                  <div className="truncate text-[12.5px] font-medium text-ink">
-                    {host.hostName || host.roomTitle || host.roomId}
-                  </div>
-                  <div className="truncate text-[10.5px] text-muted">{host.roomTitle}</div>
-                </div>
-                <span className="truncate text-[11.5px] text-ink-soft">
-                  {t("platformName." + host.platform, { defaultValue: host.platform })}
-                </span>
-                <span className="text-right font-mono text-[11.5px] tabular-nums text-ink-soft">{host.count}</span>
-                <span className="text-right font-mono text-[11.5px] tabular-nums text-muted">{formatSize(host.bytes)}</span>
-                <span className="text-right font-mono text-[11px] tabular-nums text-faint">{formatShort(host.latestAt)}</span>
-                <span className="flex justify-end text-faint">
-                  <IconChevron />
-                </span>
-              </button>
-            ))}
-          </div>
         </div>
       )}
 
