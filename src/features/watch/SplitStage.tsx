@@ -8,20 +8,21 @@ import {
   type SplitNode,
 } from "./split";
 
-export type DragPayload =
-  | { kind: "cell"; index: number }
-  | { kind: "room"; roomId: string };
+export type DragPayload = { kind: "cell"; index: number };
+
+/** 拖到某一格的上/左半边表示插到它前面，下/右半边表示插到它后面。 */
+export type DropZone = { index: number; side: "before" | "after" };
 
 export type SplitStageHandle = {
-  /** 指针拖拽时用坐标反查落在哪一格。 */
-  hitTest: (clientX: number, clientY: number) => number | null;
+  /** 指针拖拽时用坐标反查落在哪一格、落在哪半边。 */
+  hitTest: (clientX: number, clientY: number) => DropZone | null;
 };
 
 type Props = {
   tree: SplitNode;
   count: number;
-  /** 指针拖拽当前悬停的格子，用于高亮。 */
-  dropIndex?: number | null;
+  /** 指针拖拽当前悬停的落点，用于画出 Windows 分屏式的半格预览。 */
+  drop?: DropZone | null;
   onTreeChange: (tree: SplitNode, commit: boolean) => void;
   renderCell: (index: number, rect: Rect) => ReactNode;
 };
@@ -31,7 +32,7 @@ type Props = {
  * 指针按下后把 pointermove 挂在分割线自己身上（setPointerCapture），拖出边界也不丢。
  */
 const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
-  { tree, count, dropIndex, onTreeChange, renderCell },
+  { tree, count, drop, onTreeChange, renderCell },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -70,7 +71,15 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
       const y = clientY - box.top;
       for (const [index, rect] of cellsRef.current) {
         if (x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height) {
-          return index;
+          const horizontal = rect.width >= rect.height;
+          const side = horizontal
+            ? x < rect.left + rect.width / 2
+              ? "before"
+              : "after"
+            : y < rect.top + rect.height / 2
+              ? "before"
+              : "after";
+          return { index, side };
         }
       }
       return null;
@@ -125,8 +134,25 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
             style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
           >
             {renderCell(index, rect)}
-            {dropIndex === index ? (
-              <div className="pointer-events-none absolute inset-0 z-30 rounded-[8px] ring-2 ring-accent ring-inset" />
+            {drop?.index === index ? (
+              <div
+                className="pointer-events-none absolute z-30 rounded-[8px] border-2 border-accent bg-accent/25 transition-[left,top,width,height] duration-150"
+                style={
+                  rect.width >= rect.height
+                    ? {
+                        top: 0,
+                        bottom: 0,
+                        width: "50%",
+                        left: drop.side === "before" ? 0 : "50%",
+                      }
+                    : {
+                        left: 0,
+                        right: 0,
+                        height: "50%",
+                        top: drop.side === "before" ? 0 : "50%",
+                      }
+                }
+              />
             ) : null}
           </div>
         );

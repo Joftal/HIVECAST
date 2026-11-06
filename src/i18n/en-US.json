@@ -299,7 +299,9 @@
       "join": "Add to view",
       "empty": "No rooms available",
       "full": "4 slots in use",
-      "dragHint": "Drop onto a cell to replace it"
+      "dragHint": "Hover a room, then pick a cell",
+      "place": "Place in cell",
+      "placeNew": "New cell"
     },
     "cellN": "Cell {{n}}"
   },

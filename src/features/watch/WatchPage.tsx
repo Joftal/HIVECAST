@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
+import { createPortal } from "react-dom";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player from "./Player";
-import SplitStage, { type DragPayload, type SplitStageHandle } from "./SplitStage";
+import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
 import {
   buildTree,
   leafCount,
@@ -69,11 +70,13 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const [panelOpen, setPanelOpen] = useState(false);
   // 指针拖拽：不依赖 HTML5 DnD，WKWebView 里更可靠；拖拽中显示跟随指针的浮标。
   const [drag, setDrag] = useState<{ payload: DragPayload; x: number; y: number } | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [drop, setDrop] = useState<DropZone | null>(null);
   const stageRef = useRef<SplitStageHandle | null>(null);
   const dragRef = useRef<{ payload: DragPayload; x: number; y: number; moved: boolean } | null>(null);
-  const dropRef = useRef<number | null>(null);
-  const suppressClickRef = useRef(false);
+  const dropRef = useRef<DropZone | null>(null);
+  // 悬停候选时浮出的「放到哪一格」选择器。
+  const [picker, setPicker] = useState<{ roomId: string; x: number; y: number } | null>(null);
+  const pickerTimer = useRef<number | undefined>(undefined);
   const [query, setQuery] = useState("");
   const [input, setInput] = useState("");
 
@@ -330,10 +333,22 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     setTree(buildTree(count, kind));
   };
 
-  const swapRef = useRef(swapCells);
-  swapRef.current = swapCells;
-  const watchRef = useRef(watchRoom);
-  watchRef.current = watchRoom;
+  /** 拖动格子到另一格的前/后半边：把该格插到目标之前或之后，其余格子顺延。 */
+  const moveCell = (from: number, target: number, side: "before" | "after") => {
+    if (from === target) return;
+    setOrder((prev) => {
+      if (from < 0 || from >= prev.length || target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(from, 1);
+      let at = target;
+      if (from < target) at -= 1;
+      if (side === "after") at += 1;
+      next.splice(at, 0, item);
+      return next;
+    });
+  };
+  const moveRef = useRef(moveCell);
+  moveRef.current = moveCell;
 
   // 监听器在 pointerdown 里同步挂上，不依赖下一次 render，快速拖拽也不会丢事件。
   const startDrag = (payload: DragPayload, event: ReactPointerEvent) => {
@@ -341,7 +356,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     dragRef.current = { payload, x: event.clientX, y: event.clientY, moved: false };
     dropRef.current = null;
     setDrag({ payload, x: event.clientX, y: event.clientY });
-    setDropIndex(null);
+    setDrop(null);
 
     const move = (moveEvent: PointerEvent) => {
       const current = dragRef.current;
@@ -352,9 +367,9 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       current.x = moveEvent.clientX;
       current.y = moveEvent.clientY;
       setDrag({ payload: current.payload, x: moveEvent.clientX, y: moveEvent.clientY });
-      const index = stageRef.current?.hitTest(moveEvent.clientX, moveEvent.clientY) ?? null;
-      dropRef.current = index;
-      setDropIndex(index);
+      const zone = stageRef.current?.hitTest(moveEvent.clientX, moveEvent.clientY) ?? null;
+      dropRef.current = zone;
+      setDrop(zone);
     };
     const finish = () => {
       window.removeEventListener("pointermove", move);
@@ -362,24 +377,13 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       window.removeEventListener("pointercancel", finish);
       const current = dragRef.current;
       dragRef.current = null;
-      const index = dropRef.current;
+      const zone = dropRef.current;
       dropRef.current = null;
-      if (current && current.moved) {
-        // 拖拽结束后浏览器还会补一个 click，这里先压掉，避免「拖进格子」又被当成点「加入观看」。
-        suppressClickRef.current = true;
-        window.setTimeout(() => {
-          suppressClickRef.current = false;
-        }, 0);
-        if (index !== null) {
-          if (current.payload.kind === "cell") {
-            if (current.payload.index !== index) swapRef.current(current.payload.index, index);
-          } else {
-            void watchRef.current(current.payload.roomId, index);
-          }
-        }
+      if (current && current.moved && zone) {
+        moveRef.current(current.payload.index, zone.index, zone.side);
       }
       setDrag(null);
-      setDropIndex(null);
+      setDrop(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
@@ -387,6 +391,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   };
 
   const candidates = rooms.filter((view) => view.room.isLive && !watchedIds.has(view.room.id));
+
   const filtered = candidates.filter((view) => {
     const needle = query.trim().toLowerCase();
     if (!needle) return true;
@@ -455,9 +460,6 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                 {t("watch.muteAll")}
               </Button>
             ) : null}
-            <Button size="sm" variant="ghost" onClick={() => setPanelOpen((open) => !open)}>
-              {t("watch.panel.title")}
-            </Button>
           </div>
         </div>
 
@@ -551,7 +553,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
               ref={stageRef}
               tree={tree}
               count={count}
-              dropIndex={dropIndex}
+              drop={drop}
               onTreeChange={(next) => setTree(next)}
               renderCell={(index) => {
                 const roomId = order[index] ?? null;
@@ -624,15 +626,17 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                   filtered.map((view) => (
                     <div
                       key={view.room.id}
-                      onPointerDown={(event) => {
-                        if ((event.target as HTMLElement).closest("button")) return;
-                        startDrag({ kind: "room", roomId: view.room.id }, event);
+                      onPointerEnter={(event) => {
+                        window.clearTimeout(pickerTimer.current);
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setPicker({ roomId: view.room.id, x: rect.left, y: rect.top });
                       }}
-                      onClick={() => {
-                        if (suppressClickRef.current) return;
-                        void watchRoom(view.room.id);
+                      onPointerLeave={() => {
+                        window.clearTimeout(pickerTimer.current);
+                        pickerTimer.current = window.setTimeout(() => setPicker(null), 160);
                       }}
-                      className="group flex cursor-grab touch-none items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised active:cursor-grabbing"
+                      onClick={() => void watchRoom(view.room.id)}
+                      className="group relative flex cursor-pointer items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised"
                     >
                       {view.room.avatarUrl ? (
                         <img
@@ -650,14 +654,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                         </div>
                         <div className="truncate text-[10px] text-faint">{view.room.hostName}</div>
                       </div>
-                      <button
-                        type="button"
-                        disabled={busy || count >= MAX_SLOTS}
-                        onClick={() => void watchRoom(view.room.id)}
-                        className="focus-ring shrink-0 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-muted transition-colors hover:bg-raised hover:text-ink disabled:opacity-35"
-                      >
-                        {count >= MAX_SLOTS ? t("watch.panel.full") : t("watch.panel.join")}
-                      </button>
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">›</span>
                     </div>
                   ))
                 )}
@@ -688,6 +685,59 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
           ) : null}
         </div>
       </div>
+
+      {picker
+        ? createPortal(
+            <div
+              className="fixed z-[70] w-[208px] rounded-[8px] border border-line bg-surface p-2 shadow-pop animate-pop"
+              style={{
+                left: Math.max(8, picker.x - 204),
+                top: Math.min(picker.y, window.innerHeight - 200),
+              }}
+              onPointerEnter={() => window.clearTimeout(pickerTimer.current)}
+              onPointerLeave={() => {
+                window.clearTimeout(pickerTimer.current);
+                pickerTimer.current = window.setTimeout(() => setPicker(null), 160);
+              }}
+            >
+              <div className="mb-1.5 px-0.5 text-[10px] uppercase tracking-[0.08em] text-faint">
+                {t("watch.panel.place")}
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {Array.from({ length: count }).map((_, index) => (
+                  <button
+                    key={index}
+                    type="button"
+                    onClick={() => {
+                      const roomId = picker.roomId;
+                      setPicker(null);
+                      void watchRoom(roomId, index);
+                    }}
+                    className="focus-ring flex flex-col items-center gap-1 rounded-[6px] border border-line bg-raised px-1.5 py-2 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
+                  >
+                    <MiniLayout tree={tree} target={index} />
+                    <span>{t("watch.cellN", { n: index + 1 })}</span>
+                  </button>
+                ))}
+                {count < MAX_SLOTS ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const roomId = picker.roomId;
+                      setPicker(null);
+                      void watchRoom(roomId);
+                    }}
+                    className="focus-ring flex flex-col items-center gap-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-1.5 py-2 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
+                  >
+                    <MiniLayout tree={buildTree(count + 1)} target={count} />
+                    <span>{t("watch.panel.placeNew")}</span>
+                  </button>
+                ) : null}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       <aside className="flex w-11 shrink-0 flex-col border-l border-line bg-surface">
         <button
@@ -723,9 +773,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
           className="pointer-events-none fixed z-[60] max-w-[220px] truncate rounded-[6px] border border-line bg-surface px-2 py-1 text-[11px] text-ink shadow-pop"
           style={{ left: drag.x + 14, top: drag.y + 12 }}
         >
-          {drag.payload.kind === "cell"
-            ? t("watch.cellN", { n: drag.payload.index + 1 })
-            : roomById.get(drag.payload.roomId)?.room.title || t("watch.panel.title")}
+          {t("watch.cellN", { n: drag.payload.index + 1 })}
         </div>
       ) : null}
     </div>
@@ -998,5 +1046,47 @@ function SlotCell({
         )}
       </div>
     </section>
+  );
+}
+
+
+type Rect = { x: number; y: number; w: number; h: number };
+
+function miniRects(node: SplitNode, box: Rect, gap: number, out: Map<number, Rect>) {
+  if (node.kind === "leaf") {
+    out.set(node.index, box);
+    return;
+  }
+  const horizontal = node.dir === "row";
+  const avail = (horizontal ? box.w : box.h) - gap;
+  const first = Math.max(0, avail * node.ratio);
+  if (horizontal) {
+    miniRects(node.a, { ...box, w: first }, gap, out);
+    miniRects(node.b, { ...box, x: box.x + first + gap, w: Math.max(0, avail - first) }, gap, out);
+  } else {
+    miniRects(node.a, { ...box, h: first }, gap, out);
+    miniRects(node.b, { ...box, y: box.y + first + gap, h: Math.max(0, avail - first) }, gap, out);
+  }
+}
+
+/** 候选放置器里的小版式图：画出当前切法，并把目标格点亮。 */
+function MiniLayout({ tree, target }: { tree: SplitNode; target: number }) {
+  const rects = new Map<number, Rect>();
+  miniRects(tree, { x: 0, y: 0, w: 100, h: 64 }, 2.5, rects);
+  return (
+    <svg viewBox="0 0 100 64" className="h-8 w-full" aria-hidden>
+      {Array.from(rects.entries()).map(([index, rect]) => (
+        <rect
+          key={index}
+          x={rect.x}
+          y={rect.y}
+          width={rect.w}
+          height={rect.h}
+          rx={3}
+          fill={index === target ? "var(--c-accent)" : "var(--c-line-strong)"}
+          opacity={index === target ? 0.9 : 0.55}
+        />
+      ))}
+    </svg>
   );
 }

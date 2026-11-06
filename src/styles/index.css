@@ -80,6 +80,19 @@
 
 html, body, #root { height: 100%; }
 
+/* WKWebView 里拖拽格子时仍可能划选文字，这里补上 WebKit 前缀并放开输入控件。 */
+html {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+img, video {
+  -webkit-user-drag: none;
+}
+
 body {
   margin: 0;
   background: var(--c-canvas);
@@ -87,7 +100,9 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
+  -webkit-user-select: none;
   user-select: none;
+  -webkit-touch-callout: none;
   transition: background-color 200ms var(--ease-spring), color 200ms var(--ease-spring);
 }
 
