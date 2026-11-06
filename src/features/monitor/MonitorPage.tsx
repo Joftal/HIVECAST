@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Button, Select, cx } from "../../components/ui/Controls";
+import { Button, Select, Switch, cx } from "../../components/ui/Controls";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
@@ -255,6 +255,9 @@ export default function MonitorPage({
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [input, setInput] = useState("");
+  // 添加房间时的两个开关：不监控就没有自动录制，所以关掉监控会顺手关掉它。
+  const [addMonitor, setAddMonitor] = useState(true);
+  const [addAutoRecord, setAddAutoRecord] = useState(true);
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -442,8 +445,10 @@ export default function MonitorPage({
     setAdding(true);
     setError(null);
     try {
-      await roomAdd(value);
+      await roomAdd(value, addMonitor, addAutoRecord);
       setInput("");
+      setAddMonitor(true);
+      setAddAutoRecord(true);
       setAddOpen(false);
       await load();
     } catch (err) {
@@ -962,7 +967,15 @@ export default function MonitorPage({
               className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
             />
           </div>
-          <Button size="lg" variant="primary" onClick={() => setAddOpen((open) => !open)}>
+          <Button
+            size="lg"
+            variant="primary"
+            onClick={() => {
+              setAddOpen((open) => !open);
+              setAddMonitor(true);
+              setAddAutoRecord(true);
+            }}
+          >
             <span className="text-[15px] leading-none">+</span>
             {t("monitor.addRoom")}
           </Button>
@@ -1010,6 +1023,41 @@ export default function MonitorPage({
               spellCheck={false}
               className="focus-ring mt-4 h-10 w-full rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
             />
+            <div className="mt-3 divide-y divide-line overflow-hidden rounded-[8px] border border-line">
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-ink">{t("monitor.addMonitor")}</div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-faint">
+                    {t("monitor.addMonitorHint")}
+                  </p>
+                </div>
+                <Switch
+                  checked={addMonitor}
+                  onChange={(next) => {
+                    setAddMonitor(next);
+                    // 不监控就不会自动录，避免留一个看不见的开关。
+                    setAddAutoRecord(next);
+                  }}
+                  label={t("monitor.addMonitor")}
+                />
+              </div>
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-ink">{t("monitor.addAutoRecord")}</div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-faint">
+                    {addMonitor
+                      ? t("monitor.addAutoRecordHint")
+                      : t("monitor.addAutoRecordDisabled")}
+                  </p>
+                </div>
+                <Switch
+                  checked={addAutoRecord}
+                  disabled={!addMonitor}
+                  onChange={setAddAutoRecord}
+                  label={t("monitor.addAutoRecord")}
+                />
+              </div>
+            </div>
             <div className="mt-4 flex justify-end gap-2">
               <Button
                 size="lg"

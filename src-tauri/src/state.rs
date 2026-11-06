@@ -148,12 +148,22 @@ impl AppState {
     }
 }
 
-/// 媒体库根目录：默认放到系统「影片 / 视频」目录，允许用环境变量覆盖（便于测试与迁移）。
+/// 媒体库根目录：默认在「程序安装目录/Recording」，程序装在哪就存哪；
+/// 装到不可写的位置（例如 /Applications 下无权限、直接从 DMG 运行）时，
+/// 回落到用户影片目录。`HIVECAST_MEDIA_DIR` 可覆盖（测试与迁移用）。
 pub fn default_media_root() -> PathBuf {
     if let Ok(custom) = std::env::var("HIVECAST_MEDIA_DIR") {
         if !custom.trim().is_empty() {
             return PathBuf::from(custom);
         }
+    }
+
+    if let Some(dir) = install_dir() {
+        let candidate = dir.join("Recording");
+        if ensure_writable(&candidate) {
+            return candidate;
+        }
+        tracing::info!(dir = %candidate.display(), "安装目录不可写，媒体库回落到用户影片目录");
     }
 
     #[cfg(target_os = "macos")]
@@ -177,5 +187,44 @@ pub fn default_media_root() -> PathBuf {
         }
     }
 
-    PathBuf::from("HIVECAST")
+    PathBuf::from("Recording")
+}
+
+/// 安装目录：macOS 取 .app 所在目录（可执行文件在 Contents/MacOS 下，上溯四层），
+/// 其它平台取可执行文件所在目录。未打包运行时就是 target/debug 这类目录。
+fn install_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
+
+    #[cfg(target_os = "macos")]
+    {
+        // .../HIVECAST.app/Contents/MacOS/hivecast
+        let is_macos = dir.file_name().and_then(|n| n.to_str()) == Some("MacOS");
+        if is_macos {
+            if let Some(root) = dir
+                .parent()
+                .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("Contents"))
+                .and_then(|p| p.parent())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
+                .and_then(|p| p.parent())
+            {
+                return Some(root.to_path_buf());
+            }
+        }
+    }
+
+    Some(dir)
+}
+
+/// 目录能建出来、也能真的写进去一个文件。
+fn ensure_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".hivecast-write-test");
+    if std::fs::write(&probe, b"ok").is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_file(&probe);
+    true
 }

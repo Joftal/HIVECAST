@@ -283,6 +283,33 @@ pub struct Settings {
     pub close_action: String,
     /// 阻止系统空闲休眠（录制/观看期间保持唤醒）
     pub prevent_sleep: bool,
+    /// 监控检测间隔（秒）；0 = 关闭自动检测，只能手动刷新
+    pub monitor_interval_sec: u32,
+    /// 连续失败（限流/网络）时是否自动加大检测间隔
+    pub monitor_backoff_enabled: bool,
+    /// 自动回退的间隔上限（秒）
+    pub monitor_backoff_cap_sec: u32,
+    /// 录制文件名模板（不含目录与扩展名）
+    pub media_filename_template: String,
+    /// 去掉文件名里的 emoji 与特殊符号
+    pub media_strip_emoji: bool,
+    /// 按「平台/主播」建子目录
+    pub media_group_dirs: bool,
+}
+
+/// 文件名模板预览：用示例房间渲染一次，前端直接展示。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct FilenamePreview {
+    /// 渲染出的文件名（不含扩展名与目录）
+    pub name: String,
+    /// 完整路径（示例根目录 + 目录结构 + 文件名 + .mp4）
+    pub path: String,
+    /// 模板是否可用
+    pub valid: bool,
+    /// 不可用时的原因
+    pub error: Option<String>,
 }
 
 /// 关闭程序时还没结束的任务（录制、转封装、合并、弹幕导出）。

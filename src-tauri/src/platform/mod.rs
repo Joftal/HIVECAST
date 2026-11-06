@@ -156,6 +156,17 @@ impl PlatformError {
             PlatformError::Parse(_) => "parse",
         }
     }
+
+    /// 限流或网络抖动：值得退避后再试，而不是当成房间本身出错。
+    pub fn is_throttle(&self) -> bool {
+        match self {
+            PlatformError::Network(_) => true,
+            PlatformError::Upstream { code, .. } => {
+                matches!(*code, -352 | -412 | -429 | 412 | 429)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[async_trait]

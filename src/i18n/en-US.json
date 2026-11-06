@@ -175,7 +175,23 @@
     "closeQuit": "Quit app",
     "sectionPower": "Power",
     "preventSleep": "Prevent system sleep",
-    "preventSleepHint": "While enabled, the computer will not go to idle sleep during recording or watching."
+    "preventSleepHint": "While enabled, the computer will not go to idle sleep during recording or watching.",
+    "sectionMonitor": "Monitoring",
+    "monitorInterval": "Check interval",
+    "monitorIntervalHint": "How often to refresh room status. Set 0 to turn automatic checks off and refresh manually.",
+    "unitSeconds": "sec",
+    "monitorBackoff": "Back off after failures",
+    "monitorBackoffHint": "When a room hits rate limits or network errors, its interval grows step by step and resets after a success.",
+    "monitorBackoffCap": "Backoff cap",
+    "monitorBackoffCapHint": "Never wait longer than this between checks.",
+    "sectionNaming": "File names",
+    "filenameTemplate": "File name template",
+    "filenameTemplateHint": "Only the file name changes; folders still follow platform and host.",
+    "filenameVars": "Variables: {platform} platform · {platform_id} platform id · {host} host · {title} title · {area} area · {room_key} room · {qn} quality · {date} date · {time} time · {datetime} date and time · {year} {month} {day} {hour} {min} {sec}",
+    "stripEmoji": "Strip emoji and symbols",
+    "stripEmojiHint": "Keeps emoji and arrows out of file names so they sync across devices.",
+    "groupDirs": "Group by platform and host",
+    "groupDirsHint": "When off, every recording lands directly in the library root."
   },
   "common": {
     "retry": "Retry",
@@ -310,7 +326,12 @@
     "modeCol": "Stacked",
     "modeTop": "Top large",
     "modeLeft": "Left large",
-    "modeQuad": "Grid"
+    "modeQuad": "Grid",
+    "addMonitor": "Monitor",
+    "addAutoRecord": "Auto record",
+    "addMonitorHint": "When off, this room is never checked automatically and never records on its own.",
+    "addAutoRecordHint": "Start recording when the room goes live.",
+    "addAutoRecordDisabled": "Turn monitoring on first."
   },
   "watch": {
     "title": "Multi-view",

@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
-import { appInfo, isTauri, settingsGet, settingsUpdate, type Settings } from "../../lib/ipc";
+import {
+  appInfo,
+  filenamePreview,
+  isTauri,
+  settingsGet,
+  settingsUpdate,
+  type FilenamePreview,
+  type Settings,
+} from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
 import AccountSection from "./AccountSection";
@@ -96,6 +104,11 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
   { page: "record", id: "set-auto-remux", titleKey: "settings.autoRemux", descKey: "settings.autoRemuxHint", extra: "mp4 转码 remux 后处理" },
   { page: "storage", id: "set-media-root", titleKey: "settings.mediaRoot", descKey: "settings.mediaRootHint", extra: "目录 路径 folder path" },
+  { page: "record", id: "set-monitor-interval", titleKey: "settings.monitorInterval", descKey: "settings.monitorIntervalHint", extra: "监控 间隔 轮询 monitor interval poll" },
+  { page: "record", id: "set-monitor-backoff", titleKey: "settings.monitorBackoff", descKey: "settings.monitorBackoffHint", extra: "退避 限流 失败 backoff throttle" },
+  { page: "storage", id: "set-filename-template", titleKey: "settings.filenameTemplate", descKey: "settings.filenameTemplateHint", extra: "文件名 模板 命名 filename template naming" },
+  { page: "storage", id: "set-strip-emoji", titleKey: "settings.stripEmoji", descKey: "settings.stripEmojiHint", extra: "emoji 特殊符号 文件名 symbol" },
+  { page: "storage", id: "set-group-dirs", titleKey: "settings.groupDirs", descKey: "settings.groupDirsHint", extra: "目录 分目录 平台 主播 folder group" },
   { page: "storage", id: "set-retention", titleKey: "settings.retention", descKey: "settings.retentionHint", extra: "清理 保留 容量 retention cleanup" },
   { page: "notify", id: "set-notify-record", titleKey: "settings.notifyRecord", descKey: "settings.notifyRecordHint", extra: "通知 录制开始 结束 notify" },
   { page: "notify", id: "set-notify-error", titleKey: "settings.notifyError", descKey: "settings.notifyErrorHint", extra: "通知 异常 失败 error" },
@@ -210,6 +223,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const [query, setQuery] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [preview, setPreview] = useState<FilenamePreview | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const dirty = Boolean(settings) && JSON.stringify(settings) !== initial;
@@ -302,6 +316,26 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     const timer = window.setTimeout(() => setFocusId(null), 1600);
     return () => window.clearTimeout(timer);
   }, [focusId, page]);
+
+  // 文件名预览跟着输入实时算；防抖 200ms，避免每敲一个字都过一次 IPC。
+  useEffect(() => {
+    if (!open || !settings || !isTauri()) return;
+    const timer = window.setTimeout(() => {
+      void filenamePreview(
+        settings.mediaFilenameTemplate,
+        settings.mediaStripEmoji,
+        settings.mediaGroupDirs,
+      )
+        .then(setPreview)
+        .catch(() => setPreview(null));
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [
+    open,
+    settings?.mediaFilenameTemplate,
+    settings?.mediaStripEmoji,
+    settings?.mediaGroupDirs,
+  ]);
 
   const chooseFolder = async () => {
     if (!settings) return;
@@ -445,6 +479,66 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
             </Row>
           </Section>
 
+          <Section title={t("settings.sectionMonitor")}>
+            <Row
+              id="set-monitor-interval"
+              focus={focusId === "set-monitor-interval"}
+              title={t("settings.monitorInterval")}
+              desc={t("settings.monitorIntervalHint")}
+            >
+              <div className="flex items-center gap-1.5">
+                <div className="w-[88px]">
+                  <input
+                    type="number"
+                    min={0}
+                    max={86400}
+                    value={settings.monitorIntervalSec}
+                    onChange={(event) => patch({ monitorIntervalSec: Number(event.target.value) })}
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-[11px] text-muted">
+                  {t("settings.unitSeconds")}
+                </span>
+              </div>
+            </Row>
+            <Row
+              id="set-monitor-backoff"
+              focus={focusId === "set-monitor-backoff"}
+              title={t("settings.monitorBackoff")}
+              desc={t("settings.monitorBackoffHint")}
+            >
+              <Switch
+                checked={settings.monitorBackoffEnabled}
+                onChange={(next) => patch({ monitorBackoffEnabled: next })}
+                label={t("settings.monitorBackoff")}
+              />
+            </Row>
+            <Row
+              id="set-monitor-backoff-cap"
+              focus={focusId === "set-monitor-backoff-cap"}
+              title={t("settings.monitorBackoffCap")}
+              desc={t("settings.monitorBackoffCapHint")}
+            >
+              <div className="flex items-center gap-1.5">
+                <div className="w-[88px]">
+                  <input
+                    type="number"
+                    min={60}
+                    max={3600}
+                    disabled={!settings.monitorBackoffEnabled}
+                    value={settings.monitorBackoffCapSec}
+                    onChange={(event) => patch({ monitorBackoffCapSec: Number(event.target.value) })}
+                    className={FIELD + " font-mono tabular-nums disabled:cursor-not-allowed disabled:opacity-50"}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-[11px] text-muted">
+                  {t("settings.unitSeconds")}
+                </span>
+              </div>
+            </Row>
+          </Section>
+
           <Section title={t("settings.sectionPost")}>
             <Row
               id="set-auto-remux"
@@ -484,6 +578,58 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                   {t("settings.choose")}
                 </Button>
               </div>
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionNaming")}>
+            <Row
+              id="set-filename-template"
+              focus={focusId === "set-filename-template"}
+              title={t("settings.filenameTemplate")}
+              desc={t("settings.filenameTemplateHint")}
+            >
+              <div className="w-[420px]">
+                <input
+                  value={settings.mediaFilenameTemplate}
+                  onChange={(event) => patch({ mediaFilenameTemplate: event.target.value })}
+                  className={FIELD + " font-mono text-[11px]"}
+                  spellCheck={false}
+                />
+              </div>
+            </Row>
+            <div className="px-4 pb-3">
+              <p className="text-[10.5px] leading-4 text-faint">{t("settings.filenameVars")}</p>
+              {preview && settings.mediaFilenameTemplate.trim() ? (
+                preview.valid ? (
+                  <p className="mt-1 break-all font-mono text-[10.5px] text-muted">{preview.path}</p>
+                ) : (
+                  <p className="mt-1 text-[10.5px] text-rec">{preview.error}</p>
+                )
+              ) : null}
+            </div>
+            <Row
+              id="set-strip-emoji"
+              focus={focusId === "set-strip-emoji"}
+              title={t("settings.stripEmoji")}
+              desc={t("settings.stripEmojiHint")}
+            >
+              <Switch
+                checked={settings.mediaStripEmoji}
+                onChange={(next) => patch({ mediaStripEmoji: next })}
+                label={t("settings.stripEmoji")}
+              />
+            </Row>
+            <Row
+              id="set-group-dirs"
+              focus={focusId === "set-group-dirs"}
+              title={t("settings.groupDirs")}
+              desc={t("settings.groupDirsHint")}
+            >
+              <Switch
+                checked={settings.mediaGroupDirs}
+                onChange={(next) => patch({ mediaGroupDirs: next })}
+                label={t("settings.groupDirs")}
+              />
             </Row>
           </Section>
 

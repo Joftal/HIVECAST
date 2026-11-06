@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AppInfo, CredentialInfo, LineInfo, MediaHostPage, MediaPage, Playback, PostResult,
+    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, MediaHostPage, MediaPage,
+    Playback, PostResult,
     QrPoll, QrTicket, RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
@@ -61,8 +62,15 @@ pub async fn room_add(
     app: AppHandle,
     state: State<'_, AppState>,
     input: String,
+    // 是否加入监控；关掉后不参与自动检测，也不自动录制。
+    monitor: Option<bool>,
+    // 是否开播自动录制；仅在监控开启时有效。
+    auto_record: Option<bool>,
 ) -> Result<RoomView, AppError> {
     let reference = resolve_input(&input)?;
+    let monitor = monitor.unwrap_or(true);
+    // 不监控就没有「自动录制」可言，直接按关闭处理，避免出现看不见的录制。
+    let auto_record = monitor && auto_record.unwrap_or(true);
     if let Some(existing) = state
         .db
         .find_room(&reference.platform, &reference.room_key)?
@@ -90,8 +98,8 @@ pub async fn room_add(
         is_live: info.is_live,
         started_at: info.started_at,
         online: info.online,
-        auto_record: true,
-        monitor_paused: false,
+        auto_record,
+        monitor_paused: !monitor,
         record_qn: settings.default_record_qn,
         view_qn: settings.default_view_qn,
         record_line: None,
@@ -575,6 +583,56 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppError> {
 }
 
 /// 保存设置；返回规范化后的值（并发数夹到 1..=8、目录会被创建）。
+/// 文件名模板预览：用一份固定的示例房间渲染，保证与真正落盘时同一套逻辑。
+#[tauri::command]
+pub fn filename_preview(
+    state: State<'_ , AppState>,
+    template: String,
+    strip_emoji: bool,
+    group_dirs: bool,
+) -> FilenamePreview {
+    let template = template.trim().to_string();
+    if let Err(error) = crate::filename::validate(&template) {
+        return FilenamePreview {
+            name: String::new(),
+            path: String::new(),
+            valid: false,
+            error: Some(error),
+        };
+    }
+
+    let parts = crate::filename::NameParts {
+        platform_id: "bilibili",
+        platform: "哔哩哔哩",
+        host: "老实憨厚的笑笑",
+        title: "【直播】今晚打排位 🎮",
+        area: "英雄联盟",
+        room_key: "6",
+        qn: 10000,
+    };
+    let naming = crate::recorder::Naming {
+        template,
+        strip_emoji,
+        group_dirs,
+    };
+    let path = crate::recorder::session_path(
+        &state.recorder.media_root(),
+        &parts,
+        now_ts(),
+        "mp4",
+        &naming,
+    );
+    FilenamePreview {
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: path.display().to_string(),
+        valid: true,
+        error: None,
+    }
+}
+
 #[tauri::command]
 pub async fn settings_update(
     app: tauri::AppHandle,

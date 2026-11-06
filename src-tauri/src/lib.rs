@@ -8,6 +8,7 @@ mod db;
 mod disk;
 mod error;
 mod ffmpeg;
+mod filename;
 mod jce;
 mod jobs;
 mod lifecycle;
@@ -135,6 +136,7 @@ pub fn run() {
             commands::sessions_merge,
             commands::settings_get,
             commands::settings_update,
+            commands::filename_preview,
             commands::layout_get,
             commands::layout_set,
             commands::credentials_list,

@@ -55,10 +55,30 @@ struct Active {
     restarts: u32,
 }
 
+/// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
+#[derive(Debug, Clone)]
+pub struct Naming {
+    pub template: String,
+    pub strip_emoji: bool,
+    pub group_dirs: bool,
+}
+
+impl Default for Naming {
+    fn default() -> Self {
+        Self {
+            template: crate::filename::DEFAULT_TEMPLATE.into(),
+            strip_emoji: false,
+            group_dirs: true,
+        }
+    }
+}
+
 pub struct Recorder {
     db: Arc<Db>,
     /// 媒体库根目录：设置页可以改，开录时现取，避免改完要重启。
     media_root: std::sync::RwLock<PathBuf>,
+    /// 文件名模板与清洗开关，同样开录时现取。
+    naming: std::sync::RwLock<Naming>,
     /// 同时录制上限；0 表示不限。
     max_concurrent: std::sync::atomic::AtomicUsize,
     inner: Mutex<HashMap<String, Active>>,
@@ -81,6 +101,7 @@ impl Recorder {
         Self {
             db,
             media_root: std::sync::RwLock::new(media_root),
+            naming: std::sync::RwLock::new(Naming::default()),
             max_concurrent: std::sync::atomic::AtomicUsize::new(4),
             inner: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
@@ -127,6 +148,19 @@ impl Recorder {
     /// 设置页改目录后立即对新录制生效；正在录制的进程仍写旧路径。
     pub fn set_media_root(&self, root: PathBuf) {
         *self.media_root.write().expect("媒体目录被污染") = root;
+    }
+
+    pub fn naming(&self) -> Naming {
+        self.naming.read().expect("命名策略被污染").clone()
+    }
+
+    /// 设置页保存后调用；正在录制的文件不受影响。
+    pub fn set_naming(&self, template: String, strip_emoji: bool, group_dirs: bool) {
+        *self.naming.write().expect("命名策略被污染") = Naming {
+            template,
+            strip_emoji,
+            group_dirs,
+        };
     }
 
     pub fn max_concurrent(&self) -> usize {
@@ -277,12 +311,21 @@ impl Recorder {
         let started_at = crate::db::now_ts();
         let path = session_path(
             &media_root,
-            platform_label(&room.platform),
-            &room.host_name,
-            &room.title,
+            &crate::filename::NameParts {
+                platform_id: &room.platform,
+                platform: platform_label(&room.platform),
+                host: &room.host_name,
+                title: &room.title,
+                area: room.area_name.as_deref().unwrap_or(""),
+                room_key: &room.room_key,
+                qn: room.record_qn,
+            },
             started_at,
             "mp4",
+            &self.naming(),
         );
+        // 同名会同时覆盖视频和旁挂弹幕，落盘前先让开。
+        let path = crate::filename::unique_path(&path);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -928,54 +971,44 @@ fn platform_label(platform: &str) -> &'static str {
     }
 }
 
-/// 生成录制文件路径：媒体库/平台/主播/[时间][主播][标题].mp4
+/// 生成录制文件路径：媒体库/[平台/主播]/模板渲染出的文件名.ext
 pub fn session_path(
     root: &Path,
-    platform: &str,
-    host: &str,
-    title: &str,
+    parts: &crate::filename::NameParts<'_>,
     started_at: i64,
     ext: &str,
+    naming: &Naming,
 ) -> PathBuf {
-    let time = chrono::DateTime::from_timestamp(started_at, 0)
-        .unwrap_or_else(chrono::Utc::now)
-        .with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H-%M-%S")
-        .to_string();
-    let host = sanitize(host, "未知主播", 40);
-    let title = sanitize(title, "未命名直播", 60);
-    root.join(platform)
-        .join(&host)
-        .join(format!("[{time}][{host}][{title}].{ext}"))
-}
-
-/// 跨平台文件名清洗：去掉 Windows/macOS 都不接受的字符，压缩空白，限制长度。
-pub fn sanitize(input: &str, fallback: &str, max_chars: usize) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut last_was_space = false;
-    for ch in input.chars() {
-        let mapped = match ch {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        };
-        if mapped.is_whitespace() {
-            if last_was_space {
-                continue;
-            }
-            last_was_space = true;
-            out.push(' ');
-        } else {
-            last_was_space = false;
-            out.push(mapped);
-        }
+    let mut dir = root.to_path_buf();
+    if naming.group_dirs {
+        dir.push(parts.platform);
+        dir.push(crate::filename::sanitize(
+            parts.host,
+            "未知主播",
+            40,
+            naming.strip_emoji,
+        ));
     }
-    let trimmed = out.trim().trim_matches('.').trim();
-    let mut result: String = trimmed.chars().take(max_chars).collect();
-    if result.is_empty() {
-        result = fallback.to_string();
-    }
-    result
+    let budget = crate::filename::stem_budget(&dir, ext);
+    let stem = crate::filename::render(
+        &naming.template,
+        parts,
+        started_at,
+        naming.strip_emoji,
+        budget,
+    )
+    .unwrap_or_else(|_| {
+        // 保存设置时已校验；这里只兜底手改库或并发写入留下的坏模板。
+        crate::filename::render(
+            crate::filename::DEFAULT_TEMPLATE,
+            parts,
+            started_at,
+            naming.strip_emoji,
+            budget,
+        )
+        .unwrap_or_else(|_| "未命名直播".to_string())
+    });
+    dir.join(format!("{stem}.{ext}"))
 }
 
 #[cfg(test)]
@@ -984,10 +1017,11 @@ mod tests {
 
     #[test]
     fn sanitize_filters_illegal_chars() {
-        assert_eq!(sanitize("a/b:c*d?e\"f<g>h|i", "x", 40), "a_b_c_d_e_f_g_h_i");
-        assert_eq!(sanitize("  多   空格  ", "x", 40), "多 空格");
-        assert_eq!(sanitize("", "兜底", 40), "兜底");
-        assert_eq!(sanitize("...", "兜底", 40), "兜底");
+        let s = |input: &str, fallback: &str| crate::filename::sanitize(input, fallback, 40, false);
+        assert_eq!(s("a/b:c*d?e\"f<g>h|i", "x"), "a_b_c_d_e_f_g_h_i");
+        assert_eq!(s("  多   空格  ", "x"), "多 空格");
+        assert_eq!(s("", "兜底"), "兜底");
+        assert_eq!(s("...", "兜底"), "兜底");
     }
 
     #[test]
@@ -1043,10 +1077,27 @@ mod tests {
 
     #[test]
     fn session_path_shape() {
-        let path = session_path(Path::new("/tmp/lib"), "哔哩哔哩", "主播", "标题", 1_760_000_000, "flv");
+        let parts = crate::filename::NameParts {
+            platform_id: "bilibili",
+            platform: "哔哩哔哩",
+            host: "主播",
+            title: "标题",
+            area: "",
+            room_key: "6",
+            qn: 10000,
+        };
+        let naming = Naming::default();
+        let path = session_path(Path::new("/tmp/lib"), &parts, 1_760_000_000, "flv", &naming);
         let text = path.display().to_string();
-        assert!(text.starts_with("/tmp/lib/哔哩哔哩/主播/["));
-        assert!(text.ends_with("][主播][标题].flv"));
+        assert!(text.starts_with("/tmp/lib/哔哩哔哩/主播/哔哩哔哩-主播-标题-"));
+        assert!(text.ends_with(".flv"));
+        // 关掉分目录后直接落在根目录。
+        let flat = Naming {
+            group_dirs: false,
+            ..naming.clone()
+        };
+        let path = session_path(Path::new("/tmp/lib"), &parts, 1_760_000_000, "flv", &flat);
+        assert_eq!(path.parent(), Some(Path::new("/tmp/lib")));
     }
 
     #[test]

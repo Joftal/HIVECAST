@@ -299,8 +299,8 @@ impl Db {
                 "INSERT INTO room (
                     id, platform, room_key, canonical_url, title, host_name, avatar_url,
                     cover_url, area_name, is_live, started_at, online, auto_record,
-                    record_qn, view_qn, last_checked_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    monitor_paused, record_qn, view_qn, last_checked_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT (platform, room_key) DO UPDATE SET
                     canonical_url = excluded.canonical_url,
                     title = excluded.title,
@@ -311,6 +311,9 @@ impl Db {
                     is_live = excluded.is_live,
                     started_at = excluded.started_at,
                     online = excluded.online,
+                    -- 重新添加同一个房间时，按这次弹窗里的开关覆盖。
+                    auto_record = excluded.auto_record,
+                    monitor_paused = excluded.monitor_paused,
                     last_checked_at = excluded.last_checked_at,
                     updated_at = excluded.updated_at",
                 params![
@@ -327,6 +330,7 @@ impl Db {
                     info.started_at,
                     info.online,
                     room.auto_record as i64,
+                    room.monitor_paused as i64,
                     room.record_qn,
                     room.view_qn,
                     now,

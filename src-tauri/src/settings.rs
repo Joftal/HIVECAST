@@ -33,6 +33,18 @@ pub const KEY_POST_AUTO_REMUX: &str = "post.auto_remux";
 pub const KEY_CLOSE_ACTION: &str = "app.close_action";
 /// 阻止系统空闲休眠。
 pub const KEY_PREVENT_SLEEP: &str = "app.prevent_sleep";
+/// 监控检测间隔（秒）；0 = 关闭自动检测。
+pub const KEY_MONITOR_INTERVAL: &str = "monitor.interval_sec";
+/// 失败时是否自动加大间隔。
+pub const KEY_MONITOR_BACKOFF: &str = "monitor.backoff_enabled";
+/// 自动回退的间隔上限（秒）。
+pub const KEY_MONITOR_BACKOFF_CAP: &str = "monitor.backoff_cap_sec";
+/// 录制文件名模板。
+pub const KEY_FILENAME_TEMPLATE: &str = "media.filename_template";
+/// 去掉文件名里的 emoji 与特殊符号。
+pub const KEY_STRIP_EMOJI: &str = "media.strip_emoji";
+/// 按「平台/主播」建子目录。
+pub const KEY_GROUP_DIRS: &str = "media.group_dirs";
 
 /// 关闭行为的两种取值，前端也按这两个字符串渲染。
 pub const CLOSE_TRAY: &str = "tray";
@@ -41,6 +53,11 @@ pub const CLOSE_QUIT: &str = "quit";
 pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
 pub const MAX_TOTAL_GB: u32 = 100_000;
+/// 监控间隔上限：一天。再大就没有「监控」的意义了。
+pub const MAX_MONITOR_INTERVAL: u32 = 86_400;
+/// 回退上限的取值范围。
+pub const MIN_BACKOFF_CAP: u32 = 60;
+pub const MAX_BACKOFF_CAP: u32 = 3_600;
 
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
@@ -59,6 +76,12 @@ pub fn defaults() -> Settings {
         auto_remux: true,
         close_action: CLOSE_TRAY.into(),
         prevent_sleep: false,
+        monitor_interval_sec: 30,
+        monitor_backoff_enabled: true,
+        monitor_backoff_cap_sec: 300,
+        media_filename_template: crate::filename::DEFAULT_TEMPLATE.into(),
+        media_strip_emoji: false,
+        media_group_dirs: true,
     }
 }
 
@@ -109,6 +132,28 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_PREVENT_SLEEP).and_then(|v| v.parse::<bool>().ok()) {
         settings.prevent_sleep = value;
     }
+    if let Some(value) = read(KEY_MONITOR_INTERVAL).and_then(|v| v.parse::<u32>().ok()) {
+        settings.monitor_interval_sec = value.min(MAX_MONITOR_INTERVAL);
+    }
+    if let Some(value) = read(KEY_MONITOR_BACKOFF).and_then(|v| v.parse::<bool>().ok()) {
+        settings.monitor_backoff_enabled = value;
+    }
+    if let Some(value) = read(KEY_MONITOR_BACKOFF_CAP).and_then(|v| v.parse::<u32>().ok()) {
+        settings.monitor_backoff_cap_sec = value.clamp(MIN_BACKOFF_CAP, MAX_BACKOFF_CAP);
+    }
+    if let Some(value) = read(KEY_FILENAME_TEMPLATE) {
+        let value = value.trim().to_string();
+        // 旧版本或手改库可能留下坏模板，读的时候校验一次，坏了回落到默认值。
+        if crate::filename::validate(&value).is_ok() {
+            settings.media_filename_template = value;
+        }
+    }
+    if let Some(value) = read(KEY_STRIP_EMOJI).and_then(|v| v.parse::<bool>().ok()) {
+        settings.media_strip_emoji = value;
+    }
+    if let Some(value) = read(KEY_GROUP_DIRS).and_then(|v| v.parse::<bool>().ok()) {
+        settings.media_group_dirs = value;
+    }
     settings
 }
 
@@ -131,6 +176,13 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     }
     settings.retention_days = settings.retention_days.min(MAX_RETENTION_DAYS);
     settings.max_total_gb = settings.max_total_gb.min(MAX_TOTAL_GB);
+    settings.monitor_interval_sec = settings.monitor_interval_sec.min(MAX_MONITOR_INTERVAL);
+    settings.monitor_backoff_cap_sec = settings
+        .monitor_backoff_cap_sec
+        .clamp(MIN_BACKOFF_CAP, MAX_BACKOFF_CAP);
+    settings.media_filename_template = settings.media_filename_template.trim().to_string();
+    crate::filename::validate(&settings.media_filename_template)
+        .map_err(|reason| AppError::User(format!("文件名模板不可用：{reason}")))?;
     let media_root = settings.media_root.trim();
     if media_root.is_empty() {
         return Err(AppError::User("媒体目录不能为空".into()));
@@ -160,6 +212,15 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
     db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
     db.set_setting(KEY_POST_AUTO_REMUX, &settings.auto_remux.to_string())?;
+    db.set_setting(KEY_MONITOR_INTERVAL, &settings.monitor_interval_sec.to_string())?;
+    db.set_setting(KEY_MONITOR_BACKOFF, &settings.monitor_backoff_enabled.to_string())?;
+    db.set_setting(
+        KEY_MONITOR_BACKOFF_CAP,
+        &settings.monitor_backoff_cap_sec.to_string(),
+    )?;
+    db.set_setting(KEY_FILENAME_TEMPLATE, &settings.media_filename_template)?;
+    db.set_setting(KEY_STRIP_EMOJI, &settings.media_strip_emoji.to_string())?;
+    db.set_setting(KEY_GROUP_DIRS, &settings.media_group_dirs.to_string())?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
     Ok(settings)
@@ -169,6 +230,11 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
 pub fn apply(settings: &Settings, recorder: &Recorder) {
     recorder.set_media_root(PathBuf::from(&settings.media_root));
     recorder.set_max_concurrent(settings.max_concurrent_records as usize);
+    recorder.set_naming(
+        settings.media_filename_template.clone(),
+        settings.media_strip_emoji,
+        settings.media_group_dirs,
+    );
     // 电源断言与界面无关，启动和保存都走同一条路径，避免两处状态不一致。
     if let Err(err) = crate::power::apply(settings.prevent_sleep) {
         tracing::warn!(error = %err, "设置防休眠失败");
@@ -221,6 +287,7 @@ mod tests {
                 auto_remux: false,
                 close_action: "tray".into(),
                 prevent_sleep: false,
+                ..defaults()
             },
         )
         .expect("save settings");

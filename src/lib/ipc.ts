@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ActiveTask } from "./bindings/ActiveTask";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
+import type { FilenamePreview } from "./bindings/FilenamePreview";
 import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
@@ -27,6 +28,7 @@ export type {
   ActiveTask,
   AppInfo,
   CredentialInfo,
+  FilenamePreview,
   QrPoll,
   QrTicket,
   DanmakuBatch,
@@ -80,8 +82,12 @@ export async function roomsList(): Promise<RoomView[]> {
 }
 
 // input 支持房间号、直播间链接、主播主页链接；解析在 Rust 侧完成。
-export async function roomAdd(input: string): Promise<RoomView> {
-  return invoke<RoomView>("room_add", { input });
+export async function roomAdd(
+  input: string,
+  monitor = true,
+  autoRecord = true,
+): Promise<RoomView> {
+  return invoke<RoomView>("room_add", { input, monitor, autoRecord });
 }
 
 export async function roomRemove(id: string): Promise<void> {
@@ -222,6 +228,15 @@ export async function settingsGet(): Promise<Settings> {
 
 export async function settingsUpdate(settings: Settings): Promise<Settings> {
   return invoke<Settings>("settings_update", { settings });
+}
+
+/** 用示例房间预览文件名模板（与真正落盘同一套逻辑）。 */
+export async function filenamePreview(
+  template: string,
+  stripEmoji: boolean,
+  groupDirs: boolean,
+): Promise<FilenamePreview> {
+  return invoke<FilenamePreview>("filename_preview", { template, stripEmoji, groupDirs });
 }
 
 /** 媒体库筛选条件：字段全部可选，未传就走后端的默认值。 */

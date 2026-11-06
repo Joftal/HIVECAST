@@ -129,18 +129,39 @@ impl StreamBroker {
         }
     }
 
-    /// 取房间信息（开播状态 / 标题 / 人气）。监控轮询走这里。
+    /// 取房间信息（开播状态 / 标题 / 人气）。手动刷新、开录前检查走这里。
     pub async fn room_info(&self, room: &RoomRef) -> Result<Arc<RoomInfo>, PlatformError> {
+        self.room_info_inner(room, false).await
+    }
+
+    /// 监控轮询专用：跳过 15 秒信息缓存，但仍走房间闸门与失败退避。
+    /// 间隔设得比缓存短时（例如 5 秒），用它可以真的按间隔取到新状态。
+    pub async fn room_info_fresh(
+        &self,
+        room: &RoomRef,
+    ) -> Result<Arc<RoomInfo>, PlatformError> {
+        self.room_info_inner(room, true).await
+    }
+
+    async fn room_info_inner(
+        &self,
+        room: &RoomRef,
+        fresh: bool,
+    ) -> Result<Arc<RoomInfo>, PlatformError> {
         let gate_key = room_gate(room);
-        if let Some(info) = self.cached_info(&gate_key) {
-            return Ok(info);
+        if !fresh {
+            if let Some(info) = self.cached_info(&gate_key) {
+                return Ok(info);
+            }
         }
 
         let gate = self.info_gate(&gate_key);
         let _guard = gate.lock().await;
 
-        if let Some(info) = self.cached_info(&gate_key) {
-            return Ok(info);
+        if !fresh {
+            if let Some(info) = self.cached_info(&gate_key) {
+                return Ok(info);
+            }
         }
         if let Some(err) = self.backoff_error(&gate_key) {
             return Err(err);

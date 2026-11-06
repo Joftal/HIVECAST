@@ -126,10 +126,12 @@ export function Switch({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -138,9 +140,10 @@ export function Switch({
       aria-checked={checked}
       aria-label={label}
       title={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cx(
-        "focus-ring relative h-[18px] w-[30px] shrink-0 rounded-full transition-colors duration-200",
+        "focus-ring relative h-[18px] w-[30px] shrink-0 rounded-full transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-45",
         checked ? "bg-accent" : "bg-line-strong",
       )}
     >

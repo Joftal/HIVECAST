@@ -175,7 +175,23 @@
     "closeQuit": "退出程序",
     "sectionPower": "电源",
     "preventSleep": "阻止系统休眠",
-    "preventSleepHint": "开启后，录制或观看期间电脑不会进入空闲休眠。"
+    "preventSleepHint": "开启后，录制或观看期间电脑不会进入空闲休眠。",
+    "sectionMonitor": "监控",
+    "monitorInterval": "检测间隔",
+    "monitorIntervalHint": "多久刷新一次直播间状态。填 0 关闭自动检测，只能手动刷新。",
+    "unitSeconds": "秒",
+    "monitorBackoff": "失败自动退避",
+    "monitorBackoffHint": "遇到限流或网络错误时，逐步拉长这个房间的检测间隔，成功一次就恢复。",
+    "monitorBackoffCap": "退避上限",
+    "monitorBackoffCapHint": "退避最长不超过这个间隔。",
+    "sectionNaming": "文件名",
+    "filenameTemplate": "文件名模板",
+    "filenameTemplateHint": "只改文件名，目录仍按平台与主播分。",
+    "filenameVars": "可用变量：{platform} 平台 · {platform_id} 平台代号 · {host} 主播 · {title} 标题 · {area} 分区 · {room_key} 房间号 · {qn} 画质 · {date} 日期 · {time} 时间 · {datetime} 日期时间 · {year} {month} {day} {hour} {min} {sec}",
+    "stripEmoji": "去掉 emoji 与特殊符号",
+    "stripEmojiHint": "文件名里不出现 emoji、箭头等符号，跨设备同步更稳。",
+    "groupDirs": "按平台与主播分目录",
+    "groupDirsHint": "关闭后所有录像直接放在媒体库根目录。"
   },
   "common": {
     "retry": "重试",
@@ -310,7 +326,12 @@
     "modeCol": "上下",
     "modeTop": "上大下二",
     "modeLeft": "左大右二",
-    "modeQuad": "田字"
+    "modeQuad": "田字",
+    "addMonitor": "监控",
+    "addAutoRecord": "自动录制",
+    "addMonitorHint": "关闭后不参与定时检测，也不会自动录制。",
+    "addAutoRecordHint": "开播时自动开始录制。",
+    "addAutoRecordDisabled": "先开启监控，才能自动录制。"
   },
   "watch": {
     "title": "多屏观看",

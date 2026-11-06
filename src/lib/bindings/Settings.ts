@@ -62,4 +62,28 @@ closeAction: string,
 /**
  * 阻止系统空闲休眠（录制/观看期间保持唤醒）
  */
-preventSleep: boolean, };
+preventSleep: boolean, 
+/**
+ * 监控检测间隔（秒）；0 = 关闭自动检测，只能手动刷新
+ */
+monitorIntervalSec: number, 
+/**
+ * 连续失败（限流/网络）时是否自动加大检测间隔
+ */
+monitorBackoffEnabled: boolean, 
+/**
+ * 自动回退的间隔上限（秒）
+ */
+monitorBackoffCapSec: number, 
+/**
+ * 录制文件名模板（不含目录与扩展名）
+ */
+mediaFilenameTemplate: string, 
+/**
+ * 去掉文件名里的 emoji 与特殊符号
+ */
+mediaStripEmoji: boolean, 
+/**
+ * 按「平台/主播」建子目录
+ */
+mediaGroupDirs: boolean, };
