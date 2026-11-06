@@ -527,8 +527,16 @@ impl Recorder {
         if let Some(existing) = self.active(&room.id) {
             return Ok(existing);
         }
-        if self.cooling_down(&room.id) || self.in_failure_cooldown(&room.id) {
+        if self.cooling_down(&room.id) {
             return Err(AppError::User("该房间连续录制失败，已暂停自动重试".into()));
+        }
+        // 连续失败冷却（R6/R7）只拦自动开录：用户手动点「录制」说明他知道源可能有问题，
+        // 硬拦 5 分钟反而像功能坏了；这里只记一条日志，让 ffmpeg 去试。
+        if self.in_failure_cooldown(&room.id) {
+            if recheck {
+                return Err(AppError::User("该房间连续录制失败，已暂停自动重试".into()));
+            }
+            tracing::info!(room = %room.host_name, "手动开录，忽略连续失败冷却");
         }
 
         // 并发上限：4 路 1080p 已经能吃掉一块 SSD 的写入带宽，默认不再往上加。
