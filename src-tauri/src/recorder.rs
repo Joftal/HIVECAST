@@ -611,7 +611,17 @@ impl Recorder {
         // 收尾产物：分片 → mp4；合成失败退化为字节拼接的 .ts；再不行只能报分片总量。
         let source_path = PathBuf::from(&active.recording.file_path);
         let auto_remux = crate::settings::load(&self.db).auto_remux;
+        // 收尾里的转封装同样会写文件：登记成任务，退出时才会等它写完再走。
+        let jobs = app.state::<crate::state::AppState>().jobs.clone();
+        let remux_label = source_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| active.recording.session_id.clone());
+        let _remux_job = auto_remux.then(|| {
+            jobs.begin("remux", remux_label, Some(active.recording.quality.clone()))
+        });
         let (stored_path, file_size) = finish_file(&source_path, auto_remux).await;
+        drop(_remux_job);
         if stored_path != source_path {
             if let Err(err) = self.db.update_session_file(
                 &active.recording.session_id,

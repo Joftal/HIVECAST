@@ -7,7 +7,21 @@ import SettingsView from "./features/settings/SettingsView";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
-import { isTauri, onAppNotice, settingsGet, settingsUpdate, type Settings } from "./lib/ipc";
+import CloseDialog from "./features/close/CloseDialog";
+import {
+  activeTasks,
+  closeArmQuit,
+  closeCancelQuit,
+  closeQuitNow,
+  isTauri,
+  onAppNotice,
+  onCloseBlocked,
+  onCloseReady,
+  settingsGet,
+  settingsUpdate,
+  type ActiveTask,
+  type Settings,
+} from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 
@@ -24,6 +38,10 @@ export default function App() {
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
   // 通知开关按事件分三类：录制、异常、登录失效。
   const notifyRef = useRef<Settings | null>(null);
+  // 退出被任务拦下：null = 没有提示；[] = 任务已清空，可以安全退出。
+  const [closeTasks, setCloseTasks] = useState<ActiveTask[] | null>(null);
+  const [closeArmed, setCloseArmed] = useState(false);
+  const [closeBusy, setCloseBusy] = useState(false);
   const prevTab = useRef<TabKey>(tab);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
 
@@ -43,6 +61,58 @@ export default function App() {
       })
       .catch(() => applyTheme("light"));
   }, []);
+
+  // 后端拦下退出后弹提示；任务清空时同一个面板切成「可以安全退出」。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisteners: Array<() => void> = [];
+    let alive = true;
+    void onCloseBlocked((tasks) => {
+      if (!alive) return;
+      setCloseTasks(tasks);
+      setCloseArmed(false);
+    }).then((off) => (alive ? unlisteners.push(off) : off()));
+    void onCloseReady(() => {
+      if (!alive) return;
+      setCloseTasks((current) => (current ? [] : current));
+    }).then((off) => (alive ? unlisteners.push(off) : off()));
+    return () => {
+      alive = false;
+      unlisteners.forEach((off) => off());
+    };
+  }, []);
+
+  // 后端重启 / 事件漏收时兜底拉一次任务表。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const timer = window.setInterval(() => {
+      if (closeTasks && closeTasks.length > 0) {
+        void activeTasks().then((tasks) => setCloseTasks(tasks)).catch(() => undefined);
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [closeTasks]);
+
+  const cancelClose = () => {
+    setCloseTasks(null);
+    setCloseArmed(false);
+    void closeCancelQuit().catch(() => undefined);
+  };
+
+  const armClose = () => {
+    setCloseArmed(true);
+    void closeArmQuit().catch(() => setCloseArmed(false));
+  };
+
+  const disarmClose = () => {
+    setCloseArmed(false);
+    void closeCancelQuit().catch(() => undefined);
+  };
+
+  const quitClose = () => {
+    setCloseBusy(true);
+    void closeQuitNow().finally(() => setCloseBusy(false));
+  };
 
   // Cmd/Ctrl + , 打开设置，和 macOS 惯例一致。
   useEffect(() => {
@@ -245,6 +315,18 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {closeTasks ? (
+        <CloseDialog
+          tasks={closeTasks}
+          armed={closeArmed}
+          busy={closeBusy}
+          onCancel={cancelClose}
+          onArm={armClose}
+          onDisarm={disarmClose}
+          onQuitNow={quitClose}
+        />
+      ) : null}
 
       <SettingsView
         open={settingsOpen}

@@ -164,7 +164,18 @@
     "groupPlatforms": "Platforms",
     "unitDays": "days",
     "unitGb": "GB",
-    "searchResults": "{{n}} matches"
+    "searchResults": "{{n}} matches",
+    "navSystem": "System",
+    "pageSystem": "System",
+    "pageSystemDesc": "Close behavior, tray and power",
+    "sectionClose": "Close and quit",
+    "closeAction": "When closing the main window",
+    "closeActionHint": "Minimizing to the tray keeps recording and monitoring running. Quitting with unfinished tasks shows a warning first.",
+    "closeTray": "Minimize to tray",
+    "closeQuit": "Quit app",
+    "sectionPower": "Power",
+    "preventSleep": "Prevent system sleep",
+    "preventSleepHint": "While enabled, the computer will not go to idle sleep during recording or watching."
   },
   "common": {
     "retry": "Retry",
@@ -460,5 +471,22 @@
     "qrExpiresIn": "Expires in {{time}}",
     "qrExpired": "QR code expired, please refresh",
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
+  },
+  "close": {
+    "title": "Tasks are still running",
+    "body": "{{n}} task(s) must finish before quitting so recordings are not damaged.",
+    "readyTitle": "All tasks finished",
+    "readyBody": "It is safe to quit now.",
+    "autoQuit": "Quit when tasks finish",
+    "autoQuitHint": "Turn this on and HIVECAST will close itself once the tasks are done.",
+    "armed": "Will quit when tasks finish",
+    "cancel": "Cancel",
+    "waitQuit": "Quit when finished",
+    "quitNow": "Quit now",
+    "kindRecord": "Recording",
+    "kindRemux": "Remux",
+    "kindMerge": "Merge",
+    "kindDanmaku": "Danmaku",
+    "kindTask": "Task"
   }
 }

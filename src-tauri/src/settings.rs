@@ -29,6 +29,14 @@ pub const KEY_RETENTION_DAYS: &str = "media.retention_days";
 pub const KEY_MAX_TOTAL_GB: &str = "media.max_total_gb";
 /// 文件后处理：录制结束后是否自动合成 mp4。
 pub const KEY_POST_AUTO_REMUX: &str = "post.auto_remux";
+/// 关闭主窗口的行为：tray（最小化到托盘）| quit（退出程序）。
+pub const KEY_CLOSE_ACTION: &str = "app.close_action";
+/// 阻止系统空闲休眠。
+pub const KEY_PREVENT_SLEEP: &str = "app.prevent_sleep";
+
+/// 关闭行为的两种取值，前端也按这两个字符串渲染。
+pub const CLOSE_TRAY: &str = "tray";
+pub const CLOSE_QUIT: &str = "quit";
 
 pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
@@ -49,6 +57,8 @@ pub fn defaults() -> Settings {
         retention_days: 0,
         max_total_gb: 0,
         auto_remux: true,
+        close_action: CLOSE_TRAY.into(),
+        prevent_sleep: false,
     }
 }
 
@@ -93,6 +103,12 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_POST_AUTO_REMUX).and_then(|v| v.parse::<bool>().ok()) {
         settings.auto_remux = value;
     }
+    if let Some(value) = read(KEY_CLOSE_ACTION).filter(|v| v == CLOSE_TRAY || v == CLOSE_QUIT) {
+        settings.close_action = value;
+    }
+    if let Some(value) = read(KEY_PREVENT_SLEEP).and_then(|v| v.parse::<bool>().ok()) {
+        settings.prevent_sleep = value;
+    }
     settings
 }
 
@@ -109,6 +125,9 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     }
     if !matches!(settings.theme.as_str(), "light" | "dark" | "system") {
         settings.theme = "light".into();
+    }
+    if !matches!(settings.close_action.as_str(), CLOSE_TRAY | CLOSE_QUIT) {
+        settings.close_action = CLOSE_TRAY.into();
     }
     settings.retention_days = settings.retention_days.min(MAX_RETENTION_DAYS);
     settings.max_total_gb = settings.max_total_gb.min(MAX_TOTAL_GB);
@@ -150,6 +169,10 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
 pub fn apply(settings: &Settings, recorder: &Recorder) {
     recorder.set_media_root(PathBuf::from(&settings.media_root));
     recorder.set_max_concurrent(settings.max_concurrent_records as usize);
+    // 电源断言与界面无关，启动和保存都走同一条路径，避免两处状态不一致。
+    if let Err(err) = crate::power::apply(settings.prevent_sleep) {
+        tracing::warn!(error = %err, "设置防休眠失败");
+    }
 }
 
 fn normalize_qn(qn: u32) -> u32 {
@@ -196,6 +219,8 @@ mod tests {
                 retention_days: 9_999,
                 max_total_gb: 500_000,
                 auto_remux: false,
+                close_action: "tray".into(),
+                prevent_sleep: false,
             },
         )
         .expect("save settings");
@@ -220,6 +245,8 @@ mod tests {
         assert_eq!(loaded.retention_days, MAX_RETENTION_DAYS);
         assert_eq!(loaded.max_total_gb, MAX_TOTAL_GB);
         assert!(!loaded.auto_remux);
+        assert_eq!(loaded.close_action, CLOSE_TRAY, "未知关闭行为回落到托盘");
+        assert!(!loaded.prevent_sleep);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

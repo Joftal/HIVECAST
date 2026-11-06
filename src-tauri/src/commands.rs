@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, CredentialInfo, LineInfo, MediaHostPage, MediaPage, Playback, PostResult, QrPoll,
-    QrTicket,
-    RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
+    ActiveTask, AppInfo, CredentialInfo, LineInfo, MediaHostPage, MediaPage, Playback, PostResult,
+    QrPoll, QrTicket, RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -418,6 +417,12 @@ fn session_file(state: &AppState, session_id: &str) -> Result<RecordSession, App
         .ok_or_else(|| AppError::Internal("录像不存在".into()))
 }
 
+fn file_label(path: &PathBuf) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn session_video(session: &RecordSession, active: bool) -> Result<PathBuf, AppError> {
     if active {
         return Err(AppError::User("这段还在录制，先停下再处理".into()));
@@ -438,6 +443,8 @@ pub async fn session_remux(
 ) -> Result<PostResult, AppError> {
     let session = session_file(&state, &session_id)?;
     let path = session_video(&session, session.status == "recording")?;
+    // 先登记再开跑：退出流程要能看到这个任务，命令返回（含报错）时 guard 自动注销。
+    let _job = state.jobs.begin("remux", file_label(&path), session.quality.clone());
     let progress = postprocess::Progress {
         app: &app,
         task: &session_id,
@@ -464,6 +471,14 @@ pub async fn room_merge_sessions(
         .filter_map(|session| session.file_path.map(PathBuf::from))
         .filter(|path| path.is_file())
         .collect();
+    let title = state
+        .db
+        .get_room(&room_id)?
+        .map(|room| room.title)
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| files.first().map(file_label))
+        .unwrap_or_else(|| room_id.clone());
+    let _job = state.jobs.begin("merge", title, None);
     postprocess::merge(&files, None).await
 }
 
@@ -490,6 +505,7 @@ pub async fn sessions_merge(
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
+    let _job = state.jobs.begin("merge", file_label(&files[0]), None);
     let progress = postprocess::Progress {
         app: &app,
         task: "merge",
@@ -707,6 +723,9 @@ pub async fn session_export_danmaku(
         .danmaku_path
         .filter(|path| std::path::Path::new(path).is_file())
         .ok_or_else(|| AppError::User("这段录像没有弹幕文件".into()))?;
+    let _job = state
+        .jobs
+        .begin("danmaku", file_label(&PathBuf::from(&path)), None);
     postprocess::danmaku_to_ass(std::path::Path::new(&path))
 }
 
@@ -811,5 +830,32 @@ fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
         .status()
         .map_err(|err| AppError::Internal(format!("无法打开文件管理器：{err}")))?;
     Ok(())
+}
+
+
+// ---- 关闭与退出 ----
+
+/// 当前还没结束的录制与后处理任务，前端在退出提示里逐条列出。
+#[tauri::command]
+pub fn active_tasks(state: State<'_, AppState>) -> Vec<ActiveTask> {
+    crate::lifecycle::active_tasks(&state)
+}
+
+/// 用户确认「现在就退出」；只有任务清空后前端才会走到这里。
+#[tauri::command]
+pub fn close_quit_now(app: AppHandle) {
+    crate::lifecycle::quit_now(&app);
+}
+
+/// 用户勾了「任务完成后自动退出」。
+#[tauri::command]
+pub fn close_arm_quit(app: AppHandle) {
+    crate::lifecycle::arm_auto_quit(&app);
+}
+
+/// 撤销「任务完成后自动退出」，应用继续留着。
+#[tauri::command]
+pub fn close_cancel_quit() {
+    crate::lifecycle::cancel_auto_quit();
 }
 

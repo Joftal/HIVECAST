@@ -31,6 +31,8 @@ pub struct AppState {
     pub danmaku: Arc<DanmakuHub>,
     /// 媒体库九宫格缩略图（后台限流生成，完成后广播事件）。
     pub thumbs: Arc<crate::thumbs::Thumbs>,
+    /// 正在跑的后处理任务（转封装、合并、弹幕导出），关闭程序时用来拦退出。
+    pub jobs: Arc<crate::jobs::Jobs>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
 }
@@ -140,6 +142,7 @@ impl AppState {
             local,
             danmaku,
             thumbs,
+            jobs: crate::jobs::Jobs::new(),
             demo: tokio::sync::Mutex::new(None),
         })
     }

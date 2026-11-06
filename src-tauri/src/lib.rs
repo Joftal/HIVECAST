@@ -9,10 +9,13 @@ mod disk;
 mod error;
 mod ffmpeg;
 mod jce;
+mod jobs;
+mod lifecycle;
 mod local;
 mod monitor;
 mod platform;
 mod postprocess;
+mod power;
 mod process;
 mod recorder;
 mod retention;
@@ -66,9 +69,10 @@ pub fn run() {
                 }
                 let target = window.clone();
                 window.on_window_event(move |event| match event {
-                    tauri::WindowEvent::CloseRequested { api, .. } if tray_ready => {
+                    // 一律先拦下：是隐藏还是退出由设置与任务表决定。
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        let _ = target.hide();
+                        crate::lifecycle::on_close_requested(target.app_handle(), tray_ready);
                     }
                     #[cfg(target_os = "windows")]
                     tauri::WindowEvent::ThemeChanged(theme) => {
@@ -95,7 +99,8 @@ pub fn run() {
                     state.recorder.shutdown_all(&handle).await;
                     state.view.shutdown_all(&handle).await;
                     state.danmaku.shutdown_all();
-                    handle.exit(0);
+                    // 走统一出口：置上 force 标记，避免 ExitRequested 再把退出拦下来。
+                    crate::lifecycle::quit_now(&handle);
                 });
             }
             Ok(())
@@ -142,12 +147,29 @@ pub fn run() {
             commands::media_delete,
             commands::media_reveal,
             commands::media_play,
-            commands::media_stop
+            commands::media_stop,
+            commands::active_tasks,
+            commands::close_quit_now,
+            commands::close_arm_quit,
+            commands::close_cancel_quit
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIVECAST");
 
     app.run(|handle, event| {
+        // Cmd+Q / Dock 退出也走同一套任务检查；只有 quit_now 置过 force 才放行。
+        if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+            if !crate::lifecycle::force_quit() {
+                let blocked = handle
+                    .try_state::<AppState>()
+                    .map(|state| !crate::lifecycle::active_tasks(&state).is_empty())
+                    .unwrap_or(false);
+                if blocked {
+                    api.prevent_exit();
+                    crate::lifecycle::on_quit_requested(handle);
+                }
+            }
+        }
         // macOS：点 Dock 图标把藏起来的窗口拿回来。
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {

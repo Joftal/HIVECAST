@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ActiveTask } from "./bindings/ActiveTask";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { QrPoll } from "./bindings/QrPoll";
@@ -23,6 +24,7 @@ import type { StreamDescriptor } from "./bindings/StreamDescriptor";
 import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
 
 export type {
+  ActiveTask,
   AppInfo,
   CredentialInfo,
   QrPoll,
@@ -335,4 +337,35 @@ export async function bilibiliQrStart(): Promise<QrTicket> {
 
 export async function bilibiliQrPoll(qrcodeKey: string): Promise<QrPoll> {
   return invoke<QrPoll>("bilibili_qr_poll", { qrcodeKey });
+}
+
+// ---- 关闭与退出 ----
+
+/** 还没结束的录制与后处理任务。 */
+export async function activeTasks(): Promise<ActiveTask[]> {
+  return invoke<ActiveTask[]>("active_tasks");
+}
+
+/** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */
+export async function closeQuitNow(): Promise<void> {
+  return invoke<void>("close_quit_now");
+}
+
+/** 任务完成后自动退出；应用先留在后台。 */
+export async function closeArmQuit(): Promise<void> {
+  return invoke<void>("close_arm_quit");
+}
+
+export async function closeCancelQuit(): Promise<void> {
+  return invoke<void>("close_cancel_quit");
+}
+
+/** 退出被任务拦下：payload 是任务列表。 */
+export function onCloseBlocked(handler: (tasks: ActiveTask[]) => void): Promise<UnlistenFn> {
+  return listen<ActiveTask[]>("app://close-blocked", (event) => handler(event.payload));
+}
+
+/** 任务全部结束，可以安全退出。 */
+export function onCloseReady(handler: () => void): Promise<UnlistenFn> {
+  return listen("app://close-ready", () => handler());
 }

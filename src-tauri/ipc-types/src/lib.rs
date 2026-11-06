@@ -279,6 +279,25 @@ pub struct Settings {
     pub max_total_gb: u32,
     /// 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
     pub auto_remux: bool,
+    /// 关闭主窗口时的行为：tray = 最小化到托盘，quit = 退出程序
+    pub close_action: String,
+    /// 阻止系统空闲休眠（录制/观看期间保持唤醒）
+    pub prevent_sleep: bool,
+}
+
+/// 关闭程序时还没结束的任务（录制、转封装、合并、弹幕导出）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ActiveTask {
+    /// 稳定标识，前端用它做列表 key
+    pub id: String,
+    /// record | remux | merge | danmaku
+    pub kind: String,
+    /// 房间标题或文件名，直接展示
+    pub title: String,
+    /// 次要说明（画质、来源文件），可为空
+    pub detail: Option<String>,
 }
 
 /// 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。

@@ -164,7 +164,18 @@
     "groupPlatforms": "直播平台",
     "unitDays": "天",
     "unitGb": "GB",
-    "searchResults": "{{n}} 个匹配项"
+    "searchResults": "{{n}} 个匹配项",
+    "navSystem": "系统",
+    "pageSystem": "系统",
+    "pageSystemDesc": "关闭行为、托盘与电源",
+    "sectionClose": "关闭与退出",
+    "closeAction": "关闭主窗口时",
+    "closeActionHint": "最小化到托盘时录制与监控继续运行；有任务未完成时退出会先提示。",
+    "closeTray": "最小化到托盘",
+    "closeQuit": "退出程序",
+    "sectionPower": "电源",
+    "preventSleep": "阻止系统休眠",
+    "preventSleepHint": "开启后，录制或观看期间电脑不会进入空闲休眠。"
   },
   "common": {
     "retry": "重试",
@@ -460,5 +471,22 @@
     "qrExpiresIn": "{{time}} 后失效",
     "qrExpired": "二维码已过期，请刷新",
     "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。"
+  },
+  "close": {
+    "title": "有任务正在进行",
+    "body": "退出前需要等待以下 {{n}} 个任务完成，避免录像文件损坏。",
+    "readyTitle": "任务已全部完成",
+    "readyBody": "现在可以安全退出程序。",
+    "autoQuit": "任务完成后自动退出",
+    "autoQuitHint": "打开后可以先去忙别的，任务结束会自动关闭程序。",
+    "armed": "已设置：任务完成后自动退出",
+    "cancel": "取消",
+    "waitQuit": "任务完成后退出",
+    "quitNow": "立即退出",
+    "kindRecord": "录制",
+    "kindRemux": "转 MP4",
+    "kindMerge": "合并",
+    "kindDanmaku": "弹幕",
+    "kindTask": "任务"
   }
 }

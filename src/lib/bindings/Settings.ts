@@ -54,4 +54,12 @@ maxTotalGb: number,
 /**
  * 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
  */
-autoRemux: boolean, };
+autoRemux: boolean, 
+/**
+ * 关闭主窗口时的行为：tray = 最小化到托盘，quit = 退出程序
+ */
+closeAction: string, 
+/**
+ * 阻止系统空闲休眠（录制/观看期间保持唤醒）
+ */
+preventSleep: boolean, };

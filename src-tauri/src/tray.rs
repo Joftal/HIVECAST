@@ -63,6 +63,7 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let (show, quit) = labels(&language(app));
     let show_item = MenuItem::with_id(app, MENU_SHOW, show, true, None::<&str>)?;
@@ -79,7 +80,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .icon(tray_image(app))
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_main(app),
-            MENU_QUIT => app.exit(0),
+            MENU_QUIT => crate::lifecycle::on_quit_requested(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

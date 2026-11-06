@@ -21,7 +21,7 @@ const QN_OPTIONS = [
   { value: 80, key: "qnStandard" },
 ];
 
-type PageKey = "account" | "record" | "storage" | "notify" | "appearance" | "about";
+type PageKey = "account" | "record" | "storage" | "notify" | "appearance" | "system" | "about";
 
 type PageMeta = {
   key: PageKey;
@@ -63,6 +63,12 @@ const ICON = {
       <path d="M8 1.4v1.4M8 13.2v1.4M1.4 8h1.4M13.2 8h1.4M3.3 3.3l1 1M11.7 11.7l1 1M12.7 3.3l-1 1M4.3 11.7l-1 1" strokeLinecap="round" />
     </svg>
   ),
+  system: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+      <rect x="1.8" y="2.8" width="12.4" height="8" rx="1.6" />
+      <path d="M8 10.8v2.4M5.4 13.4h5.2" strokeLinecap="round" />
+    </svg>
+  ),
   about: (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
       <circle cx="8" cy="8" r="6.2" />
@@ -77,6 +83,7 @@ const PAGES: PageMeta[] = [
   { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage },
   { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify },
   { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance },
+  { key: "system", labelKey: "settings.navSystem", titleKey: "settings.pageSystem", descKey: "settings.pageSystemDesc", icon: ICON.system },
   { key: "about", labelKey: "settings.navAbout", titleKey: "settings.pageAbout", descKey: "settings.pageAboutDesc", icon: ICON.about },
 ];
 
@@ -95,6 +102,8 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "notify", id: "set-notify-auth", titleKey: "settings.notifyAuth", descKey: "settings.notifyAuthHint", extra: "通知 登录 失效 cookie expired" },
   { page: "appearance", id: "set-theme", titleKey: "settings.theme", descKey: "settings.themeHint", extra: "主题 深色 浅色 theme dark light" },
   { page: "appearance", id: "set-language", titleKey: "settings.language", descKey: "settings.languageHint", extra: "语言 language english 中文" },
+  { page: "system", id: "set-close-action", titleKey: "settings.closeAction", descKey: "settings.closeActionHint", extra: "关闭 托盘 退出 close tray quit" },
+  { page: "system", id: "set-prevent-sleep", titleKey: "settings.preventSleep", descKey: "settings.preventSleepHint", extra: "休眠 睡眠 唤醒 sleep power wake" },
   { page: "about", id: "set-about", titleKey: "settings.pageAbout", descKey: "settings.aboutBuild", extra: "版本 version 关于 about 构建" },
 ];
 
@@ -603,6 +612,45 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
             <p className="text-[11px] leading-4 text-faint">{t("settings.trayHint")}</p>
           </div>
         </Section>
+      );
+    }
+
+    if (page === "system") {
+      return (
+        <div className="space-y-6">
+          <Section title={t("settings.sectionClose")}>
+            <Row
+              id="set-close-action"
+              focus={focusId === "set-close-action"}
+              title={t("settings.closeAction")}
+              desc={t("settings.closeActionHint")}
+            >
+              <Segmented
+                items={[
+                  { key: "tray", label: t("settings.closeTray") },
+                  { key: "quit", label: t("settings.closeQuit") },
+                ]}
+                value={settings.closeAction === "quit" ? "quit" : "tray"}
+                onChange={(next) => patch({ closeAction: next })}
+              />
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionPower")}>
+            <Row
+              id="set-prevent-sleep"
+              focus={focusId === "set-prevent-sleep"}
+              title={t("settings.preventSleep")}
+              desc={t("settings.preventSleepHint")}
+            >
+              <Switch
+                checked={settings.preventSleep}
+                onChange={(next) => patch({ preventSleep: next })}
+                label={t("settings.preventSleep")}
+              />
+            </Row>
+          </Section>
+        </div>
       );
     }
 
