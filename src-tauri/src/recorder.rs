@@ -40,9 +40,15 @@ const MAX_STALL_RESTARTS: u32 = 2;
 /// 录制文件连续这么久一个字节都没涨，判定直播源假死（S4）。
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// 下播需要连续两次成功检查都报离线（S1），两次最多间隔这么久。
-const OFFLINE_CONFIRM_GAP_SECS: i64 = 180;
+const OFFLINE_CONFIRM_GAP: Duration = Duration::from_secs(180);
 /// 自然结束后的自动开录静默期（S2）；出现新场次会提前解除。
-const ENDED_BLOCK_SECS: i64 = 600;
+const ENDED_BLOCK: Duration = Duration::from_secs(600);
+/// 干净 EOF 后最多复核几次「平台是否仍显示在播」（R1）。
+const MAX_EOF_RETRIES: u32 = 2;
+/// 连续失败多少次后进入长冷却（R6/R7）。
+const FAILED_STREAK_LIMIT: u32 = 3;
+/// 连续失败后的长冷却时长：源真的不可用时，别再每分钟开一条失败会话。
+const FAILED_STREAK_COOLDOWN: Duration = Duration::from_secs(300);
 
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
@@ -68,6 +74,8 @@ struct Active {
     last_growth: Instant,
     /// 假死重启次数；只要文件重新增长就清零
     stalls: u32,
+    /// 「平台仍显示在播」的干净 EOF 复核次数（R1）
+    eof_retries: u32,
 }
 
 /// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
@@ -106,11 +114,15 @@ pub struct Recorder {
     /// 用户手动停录过的房间 → 停录时的开播时间。
     /// 同一场直播内不再自动开录，换了新场次自动放行（S3）。
     suppressed: Mutex<HashMap<String, Option<i64>>>,
-    /// 上一场自然结束：房间 →（结束时间, 那场的开播时间）。
+    /// 上一场自然结束：房间 →（结束时刻, 那场的开播时间）。
     /// 平台下播状态滞后时先别再开一条秒退的会话（S2）。
-    ended: Mutex<HashMap<String, (i64, Option<i64>)>>,
+    /// 用单调时钟：改系统时间不该让静默窗口提前结束或永不结束（R4）。
+    ended: Mutex<HashMap<String, (Instant, Option<i64>)>>,
     /// 连续「成功检查且离线」的次数，给下播做二次确认（S1）。
-    offline: Mutex<HashMap<String, (u32, i64)>>,
+    offline: Mutex<HashMap<String, (u32, Instant)>>,
+    /// 连续「非正常收尾」的次数与最后一次时刻（R6/R7）。
+    /// 源不可用时监控每轮都会重开，这里攒够 3 次就进长冷却。
+    hard_failures: Mutex<HashMap<String, (u32, Instant)>>,
     /// 弹幕扇出中心：录制与观看共用一条房间连接。测试里可以不挂。
     danmaku: Option<Arc<DanmakuHub>>,
     /// 缩略图生成器：录制一收尾就排队生成九宫格封面，媒体库打开时直接有图。
@@ -131,6 +143,7 @@ impl Recorder {
             suppressed: Mutex::new(HashMap::new()),
             ended: Mutex::new(HashMap::new()),
             offline: Mutex::new(HashMap::new()),
+            hard_failures: Mutex::new(HashMap::new()),
             danmaku,
             thumbs: std::sync::RwLock::new(None),
         }
@@ -266,12 +279,11 @@ impl Recorder {
     /// 解除条件（任一）：成功看到一次离线（resume_auto）、平台给出新的开播时间、
     /// 或者过了 ENDED_BLOCK_SECS 的兜底窗口。
     pub fn auto_blocked(&self, room_id: &str, live_started: Option<i64>) -> bool {
-        let now = crate::db::now_ts();
         let mut map = self.ended.lock().expect("结束标记被污染");
         let Some((at, stored)) = map.get(room_id).copied() else {
             return false;
         };
-        if now - at > ENDED_BLOCK_SECS {
+        if at.elapsed() > ENDED_BLOCK {
             map.remove(room_id);
             return false;
         }
@@ -289,7 +301,7 @@ impl Recorder {
         self.ended
             .lock()
             .expect("结束标记被污染")
-            .insert(room_id.to_string(), (crate::db::now_ts(), live_started));
+            .insert(room_id.to_string(), (Instant::now(), live_started));
     }
 
     /// 成功看到离线、或重新开录之后，清掉停录抑制与结束标记。
@@ -306,14 +318,13 @@ impl Recorder {
     /// 一次接口抖动或字段缺失会把状态误报成离线，单次就停录会把一场健康录像
     /// 切成两条历史。返回 true 表示可以停录；返回后计数清零重新计。
     pub fn confirm_offline(&self, room_id: &str) -> bool {
-        let now = crate::db::now_ts();
         let mut map = self.offline.lock().expect("离线确认被污染");
-        let entry = map.entry(room_id.to_string()).or_insert((0, now));
-        if now - entry.1 > OFFLINE_CONFIRM_GAP_SECS {
+        let entry = map.entry(room_id.to_string()).or_insert((0, Instant::now()));
+        if entry.1.elapsed() > OFFLINE_CONFIRM_GAP {
             entry.0 = 0;
         }
         entry.0 += 1;
-        entry.1 = now;
+        entry.1 = Instant::now();
         if entry.0 >= 2 {
             map.remove(room_id);
             true
@@ -337,6 +348,119 @@ impl Recorder {
             .contains_key(room_id)
     }
 
+    /// 每一路正在录制的落盘目录，磁盘红线按它逐路检查（R5）。
+    ///
+    /// 只看「当前媒体目录」不够：用户中途换过目录后，正在录的那一路还写在旧卷上，
+    /// 旧卷写满时按新目录判断会漏掉，最后只能等 ffmpeg 报错。
+    pub fn active_targets(&self) -> Vec<(String, String, PathBuf)> {
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .values()
+            .map(|active| {
+                (
+                    active.recording.room_id.clone(),
+                    active.host_name.clone(),
+                    PathBuf::from(&active.recording.file_path),
+                )
+            })
+            .collect()
+    }
+
+    /// 文件最近是否还在增长：停录前的交叉验证（R2）。
+    ///
+    /// 平台偶尔连续两次误报离线，此时分片其实还在写；单看平台状态会把一场
+    /// 健康的录像切断。这里顺带刷新增长基线，避免和假死看门狗互相干扰。
+    pub fn flowing(&self, room_id: &str) -> bool {
+        let mut inner = self.inner.lock().expect("录制状态被污染");
+        let Some(active) = inner.get_mut(room_id) else {
+            return false;
+        };
+        let bytes = segment::parts_total(Path::new(&active.recording.file_path));
+        if bytes > active.last_bytes {
+            active.last_bytes = bytes;
+            active.last_growth = Instant::now();
+        }
+        active.last_growth.elapsed() < STALL_TIMEOUT
+    }
+
+    /// 连续失败攒够次数后是否处于长冷却（R6/R7）。
+    pub fn in_failure_cooldown(&self, room_id: &str) -> bool {
+        let mut map = self.hard_failures.lock().expect("失败计数被污染");
+        let Some((streak, at)) = map.get(room_id).copied() else {
+            return false;
+        };
+        if at.elapsed() > FAILED_STREAK_COOLDOWN {
+            map.remove(room_id);
+            return false;
+        }
+        streak >= FAILED_STREAK_LIMIT
+    }
+
+    /// 记一次非正常收尾，返回连续次数（用于决定要不要发通知）。
+    fn note_hard_failure(&self, room_id: &str) -> u32 {
+        let mut map = self.hard_failures.lock().expect("失败计数被污染");
+        let entry = map
+            .entry(room_id.to_string())
+            .or_insert((0, Instant::now()));
+        if entry.1.elapsed() > FAILED_STREAK_COOLDOWN {
+            entry.0 = 0;
+        }
+        entry.0 += 1;
+        entry.1 = Instant::now();
+        entry.0
+    }
+
+    fn clear_hard_failure(&self, room_id: &str) {
+        self.hard_failures
+            .lock()
+            .expect("失败计数被污染")
+            .remove(room_id);
+    }
+
+    fn eof_retries(&self, room_id: &str) -> u32 {
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .get(room_id)
+            .map(|active| active.eof_retries)
+            .unwrap_or(u32::MAX)
+    }
+
+    fn bump_eof_retry(&self, room_id: &str) {
+        if let Some(active) = self
+            .inner
+            .lock()
+            .expect("录制状态被污染")
+            .get_mut(room_id)
+        {
+            active.eof_retries += 1;
+        }
+    }
+
+    /// 干净 EOF 之后问一次平台：还显示在播就说明更像断流而不是下播（R1）。
+    ///
+    /// 用 fresh 取信息（跳过 15 秒缓存），否则缓存里那句「在播」正好会把
+    /// 真正的下播误判成断流。查不到 / 被限流一律按「不确定」处理，不重连。
+    async fn platform_still_live(
+        &self,
+        broker: &StreamBroker,
+        room_id: &str,
+    ) -> bool {
+        let room = match self.db.get_room(room_id) {
+            Ok(Some(room)) => room,
+            _ => return false,
+        };
+        if self.db.room_removed(room_id).unwrap_or(false) {
+            return false;
+        }
+        broker
+            .room_info_fresh(&crate::monitor::room_ref(&room))
+            .await
+            .map(|info| info.is_live)
+            .unwrap_or(false)
+    }
+
     /// 当前这段 ffmpeg 已经活了多久；没在录时返回 None。
     fn elapsed(&self, room_id: &str) -> Option<Duration> {
         self.inner
@@ -353,6 +477,30 @@ impl Recorder {
         broker: &StreamBroker,
         room: &RoomRecord,
     ) -> Result<RecordingInfo, AppError> {
+        self.start_inner(app, broker, room, false).await
+    }
+
+    /// 监控专用入口：拿锁后复查房间是否刚被移除或暂停（R3）。
+    ///
+    /// 监控用的是每轮开始时的房间快照；从快照到真正拉起 ffmpeg 之间，用户
+    /// 可能在界面上移除房间或点「停止监控」。重新读一次库，避免给已经移除的
+    /// 房间留下一个没有停止入口的「幽灵录制」。
+    pub async fn start_checked(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: &StreamBroker,
+        room: &RoomRecord,
+    ) -> Result<RecordingInfo, AppError> {
+        self.start_inner(app, broker, room, true).await
+    }
+
+    async fn start_inner(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: &StreamBroker,
+        room: &RoomRecord,
+        recheck: bool,
+    ) -> Result<RecordingInfo, AppError> {
         // 先拿房间级开录锁，再复查状态；否则并发调用会各自拉起一个 ffmpeg 写同一个文件。
         let gate = self
             .start_locks
@@ -363,11 +511,24 @@ impl Recorder {
             .clone();
         let _gate = gate.lock().await;
 
+        if recheck {
+            let removed = self.db.room_removed(&room.id).unwrap_or(false);
+            let fresh = self.db.get_room(&room.id).ok().flatten();
+            let paused = fresh.as_ref().is_some_and(|room| room.monitor_paused);
+            if !monitor_start_allowed(removed, paused) {
+                tracing::info!(room = %room.host_name, removed, paused, "监控开录复查未通过");
+                return Err(AppError::User("房间已移除或监控已暂停".into()));
+            }
+            if fresh.is_none() {
+                return Err(AppError::User("房间不存在".into()));
+            }
+        }
+
         if let Some(existing) = self.active(&room.id) {
             return Ok(existing);
         }
-        if self.cooling_down(&room.id) {
-            return Err(AppError::User("该房间刚刚连续失败，稍后再试".into()));
+        if self.cooling_down(&room.id) || self.in_failure_cooldown(&room.id) {
+            return Err(AppError::User("该房间连续录制失败，已暂停自动重试".into()));
         }
 
         // 并发上限：4 路 1080p 已经能吃掉一块 SSD 的写入带宽，默认不再往上加。
@@ -499,6 +660,7 @@ impl Recorder {
                     last_bytes: 0,
                     last_growth: Instant::now(),
                     stalls: 0,
+                    eof_retries: 0,
                 },
             );
         }
@@ -641,6 +803,28 @@ impl Recorder {
                 let early = rec
                     .elapsed(&room_id)
                     .is_some_and(|elapsed| elapsed < EARLY_EXIT);
+                // 干净退出也可能是 CDN 主动关连接：ffmpeg 读到 EOF 会当成正常结束。
+                // 收尾前问一次平台，仍显示在播就按断流续录（R1）。真正的下播
+                // 这里只会多一次查询，不会重连。
+                if should_check_eof(
+                    stop_reason.as_deref(),
+                    status.success(),
+                    early,
+                    rec.eof_retries(&room_id),
+                ) {
+                    let broker = {
+                        let state = app.state::<crate::state::AppState>();
+                        state.broker.clone()
+                    };
+                    if rec.platform_still_live(&broker, &room_id).await {
+                        tracing::info!(room_id, "平台仍显示在播，按断流续录");
+                        if rec.respawn(&app, &broker, &room_id).await {
+                            rec.bump_eof_retry(&room_id);
+                            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                            continue;
+                        }
+                    }
+                }
                 if stop_reason.is_none() && (!status.success() || early) {
                     let broker = {
                         let state = app.state::<crate::state::AppState>();
@@ -872,6 +1056,17 @@ impl Recorder {
             self.mark_ended(room_id, active.live_started_at);
         }
 
+        // 连续非正常收尾：攒到阈值就进长冷却，避免源不可用时每分钟一条会话（R6/R7）。
+        let failed_streak = if final_status == "failed" {
+            let streak = self.note_hard_failure(room_id);
+            if streak == FAILED_STREAK_LIMIT {
+                tracing::warn!(room_id, "连续录制失败，暂停自动重试 5 分钟");
+            }
+            streak
+        } else {
+            0
+        };
+
         // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
         let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
             (Some(hub), Some(writer)) => match hub.detach_record(room_id, writer) {
@@ -903,6 +1098,7 @@ impl Recorder {
 
         if final_status == "finished" {
             self.clear_failure(room_id);
+            self.clear_hard_failure(room_id);
             self.queue_thumb(app, &active.recording.session_id);
         }
 
@@ -925,7 +1121,12 @@ impl Recorder {
             ("aborted", "disk_full") => {
                 emit_notice(app, "disk_full", room_id, &active.host_name, None)
             }
-            ("failed", _) => emit_notice(app, "failed", room_id, &active.host_name, error.clone()),
+            ("failed", _) => {
+                // 只提醒第 1 次与进入长冷却那一次；中间的重试不打扰用户。
+                if failed_streak == 1 || failed_streak == FAILED_STREAK_LIMIT {
+                    emit_notice(app, "failed", room_id, &active.host_name, error.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -953,6 +1154,24 @@ impl Recorder {
             None => false,
         }
     }
+}
+
+/// 干净 EOF 之后要不要先复核平台（R1）。
+///
+/// 只有「没人叫停、正常退出、活够了、复核次数没用完」才值得再问一次；
+/// 用户停录、秒退（走另一条续录分支）都不该多打一次接口。
+fn should_check_eof(
+    stop_reason: Option<&str>,
+    status_success: bool,
+    early: bool,
+    retries: u32,
+) -> bool {
+    stop_reason.is_none() && status_success && !early && retries < MAX_EOF_RETRIES
+}
+
+/// 监控开录前的复查条件（R3）：房间还在、且没被暂停监控。
+fn monitor_start_allowed(removed: bool, paused: bool) -> bool {
+    !removed && !paused
 }
 
 /// 分段录制的命令行。
@@ -1331,6 +1550,44 @@ mod tests {
         recorder.mark_ended("r1", Some(100));
         assert!(!recorder.auto_blocked("r1", Some(200)));
         assert!(!recorder.auto_blocked("r1", Some(100)));
+    }
+
+    #[test]
+    fn clean_eof_only_rechecks_when_nobody_stopped_it() {
+        assert!(should_check_eof(None, true, false, 0));
+        assert!(should_check_eof(None, true, false, MAX_EOF_RETRIES - 1));
+        // 复核次数用尽后不再问平台，避免「在播但没流」时无限重连（R1）。
+        assert!(!should_check_eof(None, true, false, MAX_EOF_RETRIES));
+        // 用户停录、异常退出、秒退都走各自的分支。
+        assert!(!should_check_eof(Some("stopped"), true, false, 0));
+        assert!(!should_check_eof(Some("stream_ended"), true, false, 0));
+        assert!(!should_check_eof(None, false, false, 0));
+        assert!(!should_check_eof(None, true, true, 0));
+    }
+
+    #[test]
+    fn monitor_start_rechecks_removed_or_paused_rooms() {
+        assert!(monitor_start_allowed(false, false));
+        assert!(!monitor_start_allowed(true, false));
+        assert!(!monitor_start_allowed(false, true));
+        assert!(!monitor_start_allowed(true, true));
+    }
+
+    #[test]
+    fn repeated_failures_enter_long_cooldown() {
+        let recorder = test_recorder("hard-failures");
+        assert!(!recorder.in_failure_cooldown("r1"));
+        // 头两次只是重试，第三次才进入长冷却（R6/R7）。
+        assert_eq!(recorder.note_hard_failure("r1"), 1);
+        assert!(!recorder.in_failure_cooldown("r1"));
+        assert_eq!(recorder.note_hard_failure("r1"), 2);
+        assert!(!recorder.in_failure_cooldown("r1"));
+        assert_eq!(recorder.note_hard_failure("r1"), 3);
+        assert!(recorder.in_failure_cooldown("r1"));
+        // 成功录完一场后从零开始。
+        recorder.clear_hard_failure("r1");
+        assert!(!recorder.in_failure_cooldown("r1"));
+        assert_eq!(recorder.note_hard_failure("r1"), 1);
     }
 
     #[test]

@@ -15,13 +15,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::broker::StreamBroker;
-use crate::db::{now_ts, Db};
+use crate::db::Db;
 use crate::disk;
 use crate::platform::{PlatformError, RoomRef};
 use crate::recorder::{Recorder, EVENT_ROOMS_CHANGED};
@@ -43,9 +43,10 @@ const TICK: Duration = Duration::from_secs(1);
 static JITTER_SALT: AtomicU64 = AtomicU64::new(0);
 
 /// 每个房间的下次检测时间与失败计数。
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct Schedule {
-    next_at: i64,
+    /// 下次检测时刻。用单调时钟：改系统时间不该让监控停摆或瞬间全部到期（R4）。
+    next_at: Instant,
     /// 连续限流次数；成功即清零，普通错误不累加。
     throttle_streak: u32,
     /// 普通错误计数，只用于观测，不影响节奏。
@@ -54,6 +55,18 @@ struct Schedule {
     inflight: bool,
     /// 当前 next_at 是不是退避算出来的（退避不跟随间隔设置收缩）。
     backoff: bool,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            next_at: Instant::now(),
+            throttle_streak: 0,
+            error_count: 0,
+            inflight: false,
+            backoff: false,
+        }
+    }
 }
 
 /// 一次检测的结果分类，决定下一拍怎么排期。
@@ -83,6 +96,8 @@ pub fn spawn(app: AppHandle, db: Arc<Db>, broker: Arc<StreamBroker>, recorder: A
             let cap = settings.monitor_backoff_cap_sec as i64;
             let backoff_on = settings.monitor_backoff_enabled;
             if base > 0 {
+                let base = Duration::from_secs(base as u64);
+                let cap = Duration::from_secs(cap.max(1) as u64);
                 drain(&mut rx, &mut schedule, base, cap, backoff_on);
             } else {
                 // 关闭自动检测：清空排期，恢复时所有房间立即检测一次。
@@ -118,8 +133,8 @@ pub fn room_ref(room: &hivecast_ipc::RoomRecord) -> RoomRef {
 fn drain(
     rx: &mut mpsc::UnboundedReceiver<(String, Outcome)>,
     schedule: &mut HashMap<String, Schedule>,
-    base: i64,
-    cap: i64,
+    base: Duration,
+    cap: Duration,
     backoff_on: bool,
 ) {
     while let Ok((id, outcome)) = rx.try_recv() {
@@ -133,44 +148,52 @@ fn apply(
     id: &str,
     entry: &mut Schedule,
     outcome: Outcome,
-    base: i64,
-    cap: i64,
+    base: Duration,
+    cap: Duration,
     backoff_on: bool,
 ) {
-    let now = now_ts();
+    let now = Instant::now();
     entry.inflight = false;
     match outcome {
         Outcome::Ok => {
             entry.throttle_streak = 0;
             entry.error_count = 0;
             entry.backoff = false;
-            entry.next_at = grid_next(entry.next_at, now, base) + jitter(id, base * JITTER_PCT / 100);
+            entry.next_at = add_jitter(
+                grid_next(entry.next_at, now, base),
+                id,
+                base.mul_f64(JITTER_PCT as f64 / 100.0),
+            );
         }
         Outcome::Throttled => {
             entry.throttle_streak = entry.throttle_streak.saturating_add(1);
             entry.error_count = entry.error_count.saturating_add(1);
             let wait = backoff_wait(base, entry.throttle_streak, cap, backoff_on);
-            let wait = wait + jitter(id, wait * BACKOFF_JITTER_PCT / 100);
-            entry.next_at = now + wait.max(1);
+            let fire_at = add_jitter(now + wait, id, wait.mul_f64(BACKOFF_JITTER_PCT as f64 / 100.0));
+            entry.next_at = fire_at.max(now + Duration::from_secs(1));
             entry.backoff = backoff_on;
         }
         Outcome::Retry(secs) => {
             // broker 已经知道什么时候能恢复，照着排就行，不算失败。
-            entry.next_at = now + secs.max(1);
+            entry.next_at = now + Duration::from_secs(secs.max(1) as u64);
             entry.backoff = true;
         }
         Outcome::Failed => {
             entry.error_count = entry.error_count.saturating_add(1);
             entry.backoff = false;
-            entry.next_at = now + base + jitter(id, base * JITTER_PCT / 100);
+            entry.next_at = add_jitter(
+                now + base,
+                id,
+                base.mul_f64(JITTER_PCT as f64 / 100.0),
+            );
         }
     }
 }
 
 /// 固定网格：在上一拍上加一个间隔。落后太多（例如机器休眠）就从现在重算，
 /// 避免恢复瞬间把欠下的检测一口气全补出去。
-fn grid_next(previous: i64, now: i64, base: i64) -> i64 {
-    let next = previous.saturating_add(base);
+fn grid_next(previous: Instant, now: Instant, base: Duration) -> Instant {
+    let next = previous + base;
     if next <= now {
         now + base
     } else {
@@ -179,12 +202,26 @@ fn grid_next(previous: i64, now: i64, base: i64) -> i64 {
 }
 
 /// 限流退避：基础间隔 × 2^streak，封顶 cap；关闭退避时维持基础间隔。
-fn backoff_wait(base: i64, streak: u32, cap: i64, enabled: bool) -> i64 {
+fn backoff_wait(base: Duration, streak: u32, cap: Duration, enabled: bool) -> Duration {
     if !enabled {
         return base;
     }
     let shift = streak.min(BACKOFF_MAX_SHIFT);
-    base.saturating_mul(1i64 << shift).min(cap.max(base))
+    let factor = 1u32 << shift;
+    base.checked_mul(factor)
+        .unwrap_or(cap)
+        .min(cap.max(base))
+}
+
+/// 给时间点叠加 ±span 的确定性抖动；负偏移不会把时间推到过去。
+fn add_jitter(at: Instant, id: &str, span: Duration) -> Instant {
+    let ms = span.as_millis().min(i64::MAX as u128) as i64;
+    let offset = jitter(id, ms);
+    if offset >= 0 {
+        at + Duration::from_millis(offset as u64)
+    } else {
+        at - Duration::from_millis((-offset) as u64)
+    }
 }
 
 /// 首次排期把房间散在第一个间隔里，避免启动时所有房间同时到期。
@@ -231,31 +268,31 @@ fn tick(
         }
     };
 
-    // 磁盘红线：录制中的房间要主动收尾，否则会一路写到系统盘满。
-    // 收尾可能要等 ffmpeg 退出，扔进后台，别拖住调度。
-    if disk::is_low(&recorder.media_root()) {
-        for room in &rooms {
-            if recorder.is_recording(&room.id) {
-                tracing::warn!(room = %room.host_name, "磁盘剩余空间低于红线，停止录制");
-                let app = app.clone();
-                let recorder = recorder.clone();
-                let id = room.id.clone();
-                tokio::spawn(async move {
-                    let _ = recorder.stop(&app, &id, "disk_full").await;
-                });
-            }
+    // 磁盘红线：按每一路自己的落盘目录检查。用户中途换过媒体目录时，
+    // 旧目录写满仍然要停掉还在写它的那一路，否则只能等 ffmpeg 报错（R5）。
+    for (id, host, file) in recorder.active_targets() {
+        let dir = target_dir(&file, &recorder.media_root());
+        if !disk::is_low(&dir) {
+            continue;
         }
+        tracing::warn!(room = %host, dir = %dir.display(), "磁盘剩余空间低于红线，停止录制");
+        let app = app.clone();
+        let recorder = recorder.clone();
+        tokio::spawn(async move {
+            let _ = recorder.stop(&app, &id, "disk_full").await;
+        });
     }
 
     if base <= 0 {
         return;
     }
+    let interval = Duration::from_secs(base as u64);
 
     // 房间被删掉后清掉它的排期，避免长跑后 map 越来越大。
     let alive: HashSet<&str> = rooms.iter().map(|room| room.id.as_str()).collect();
     schedule.retain(|id, _| alive.contains(id.as_str()));
 
-    let now = now_ts();
+    let now = Instant::now();
     for room in rooms {
         // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
         if room.monitor_paused {
@@ -263,12 +300,12 @@ fn tick(
             continue;
         }
         let entry = schedule.entry(room.id.clone()).or_insert_with(|| Schedule {
-            next_at: now + spread(&room.id, base),
+            next_at: now + Duration::from_secs(spread(&room.id, base) as u64),
             ..Default::default()
         });
         // 间隔被调小后，旧排期不要继续拖几分钟。
-        if !entry.backoff && entry.next_at > now + base {
-            entry.next_at = now + spread(&room.id, base);
+        if !entry.backoff && entry.next_at > now + interval {
+            entry.next_at = now + Duration::from_secs(spread(&room.id, base) as u64);
         }
         if entry.inflight || entry.next_at > now {
             continue;
@@ -313,6 +350,24 @@ async fn run_check(
     check_room(app, db, broker, recorder, room).await
 }
 
+/// 平台报离线时到底停不停录（R2）。
+///
+/// 两次成功检查都离线只是「平台这么说」，分片仍在写说明源还活着；
+/// 只有当确认离线且文件确实不再增长时才收尾。
+fn should_stop_for_offline(confirmed: bool, flowing: bool) -> bool {
+    confirmed && !flowing
+}
+
+/// 这一路录制实际在往哪个目录写（R5）。
+///
+/// 正常都是录像文件所在目录；只有取不到父目录这种异常路径才退回当前媒体根。
+fn target_dir(file: &std::path::Path, fallback: &std::path::Path) -> std::path::PathBuf {
+    file.parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
 /// 检测一个房间，并把结果归类成排期需要的四种情况。
 async fn check_room(
     app: &AppHandle,
@@ -342,9 +397,10 @@ async fn check_room(
                     && !recorder.is_recording(&room.id)
                     && !recorder.auto_suppressed(&room.id, info.started_at)
                     && !recorder.auto_blocked(&room.id, info.started_at)
+                    && !recorder.in_failure_cooldown(&room.id)
                     && disk::can_start(&recorder.media_root())
                 {
-                    if let Err(err) = recorder.start(app, broker, room).await {
+                    if let Err(err) = recorder.start_checked(app, broker, room).await {
                         tracing::warn!(room = %room.host_name, %err, "自动开录失败");
                         recorder.set_error(&room.id, err.to_string());
                         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
@@ -353,9 +409,19 @@ async fn check_room(
             } else {
                 recorder.resume_auto(&room.id);
                 if recorder.is_recording(&room.id) {
-                    // 一次离线可能只是接口抖动 / 字段缺失，连续两次才停录（S1）。
-                    if recorder.confirm_offline(&room.id) {
+                    // 一次离线可能只是接口抖动 / 字段缺失，连续两次才停录（S1）；
+                    // 确认了吗，还要看文件是不是仍在增长（R2）。
+                    let confirmed = recorder.confirm_offline(&room.id);
+                    let flowing = confirmed && recorder.flowing(&room.id);
+                    if should_stop_for_offline(confirmed, flowing) {
                         let _ = recorder.stop(app, &room.id, "stream_ended").await;
+                    } else if confirmed {
+                        // 平台说下播、文件却还在写：更像是状态接口误报。
+                        // 计数已清零，下一轮重新确认，不切断健康录像。
+                        tracing::warn!(
+                            room = %room.host_name,
+                            "平台报离线，但录像仍在增长，暂不停录"
+                        );
                     }
                 } else {
                     recorder.clear_offline(&room.id);
@@ -393,11 +459,15 @@ async fn check_room(
 mod tests {
     use super::*;
 
-    fn entry(next_at: i64) -> Schedule {
+    fn entry(offset_secs: u64) -> Schedule {
         Schedule {
-            next_at,
+            next_at: Instant::now() + Duration::from_secs(offset_secs),
             ..Default::default()
         }
+    }
+
+    fn secs(value: u64) -> Duration {
+        Duration::from_secs(value)
     }
 
     #[test]
@@ -421,34 +491,43 @@ mod tests {
 
     #[test]
     fn grid_next_keeps_cadence_and_avoids_burst() {
+        let start = Instant::now();
         // 准时完成：在上一拍上加一个间隔。
-        assert_eq!(grid_next(100, 100, 30), 130);
+        assert_eq!(grid_next(start, start, secs(30)), start + secs(30));
         // 落后两拍（例如休眠）：从现在重算，不补发。
-        assert_eq!(grid_next(100, 200, 30), 230);
+        assert_eq!(
+            grid_next(start, start + secs(100), secs(30)),
+            start + secs(130)
+        );
+        // 系统时间被改（墙钟跳变）不影响：这里只用单调时钟。
+        assert_eq!(
+            grid_next(start, start + secs(1), secs(30)),
+            start + secs(30)
+        );
     }
 
     #[test]
     fn backoff_grows_caps_and_respects_switch() {
-        assert_eq!(backoff_wait(30, 1, 120, true), 60);
-        assert_eq!(backoff_wait(30, 2, 120, true), 120);
-        assert_eq!(backoff_wait(30, 9, 120, true), 120);
-        assert_eq!(backoff_wait(30, 3, 120, false), 30);
+        assert_eq!(backoff_wait(secs(30), 1, secs(120), true), secs(60));
+        assert_eq!(backoff_wait(secs(30), 2, secs(120), true), secs(120));
+        assert_eq!(backoff_wait(secs(30), 9, secs(120), true), secs(120));
+        assert_eq!(backoff_wait(secs(30), 3, secs(120), false), secs(30));
         // cap 小于基础间隔时不该把间隔压得比基础还短。
-        assert_eq!(backoff_wait(30, 2, 10, true), 30);
+        assert_eq!(backoff_wait(secs(30), 2, secs(10), true), secs(30));
     }
 
     #[test]
     fn throttle_only_counts_real_throttles() {
         let mut s = entry(100);
-        apply("rm-b6", &mut s, Outcome::Throttled, 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Throttled, secs(30), secs(120), true);
         assert_eq!(s.throttle_streak, 1);
-        apply("rm-b6", &mut s, Outcome::Throttled, 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Throttled, secs(30), secs(120), true);
         assert_eq!(s.throttle_streak, 2);
         // 普通错误不累加限流计数，也不放大退避。
-        apply("rm-b6", &mut s, Outcome::Failed, 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Failed, secs(30), secs(120), true);
         assert_eq!(s.throttle_streak, 2);
         assert_eq!(s.error_count, 3);
-        apply("rm-b6", &mut s, Outcome::Ok, 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Ok, secs(30), secs(120), true);
         assert_eq!(s.throttle_streak, 0);
         assert_eq!(s.error_count, 0);
     }
@@ -456,10 +535,44 @@ mod tests {
     #[test]
     fn broker_cooldown_does_not_count_as_failure() {
         let mut s = entry(100);
-        apply("rm-b6", &mut s, Outcome::Retry(5), 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Retry(5), secs(30), secs(120), true);
         assert_eq!(s.throttle_streak, 0);
         assert_eq!(s.error_count, 0);
-        assert!(s.next_at >= now_ts() + 4);
+        assert!(s.next_at >= Instant::now() + secs(4));
+    }
+
+    #[test]
+    fn offline_stops_only_when_the_file_stopped_growing() {
+        // 确认了离线、文件也停了 → 收尾。
+        assert!(should_stop_for_offline(true, false));
+        // 确认了离线但分片仍在写 → 更像接口误报，继续录（R2）。
+        assert!(!should_stop_for_offline(true, true));
+        assert!(!should_stop_for_offline(false, false));
+        assert!(!should_stop_for_offline(false, true));
+    }
+
+    #[test]
+    fn target_dir_prefers_the_recording_location() {
+        use std::path::Path;
+        // 换过媒体目录后，旧路径下的录制仍然按旧目录检查磁盘（R5）。
+        assert_eq!(
+            target_dir(Path::new("/old/dir/a.mp4"), Path::new("/new")),
+            Path::new("/old/dir")
+        );
+        assert_eq!(
+            target_dir(Path::new("a.mp4"), Path::new("/new")),
+            Path::new("/new")
+        );
+    }
+
+    #[test]
+    fn jitter_never_moves_far_or_backwards_in_time() {
+        let now = Instant::now();
+        for _ in 0..100 {
+            let at = add_jitter(now, "rm-b6", secs(3));
+            assert!(at >= now - secs(3) && at <= now + secs(3));
+        }
+        assert_eq!(add_jitter(now, "rm-b6", secs(0)), now);
     }
 
     #[test]
@@ -467,7 +580,7 @@ mod tests {
         let mut s = entry(0);
         s.inflight = true;
         assert!(s.inflight);
-        apply("rm-b6", &mut s, Outcome::Ok, 30, 120, true);
+        apply("rm-b6", &mut s, Outcome::Ok, secs(30), secs(120), true);
         assert!(!s.inflight);
     }
 }
