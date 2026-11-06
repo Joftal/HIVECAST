@@ -88,6 +88,8 @@ pub fn run() {
             commands::view_slots,
             commands::view_open,
             commands::view_close,
+            commands::view_replace,
+            commands::view_suspend,
             commands::view_set_quality,
             commands::view_set_line,
             commands::view_retry,

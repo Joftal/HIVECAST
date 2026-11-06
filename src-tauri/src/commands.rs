@@ -347,6 +347,34 @@ pub async fn view_close(app: AppHandle, state: State<'_, AppState>, slot: u8) ->
     state.view.close(&app, slot).await
 }
 
+/// 原子替换槽位里的房间：同一槽位停旧起新，前端不必先 close 再 open。
+#[tauri::command]
+pub async fn view_replace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: u8,
+    room_id: String,
+) -> Result<ViewSlotInfo, AppError> {
+    let room = state
+        .db
+        .get_room(&room_id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    if !room.is_live {
+        return Err(AppError::User("房间未开播".into()));
+    }
+    state
+        .view
+        .replace(&app, state.broker.clone(), slot, &room)
+        .await
+}
+
+/// 离开观看页：停掉全部观看管道，保留房间与布局，回来时再按布局恢复。
+#[tauri::command]
+pub async fn view_suspend(app: AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.view.suspend_all(&app).await;
+    Ok(())
+}
+
 /// 切换某个槽位的观看画质：只换这一路的租约，录制进程不受影响。
 #[tauri::command]
 pub async fn view_set_quality(

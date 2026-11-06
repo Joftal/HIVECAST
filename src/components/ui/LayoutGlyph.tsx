@@ -1,7 +1,8 @@
-export type LayoutKind = "row" | "col" | "top" | "left" | "quad" | "portrait";
+export type LayoutKind = "single" | "row" | "col" | "top" | "left" | "quad" | "portrait";
 
 /** 16×12 画布：四边留 0.4，所有切缝统一 0.8，保证缩到 18px 时四块间距看起来一致。 */
 const RECTS: Record<LayoutKind, Array<[number, number, number, number]>> = {
+  single: [[0.4, 0.4, 15.2, 11.2]],
   row: [
     [0.4, 0.4, 7.2, 11.2],
     [8.4, 0.4, 7.2, 11.2],

@@ -210,9 +210,15 @@
     "close": "Close",
     "selectHint": "Select this room for split view",
     "selectedCount": "{{n}} selected",
-    "watchSelected": "Watch in split view",
     "clearSelection": "Clear",
-    "maxSelection": "Up to 4 rooms at once"
+    "maxSelection": "Up to 4 rooms at once",
+    "splitMode": "Split view",
+    "modeSingle": "Single",
+    "modeRow": "Side by side",
+    "modeCol": "Stacked",
+    "modeTop": "Top large",
+    "modeLeft": "Left large",
+    "modeQuad": "Grid"
   },
   "watch": {
     "title": "Multi-view",
@@ -303,7 +309,8 @@
       "place": "Place in cell",
       "placeNew": "New cell"
     },
-    "cellN": "Cell {{n}}"
+    "cellN": "Cell {{n}}",
+    "slotsFull": "Up to 4 rooms at once"
   },
   "notice": {
     "started": {

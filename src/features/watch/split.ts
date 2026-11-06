@@ -196,7 +196,10 @@ export function parseLayout(raw: string | null): SavedLayout | null {
   try {
     const data = JSON.parse(raw) as Partial<SavedLayout> & { version?: number };
     if (data.version !== 1) return null;
-    if (!data.tree || typeof data.count !== "number") return null;
+    if (typeof data.count !== "number") return null;
+    // 用户把格子全关掉也要记住「空布局」，否则下次回来会复活上一次的房间。
+    if (data.count === 0) return { count: 0, tree: buildTree(1), rooms: [] };
+    if (!data.tree) return null;
     if (data.count < 1 || data.count > 4) return null;
     if (!isTreeShape(data.tree)) return null;
     const count = data.count;

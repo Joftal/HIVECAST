@@ -25,6 +25,8 @@ type Props = {
   drop?: DropZone | null;
   onTreeChange: (tree: SplitNode, commit: boolean) => void;
   renderCell: (index: number, rect: Rect) => ReactNode;
+  /** 格子容器的 React key。用房间 id 时，换位只会移动 DOM，不会重建播放器。 */
+  cellKey?: (index: number) => string | number;
 };
 
 /**
@@ -32,7 +34,7 @@ type Props = {
  * 指针按下后把 pointermove 挂在分割线自己身上（setPointerCapture），拖出边界也不丢。
  */
 const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
-  { tree, count, drop, onTreeChange, renderCell },
+  { tree, count, drop, onTreeChange, renderCell, cellKey },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -129,30 +131,14 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
         if (!rect) return null;
         return (
           <div
-            key={index}
+            key={cellKey ? cellKey(index) : index}
             className="absolute"
             style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
           >
             {renderCell(index, rect)}
             {drop?.index === index ? (
-              <div
-                className="pointer-events-none absolute z-30 rounded-[8px] border-2 border-accent bg-accent/25 transition-[left,top,width,height] duration-150"
-                style={
-                  rect.width >= rect.height
-                    ? {
-                        top: 0,
-                        bottom: 0,
-                        width: "50%",
-                        left: drop.side === "before" ? 0 : "50%",
-                      }
-                    : {
-                        left: 0,
-                        right: 0,
-                        height: "50%",
-                        top: drop.side === "before" ? 0 : "50%",
-                      }
-                }
-              />
+              // 落点整格覆盖：换位的结果就是这一格换成拖来的画面，磨砂层要和目标格严丝合缝。
+              <div className="pointer-events-none absolute inset-0 z-30 rounded-[8px] border border-white/45 bg-white/12 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_6px_24px_rgba(0,0,0,0.25)] backdrop-blur-[7px]" />
             ) : null}
           </div>
         );

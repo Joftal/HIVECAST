@@ -204,6 +204,66 @@ impl ViewManager {
         Ok(handle.info(slot))
     }
 
+    /// 原子替换某个槽位的房间：停旧起新只广播一次，不出现「关掉再打开」的中间态。
+    pub async fn replace(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: Arc<StreamBroker>,
+        slot: u8,
+        room: &RoomRecord,
+    ) -> Result<ViewSlotInfo, AppError> {
+        let _gate = self.open_gate.lock().await;
+        // 同一房间已经在别的槽位：先摘掉旧的，避免一个房间起两条管道。
+        if let Some((other, handle)) = self.find_by_room(&room.id) {
+            if other != slot {
+                self.detach(app, other, &handle);
+            }
+        }
+        let old = {
+            let mut slots = self.slots.lock().expect("观看槽位被污染");
+            slots.remove(&slot)
+        };
+        if let Some(old) = old {
+            if old.room.id == room.id {
+                self.slots
+                    .lock()
+                    .expect("观看槽位被污染")
+                    .insert(slot, old.clone());
+                return Ok(old.info(slot));
+            }
+            self.detach(app, slot, &old);
+        }
+
+        let handle = Arc::new(Slot::new(room.clone()));
+        self.slots
+            .lock()
+            .expect("观看槽位被污染")
+            .insert(slot, handle.clone());
+        self.danmaku.retain(room);
+        self.emit(app);
+        self.restart_supervisor(app, broker, slot, handle.clone(), room.clone());
+        Ok(handle.info(slot))
+    }
+
+    /// 停掉一个槽位：从表里摘除、释放弹幕、通知监督循环退出，收尾放到后台。
+    fn detach(self: &Arc<Self>, _app: &AppHandle, slot: u8, handle: &Arc<Slot>) {
+        self.slots.lock().expect("观看槽位被污染").remove(&slot);
+        self.danmaku.release(&handle.room.id);
+        {
+            let mut state = handle.lock();
+            state.closed = true;
+            state.generation += 1;
+            if let Some(child) = state.child.as_mut() {
+                send_graceful(child);
+            }
+        }
+        let manager = self.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            manager.teardown(&handle).await;
+        });
+    }
+
     pub async fn close(&self, app: &AppHandle, slot: u8) -> Result<(), AppError> {
         let handle = {
             let mut slots = self.slots.lock().expect("观看槽位被污染");
@@ -313,6 +373,31 @@ impl ViewManager {
         for slot in targets {
             let _ = self.close(app, slot).await;
         }
+    }
+
+    /// 切走观看页：停掉所有转封装与分片缓存，但不动房间与布局（前端持久化）。
+    /// 与 open/replace 共用 open_gate，快速来回切 Tab 也不会把新旧会话搅在一起。
+    pub async fn suspend_all(self: &Arc<Self>, app: &AppHandle) {
+        let _gate = self.open_gate.lock().await;
+        let handles: Vec<Arc<Slot>> = {
+            let mut slots = self.slots.lock().expect("观看槽位被污染");
+            slots.drain().map(|(_, handle)| handle).collect()
+        };
+        if handles.is_empty() {
+            return;
+        }
+        for handle in &handles {
+            self.danmaku.release(&handle.room.id);
+            let mut state = handle.lock();
+            state.closed = true;
+            state.generation += 1;
+            if let Some(child) = state.child.as_mut() {
+                send_graceful(child);
+            }
+        }
+        self.emit(app);
+        // 四路并行收尾：每路最多等 4 秒，串行会让「离开观看页」卡十几秒。
+        futures_util::future::join_all(handles.iter().map(|handle| self.teardown(handle))).await;
     }
 
     /// 退出应用：收掉所有槽位的 ffmpeg 与缓存目录。

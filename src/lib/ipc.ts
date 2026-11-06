@@ -168,6 +168,16 @@ export async function viewClose(slot: number): Promise<void> {
   return invoke("view_close", { slot });
 }
 
+// 原子替换：同一槽位停旧起新，不经过「先关后开」的空窗。
+export async function viewReplace(slot: number, roomId: string): Promise<ViewSlotInfo> {
+  return invoke<ViewSlotInfo>("view_replace", { slot, roomId });
+}
+
+// 离开观看页时停掉全部观看管道；房间与布局由前端持久化，回来再恢复。
+export async function viewSuspend(): Promise<void> {
+  return invoke("view_suspend");
+}
+
 // 只影响这一路的租约，录制进程不会被打断。
 export async function viewSetQuality(slot: number, qn: number): Promise<ViewSlotInfo> {
   return invoke<ViewSlotInfo>("view_set_quality", { slot, qn });

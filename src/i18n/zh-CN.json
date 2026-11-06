@@ -210,9 +210,15 @@
     "close": "关闭",
     "selectHint": "选择该直播间用于分屏观看",
     "selectedCount": "已选 {{n}} 个",
-    "watchSelected": "分屏观看",
     "clearSelection": "清除",
-    "maxSelection": "最多同时观看 4 路"
+    "maxSelection": "最多同时观看 4 路",
+    "splitMode": "分屏模式",
+    "modeSingle": "单画面",
+    "modeRow": "左右",
+    "modeCol": "上下",
+    "modeTop": "上大下二",
+    "modeLeft": "左大右二",
+    "modeQuad": "田字"
   },
   "watch": {
     "title": "多屏观看",
@@ -303,7 +309,8 @@
       "place": "放入哪一格",
       "placeNew": "新增一格"
     },
-    "cellN": "第 {{n}} 格"
+    "cellN": "第 {{n}} 格",
+    "slotsFull": "最多同时观看 4 路"
   },
   "notice": {
     "started": {

@@ -12,7 +12,6 @@ import {
   parseLayout,
   portraitTree,
   serializeLayout,
-  type SavedLayout,
   type SplitNode,
   type Variant,
 } from "./split";
@@ -30,6 +29,7 @@ import {
   roomsList,
   viewClose,
   viewOpen,
+  viewReplace,
   viewRetry,
   viewSetLine,
   viewSetQuality,
@@ -38,11 +38,12 @@ import {
   type RoomView,
   type ViewSlotInfo,
 } from "../../lib/ipc";
+import { whenViewsIdle } from "../../lib/viewLifecycle";
 
 const QN_OPTIONS = [0, 10000, 400, 250, 150, 80] as const;
 const MAX_SLOTS = 4;
 
-export type WatchSeed = { ids: string[]; nonce: number };
+export type WatchSeed = { ids: string[]; nonce: number; kind?: LayoutKind };
 
 type Props = {
   /** 从监控页多选进入时带过来的房间；nonce 变化才会重新应用。 */
@@ -68,6 +69,9 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const [portrait, setPortrait] = useState(false);
   const [order, setOrder] = useState<(string | null)[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 首帧还不知道上次的布局，先别把空布局写回去覆盖它。
+  const [booted, setBooted] = useState(false);
+  const [roomsLoaded, setRoomsLoaded] = useState(false);
   // 指针拖拽：不依赖 HTML5 DnD，WKWebView 里更可靠；拖拽中显示跟随指针的浮标。
   const [drag, setDrag] = useState<{ payload: DragPayload; x: number; y: number } | null>(null);
   const [drop, setDrop] = useState<DropZone | null>(null);
@@ -80,7 +84,6 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const [query, setQuery] = useState("");
   const [input, setInput] = useState("");
 
-  const [saved, setSaved] = useState<SavedLayout | null>(null);
   const seedRef = useRef(0);
   const latestLayout = useRef("");
 
@@ -89,6 +92,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       const [nextRooms, nextSlots] = await Promise.all([roomsList(), viewSlots()]);
       setRooms(nextRooms);
       setSlots(nextSlots);
+      setRoomsLoaded(true);
     } catch (err) {
       setError(describeError(err));
     }
@@ -101,8 +105,35 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     let offRooms: (() => void) | undefined;
 
     void (async () => {
-      await load();
+      // 先等上一次「离开观看页」的挂起跑完，避免读到还没清掉的旧槽位。
+      await whenViewsIdle();
+      // seed 由下面的 effect 应用，这里别抢着恢复旧布局。
+      const seeded = Boolean(seed && seed.nonce !== seedRef.current);
+      try {
+        const [raw, nextRooms, nextSlots] = await Promise.all([layoutGet(), roomsList(), viewSlots()]);
+        if (disposed) return;
+        setRooms(nextRooms);
+        setSlots(nextSlots);
+        setRoomsLoaded(true);
+        const savedLayout = parseLayout(raw);
+        if (seeded) {
+          // 等 applySeed 把 order/tree 一次设好。
+        } else if (nextSlots.length > 0) {
+          // 已有会话（例如开发时热更新）：以会话为准，只套用同路数的版式。
+          const ids = [...nextSlots].sort((a, b) => a.slot - b.slot).map((session) => session.roomId);
+          if (savedLayout && savedLayout.count === ids.length) setTree(savedLayout.tree);
+          setOrder(ids);
+        } else if (savedLayout && savedLayout.rooms.some(Boolean)) {
+          // 上次离开时的布局：先摆好格子（离线房间保留占位），再逐路拉起。
+          setOrder(savedLayout.rooms);
+          setTree(savedLayout.tree);
+          await restore(savedLayout.rooms);
+        }
+      } catch (err) {
+        if (!disposed) setError(describeError(err));
+      }
       if (disposed) return;
+      setBooted(true);
       offView = await onViewChanged((next) => setSlots(next));
       offRooms = await onRoomsChanged(() => {
         void roomsList().then(setRooms).catch(() => undefined);
@@ -114,17 +145,8 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       offView?.();
       offRooms?.();
     };
-  }, [load]);
-
-  // 分屏布局：只恢复比例与版式；房间以当前后端会话为准。
-  useEffect(() => {
-    if (!isTauri()) return;
-    void layoutGet()
-      .then((raw) => {
-        const parsed = parseLayout(raw);
-        if (parsed) setSaved(parsed);
-      })
-      .catch(() => undefined);
+    // 只在挂载时跑一次；seed 变化由下面的 effect 处理
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const sessions = useMemo(() => [...slots].sort((a, b) => a.slot - b.slot), [slots]);
@@ -135,53 +157,35 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     return map;
   }, [rooms]);
 
-  const count = sessions.length;
+  // 版面格数由 order 决定，不再跟着后端会话数跳：替换房间时 count 不会短暂掉一格，
+  // 也就不会触发「版式被重置」的莫名状态。
+  const count = order.length;
 
-  // 会话变化时对齐 order：保留仍在看的房间，新会话补空位，消失的清成 null 后裁掉。
+  // 版式树的叶子数必须与格数一致；只在真正增删格子时重建。
   useEffect(() => {
-    const ids = sessions.map((session) => session.roomId);
-    setOrder((prev) => {
-      const next = prev.filter((id) => id === null || ids.includes(id));
-      while (next.length < ids.length) next.push(null);
-      for (const id of ids) {
-        if (next.includes(id)) continue;
-        const at = next.indexOf(null);
-        if (at >= 0) next[at] = id;
-        else next.push(id);
-      }
-      return next.slice(0, ids.length);
-    });
-  }, [sessions]);
-
-  // 存过的布局正好是同一路数时优先用它（含用户拖过的比例）；用完即弃，之后按路数走默认版式。
-  useEffect(() => {
-    if (!saved) return;
-    if (saved.count !== count || leafCount(saved.tree) !== count) return;
-    setTree(saved.tree);
-    setSaved(null);
-  }, [saved, count]);
-
-  // 只有路数真正变化才重置版式；恢复布局那一轮交给上一个 effect。
-  const prevCount = useRef<number | null>(null);
-  useEffect(() => {
-    const first = prevCount.current === null;
-    const changed = prevCount.current !== count;
-    prevCount.current = count;
-    if (first || !changed) return;
-    if (saved && saved.count === count && leafCount(saved.tree) === count) return;
-    setTree(count === 0 ? buildTree(1) : buildTree(count));
-    setVariant("default");
-  }, [count, saved]);
+    if (count === 0) return;
+    if (leafCount(tree) !== count) setTree(buildTree(count));
+  }, [count, tree]);
 
   useEffect(() => {
-    if (!isTauri() || count === 0) return;
+    if (!isTauri() || !booted) return;
     const payload = serializeLayout(count, tree, order);
     latestLayout.current = payload;
     const timer = window.setTimeout(() => {
       void layoutSet(payload).catch(() => undefined);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [tree, order, count]);
+  }, [tree, order, count, booted]);
+
+  // 房间被移除后，格子里的 id 也要跟着消失，避免留下点不掉的占位。
+  useEffect(() => {
+    if (!booted || !roomsLoaded) return;
+    const alive = new Set(rooms.map((view) => view.room.id));
+    setOrder((prev) => {
+      if (!prev.some((id) => id && !alive.has(id))) return prev;
+      return prev.filter((id) => id && alive.has(id));
+    });
+  }, [rooms, booted, roomsLoaded]);
 
   // 切 Tab 会卸载本页，防抖还没到点就先把布局落库。
   useEffect(() => {
@@ -195,7 +199,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   useEffect(() => {
     if (!seed || seed.nonce === seedRef.current) return;
     seedRef.current = seed.nonce;
-    void applySeed(seed.ids).finally(() => onSeedApplied?.());
+    void applySeed(seed.ids, seed.kind).finally(() => onSeedApplied?.());
     // applySeed 用最新 tabs，不需要进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed]);
@@ -213,22 +217,61 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     setVolumes(next);
   };
 
-  async function applySeed(ids: string[]) {
+  /** 版式 kind → 分割树；路数对不上时退回该路数的默认版式。 */
+  function treeFor(kind: LayoutKind | undefined, n: number) {
+    const candidate =
+      kind === "single"
+        ? buildTree(1)
+        : kind === "row"
+          ? buildTree(2)
+          : kind === "col"
+            ? buildTree(2, "alt")
+            : kind === "top"
+              ? buildTree(3)
+              : kind === "left"
+                ? buildTree(3, "alt")
+                : kind === "quad"
+                  ? buildTree(4)
+                  : kind === "portrait"
+                    ? portraitTree(n)
+                    : buildTree(n);
+    return {
+      tree: leafCount(candidate) === n ? candidate : buildTree(n),
+      variant: (kind === "col" || kind === "left" ? "alt" : "default") as Variant,
+      portrait: kind === "portrait",
+    };
+  }
+
+  /** 从监控页多选进入：先摆好格子与版式，再按差异复用/新开槽位，不整页重建。 */
+  async function applySeed(ids: string[], kind?: LayoutKind) {
+    const wanted = ids.slice(0, MAX_SLOTS);
+    const layout = treeFor(kind, wanted.length);
+    setOrder(wanted);
+    setTree(layout.tree);
+    setVariant(layout.variant);
+    setPortrait(layout.portrait);
     setBusy(true);
     setError(null);
     try {
+      await whenViewsIdle();
       const current = await viewSlots();
-      await Promise.all(current.map((session) => viewClose(session.slot).catch(() => undefined)));
-      const opened: string[] = [];
-      for (const id of ids.slice(0, MAX_SLOTS)) {
-        try {
-          const info = await viewOpen(id);
-          opened.push(info.roomId);
-        } catch {
-          // 单路失败不影响其它路，最后一并刷新状态
-        }
-      }
-      setOrder(opened);
+      const wantedSet = new Set(wanted);
+      await Promise.all(
+        current
+          .filter((session) => !wantedSet.has(session.roomId))
+          .map((session) => viewClose(session.slot).catch(() => undefined)),
+      );
+      const opened = new Set(current.map((session) => session.roomId));
+      await Promise.all(
+        wanted.map(async (id) => {
+          if (opened.has(id)) return;
+          try {
+            await viewOpen(id);
+          } catch {
+            // 单路失败保留占位，不影响其它格
+          }
+        }),
+      );
       setPanelOpen(false);
       await load();
     } catch (err) {
@@ -238,20 +281,64 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     }
   }
 
+  /** 回到观看页：按上次布局逐路恢复；离线/失败的路保留占位，不改变格子数量。 */
+  async function restore(roomsToOpen: (string | null)[]) {
+    const ids = roomsToOpen.filter((id): id is string => Boolean(id));
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          await viewOpen(id);
+        } catch {
+          // 保留占位
+        }
+      }),
+    );
+    await load();
+  }
+
   async function watchRoom(roomId: string, replaceAt?: number) {
+    if (replaceAt !== undefined) {
+      const previous = order[replaceAt];
+      if (previous === roomId) return;
+      // 目标房间已经在别的格子里：只交换两个格子的位置，后端一根管道都不用动。
+      const existing = order.indexOf(roomId);
+      if (existing >= 0) {
+        setOrder((prev) => {
+          const next = [...prev];
+          [next[replaceAt], next[existing]] = [next[existing], next[replaceAt]];
+          return next;
+        });
+        return;
+      }
+    } else {
+      if (order.includes(roomId)) return;
+      if (count >= MAX_SLOTS) {
+        setError(t("watch.slotsFull"));
+        return;
+      }
+    }
+
     setBusy(true);
     setError(null);
     try {
       if (replaceAt !== undefined) {
         const previous = order[replaceAt];
-        if (previous && previous !== roomId) {
-          const session = sessions.find((item) => item.roomId === previous);
-          if (session) await viewClose(session.slot);
-        }
-      }
-      await viewOpen(roomId);
-      if (replaceAt !== undefined) {
+        const session = previous ? sessions.find((item) => item.roomId === previous) : undefined;
+        // 先换格子里的房间，再让后端原子替换：事件回来时顺序已经就位，不会闪一下占位。
         setOrder((prev) => prev.map((id, index) => (index === replaceAt ? roomId : id)));
+        try {
+          if (session) await viewReplace(session.slot, roomId);
+          else await viewOpen(roomId);
+        } catch (err) {
+          setOrder((prev) => prev.map((id, index) => (index === replaceAt ? previous ?? id : id)));
+          throw err;
+        }
+      } else {
+        await viewOpen(roomId);
+        const next = order.includes(roomId) ? order : [...order, roomId];
+        setOrder(next);
+        // 同一帧把树补齐，避免多出一格空白再被 effect 补上。
+        if (leafCount(tree) !== next.length) setTree(buildTree(next.length));
       }
       await load();
     } catch (err) {
@@ -268,7 +355,16 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
     setError(null);
     try {
       const view = await roomAdd(value);
-      await viewOpen(view.room.id);
+      if (!order.includes(view.room.id)) {
+        if (count >= MAX_SLOTS) {
+          setError(t("watch.slotsFull"));
+          return;
+        }
+        await viewOpen(view.room.id);
+        const next = order.includes(view.room.id) ? order : [...order, view.room.id];
+        setOrder(next);
+        if (leafCount(tree) !== next.length) setTree(buildTree(next.length));
+      }
       setInput("");
       await load();
     } catch (err) {
@@ -279,10 +375,22 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   }
 
   async function closeSlot(slot: number) {
+    const roomId = sessions.find((session) => session.slot === slot)?.roomId;
+    if (!roomId) {
+      await viewClose(slot).catch((err) => setError(describeError(err)));
+      await load();
+      return;
+    }
+    // 同样先摘格子：关流事件回来时格子已经收掉，不会出现空占位。
+    const next = order.filter((id) => id !== roomId);
+    setOrder(next);
+    if (next.length === 0) setTree(buildTree(1));
+    else if (leafCount(tree) !== next.length) setTree(buildTree(next.length));
     try {
       await viewClose(slot);
       await load();
     } catch (err) {
+      setOrder(order);
       setError(describeError(err));
     }
   }
@@ -308,6 +416,20 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       await viewRetry(slot);
     } catch (err) {
       setError(describeError(err));
+    }
+  }
+
+  /** 占位格重试：房间已开播时把这一格拉起来，不改动版式与其它格。 */
+  async function openPlaceholder(roomId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await viewOpen(roomId);
+      await load();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -555,20 +677,45 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
               count={count}
               drop={drop}
               onTreeChange={(next) => setTree(next)}
+              cellKey={(index) => order[index] ?? `empty-${index}`}
               renderCell={(index) => {
                 const roomId = order[index] ?? null;
                 const session = roomId ? sessions.find((item) => item.roomId === roomId) : undefined;
                 const view = roomId ? roomById.get(roomId) : undefined;
                 if (!session) {
+                  const room = view?.room;
                   return (
-                    <div className="flex h-full items-center justify-center rounded-[8px] border border-dashed border-line bg-surface/60 text-[11px] text-faint">
-                      {t("watch.stage.empty")}
+                    <div className="flex h-full flex-col items-center justify-center gap-1.5 rounded-[8px] border border-dashed border-line bg-surface/60 px-4 text-center">
+                      <span className="max-w-full truncate text-[12px] font-medium text-ink-soft">
+                        {room ? room.hostName || room.title || room.roomKey : t("watch.stage.empty")}
+                      </span>
+                      {room ? (
+                        <span className="text-[10.5px] text-faint">
+                          {room.isLive ? t("watch.stage.starting") : t("watch.stage.offline")}
+                        </span>
+                      ) : null}
+                      {roomId ? (
+                        <div className="mt-1 flex items-center gap-1.5">
+                          {room ? (
+                            <Button size="sm" variant="secondary" onClick={() => void openPlaceholder(room.id)}>
+                              {t("watch.retry")}
+                            </Button>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setOrder((prev) => prev.filter((id) => id !== roomId))}
+                          >
+                            {t("watch.remove")}
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                   );
                 }
                 return (
                   <SlotCell
-                    key={session.roomId}
+                    key={index}
                     session={session}
                     room={view?.room}
                     index={index}

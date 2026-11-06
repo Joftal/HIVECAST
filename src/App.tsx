@@ -7,6 +7,7 @@ import SettingsPanel from "./features/settings/SettingsPanel";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
 import { isTauri, onAppNotice, settingsGet, settingsUpdate } from "./lib/ipc";
+import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 
 type TabKey = "monitor" | "watch" | "media";
@@ -19,6 +20,7 @@ export default function App() {
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
   const notifyRef = useRef(true);
+  const prevTab = useRef<TabKey>(tab);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
 
   // 启动时读一次性设置：语言、主题与通知开关。读失败就保持默认，不打扰用户。
@@ -37,6 +39,12 @@ export default function App() {
       })
       .catch(() => applyTheme("light"));
   }, []);
+
+  // 离开观看页就停掉所有观看管道：不拉流、不转封装，但房间与布局留在本地。
+  useEffect(() => {
+    if (prevTab.current === "watch" && tab !== "watch") void suspendViews();
+    prevTab.current = tab;
+  }, [tab]);
 
   // 跟随系统时，系统换主题要跟着换。
   useEffect(() => {
@@ -186,8 +194,8 @@ export default function App() {
       <main key={tab} className="animate-fade-rise flex min-h-0 flex-1 flex-col">
         {tab === "monitor" ? (
           <MonitorPage
-            onOpenWatch={(ids) => {
-              if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now() });
+            onOpenWatch={(ids, kind) => {
+              if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now(), kind });
               setTab("watch");
             }}
           />

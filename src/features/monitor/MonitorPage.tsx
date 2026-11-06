@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Select, cx } from "../../components/ui/Controls";
-import { LayoutGlyph } from "../../components/ui/LayoutGlyph";
+import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
   isTauri,
@@ -237,7 +237,11 @@ function SortHead({
   );
 }
 
-export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: (roomIds?: string[]) => void }) {
+export default function MonitorPage({
+  onOpenWatch,
+}: {
+  onOpenWatch?: (roomIds?: string[], kind?: LayoutKind) => void;
+}) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
 
@@ -373,6 +377,31 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: (roomIds?: 
       return (sort.dir === "asc" ? diff : -diff) || byName(a, b);
     });
   }, [views, query, platform, onlyRecording, sort]);
+
+  // 分屏入口：顺序沿用当前表格顺序（筛选 + 排序），余下的按房间列表补齐。
+  const pickedIds = useMemo(() => {
+    const ordered = shown.map((view) => view.room.id).filter((id) => picked.has(id));
+    for (const view of views) {
+      if (picked.has(view.room.id) && !ordered.includes(view.room.id)) ordered.push(view.room.id);
+    }
+    return ordered.slice(0, 4);
+  }, [shown, views, picked]);
+
+  // 按选中数量给出可选版式：1 单画面、2 左右/上下、3 上大下二/左大右二、4 田字。
+  const splitModes: { kind: LayoutKind; label: string }[] =
+    pickedIds.length <= 1
+      ? [{ kind: "single", label: t("monitor.modeSingle") }]
+      : pickedIds.length === 2
+        ? [
+            { kind: "row", label: t("monitor.modeRow") },
+            { kind: "col", label: t("monitor.modeCol") },
+          ]
+        : pickedIds.length === 3
+          ? [
+              { kind: "top", label: t("monitor.modeTop") },
+              { kind: "left", label: t("monitor.modeLeft") },
+            ]
+          : [{ kind: "quad", label: t("monitor.modeQuad") }];
 
   /** 点一次升序（在线/录制中优先），再点降序，第三次取消。 */
   const toggleSort = (key: SortKey) =>
@@ -1176,17 +1205,28 @@ export default function MonitorPage({ onOpenWatch }: { onOpenWatch?: (roomIds?: 
       </div>
 
       {picked.size > 0 ? (
-        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line bg-surface/95 py-1.5 pl-3.5 pr-1.5 shadow-pop backdrop-blur">
-          <span className="text-[12px] text-ink">{t("monitor.selectedCount", { n: picked.size })}</span>
+        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-[10px] border border-line bg-surface/95 py-1.5 pl-3.5 pr-2 shadow-pop backdrop-blur">
+          <span className="whitespace-nowrap text-[12px] text-ink">
+            {t("monitor.selectedCount", { n: picked.size })}
+          </span>
           <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>
             {t("monitor.clearSelection")}
           </Button>
-          <Button size="sm" variant="primary" onClick={() => onOpenWatch?.(Array.from(picked))}>
-            <span className="inline-flex items-center gap-1.5">
-              <LayoutGlyph kind="quad" />
-              {t("monitor.watchSelected")}
-            </span>
-          </Button>
+          <span className="h-4 w-px shrink-0 bg-line" />
+          <span className="whitespace-nowrap text-[11px] text-faint">{t("monitor.splitMode")}</span>
+          {splitModes.map((mode) => (
+            <Button
+              key={mode.kind}
+              size="sm"
+              variant="secondary"
+              onClick={() => onOpenWatch?.(pickedIds, mode.kind)}
+            >
+              <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                <LayoutGlyph kind={mode.kind} />
+                {mode.label}
+              </span>
+            </Button>
+          ))}
         </div>
       ) : null}
 
