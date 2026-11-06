@@ -4,6 +4,7 @@ import {
   computeLayout,
   updateRatio,
   resetRatio,
+  type Divider,
   type Rect,
   type SplitNode,
 } from "./split";
@@ -25,8 +26,10 @@ type Props = {
   drop?: DropZone | null;
   onTreeChange: (tree: SplitNode, commit: boolean) => void;
   renderCell: (index: number, rect: Rect) => ReactNode;
-  /** 格子容器的 React key。用房间 id 时，换位只会移动 DOM，不会重建播放器。 */
+  /** 格子容器的 React key。用房间 id 时，换位只改位置，不重建播放器。 */
   cellKey?: (index: number) => string | number;
+  /** 紧凑模式：去掉外圈与缝，分割线只在悬浮/拖动时出现。 */
+  compact?: boolean;
 };
 
 /**
@@ -34,7 +37,7 @@ type Props = {
  * 指针按下后把 pointermove 挂在分割线自己身上（setPointerCapture），拖出边界也不丢。
  */
 const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
-  { tree, count, drop, onTreeChange, renderCell, cellKey },
+  { tree, count, drop, onTreeChange, renderCell, cellKey, compact = false },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -60,7 +63,10 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
     return () => observer.disconnect();
   }, []);
 
-  const { cells, dividers } = size.width > 0 ? computeLayout(tree, size.width, size.height) : { cells: new Map(), dividers: [] };
+  const { cells, dividers } =
+    size.width > 0
+      ? computeLayout(tree, size.width, size.height, compact ? { pad: 0, gap: 0, hit: 10 } : undefined)
+      : { cells: new Map<number, Rect>(), dividers: [] as Divider[] };
   const cellsRef = useRef(cells);
   cellsRef.current = cells;
 
@@ -126,23 +132,34 @@ const SplitStage = forwardRef<SplitStageHandle, Props>(function SplitStage(
 
   return (
     <div ref={hostRef} className="relative h-full w-full overflow-hidden">
-      {Array.from({ length: count }).map((_, index) => {
-        const rect = cells.get(index);
-        if (!rect) return null;
-        return (
-          <div
-            key={cellKey ? cellKey(index) : index}
-            className="absolute"
-            style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
-          >
-            {renderCell(index, rect)}
-            {drop?.index === index ? (
-              // 落点整格覆盖：换位的结果就是这一格换成拖来的画面，磨砂层要和目标格严丝合缝。
-              <div className="pointer-events-none absolute inset-0 z-30 rounded-[8px] border border-white/45 bg-white/12 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_6px_24px_rgba(0,0,0,0.25)] backdrop-blur-[7px]" />
-            ) : null}
-          </div>
-        );
-      })}
+      {/*
+        子节点按 key 排序后固定渲染顺序：换位只改 style 与 index，React 不会移动含 <video> 的 DOM 子树。
+        WKWebView 里移动 video 节点会重新加载媒体，那正是「拖一下就重新拉流」的来源。
+      */}
+      {Array.from({ length: count }, (_, index) => ({ index, key: String(cellKey ? cellKey(index) : index) }))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        .map(({ index }) => {
+          const rect = cells.get(index);
+          if (!rect) return null;
+          return (
+            <div
+              key={cellKey ? cellKey(index) : index}
+              className="absolute"
+              style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
+            >
+              {renderCell(index, rect)}
+              {drop?.index === index ? (
+                // 落点整格覆盖：换位的结果就是这一格换成拖来的画面，磨砂层要和目标格严丝合缝。
+                <div
+                  className={[
+                    "pointer-events-none absolute inset-0 z-30 border border-white/45 bg-white/12 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_6px_24px_rgba(0,0,0,0.25)] backdrop-blur-[7px]",
+                    compact ? "" : "rounded-[8px]",
+                  ].join(" ")}
+                />
+              ) : null}
+            </div>
+          );
+        })}
 
       {dividers.map((divider) => (
         <div

@@ -39,6 +39,8 @@ import {
   type ViewSlotInfo,
 } from "../../lib/ipc";
 import { whenViewsIdle } from "../../lib/viewLifecycle";
+import { useWatchPrefs } from "../../lib/watchPrefs";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const QN_OPTIONS = [0, 10000, 400, 250, 150, 80] as const;
 const MAX_SLOTS = 4;
@@ -50,9 +52,11 @@ type Props = {
   seed?: WatchSeed | null;
   /** 应用完立刻通知上层清空 seed，避免切回本页时又覆盖一次。 */
   onSeedApplied?: () => void;
+  /** 全屏时上层要收起顶栏；退出全屏再放回来。 */
+  onImmersiveChange?: (immersive: boolean) => void;
 };
 
-export default function WatchPage({ seed, onSeedApplied }: Props) {
+export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Props) {
   const { t } = useTranslation();
   const [rooms, setRooms] = useState<RoomView[]>([]);
   const [slots, setSlots] = useState<ViewSlotInfo[]>([]);
@@ -62,6 +66,13 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const [danmakuOpen, setDanmakuOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 紧凑模式与全屏都只影响这一页；紧凑持久化，全屏跟随窗口状态。
+  const { compact, setCompact } = useWatchPrefs();
+  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreenRef = useRef(false);
+  fullscreenRef.current = fullscreen;
+  const immersiveRef = useRef(onImmersiveChange);
+  immersiveRef.current = onImmersiveChange;
 
   // 分屏：树管版式与比例，order 管「第几格放哪个房间」。order 与后端 slot 解耦。
   const [tree, setTree] = useState<SplitNode>(() => buildTree(1));
@@ -77,6 +88,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   const [drop, setDrop] = useState<DropZone | null>(null);
   const stageRef = useRef<SplitStageHandle | null>(null);
   const dragRef = useRef<{ payload: DragPayload; x: number; y: number; moved: boolean } | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const dropRef = useRef<DropZone | null>(null);
   // 悬停候选时浮出的「放到哪一格」选择器。
   const [picker, setPicker] = useState<{ roomId: string; x: number; y: number } | null>(null);
@@ -475,6 +487,12 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   // 监听器在 pointerdown 里同步挂上，不依赖下一次 render，快速拖拽也不会丢事件。
   const startDrag = (payload: DragPayload, event: ReactPointerEvent) => {
     if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // 上一次拖拽若没收尾（指针在窗口外松开），先清掉旧监听，避免下一次拖拽被它吞掉。
+    dragCleanupRef.current?.();
+    // 把指针捕获在抓手上：即使中途重排/重渲染，pointermove/up 也不会丢。
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     dragRef.current = { payload, x: event.clientX, y: event.clientY, moved: false };
     dropRef.current = null;
     setDrag({ payload, x: event.clientX, y: event.clientY });
@@ -493,10 +511,14 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       dropRef.current = zone;
       setDrop(zone);
     };
-    const finish = () => {
+    const cleanup = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      dragCleanupRef.current = null;
+    };
+    const finish = () => {
+      cleanup();
       const current = dragRef.current;
       dragRef.current = null;
       const zone = dropRef.current;
@@ -507,10 +529,76 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
       setDrag(null);
       setDrop(null);
     };
+    dragCleanupRef.current = cleanup;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
   };
+
+  const applyFullscreen = useCallback((next: boolean) => {
+    setFullscreen(next);
+    immersiveRef.current?.(next);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    if (!isTauri()) return;
+    const next = !fullscreenRef.current;
+    try {
+      await getCurrentWindow().setFullscreen(next);
+      applyFullscreen(next);
+    } catch (err) {
+      setError(describeError(err));
+    }
+  }, [applyFullscreen]);
+
+  // 系统全屏（绿灯按钮、Cmd+Ctrl+F）也会改窗口状态，用 resize 事件把本地状态对齐。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const win = getCurrentWindow();
+    let alive = true;
+    const sync = () => {
+      void win
+        .isFullscreen()
+        .then((value) => {
+          if (alive && value !== fullscreenRef.current) applyFullscreen(value);
+        })
+        .catch(() => undefined);
+    };
+    sync();
+    const unlisten = win.onResized(sync);
+    return () => {
+      alive = false;
+      void unlisten.then((off) => off()).catch(() => undefined);
+    };
+  }, [applyFullscreen]);
+
+  // 离开观看页时把窗口还原，避免顶栏被隐藏着退出。
+  useEffect(() => {
+    return () => {
+      if (!fullscreenRef.current) return;
+      if (isTauri()) void getCurrentWindow().setFullscreen(false).catch(() => undefined);
+      immersiveRef.current?.(false);
+    };
+  }, []);
+
+  // Esc 退出、F11 切换；输入框里不抢键。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (event.key === "Escape" && fullscreenRef.current) {
+        event.preventDefault();
+        void toggleFullscreen();
+        return;
+      }
+      if (event.key === "F11") {
+        event.preventDefault();
+        void toggleFullscreen();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleFullscreen]);
 
   const candidates = rooms.filter((view) => view.room.isLive && !watchedIds.has(view.room.id));
 
@@ -544,7 +632,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
+        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-5">
           <span className="font-mono text-[11px] tabular-nums text-muted">
             {count} <span className="text-faint">/ 4</span>
           </span>
@@ -572,6 +660,44 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
           ) : null}
 
           <div className="ml-auto flex items-center gap-1">
+            <Button
+              size="sm"
+              variant={compact ? "secondary" : "ghost"}
+              title={t("watch.compactHint")}
+              onClick={() => setCompact(!compact)}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                {compact ? (
+                  <>
+                    <rect x="2.2" y="2.2" width="5" height="5" />
+                    <rect x="8.8" y="2.2" width="5" height="5" />
+                    <rect x="2.2" y="8.8" width="5" height="5" />
+                    <rect x="8.8" y="8.8" width="5" height="5" />
+                  </>
+                ) : (
+                  <>
+                    <rect x="1.6" y="1.6" width="12.8" height="12.8" rx="1.4" />
+                    <path d="M8 1.6v12.8M1.6 8h12.8" />
+                  </>
+                )}
+              </svg>
+              {t("watch.compact")}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              title={t("watch.fullscreenHint")}
+              onClick={() => void toggleFullscreen()}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                {fullscreen ? (
+                  <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" strokeLinecap="round" strokeLinejoin="round" />
+                ) : (
+                  <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
+                )}
+              </svg>
+              {fullscreen ? t("watch.exitFullscreen") : t("watch.fullscreen")}
+            </Button>
             {count > 0 ? (
               <Button size="sm" variant="ghost" onClick={() => setDanmakuOpen((open) => !open)}>
                 {t("watch.danmakuSettings")}
@@ -676,6 +802,7 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
               tree={tree}
               count={count}
               drop={drop}
+              compact={compact}
               onTreeChange={(next) => setTree(next)}
               cellKey={(index) => order[index] ?? `empty-${index}`}
               renderCell={(index) => {
@@ -715,11 +842,12 @@ export default function WatchPage({ seed, onSeedApplied }: Props) {
                 }
                 return (
                   <SlotCell
-                    key={index}
+                    key={session.roomId}
                     session={session}
                     room={view?.room}
                     index={index}
                     count={count}
+                    compact={compact}
                     volume={volumes[session.slot] ?? 0}
                     danmaku={danmaku[session.slot] ?? true}
                     onVolume={(value) => setVolume(session.slot, value)}
@@ -932,6 +1060,7 @@ type CellProps = {
   room?: RoomView["room"];
   index: number;
   count: number;
+  compact: boolean;
   volume: number;
   danmaku: boolean;
   onVolume: (volume: number) => void;
@@ -950,6 +1079,7 @@ function SlotCell({
   room,
   index,
   count,
+  compact,
   volume,
   danmaku,
   onVolume,
@@ -990,7 +1120,8 @@ function SlotCell({
   return (
     <section
       className={[
-        "group relative flex h-full w-full flex-col overflow-hidden rounded-[8px] border bg-black transition-[border-color,box-shadow] duration-200",
+        "group relative flex h-full w-full flex-col overflow-hidden bg-black transition-[border-color,box-shadow] duration-200",
+        compact ? "rounded-none border-0" : "rounded-[8px] border",
         sounding ? "border-accent/50 shadow-[0_0_0_1px_rgba(255,180,58,0.16)]" : "border-white/10",
       ].join(" ")}
     >

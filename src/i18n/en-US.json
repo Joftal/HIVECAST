@@ -310,7 +310,11 @@
       "placeNew": "New cell"
     },
     "cellN": "Cell {{n}}",
-    "slotsFull": "Up to 4 rooms at once"
+    "slotsFull": "Up to 4 rooms at once",
+    "compact": "Compact",
+    "compactHint": "Remove the gaps so the videos sit edge to edge",
+    "fullscreenHint": "Watch fullscreen (Esc to exit, F11 to toggle)",
+    "exitFullscreen": "Exit fullscreen"
   },
   "notice": {
     "started": {

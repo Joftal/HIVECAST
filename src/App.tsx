@@ -16,6 +16,8 @@ export default function App() {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<TabKey>("monitor");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 观看页全屏时收起顶栏，把整块窗口让给画面。
+  const [immersive, setImmersive] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("light");
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
@@ -43,6 +45,7 @@ export default function App() {
   // 离开观看页就停掉所有观看管道：不拉流、不转封装，但房间与布局留在本地。
   useEffect(() => {
     if (prevTab.current === "watch" && tab !== "watch") void suspendViews();
+    if (tab !== "watch") setImmersive(false);
     prevTab.current = tab;
   }, [tab]);
 
@@ -121,6 +124,7 @@ export default function App() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas text-ink">
+      {tab === "watch" && immersive ? null : (
       <header
         data-tauri-drag-region
         style={{ paddingLeft: isMac ? 78 : 14 }}
@@ -190,8 +194,9 @@ export default function App() {
           </IconButton>
         </div>
       </header>
+      )}
 
-      <main key={tab} className="animate-fade-rise flex min-h-0 flex-1 flex-col">
+      <main key={tab} className="flex min-h-0 flex-1 flex-col">
         {tab === "monitor" ? (
           <MonitorPage
             onOpenWatch={(ids, kind) => {
@@ -200,7 +205,11 @@ export default function App() {
             }}
           />
         ) : tab === "watch" ? (
-          <WatchPage seed={watchSeed} onSeedApplied={() => setWatchSeed(null)} />
+          <WatchPage
+            seed={watchSeed}
+            onSeedApplied={() => setWatchSeed(null)}
+            onImmersiveChange={setImmersive}
+          />
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="mx-auto flex min-h-full w-full max-w-[1360px] flex-col px-6 py-5">

@@ -91,8 +91,23 @@ export function leafCount(node: SplitNode): number {
   return leafIndices(node).length;
 }
 
+/** 紧凑模式：不留外圈与缝，画面彼此相接。 */
+export type LayoutOptions = {
+  /** 外圈留白，默认 STAGE_PAD。 */
+  pad?: number;
+  /** 格子之间的缝，默认 STAGE_GAP。 */
+  gap?: number;
+  /** 分割线的可拖拽厚度；缝为 0 时线仍要能悬浮出现，所以单独给厚度。 */
+  hit?: number;
+};
+
 /** 按容器尺寸算出每个叶子的像素矩形，以及每条分割线的可拖拽区域。 */
-export function computeLayout(tree: SplitNode, width: number, height: number) {
+export function computeLayout(tree: SplitNode, width: number, height: number, options?: LayoutOptions) {
+  const pad = options?.pad ?? STAGE_PAD;
+  const gap = options?.gap ?? STAGE_GAP;
+  // 有缝时拖拽区就是缝本身；无缝时留一条更薄的命中带，悬浮才画线。
+  const hit = Math.max(gap, options?.hit ?? 8);
+  const overhang = (hit - gap) / 2;
   const cells = new Map<number, Rect>();
   const dividers: Divider[] = [];
   const walk = (node: SplitNode, rect: Rect, path: string) => {
@@ -100,13 +115,13 @@ export function computeLayout(tree: SplitNode, width: number, height: number) {
       cells.set(node.index, rect);
       return;
     }
-    const avail = Math.max(0, (node.dir === "row" ? rect.width : rect.height) - STAGE_GAP);
+    const avail = Math.max(0, (node.dir === "row" ? rect.width : rect.height) - gap);
     const first = Math.round(avail * node.ratio);
     if (node.dir === "row") {
       walk(node.a, { left: rect.left, top: rect.top, width: first, height: rect.height }, path + "a");
       walk(
         node.b,
-        { left: rect.left + first + STAGE_GAP, top: rect.top, width: avail - first, height: rect.height },
+        { left: rect.left + first + gap, top: rect.top, width: avail - first, height: rect.height },
         path + "b",
       );
       dividers.push({
@@ -115,13 +130,13 @@ export function computeLayout(tree: SplitNode, width: number, height: number) {
         ratio: node.ratio,
         base: node.base,
         avail,
-        rect: { left: rect.left + first, top: rect.top, width: STAGE_GAP, height: rect.height },
+        rect: { left: rect.left + first - overhang, top: rect.top, width: hit, height: rect.height },
       });
     } else {
       walk(node.a, { left: rect.left, top: rect.top, width: rect.width, height: first }, path + "a");
       walk(
         node.b,
-        { left: rect.left, top: rect.top + first + STAGE_GAP, width: rect.width, height: avail - first },
+        { left: rect.left, top: rect.top + first + gap, width: rect.width, height: avail - first },
         path + "b",
       );
       dividers.push({
@@ -130,17 +145,17 @@ export function computeLayout(tree: SplitNode, width: number, height: number) {
         ratio: node.ratio,
         base: node.base,
         avail,
-        rect: { left: rect.left, top: rect.top + first, width: rect.width, height: STAGE_GAP },
+        rect: { left: rect.left, top: rect.top + first - overhang, width: rect.width, height: hit },
       });
     }
   };
   walk(
     tree,
     {
-      left: STAGE_PAD,
-      top: STAGE_PAD,
-      width: Math.max(0, width - STAGE_PAD * 2),
-      height: Math.max(0, height - STAGE_PAD * 2),
+      left: pad,
+      top: pad,
+      width: Math.max(0, width - pad * 2),
+      height: Math.max(0, height - pad * 2),
     },
     "",
   );
