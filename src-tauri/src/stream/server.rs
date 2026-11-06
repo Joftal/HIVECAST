@@ -63,6 +63,17 @@ impl StreamServer {
         }
     }
 
+    /// 缓存目录里任意允许扩展名的文件地址（缩略图走这条，省掉 asset 协议的权限配置）。
+    pub fn asset_url(&self, session: &str, path: &str) -> String {
+        format!(
+            "http://127.0.0.1:{port}/s/{token}/{session}/{path}",
+            port = self.port,
+            token = self.token,
+            session = session,
+            path = path
+        )
+    }
+
     /// 播放列表地址；token 放在路径里，前端拿不到其它会话。
     pub fn playlist_url(&self, session_id: &str) -> String {
         format!(
@@ -119,6 +130,8 @@ fn content_type(path: &str) -> &'static str {
         "m3u8" => "application/vnd.apple.mpegurl",
         "m4s" | "mp4" => "video/mp4",
         "ts" => "video/mp2t",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
         _ => "application/octet-stream",
     }
 }
@@ -127,7 +140,7 @@ fn content_type(path: &str) -> &'static str {
 fn allowed_extension(path: &str) -> bool {
     matches!(
         path.rsplit('.').next().unwrap_or_default(),
-        "m3u8" | "m4s" | "mp4" | "ts"
+        "m3u8" | "m4s" | "mp4" | "ts" | "jpg" | "jpeg" | "png"
     )
 }
 

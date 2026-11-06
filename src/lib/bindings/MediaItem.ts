@@ -11,4 +11,8 @@ path: string, size: number, durationMs: number, startedAt: number, status: strin
 /**
  * 磁盘上还能不能找到这个文件
  */
-hasFile: boolean, };
+hasFile: boolean, 
+/**
+ * 九宫格缩略图的回环地址；还没生成时为 null
+ */
+thumbnailUrl: string | null, };

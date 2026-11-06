@@ -8,6 +8,8 @@ import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
 import type { MediaItem } from "./bindings/MediaItem";
+import type { MediaPage } from "./bindings/MediaPage";
+import type { PlatformCount } from "./bindings/PlatformCount";
 import type { Playback } from "./bindings/Playback";
 import type { Settings } from "./bindings/Settings";
 import type { PostProgress } from "./bindings/PostProgress";
@@ -27,6 +29,8 @@ export type {
   DanmakuMessage,
   LineInfo,
   MediaItem,
+  MediaPage,
+  PlatformCount,
   Playback,
   PostProgress,
   PostResult,
@@ -214,8 +218,42 @@ export async function settingsUpdate(settings: Settings): Promise<Settings> {
   return invoke<Settings>("settings_update", { settings });
 }
 
-export async function mediaList(limit?: number): Promise<MediaItem[]> {
-  return invoke<MediaItem[]>("media_list", { limit });
+/** 媒体库筛选条件：字段全部可选，未传就走后端的默认值。 */
+export type MediaQuery = {
+  query?: string | null;
+  platform?: string | null;
+  /** 最近 N 天 */
+  days?: number | null;
+  onlyDanmaku?: boolean;
+  sort?: "recent" | "duration" | "size";
+  limit?: number;
+  offset?: number;
+};
+
+export async function mediaList(query: MediaQuery = {}): Promise<MediaPage> {
+  return invoke<MediaPage>("media_list", {
+    query: query.query ?? null,
+    platform: query.platform ?? null,
+    days: query.days ?? null,
+    onlyDanmaku: query.onlyDanmaku ?? false,
+    sort: query.sort ?? "recent",
+    limit: query.limit ?? 60,
+    offset: query.offset ?? 0,
+  });
+}
+
+export const EVENT_MEDIA_THUMB = "media://thumb";
+
+export type ThumbReady = { sessionId: string; url: string };
+
+/** 九宫格缩略图生成完成（后台限流，一张一张回推）。 */
+export function onMediaThumb(handler: (thumb: ThumbReady) => void): Promise<UnlistenFn> {
+  return listen<ThumbReady>(EVENT_MEDIA_THUMB, (event) => handler(event.payload));
+}
+
+/** 把录像的弹幕导出成 ASS 字幕。 */
+export async function sessionExportDanmaku(sessionId: string): Promise<PostResult> {
+  return invoke<PostResult>("session_export_danmaku", { sessionId });
 }
 
 export async function mediaPlay(sessionId: string, positionMs?: number | null): Promise<Playback> {

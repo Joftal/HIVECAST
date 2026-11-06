@@ -300,6 +300,30 @@ pub struct MediaItem {
     pub danmaku_count: i64,
     /// 磁盘上还能不能找到这个文件
     pub has_file: bool,
+    /// 九宫格缩略图的回环地址；还没生成时为 null
+    pub thumbnail_url: Option<String>,
+}
+
+/// 媒体库一页数据：items 是本页，total 是当前筛选条件下的总条数。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct MediaPage {
+    pub items: Vec<MediaItem>,
+    #[ts(type = "number")]
+    pub total: i64,
+    /// 当前筛选条件下各平台的条数（不受平台筛选本身影响），给下拉菜单显示计数。
+    pub platform_counts: Vec<PlatformCount>,
+}
+
+/// 媒体库里某个平台的条数。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct PlatformCount {
+    pub platform: String,
+    #[ts(type = "number")]
+    pub count: i64,
 }
 
 /// 本地回放的地址与标题。

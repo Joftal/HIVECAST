@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    AppInfo, CredentialInfo, LineInfo, MediaItem, Playback, PostResult, QrPoll, QrTicket,
+    AppInfo, CredentialInfo, LineInfo, MediaPage, Playback, PostResult, QrPoll, QrTicket,
     RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
-use crate::db::now_ts;
+use crate::db::{now_ts, MediaFilter};
 use crate::error::AppError;
 use crate::monitor::room_ref;
 use crate::postprocess;
@@ -628,12 +628,61 @@ pub async fn bilibili_qr_poll(
 
 // ---- 媒体库 ----
 
+/// 媒体库列表：筛选/排序/分页在 SQL 里做，返回本页 + 总数。
+///
+/// 顺手把缺缩略图的录像排进后台队列；生成完通过 EVENT_THUMB 回推，
+/// 前端按 sessionId 换封面，不用为了等封面把列表卡住。
 #[tauri::command]
-pub fn media_list(
+pub async fn media_list(
+    app: AppHandle,
     state: State<'_, AppState>,
+    query: Option<String>,
+    platform: Option<String>,
+    days: Option<i64>,
+    only_danmaku: Option<bool>,
+    sort: Option<String>,
     limit: Option<u32>,
-) -> Result<Vec<MediaItem>, AppError> {
-    state.db.media_list(limit.unwrap_or(200) as usize)
+    offset: Option<u32>,
+) -> Result<MediaPage, AppError> {
+    let filter = MediaFilter {
+        query,
+        platform,
+        days,
+        only_danmaku: only_danmaku.unwrap_or(false),
+        sort: sort.unwrap_or_else(|| "recent".into()),
+        limit: limit.unwrap_or(60) as usize,
+        offset: offset.unwrap_or(0) as usize,
+    };
+    let (mut items, total) = state.db.media_list(&filter)?;
+    let mut pending = Vec::new();
+    for item in &mut items {
+        item.thumbnail_url = state.thumbs.url_for(&item.id);
+        // 还在录的文件不抽帧：ffmpeg 边写边读会拿到半张图。
+        if item.thumbnail_url.is_none() && item.has_file && item.status != "recording" {
+            pending.push((item.id.clone(), item.path.clone(), item.duration_ms));
+        }
+    }
+    state.thumbs.ensure(app, pending);
+    let platform_counts = state.db.media_platform_counts(&filter)?;
+    Ok(MediaPage {
+        items,
+        total,
+        platform_counts,
+    })
+}
+
+/// 把这条录像的弹幕 JSONL 导出成 ASS 字幕，返回产物路径。
+#[tauri::command]
+pub async fn session_export_danmaku(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<PostResult, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session
+        .danmaku_path
+        .filter(|path| std::path::Path::new(path).is_file())
+        .ok_or_else(|| AppError::User("这段录像没有弹幕文件".into()))?;
+    postprocess::danmaku_to_ass(std::path::Path::new(&path))
 }
 
 /// 删除一条录像：先停掉可能正在回放的它，再按需删文件，最后删库。
@@ -671,6 +720,7 @@ pub async fn media_delete(
         }
     }
 
+    state.thumbs.remove(&session_id);
     state.db.delete_session(&session_id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())

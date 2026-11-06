@@ -7,7 +7,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use hivecast_ipc::{MediaItem, RecordSession, RoomRecord};
+use hivecast_ipc::{MediaItem, PlatformCount, RecordSession, RoomRecord};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
@@ -35,6 +36,89 @@ CREATE TABLE IF NOT EXISTS credential (
     updated_at INTEGER NOT NULL
 );
 ";
+
+/// 媒体库筛选条件：全部下推到 SQL，前端不再把 200 条拉回来自己过滤。
+#[derive(Debug, Clone)]
+pub struct MediaFilter {
+    pub query: Option<String>,
+    pub platform: Option<String>,
+    /// 只要最近 N 天（None 表示不限）
+    pub days: Option<i64>,
+    pub only_danmaku: bool,
+    /// recent / duration / size，其余值按 recent 处理
+    pub sort: String,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for MediaFilter {
+    fn default() -> Self {
+        Self {
+            query: None,
+            platform: None,
+            days: None,
+            only_danmaku: false,
+            sort: "recent".into(),
+            limit: 60,
+            offset: 0,
+        }
+    }
+}
+
+/// 拼出媒体库的 WHERE 片段。
+///
+/// include_platform=false 用于统计各平台条数：此时忽略平台筛选本身，
+/// 否则选了斗鱼之后其它平台的计数会变成 0，菜单看起来像坏了。
+fn media_where(filter: &MediaFilter, include_platform: bool) -> (String, Vec<SqlValue>) {
+    let mut where_sql = String::from(" WHERE s.file_path IS NOT NULL AND s.file_path <> ''");
+    let mut args: Vec<SqlValue> = Vec::new();
+    if let Some(keyword) = filter
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|one| !one.is_empty())
+    {
+        where_sql.push_str(r" AND (r.title LIKE ? ESCAPE '\' OR r.host_name LIKE ? ESCAPE '\')");
+        let like = format!(
+            "%{}%",
+            keyword
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        args.push(SqlValue::Text(like.clone()));
+        args.push(SqlValue::Text(like));
+    }
+    if include_platform {
+        if let Some(platform) = filter
+            .platform
+            .as_deref()
+            .filter(|one| !one.is_empty() && *one != "all")
+        {
+            where_sql.push_str(" AND r.platform = ?");
+            args.push(SqlValue::Text(platform.to_string()));
+        }
+    }
+    if let Some(days) = filter.days.filter(|days| *days > 0) {
+        where_sql.push_str(" AND s.started_at >= ?");
+        args.push(SqlValue::Integer(now_ts() - days * 86_400));
+    }
+    if filter.only_danmaku {
+        where_sql.push_str(" AND s.danmaku_count > 0");
+    }
+    (where_sql, args)
+}
+
+impl MediaFilter {
+    /// 只允许白名单里的三种排序，避免把用户输入拼进 SQL。
+    fn order_by(&self) -> &'static str {
+        match self.sort.as_str() {
+            "duration" => "s.duration_ms DESC, s.started_at DESC",
+            "size" => "s.file_size DESC, s.started_at DESC",
+            _ => "s.started_at DESC",
+        }
+    }
+}
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -375,26 +459,39 @@ impl Db {
         Ok(())
     }
 
-    /// 媒体库列表：会话左连房间，按开始时间倒序。
+    /// 媒体库列表：会话左连房间，筛选/排序/分页全部下推到 SQL。
     ///
     /// has_file 在这里就判断好：前端逐个文件调元数据接口太慢，
     /// 每次进媒体库查一次磁盘，量级是几百条，可以接受。
-    pub fn media_list(&self, limit: usize) -> Result<Vec<MediaItem>, AppError> {
+    pub fn media_list(&self, filter: &MediaFilter) -> Result<(Vec<MediaItem>, i64), AppError> {
         let conn = self.lock();
-        let limit = limit.clamp(1, 500) as i64;
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
-                        s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count
-                   FROM record_session s
-                   JOIN room r ON r.id = s.room_id
-                  WHERE s.file_path IS NOT NULL AND s.file_path <> ''
-                  ORDER BY s.started_at DESC
-                  LIMIT ?1",
+        let (where_sql, args) = media_where(filter, true);
+
+        let total: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM record_session s JOIN room r ON r.id = s.room_id{where_sql}"
+                ),
+                rusqlite::params_from_iter(args.iter()),
+                |row| row.get(0),
             )
             .map_err(db_err)?;
+
+        let mut page_args = args;
+        page_args.push(SqlValue::Integer(filter.limit.clamp(1, 500) as i64));
+        page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
+        let sql = format!(
+            "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
+                    s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count
+               FROM record_session s
+               JOIN room r ON r.id = s.room_id{where_sql}
+              ORDER BY {}
+              LIMIT ? OFFSET ?",
+            filter.order_by()
+        );
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(params![limit], |row| {
+            .query_map(rusqlite::params_from_iter(page_args.iter()), |row| {
                 let path: String = row.get(5)?;
                 Ok(MediaItem {
                     id: row.get(0)?,
@@ -409,6 +506,34 @@ impl Db {
                     status: row.get(9)?,
                     danmaku_count: row.get(10)?,
                     has_file: std::path::Path::new(&path).is_file(),
+                    thumbnail_url: None,
+                })
+            })
+            .map_err(db_err)?;
+        let items = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
+        Ok((items, total))
+    }
+
+    /// 各平台在当前筛选条件下的条数（忽略平台筛选本身）。
+    pub fn media_platform_counts(
+        &self,
+        filter: &MediaFilter,
+    ) -> Result<Vec<PlatformCount>, AppError> {
+        let conn = self.lock();
+        let (where_sql, args) = media_where(filter, false);
+        let sql = format!(
+            "SELECT r.platform, COUNT(*)
+               FROM record_session s
+               JOIN room r ON r.id = s.room_id{where_sql}
+              GROUP BY r.platform
+              ORDER BY COUNT(*) DESC, r.platform ASC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+                Ok(PlatformCount {
+                    platform: row.get(0)?,
+                    count: row.get(1)?,
                 })
             })
             .map_err(db_err)?;

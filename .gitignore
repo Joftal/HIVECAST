@@ -59,3 +59,7 @@ Thumbs.db
 
 # TypeScript 增量构建信息
 *.tsbuildinfo
+
+# 设计稿 mock（本地临时渲染用，产物图在 docs/assets/design）
+src/features/design/
+public/__design/

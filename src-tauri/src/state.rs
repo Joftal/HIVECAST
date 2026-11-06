@@ -29,6 +29,8 @@ pub struct AppState {
     pub local: Arc<LocalPlayer>,
     /// 弹幕扇出中心：一房间一条连接，录制与观看共用。
     pub danmaku: Arc<DanmakuHub>,
+    /// 媒体库九宫格缩略图（后台限流生成，完成后广播事件）。
+    pub thumbs: Arc<crate::thumbs::Thumbs>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
 }
@@ -103,6 +105,13 @@ impl AppState {
         crate::settings::apply(&settings, &recorder);
         let local = LocalPlayer::new(cache_root.join("play"), server.clone());
         let _ = tokio::fs::remove_dir_all(cache_root.join("play")).await;
+        let thumbs = Arc::new(crate::thumbs::Thumbs::new(
+            cache_root.join("thumbs"),
+            server.clone(),
+        ));
+        tokio::fs::create_dir_all(thumbs.dir())
+            .await
+            .map_err(|err| AppError::from_io(err, thumbs.dir()))?;
 
         monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
 
@@ -128,6 +137,7 @@ impl AppState {
             view,
             local,
             danmaku,
+            thumbs,
             demo: tokio::sync::Mutex::new(None),
         })
     }
