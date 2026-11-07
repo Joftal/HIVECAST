@@ -86,4 +86,12 @@ mediaStripEmoji: boolean,
 /**
  * 按「平台/主播」建子目录
  */
-mediaGroupDirs: boolean, };
+mediaGroupDirs: boolean,
+/**
+ * 日志目录；空串表示使用平台默认目录
+ */
+logDir: string,
+/**
+ * 日志保留天数（0 = 不按天清理，当天日志仍按 16 MiB 续段，不设总量上限）
+ */
+logRetentionDays: number, };

@@ -295,6 +295,37 @@ pub struct Settings {
     pub media_strip_emoji: bool,
     /// 按「平台/主播」建子目录
     pub media_group_dirs: bool,
+    /// 日志目录；空串表示使用平台默认目录
+    pub log_dir: String,
+    /// 日志保留天数（0 = 不按天清理，磁盘占用只受日志量与保留窗口影响）
+    pub log_retention_days: u32,
+}
+
+/// 日志运行状态：设置页用它显示「实际写到哪里、有没有降级」。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct LogStatus {
+    /// 当前实际生效的目录
+    pub dir: String,
+    /// 平台默认目录（设置里清空时用它）
+    pub default_dir: String,
+    /// 设置里保存的目录；空串表示跟随默认
+    pub configured: String,
+    /// 生效的保留天数
+    pub retention_days: u32,
+    /// 当前正在写的文件（没有则为空）
+    pub current_file: Option<String>,
+    /// 目录里的日志文件数（含分段）
+    pub file_count: u64,
+    /// 日志文件总字节数
+    pub total_bytes: u64,
+    /// 因队列满/pending 溢出/写失败被丢弃的日志片段数（按写入批次计，不是行数）
+    pub dropped: u64,
+    /// 最近一次写失败原因
+    pub last_error: Option<String>,
+    /// 最近一次运行中降级：从哪个目录回落到哪个目录
+    pub fallback: Option<String>,
 }
 
 /// 文件名模板预览：用示例房间渲染一次，前端直接展示。

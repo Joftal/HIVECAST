@@ -35,6 +35,8 @@ const WWW_REFERER: &str = "https://www.bilibili.com/";
 const FALLBACK_HOST: &str = "broadcastlv.chat.bilibili.com";
 const HEARTBEAT: Duration = Duration::from_secs(30);
 const BATCH_WINDOW: Duration = Duration::from_millis(200);
+/// 弹幕批次日志的汇总周期。每 200ms 一批，逐批打印会轻易写满当日日志额度。
+const BATCH_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PER_SECOND: u32 = 200;
 const RETRY_MAX: Duration = Duration::from_secs(30);
 /// 连续失败这么多次就丢弃 token，重新向平台申请。
@@ -58,11 +60,44 @@ struct RoomConn {
     writers: Mutex<Vec<Arc<RecordWriter>>>,
     dropped: AtomicU32,
     last_error: Mutex<Option<String>>,
+    batch_log: Mutex<BatchMeter>,
     started: Instant,
+}
+
+/// 弹幕批次日志的计数器：按周期汇总，而不是每批打一行。
+struct BatchMeter {
+    last: Instant,
+    batches: u64,
+    messages: u64,
+}
+
+impl BatchMeter {
+    fn new(now: Instant) -> Self {
+        Self {
+            last: now,
+            batches: 0,
+            messages: 0,
+        }
+    }
+
+    /// 记一批；到达汇总周期时返回 (批次数, 消息数) 并清零窗口。
+    fn record(&mut self, messages: usize, now: Instant) -> Option<(u64, u64)> {
+        self.batches += 1;
+        self.messages += messages as u64;
+        if now.saturating_duration_since(self.last) < BATCH_LOG_INTERVAL {
+            return None;
+        }
+        self.last = now;
+        Some((
+            std::mem::take(&mut self.batches),
+            std::mem::take(&mut self.messages),
+        ))
+    }
 }
 
 impl RoomConn {
     fn new(room: RoomRecord) -> Self {
+        let now = Instant::now();
         Self {
             room,
             refs: AtomicUsize::new(0),
@@ -70,7 +105,25 @@ impl RoomConn {
             writers: Mutex::new(Vec::new()),
             dropped: AtomicU32::new(0),
             last_error: Mutex::new(None),
-            started: Instant::now(),
+            batch_log: Mutex::new(BatchMeter::new(now)),
+            started: now,
+        }
+    }
+
+    /// 记录一批弹幕；每 60 秒最多输出一行汇总。
+    fn note_batch(&self, messages: usize) {
+        let window = {
+            let mut meter = self.batch_log.lock().expect("弹幕批次统计被污染");
+            meter.record(messages, Instant::now())
+        };
+        if let Some((batches, messages)) = window {
+            tracing::debug!(
+                room = %self.room.room_key,
+                batches,
+                messages,
+                dropped_total = self.dropped.load(Ordering::Relaxed),
+                "弹幕批量下发汇总（60 秒）"
+            );
         }
     }
 
@@ -135,7 +188,18 @@ impl DanmakuHub {
             return None;
         }
         self.retain(room);
-        let writer = RecordWriter::new(path).ok()?;
+        let writer = match RecordWriter::new(path) {
+            Ok(writer) => writer,
+            Err(err) => {
+                tracing::warn!(
+                    room = %room.room_key,
+                    path = %path.display(),
+                    %err,
+                    "弹幕文件创建失败，本场不记录弹幕"
+                );
+                return None;
+            }
+        };
         let rooms = self.rooms.lock().expect("弹幕房间表被污染");
         let conn = rooms.get(&room.id)?;
         conn.writers
@@ -538,7 +602,7 @@ fn flush(app: &AppHandle, conn: &RoomConn, batch: &mut Vec<DanmakuMessage>) {
     if batch.is_empty() {
         return;
     }
-    tracing::debug!(room = %conn.room.room_key, n = batch.len(), "弹幕批量下发");
+    conn.note_batch(batch.len());
     let payload = DanmakuBatch {
         room_id: conn.room.id.clone(),
         messages: std::mem::take(batch),
@@ -717,8 +781,11 @@ async fn try_connect(url: &str) -> Result<WsStream, String> {
     }
     let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
-        .map_err(|err| format!("{url} → {err}"))?;
-    tracing::debug!(%url, "弹幕 WS 已连接");
+        .map_err(|err| format!("{} → {err}", crate::platform::http::redact_url(&url)))?;
+    tracing::debug!(
+        url = %crate::platform::http::redact_url(&url),
+        "弹幕 WS 已连接"
+    );
     Ok(ws)
 }
 
@@ -917,6 +984,24 @@ mod tests {
 
     fn danmu_packet(json_body: &str) -> Vec<u8> {
         packet(5, json_body.as_bytes())
+    }
+
+    #[test]
+    fn batch_meter_aggregates_for_a_minute() {
+        let start = Instant::now();
+        let mut meter = BatchMeter::new(start);
+        assert_eq!(meter.record(3, start + Duration::from_secs(10)), None);
+        assert_eq!(meter.record(5, start + Duration::from_secs(59)), None);
+        assert_eq!(
+            meter.record(2, start + Duration::from_secs(60)),
+            Some((3, 10))
+        );
+        // 汇总后窗口清零，下一分钟重新累计。
+        assert_eq!(meter.record(1, start + Duration::from_secs(61)), None);
+        assert_eq!(
+            meter.record(4, start + Duration::from_secs(120)),
+            Some((2, 5))
+        );
     }
 
     #[test]

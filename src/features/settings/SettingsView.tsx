@@ -5,9 +5,12 @@ import {
   appInfo,
   filenamePreview,
   isTauri,
+  logsOpen,
+  logsStatus,
   settingsGet,
   settingsUpdate,
   type FilenamePreview,
+  type LogStatus,
   type Settings,
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
@@ -18,6 +21,18 @@ function describeError(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
 }
 
 const QN_OPTIONS = [
@@ -31,12 +46,16 @@ const QN_OPTIONS = [
 
 type PageKey = "account" | "record" | "storage" | "notify" | "appearance" | "system" | "about";
 
+type NavGroup = "account" | "recording" | "app";
+
 type PageMeta = {
   key: PageKey;
   labelKey: string;
   titleKey: string;
   descKey: string;
   icon: ReactNode;
+  group: NavGroup;
+  tint: string;
 };
 
 const ICON = {
@@ -86,14 +105,38 @@ const ICON = {
 };
 
 const PAGES: PageMeta[] = [
-  { key: "account", labelKey: "settings.navAccount", titleKey: "settings.pageAccount", descKey: "settings.pageAccountDesc", icon: ICON.account },
-  { key: "record", labelKey: "settings.navRecord", titleKey: "settings.pageRecord", descKey: "settings.pageRecordDesc", icon: ICON.record },
-  { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage },
-  { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify },
-  { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance },
-  { key: "system", labelKey: "settings.navSystem", titleKey: "settings.pageSystem", descKey: "settings.pageSystemDesc", icon: ICON.system },
-  { key: "about", labelKey: "settings.navAbout", titleKey: "settings.pageAbout", descKey: "settings.pageAboutDesc", icon: ICON.about },
+  { key: "account", labelKey: "settings.navAccount", titleKey: "settings.pageAccount", descKey: "settings.pageAccountDesc", icon: ICON.account, group: "account", tint: "var(--c-accent)" },
+  { key: "record", labelKey: "settings.navRecord", titleKey: "settings.pageRecord", descKey: "settings.pageRecordDesc", icon: ICON.record, group: "recording", tint: "var(--c-rec)" },
+  { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage, group: "recording", tint: "var(--c-warn)" },
+  { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify, group: "app", tint: "#8b5cf6" },
+  { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance, group: "app", tint: "#0f9f9a" },
+  { key: "system", labelKey: "settings.navSystem", titleKey: "settings.pageSystem", descKey: "settings.pageSystemDesc", icon: ICON.system, group: "app", tint: "var(--c-muted)" },
+  { key: "about", labelKey: "settings.navAbout", titleKey: "settings.pageAbout", descKey: "settings.pageAboutDesc", icon: ICON.about, group: "app", tint: "var(--c-faint)" },
 ];
+
+const NAV_GROUPS: { key: NavGroup; labelKey: string }[] = [
+  { key: "account", labelKey: "settings.groupAccountNav" },
+  { key: "recording", labelKey: "settings.groupRecordingNav" },
+  { key: "app", labelKey: "settings.groupAppNav" },
+];
+
+function PageIcon({ page, size = 15, className }: { page: PageKey; size?: number; className?: string }) {
+  const tint = PAGES.find((one) => one.key === page)?.tint ?? "var(--c-accent)";
+  return (
+    <span
+      aria-hidden
+      className={cx("flex shrink-0 items-center justify-center rounded-[7px]", className ?? "h-6 w-6")}
+      style={{
+        color: tint,
+        background: `color-mix(in oklab, ${tint} 13%, transparent)`,
+      }}
+    >
+      <span style={{ width: size, height: size }} className="[&_svg]:h-full [&_svg]:w-full">
+        {ICON[page]}
+      </span>
+    </span>
+  );
+}
 
 type SearchEntry = { page: PageKey; id: string; titleKey: string; descKey?: string; extra: string };
 
@@ -104,6 +147,8 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
   { page: "record", id: "set-auto-remux", titleKey: "settings.autoRemux", descKey: "settings.autoRemuxHint", extra: "mp4 转码 remux 后处理" },
   { page: "storage", id: "set-media-root", titleKey: "settings.mediaRoot", descKey: "settings.mediaRootHint", extra: "目录 路径 folder path" },
+  { page: "storage", id: "set-log-dir", titleKey: "settings.logDir", descKey: "settings.logDirHint", extra: "日志 log 目录 folder path" },
+  { page: "storage", id: "set-log-retention", titleKey: "settings.logRetention", descKey: "settings.logRetentionHint", extra: "日志 log 保留 清理 retention" },
   { page: "record", id: "set-monitor-interval", titleKey: "settings.monitorInterval", descKey: "settings.monitorIntervalHint", extra: "监控 间隔 轮询 monitor interval poll" },
   { page: "record", id: "set-monitor-backoff", titleKey: "settings.monitorBackoff", descKey: "settings.monitorBackoffHint", extra: "退避 限流 失败 backoff throttle" },
   { page: "storage", id: "set-filename-template", titleKey: "settings.filenameTemplate", descKey: "settings.filenameTemplateHint", extra: "文件名 模板 命名 filename template naming" },
@@ -121,9 +166,9 @@ const SEARCH_INDEX: SearchEntry[] = [
 ];
 
 const FIELD =
-  "focus-ring h-8 w-full rounded-ctl border border-line bg-surface px-2.5 text-[12px] text-ink transition-colors placeholder:text-faint hover:border-line-strong";
-const GROUP = "text-[10.5px] font-semibold uppercase tracking-[0.1em] text-faint";
-const HINT = "mt-0.5 block text-[11px] leading-4 text-faint";
+  "focus-ring h-9 w-full rounded-[7px] border border-line bg-surface px-3 text-[12.5px] text-ink transition-colors placeholder:text-faint hover:border-line-strong";
+const GROUP = "text-[10px] font-semibold uppercase tracking-[0.12em] text-faint";
+const HINT = "mt-1 block max-w-[520px] text-[11.5px] leading-[18px] text-faint";
 
 const CHEVRON = (
   <svg
@@ -182,12 +227,12 @@ function Row({
     <div
       id={id}
       className={cx(
-        "flex items-start gap-4 px-4 py-3 transition-colors",
-        focus && "bg-accent-soft",
+        "flex min-h-[58px] items-center gap-6 px-5 py-3.5 transition-colors",
+        focus ? "bg-accent-soft" : "hover:bg-raised/45",
       )}
     >
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] text-ink">{title}</div>
+        <div className="text-[12.5px] font-medium text-ink">{title}</div>
         {desc ? <p className={HINT}>{desc}</p> : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">{children}</div>
@@ -195,13 +240,14 @@ function Row({
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
   return (
-    <section className="space-y-2">
-      <h3 className={GROUP}>{title}</h3>
-      <div className="divide-y divide-line overflow-hidden rounded-[8px] border border-line bg-surface">
-        {children}
-      </div>
+    <section className="overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+      <header className="border-b border-line bg-raised/35 px-5 py-3">
+        <h3 className="text-[12px] font-semibold text-ink">{title}</h3>
+        {desc ? <p className="mt-0.5 text-[11px] leading-4 text-faint">{desc}</p> : null}
+      </header>
+      <div className="divide-y divide-line">{children}</div>
     </section>
   );
 }
@@ -224,6 +270,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const [focusId, setFocusId] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [preview, setPreview] = useState<FilenamePreview | null>(null);
+  const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const dirty = Boolean(settings) && JSON.stringify(settings) !== initial;
@@ -249,6 +296,15 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     }
   }, []);
 
+  const loadLogs = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      setLogStatus(await logsStatus());
+    } catch {
+      setLogStatus(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     setError(null);
@@ -256,7 +312,11 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     setFocusId(null);
     setDiscardOpen(false);
     void load();
-  }, [open, load]);
+    void loadLogs();
+    // 运行中日志目录可能失效并回落到默认目录；设置页开着时也要让状态行跟上。
+    const timer = window.setInterval(() => void loadLogs(), 5000);
+    return () => window.clearInterval(timer);
+  }, [open, load, loadLogs]);
 
   const patch = (next: Partial<Settings>) => {
     setSettings((current) => (current ? { ...current, ...next } : current));
@@ -276,6 +336,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
         setLanguage(result.language as Language);
       }
       onSaved(result);
+      void loadLogs();
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -337,16 +398,27 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     settings?.mediaGroupDirs,
   ]);
 
-  const chooseFolder = async () => {
+  const chooseFolder = async (target: "mediaRoot" | "logDir" = "mediaRoot") => {
     if (!settings) return;
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
       const dir = await openDialog({
         directory: true,
         multiple: false,
-        defaultPath: settings.mediaRoot,
+        defaultPath:
+          target === "mediaRoot"
+            ? settings.mediaRoot
+            : settings.logDir || logStatus?.defaultDir || settings.mediaRoot,
       });
-      if (typeof dir === "string" && dir.length > 0) patch({ mediaRoot: dir });
+      if (typeof dir === "string" && dir.length > 0) patch({ [target]: dir });
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
+  const openLogs = async () => {
+    try {
+      await logsOpen();
     } catch (err) {
       setError(describeError(err));
     }
@@ -372,17 +444,34 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
 
     if (query.trim()) {
       if (results.length === 0) {
-        return <div className="py-10 text-center text-[12px] text-faint">{t("settings.searchEmpty")}</div>;
+        return (
+          <div className="flex flex-col items-center gap-2 py-16 text-center">
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-raised text-faint">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                <circle cx="7" cy="7" r="4.2" />
+                <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
+              </svg>
+            </span>
+            <p className="text-[12.5px] font-medium text-ink">{t("settings.searchEmpty")}</p>
+            <p className="text-[11px] text-faint">{t("settings.searchEmptyHint")}</p>
+          </div>
+        );
       }
       return (
-        <div className="space-y-5">
+        <div className="space-y-7">
           {PAGES.map((one) => {
             const hits = results.filter((entry) => entry.page === one.key);
             if (hits.length === 0) return null;
             return (
-              <section key={one.key} className="space-y-2">
-                <h3 className={GROUP}>{t(one.titleKey)}</h3>
-                <div className="divide-y divide-line overflow-hidden rounded-[8px] border border-line bg-surface">
+              <section key={one.key} className="space-y-2.5">
+                <div className="flex items-center gap-2 px-0.5">
+                  <PageIcon page={one.key} size={11} className="h-5 w-5 rounded-[5px]" />
+                  <h2 className="text-[12px] font-semibold text-ink">{t(one.titleKey)}</h2>
+                  <span className="rounded-full bg-raised px-1.5 py-0.5 font-mono text-[9.5px] tabular-nums text-faint">
+                    {hits.length}
+                  </span>
+                </div>
+                <div className="divide-y divide-line overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
                   {hits.map((entry) => (
                     <button
                       key={entry.id}
@@ -392,15 +481,20 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                         setQuery("");
                         setFocusId(entry.id);
                       }}
-                      className="focus-ring flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-raised"
+                      className="focus-ring group flex w-full items-center gap-3 px-5 py-3.5 text-left transition-colors hover:bg-raised/45"
                     >
                       <span className="min-w-0 flex-1">
-                        <span className="block text-[12.5px] text-ink">{t(entry.titleKey)}</span>
+                        <span className="block text-[12.5px] font-medium text-ink">{t(entry.titleKey)}</span>
                         {entry.descKey ? (
-                          <span className="mt-0.5 block truncate text-[11px] text-faint">{t(entry.descKey)}</span>
+                          <span className="mt-0.5 block truncate text-[11.5px] text-faint">{t(entry.descKey)}</span>
                         ) : null}
                       </span>
-                      <span className="shrink-0 text-[10.5px] text-faint">{t(one.labelKey)}</span>
+                      <span className="shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] text-faint">
+                        {t(one.labelKey)}
+                      </span>
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden className="shrink-0 text-faint transition-transform group-hover:translate-x-0.5">
+                        <path d="M4 2.5 7.5 6 4 9.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
                     </button>
                   ))}
                 </div>
@@ -574,10 +668,98 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                   className={FIELD + " font-mono text-[11px]"}
                   spellCheck={false}
                 />
-                <Button size="sm" variant="secondary" onClick={() => void chooseFolder()}>
+                <Button size="sm" variant="secondary" onClick={() => void chooseFolder("mediaRoot")}>
                   {t("settings.choose")}
                 </Button>
               </div>
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionLogs")}>
+            <Row
+              id="set-log-dir"
+              focus={focusId === "set-log-dir"}
+              title={t("settings.logDir")}
+              desc={t("settings.logDirHint")}
+            >
+              <div className="flex w-[420px] flex-col gap-1.5">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={settings.logDir}
+                    onChange={(event) => patch({ logDir: event.target.value })}
+                    placeholder={logStatus?.defaultDir ?? ""}
+                    className={FIELD + " font-mono text-[11px]"}
+                    spellCheck={false}
+                  />
+                  <Button size="sm" variant="secondary" onClick={() => void chooseFolder("logDir")}>
+                    {t("settings.choose")}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Button size="sm" variant="ghost" onClick={() => void openLogs()}>
+                    {t("settings.logOpen")}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => patch({ logDir: "" })}>
+                    {t("settings.logReset")}
+                  </Button>
+                </div>
+              </div>
+            </Row>
+            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
+              {logStatus ? (
+                <>
+                  <p className="break-all font-mono">
+                    {t("settings.logActual", { dir: logStatus.dir })}
+                  </p>
+                  <p>
+                    {t("settings.logFiles", {
+                      n: logStatus.fileCount,
+                      size: formatBytes(Number(logStatus.totalBytes)),
+                    })}
+                    {logStatus.currentFile
+                      ? " · " + t("settings.logCurrent", { file: logStatus.currentFile })
+                      : ""}
+                  </p>
+                  {logStatus.dropped > 0 ? (
+                    <p className="text-rec">
+                      {t("settings.logDropped", { n: logStatus.dropped })}
+                    </p>
+                  ) : null}
+                  {logStatus.fallback ? (
+                    <p className="break-all text-rec">
+                      {t("settings.logFallback", { detail: logStatus.fallback })}
+                    </p>
+                  ) : null}
+                  {logStatus.lastError ? (
+                    <p className="break-all text-rec">
+                      {t("settings.logError", { detail: logStatus.lastError })}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p>{t("settings.logUnavailable")}</p>
+              )}
+            </div>
+            <Row
+              id="set-log-retention"
+              focus={focusId === "set-log-retention"}
+              title={t("settings.logRetention")}
+              desc={t("settings.logRetentionHint")}
+            >
+              <label className="flex items-center gap-2 whitespace-nowrap text-[11px] text-muted">
+                {t("settings.retentionDays")}
+                <div className="w-[72px]">
+                  <input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={settings.logRetentionDays}
+                    onChange={(event) => patch({ logRetentionDays: Number(event.target.value) })}
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                </div>
+                <span>{t("settings.unitDays")}</span>
+              </label>
             </Row>
           </Section>
 
@@ -597,7 +779,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                 />
               </div>
             </Row>
-            <div className="px-4 pb-3">
+            <div className="px-5 pb-4">
               <p className="text-[10.5px] leading-4 text-faint">{t("settings.filenameVars")}</p>
               {preview && settings.mediaFilenameTemplate.trim() ? (
                 preview.valid ? (
@@ -829,18 +1011,34 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-canvas text-ink">
-      <aside className="flex w-[208px] shrink-0 flex-col border-r border-line bg-surface">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("settings.title")}
+      className="fixed inset-0 z-50 flex animate-fade-in bg-canvas text-ink"
+    >
+      <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-surface">
         <div
-          className="flex h-12 shrink-0 items-center justify-between border-b border-line pr-4"
+          className="drag-region flex h-[58px] shrink-0 items-center gap-2.5 pr-3"
           style={{ paddingLeft: isMac ? 78 : 16 }}
         >
-          <span className="text-[13px] font-semibold text-ink">{t("settings.title")}</span>
+          <img
+            src={appIcon}
+            alt=""
+            width={28}
+            height={28}
+            className="h-7 w-7 shrink-0 select-none rounded-[7px]"
+            draggable={false}
+          />
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="truncate text-[12.5px] font-semibold text-ink">HIVECAST</div>
+            <div className="truncate text-[10px] text-faint">{t("settings.title")}</div>
+          </div>
           <button
             type="button"
             onClick={attemptClose}
             aria-label={t("settings.close")}
-            className="focus-ring -mr-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+            className="no-drag focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
               <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
@@ -848,94 +1046,158 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
           </button>
         </div>
 
-        <nav className="min-h-0 flex-1 space-y-0.5 overflow-auto px-2 py-3">
-          {PAGES.map((one) => {
-            const active = one.key === page && !query.trim();
-            return (
-              <button
-                key={one.key}
-                type="button"
-                onClick={() => {
-                  setPage(one.key);
+        <div className="shrink-0 px-3 pb-1 pt-1.5">
+          <div className="relative">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              aria-hidden
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+            >
+              <circle cx="7" cy="7" r="4.2" />
+              <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
+            </svg>
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && query) {
+                  event.stopPropagation();
                   setQuery("");
-                }}
-                aria-current={active ? "page" : undefined}
-                className={cx(
-                  "focus-ring flex h-8 w-full items-center gap-2.5 rounded-ctl px-2 text-left text-[12.5px] transition-colors",
-                  active
-                    ? "bg-accent-soft font-medium text-accent-text"
-                    : "text-muted hover:bg-raised hover:text-ink",
-                )}
+                }
+              }}
+              placeholder={t("settings.searchSettings")}
+              spellCheck={false}
+              aria-label={t("settings.searchSettings")}
+              className="focus-ring h-8 w-full rounded-[7px] border border-line bg-canvas pl-8 pr-11 text-[12px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
+            />
+            {!query ? (
+              <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-[4px] border border-line bg-surface px-1 py-0.5 font-sans text-[9.5px] leading-none text-faint">
+                ⌘F
+              </kbd>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label={t("settings.searchClear")}
+                className="focus-ring absolute right-2 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-full bg-raised text-faint hover:text-ink"
               >
-                <span className={cx("shrink-0", active ? "text-accent-text" : "text-faint")}>{one.icon}</span>
-                {t(one.labelKey)}
+                <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                  <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
+                </svg>
               </button>
+            )}
+          </div>
+        </div>
+
+        <nav aria-label={t("settings.title")} className="min-h-0 flex-1 overflow-auto px-3 pb-4">
+          {NAV_GROUPS.map((group) => {
+            const pages = PAGES.filter((one) => one.group === group.key);
+            if (pages.length === 0) return null;
+            return (
+              <div key={group.key} className="pt-4 first:pt-2">
+                <p className={GROUP + " px-2 pb-1.5"}>{t(group.labelKey)}</p>
+                <div className="space-y-0.5">
+                  {pages.map((one) => {
+                    const active = one.key === page && !query.trim();
+                    return (
+                      <button
+                        key={one.key}
+                        type="button"
+                        onClick={() => {
+                          setPage(one.key);
+                          setQuery("");
+                        }}
+                        aria-current={active ? "page" : undefined}
+                        className={cx(
+                          "focus-ring group flex h-9 w-full items-center gap-2.5 rounded-[8px] border px-2 text-left text-[12.5px] transition-all",
+                          active
+                            ? "border-line bg-canvas font-medium text-ink shadow-[0_1px_2px_rgba(16,24,40,0.05)]"
+                            : "border-transparent text-muted hover:bg-raised/70 hover:text-ink",
+                        )}
+                      >
+                        <PageIcon
+                          page={one.key}
+                          size={14}
+                          className={cx("h-[26px] w-[26px] rounded-[6px]", !active && "opacity-85")}
+                        />
+                        <span className="truncate">{t(one.labelKey)}</span>
+                        {active ? <span className="ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             );
           })}
         </nav>
 
-        <div className="shrink-0 border-t border-line px-4 py-3 font-mono text-[10.5px] text-faint">
-          HIVECAST {version ? "v" + version : ""}
+        <div className="shrink-0 border-t border-line px-4 py-3">
+          <div className="flex items-center justify-between text-[10px] text-faint">
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
+              HIVECAST
+            </span>
+            <span className="font-mono tabular-nums">{version ? "v" + version : "—"}</span>
+          </div>
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="shrink-0 px-8 pb-4 pt-6">
-          <div className="mx-auto flex w-full max-w-[720px] items-start justify-between gap-4">
-            <div className="min-w-0">
-              <h1 className="text-[18px] font-semibold text-ink">
-                {query.trim() ? t("settings.searchSettings") : t(meta.titleKey)}
-              </h1>
-              <p className="mt-1 text-[11.5px] leading-4 text-muted">
+      <main className="flex min-w-0 flex-1 flex-col bg-canvas">
+        <header className="shrink-0 border-b border-line/80 bg-canvas/85 px-10 py-6 backdrop-blur">
+          <div className="mx-auto flex w-full max-w-[760px] items-center gap-3.5">
+            {query.trim() ? (
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] bg-accent-soft text-accent-text">
+                <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                  <circle cx="7" cy="7" r="4.2" />
+                  <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
+                </svg>
+              </span>
+            ) : (
+              <PageIcon page={meta.key} size={18} className="h-10 w-10 rounded-[10px]" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h1 className="truncate text-[20px] font-semibold tracking-[-0.01em] text-ink">
+                  {query.trim() ? t("settings.searchSettings") : t(meta.titleKey)}
+                </h1>
+                {dirty ? (
+                  <span className="shrink-0 rounded-full bg-warn/10 px-2 py-0.5 text-[9.5px] font-medium text-warn">
+                    {t("settings.unsavedShort")}
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-1 truncate text-[11.5px] leading-4 text-muted">
                 {query.trim()
                   ? t("settings.searchResults", { n: results.length })
                   : t(meta.descKey)}
               </p>
             </div>
-            <div className="relative w-[196px] shrink-0">
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                aria-hidden
-                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
-              >
-                <circle cx="7" cy="7" r="4.2" />
-                <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
-              </svg>
-              <input
-                ref={searchRef}
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape" && query) {
-                    event.stopPropagation();
-                    setQuery("");
-                  }
-                }}
-                placeholder={t("settings.searchSettings")}
-                spellCheck={false}
-                className={FIELD + " pl-8"}
-              />
-            </div>
+            <span className="hidden shrink-0 items-center gap-1 text-[10px] text-faint sm:flex">
+              <kbd className="rounded-[4px] border border-line bg-surface px-1.5 py-0.5 font-sans text-[9.5px] leading-none">⌘S</kbd>
+              {t("settings.save")}
+            </span>
           </div>
-        </div>
+        </header>
 
-        <div className="min-h-0 flex-1 overflow-auto px-8">
-          <div className="mx-auto w-full max-w-[720px] pb-8">
+        <div className="min-h-0 flex-1 overflow-auto px-10 py-6">
+          <div className="mx-auto w-full max-w-[760px] space-y-5 pb-4">
             {error ? (
-              <div className="mb-4 rounded-ctl border border-rec/30 bg-rec/8 px-3 py-2 text-[11.5px] text-rec">{error}</div>
+              <div className="rounded-[10px] border border-rec/30 bg-rec/8 px-3.5 py-2.5 text-[11.5px] text-rec">{error}</div>
             ) : null}
             {renderBody()}
           </div>
         </div>
 
-        <div className="shrink-0 border-t border-line px-8 py-3">
-          <div className="mx-auto flex w-full max-w-[720px] items-center gap-2">
-            <span className={cx("text-[11px]", dirty ? "text-warn" : "text-faint")}>
+        <footer className="shrink-0 border-t border-line bg-surface/85 px-10 py-3 backdrop-blur">
+          <div className="mx-auto flex w-full max-w-[760px] items-center gap-2">
+            <span className={cx("flex items-center gap-2 text-[11px]", dirty ? "text-warn" : "text-faint")}>
+              <span className={cx("h-1.5 w-1.5 rounded-full", dirty ? "bg-warn" : "bg-ok")} aria-hidden />
               {dirty ? t("settings.unsaved") : t("settings.savedAll")}
             </span>
             <Button variant="ghost" onClick={attemptClose} className="ml-auto">
@@ -945,8 +1207,8 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
               {busy ? t("settings.saving") : t("settings.save")}
             </Button>
           </div>
-        </div>
-      </div>
+        </footer>
+      </main>
 
       {discardOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 px-6 backdrop-blur-[2px] animate-fade-in">

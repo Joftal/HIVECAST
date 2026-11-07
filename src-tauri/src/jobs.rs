@@ -40,6 +40,7 @@ impl Jobs {
             detail,
         };
         if let Ok(mut guard) = self.inner.lock() {
+            tracing::debug!(id, kind = %job.kind, title = %job.title, "登记后台任务");
             guard.push(job);
         }
         JobGuard {
@@ -66,6 +67,7 @@ impl Jobs {
     fn finish(&self, id: u64) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.retain(|job| job.id != id);
+            tracing::debug!(id, remaining = guard.len(), "注销后台任务");
         }
     }
 }

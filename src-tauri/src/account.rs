@@ -93,6 +93,7 @@ pub const QR_TTL_SECONDS: i64 = 180;
 
 /// 开始扫码：返回二维码内容、key 与后端渲染好的 SVG。
 pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
+    tracing::info!(platform = "bilibili", "开始获取登录二维码");
     let url = format!("{PASSPORT}/x/passport-login/web/qrcode/generate?source=main-fe-header");
     let envelope: Envelope<QrData> = http::get_json(&url, REFERER, &[])
         .await
@@ -100,13 +101,19 @@ pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
     let data = match (envelope.code, envelope.data) {
         (0, Some(data)) => data,
         (code, _) => {
+            tracing::warn!(platform = "bilibili", code, "获取登录二维码失败");
             return Err(AppError::User(format!(
                 "生成二维码失败（code {code}）{}",
                 envelope.message.unwrap_or_default()
-            )))
+            )));
         }
     };
     let svg = render_qr(&data.url)?;
+    tracing::info!(
+        platform = "bilibili",
+        expires_in = QR_TTL_SECONDS,
+        "登录二维码已生成"
+    );
     Ok(QrTicket {
         qrcode_key: data.qrcode_key,
         url: data.url,
@@ -132,6 +139,7 @@ fn render_qr(content: &str) -> Result<String, AppError> {
 pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppError> {
     let key = qrcode_key.trim();
     if key.is_empty() {
+        tracing::warn!(platform = "bilibili", "扫码轮询缺少 qrcode_key");
         return Err(AppError::User("缺少 qrcode_key".into()));
     }
     let url = format!(
@@ -166,12 +174,17 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         ),
     };
 
+    if state == "expired" || state == "error" {
+        tracing::warn!(platform = "bilibili", state, message = %message, "扫码状态异常");
+    }
     if state == "confirmed" {
+        tracing::info!(platform = "bilibili", "扫码已确认，开始校验登录态");
         let extra = cookies_from_set_cookie(&fetched.set_cookies);
         let base = credential::get("bilibili").unwrap_or_default();
         let merged = credential::merge(&base, &extra);
         let account = bilibili_nav(&merged).await?;
         let row = store_account(db, "bilibili", &merged, &account)?;
+        tracing::info!(platform = "bilibili", account = %row.account_name, uid = %row.uid, "扫码登录成功并已保存");
         return Ok(QrPoll {
             state: state.to_string(),
             message: format!("已登录：{}", row.account_name),
@@ -245,6 +258,7 @@ fn store_account(
     cookie: &str,
     account: &Account,
 ) -> Result<CredentialRow, AppError> {
+    tracing::debug!(platform, account = %account.name, uid = %account.uid, "保存平台凭据");
     let row = CredentialRow {
         platform: platform.to_string(),
         account_id: String::new(),
@@ -255,7 +269,10 @@ fn store_account(
         status: "ok".to_string(),
         updated_at: now_ts(),
     };
-    db.save_credential(&row)?;
+    db.save_credential(&row).map_err(|err| {
+        tracing::warn!(platform, account = %account.name, error = %err, "保存平台凭据失败");
+        err
+    })?;
     credential::set(platform, cookie);
     Ok(row)
 }
@@ -264,9 +281,13 @@ fn store_account(
 pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<CredentialInfo, AppError> {
     let platform = platform.trim();
     if !matches!(platform, "bilibili" | "douyu" | "huya" | "douyin") {
+        tracing::warn!(platform, "保存 Cookie 被拒绝：平台不受支持");
         return Err(AppError::User(format!("不支持的平台：{platform}")));
     }
-    let cookie = credential::normalize(raw).map_err(AppError::User)?;
+    let cookie = credential::normalize(raw).map_err(|err| {
+        tracing::warn!(platform, error = %err, "Cookie 格式不规范");
+        AppError::User(err)
+    })?;
 
     let account = if platform == "bilibili" {
         bilibili_nav(&cookie).await?
@@ -279,12 +300,17 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
     };
 
     let row = store_account(db, platform, &cookie, &account)?;
+    tracing::info!(platform, account = %row.account_name, "Cookie 已保存");
     Ok(info_from_row(&row))
 }
 
 pub fn delete(db: &Db, platform: &str) -> Result<(), AppError> {
-    db.delete_credential(platform)?;
+    db.delete_credential(platform).map_err(|err| {
+        tracing::warn!(platform, error = %err, "删除平台凭据失败");
+        err
+    })?;
     credential::remove(platform);
+    tracing::info!(platform, "已删除平台凭据");
     Ok(())
 }
 
@@ -296,12 +322,17 @@ pub fn list(db: &Db) -> Result<Vec<CredentialInfo>, AppError> {
 pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
     let rows = match db.credentials() {
         Ok(rows) => rows,
-        Err(_) => return,
+        Err(err) => {
+            tracing::warn!(error = %err, "读取平台凭据失败，跳过启动复验");
+            return;
+        }
     };
+    let mut checked = 0usize;
     for row in rows {
         if row.platform != "bilibili" {
             continue;
         }
+        checked += 1;
         match bilibili_nav(&row.cookie).await {
             Ok(account) => {
                 if account.name != row.account_name || row.status != "ok" {
@@ -311,18 +342,29 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                         status: "ok".to_string(),
                         ..row
                     };
-                    let _ = db.save_credential(&updated);
+                    if let Err(err) = db.save_credential(&updated) {
+                        tracing::warn!(platform = "bilibili", account = %updated.account_name, error = %err, "更新复验后的账号信息失败");
+                    } else {
+                        tracing::info!(platform = "bilibili", account = %updated.account_name, "B 站登录态复验通过，已更新账号信息");
+                    }
                 }
             }
             Err(err) => {
-                tracing::warn!(error = %err, "B 站登录态复验失败");
+                tracing::warn!(
+                    platform = "bilibili",
+                    account = %row.account_name,
+                    error = %err,
+                    "B 站登录态复验失败"
+                );
                 let was_ok = row.status == "ok";
                 let account_name = row.account_name.clone();
                 let updated = CredentialRow {
                     status: "expired".to_string(),
                     ..row
                 };
-                let _ = db.save_credential(&updated);
+                if let Err(err) = db.save_credential(&updated) {
+                    tracing::warn!(platform = "bilibili", account = %account_name, error = %err, "标记账号过期失败");
+                }
                 // 只在「从正常变成过期」时播报，避免每次启动都弹一次。
                 if was_ok {
                     let notice = AppNotice {
@@ -331,12 +373,17 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                         host_name: account_name,
                         detail: Some("bilibili".into()),
                     };
-                    let _ = app.emit(crate::recorder::EVENT_APP_NOTICE, notice);
+                    if let Err(err) = app.emit(crate::recorder::EVENT_APP_NOTICE, notice) {
+                        tracing::warn!(platform = "bilibili", error = %err, "账号过期通知发送失败");
+                    }
                 }
             }
         }
     }
-    credential::load_from_db(db);
+    if checked > 0 {
+        tracing::info!(checked, "启动登录态复验完成");
+    }
+    credential::load_from_db_quiet(db);
 }
 
 #[cfg(test)]

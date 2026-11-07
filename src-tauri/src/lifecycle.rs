@@ -68,16 +68,28 @@ pub fn force_quit() -> bool {
 }
 
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!(target: "hivecast_lib::lifecycle", "唤回主窗口失败：窗口不存在");
+        return;
+    };
+    if let Err(err) = window.show() {
+        tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "显示主窗口失败");
+    }
+    if let Err(err) = window.unminimize() {
+        tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "取消最小化主窗口失败");
+    }
+    if let Err(err) = window.set_focus() {
+        tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "聚焦主窗口失败");
     }
 }
 
 fn hide_main<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!(target: "hivecast_lib::lifecycle", "隐藏主窗口失败：窗口不存在");
+        return;
+    };
+    if let Err(err) = window.hide() {
+        tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "隐藏主窗口失败");
     }
 }
 
@@ -86,6 +98,7 @@ pub fn on_close_requested<R: Runtime>(app: &AppHandle<R>, tray_ready: bool) {
     let state = app.state::<AppState>();
     let action = settings::load(&state.db).close_action;
     if tray_ready && action == CLOSE_TRAY {
+        tracing::info!(target: "hivecast_lib::lifecycle", "关闭窗口，继续后台运行");
         hide_main(app);
         return;
     }
@@ -106,13 +119,21 @@ fn quit_or_warn<R: Runtime>(app: &AppHandle<R>) {
         quit_now(app);
         return;
     }
+    tracing::info!(
+        target: "hivecast_lib::lifecycle",
+        tasks = tasks.len(),
+        "退出被未完成任务拦下"
+    );
     // 窗口可能是藏起来的，先拿到前台再弹提示，否则用户看不到。
     show_main(app);
-    let _ = app.emit(EVENT_CLOSE_BLOCKED, &tasks);
+    if let Err(err) = app.emit(EVENT_CLOSE_BLOCKED, &tasks) {
+        tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "推送退出拦截事件失败");
+    }
     start_watch(app);
 }
 
 pub fn quit_now<R: Runtime>(app: &AppHandle<R>) {
+    tracing::info!(target: "hivecast_lib::lifecycle", "应用退出");
     FORCE_QUIT.store(true, Ordering::SeqCst);
     app.exit(0);
 }
@@ -120,6 +141,7 @@ pub fn quit_now<R: Runtime>(app: &AppHandle<R>) {
 /// 前端点了「任务完成后退出」。
 pub fn arm_auto_quit<R: Runtime>(app: &AppHandle<R>) {
     AUTO_QUIT.store(true, Ordering::SeqCst);
+    tracing::info!(target: "hivecast_lib::lifecycle", "已安排任务完成后自动退出");
     let tasks = {
         let state = app.state::<AppState>();
         active_tasks(&state)
@@ -152,7 +174,10 @@ fn start_watch<R: Runtime>(app: &AppHandle<R>) {
                 continue;
             }
             WATCHING.store(false, Ordering::SeqCst);
-            let _ = handle.emit(EVENT_CLOSE_READY, ());
+            tracing::info!(target: "hivecast_lib::lifecycle", "任务已清空，可以退出");
+            if let Err(err) = handle.emit(EVENT_CLOSE_READY, ()) {
+                tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "推送退出就绪事件失败");
+            }
             if AUTO_QUIT.swap(false, Ordering::SeqCst) {
                 quit_now(&handle);
             }

@@ -14,6 +14,7 @@ mod jce;
 mod jobs;
 mod lifecycle;
 mod local;
+mod logging;
 mod monitor;
 mod platform;
 mod postprocess;
@@ -33,20 +34,11 @@ mod view;
 use state::AppState;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
-use tracing_subscriber::EnvFilter;
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,hivecast_lib=debug"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    init_tracing();
+    logging::init();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "HIVECAST 进程启动");
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -64,34 +56,95 @@ pub fn run() {
                 Err(err) => {
                     tracing::warn!(%err, "已有实例在运行，本次启动退出");
                     eprintln!("HIVECAST 已在运行，本次启动退出");
-                    let _ = handle
+                    if let Err(err) = handle
                         .notification()
                         .builder()
                         .title("HIVECAST")
                         .body("HIVECAST 已在运行，本次启动已退出")
-                        .show();
-                    // 给通知留出送达时间，再干净退出。
+                        .show()
+                    {
+                        tracing::warn!(%err, "系统通知发送失败");
+                    }
+                    // 给通知留出送达时间，再干净退出；文件日志也要落盘。
                     std::thread::sleep(std::time::Duration::from_millis(300));
+                    logging::shutdown();
                     std::process::exit(0);
                 }
             };
             app.manage(lock);
 
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。
-            let state = tauri::async_runtime::block_on(AppState::init(&handle))?;
+            let state = match tauri::async_runtime::block_on(AppState::init(&handle)) {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::error!(error = %err, "应用状态初始化失败，启动中止");
+                    return Err(Box::<dyn std::error::Error>::from(err));
+                }
+            };
             let media_fallback = state.media_fallback.clone();
+            let log_fallback = state.log_fallback.clone();
             app.manage(state);
             // 媒体目录回落是「静默改了用户设置」，必须明确告诉用户（H2）。
             if let Some((configured, actual)) = media_fallback {
-                let _ = handle
+                if let Err(err) = handle
                     .notification()
                     .builder()
                     .title("HIVECAST 媒体目录已切换")
                     .body(format!(
                         "{configured} 当前不可用，新录像已改存到 {actual}；设置里已同步为后者"
                     ))
-                    .show();
+                    .show()
+                {
+                    tracing::warn!(%err, "系统通知发送失败");
+                }
             }
+            // 日志目录与媒体目录不同：用户设置保留原值，只把实际写入目录降级。
+            if let Some((configured, actual)) = log_fallback {
+                if let Err(err) = handle
+                    .notification()
+                    .builder()
+                    .title("HIVECAST 日志目录已切换")
+                    .body(format!(
+                        "{configured} 当前不可用，本次日志写入 {actual}；设置里仍保留原路径"
+                    ))
+                    .show()
+                {
+                    tracing::warn!(%err, "系统通知发送失败");
+                }
+            }
+
+            {
+                let state = app.state::<AppState>();
+                tracing::info!(
+                    target: "hivecast_lib",
+                    version = env!("CARGO_PKG_VERSION"),
+                    data_dir = %data_dir.display(),
+                    media_root = %state.media_root.display(),
+                    log_dir = %logging::status().dir,
+                    "应用启动完成"
+                );
+            }
+
+            // 运行中磁盘/权限变化也可能让日志目录失效：后台发现降级后补一条通知。
+            let fallback_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Some((configured, actual)) = logging::take_fallback() {
+                        if let Err(err) = fallback_handle
+                            .notification()
+                            .builder()
+                            .title("HIVECAST 日志目录已切换")
+                            .body(format!(
+                                "{configured} 当前不可写，日志已改写到 {actual}；设置里仍保留原路径"
+                            ))
+                            .show()
+                        {
+                            tracing::warn!(%err, "系统通知发送失败");
+                        }
+                    }
+                }
+            });
 
             // 托盘：关闭窗口只隐藏，录制与监控继续跑。托盘建不出来就退回「关窗即退出」。
             let tray_ready = match crate::tray::build(&handle) {
@@ -192,7 +245,10 @@ pub fn run() {
             commands::active_tasks,
             commands::close_quit_now,
             commands::close_arm_quit,
-            commands::close_cancel_quit
+            commands::close_cancel_quit,
+            commands::logs_status,
+            commands::logs_open,
+            commands::ui_log
         ])
         .build(tauri::generate_context!())
         .expect("failed to build HIVECAST");
@@ -201,25 +257,36 @@ pub fn run() {
         // Cmd+Q / Dock 退出也走同一套任务检查；只有 quit_now 置过 force 才放行。
         if let tauri::RunEvent::ExitRequested { api, .. } = &event {
             if !crate::lifecycle::force_quit() {
-                let blocked = handle
+                let tasks = handle
                     .try_state::<AppState>()
-                    .map(|state| !crate::lifecycle::active_tasks(&state).is_empty())
-                    .unwrap_or(false);
-                if blocked {
+                    .map(|state| crate::lifecycle::active_tasks(&state))
+                    .unwrap_or_default();
+                if !tasks.is_empty() {
+                    tracing::warn!(tasks = tasks.len(), "退出请求被拦下：仍有进行中的任务");
                     api.prevent_exit();
                     crate::lifecycle::on_quit_requested(handle);
+                } else {
+                    tracing::info!("退出请求放行：没有进行中的任务");
                 }
+            } else {
+                tracing::info!("退出请求放行：已确认强制退出");
             }
         }
         // macOS：点 Dock 图标把藏起来的窗口拿回来。
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
+            tracing::info!("收到 macOS Reopen，重新显示主窗口");
             if let Some(window) = handle.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+                if let Err(err) = window.show() {
+                    tracing::warn!(error = %err, "重新显示主窗口失败");
+                }
+                if let Err(err) = window.set_focus() {
+                    tracing::warn!(error = %err, "主窗口聚焦失败");
+                }
             }
         }
         if let tauri::RunEvent::Exit = event {
+            tracing::info!("应用开始退出收尾");
             if let Some(state) = handle.try_state::<AppState>() {
                 tauri::async_runtime::block_on(async {
                     state.local.stop_all().await;
@@ -228,6 +295,8 @@ pub fn run() {
                     state.danmaku.shutdown_all();
                 });
             }
+            logging::shutdown();
+            tracing::info!("应用退出收尾完成");
         }
     });
 }

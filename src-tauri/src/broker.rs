@@ -119,6 +119,7 @@ impl StreamBroker {
         // groups 用裸 room_key，两套键互不相干，invalidate 也就清不干净（C3）。
         let gate_key = room_gate(room);
         if let Some(groups) = self.cached_groups(&key) {
+            tracing::debug!(platform = room.platform, room = %room.room_key, qn, "取流命中缓存");
             return Ok(groups);
         }
 
@@ -130,6 +131,12 @@ impl StreamBroker {
         }
         if !bypass_cooldown {
             if let Some(err) = self.backoff_error(&gate_key) {
+                tracing::debug!(
+                    platform = room.platform,
+                    room = %room.room_key,
+                    retry_after = err.retry_after(),
+                    "取流仍在失败冷却中，直接返回"
+                );
                 return Err(err);
             }
         }
@@ -138,14 +145,25 @@ impl StreamBroker {
         let adapter = adapter_for(&room.platform)?;
         let started = Instant::now();
         let result = adapter.stream_groups(room, qn).await;
-        tracing::debug!(
-            platform = room.platform,
-            room = %room.room_key,
-            qn,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            ok = result.is_ok(),
-            "取流请求完成"
-        );
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(groups) => tracing::debug!(
+                platform = room.platform,
+                room = %room.room_key,
+                qn,
+                groups = groups.len(),
+                elapsed_ms,
+                "取流请求完成"
+            ),
+            Err(err) => tracing::warn!(
+                platform = room.platform,
+                room = %room.room_key,
+                qn,
+                elapsed_ms,
+                error = %err,
+                "取流请求失败"
+            ),
+        }
 
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         inner.group_inflight.remove(&key);
@@ -188,6 +206,7 @@ impl StreamBroker {
         let gate_key = room_gate(room);
         if !fresh {
             if let Some(info) = self.cached_info(&gate_key) {
+                tracing::debug!(platform = room.platform, room = %room.room_key, "房间信息命中缓存");
                 return Ok(info);
             }
         }
@@ -201,12 +220,36 @@ impl StreamBroker {
             }
         }
         if let Some(err) = self.backoff_error(&gate_key) {
+            tracing::debug!(
+                platform = room.platform,
+                room = %room.room_key,
+                retry_after = err.retry_after(),
+                "房间信息仍在失败冷却中，直接返回"
+            );
             return Err(err);
         }
         self.wait_turn(&gate_key).await;
 
         let adapter = adapter_for(&room.platform)?;
+        let started = Instant::now();
         let result = adapter.room_info(room).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(info) => tracing::debug!(
+                platform = room.platform,
+                room = %room.room_key,
+                live = info.is_live,
+                elapsed_ms,
+                "房间信息请求完成"
+            ),
+            Err(err) => tracing::warn!(
+                platform = room.platform,
+                room = %room.room_key,
+                elapsed_ms,
+                error = %err,
+                "房间信息请求失败"
+            ),
+        }
 
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         inner.info_inflight.remove(&gate_key);
@@ -249,6 +292,7 @@ impl StreamBroker {
     pub fn invalidate_address(&self, room: &RoomRef) {
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         drop_address_cache(&mut inner, room);
+        tracing::debug!(platform = room.platform, room = %room.room_key, "已失效地址缓存（保留失败冷却）");
     }
 
     /// 房间状态变化（下播 / 手动刷新）时主动失效缓存。
@@ -256,6 +300,7 @@ impl StreamBroker {
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         drop_address_cache(&mut inner, room);
         inner.failures.remove(&room_gate(room));
+        tracing::debug!(platform = room.platform, room = %room.room_key, "已失效地址缓存与失败冷却");
     }
 
     fn cached_groups(&self, key: &StreamKey) -> Option<Arc<Vec<StreamGroup>>> {
@@ -320,13 +365,15 @@ impl StreamBroker {
             .get(gate_key)
             .map(|failure| failure.attempts + 1)
             .unwrap_or(1);
+        let delay = backoff(attempts);
         inner.failures.insert(
             gate_key.to_string(),
             Failure {
                 attempts,
-                until: Instant::now() + backoff(attempts),
+                until: Instant::now() + delay,
             },
         );
+        tracing::warn!(room = %gate_key, attempts, delay_secs = delay.as_secs(), error = %err, "平台请求失败，进入冷却");
     }
 }
 

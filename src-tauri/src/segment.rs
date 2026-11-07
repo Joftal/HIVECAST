@@ -66,6 +66,19 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
     if parts.is_empty() {
         return Err("没有分片".into());
     }
+    let started = std::time::Instant::now();
+    let total: u64 = parts
+        .iter()
+        .filter_map(|part| std::fs::metadata(part).ok())
+        .map(|meta| meta.len())
+        .sum();
+    tracing::debug!(
+        target: "hivecast_lib::segment",
+        path = %final_path.display(),
+        parts = parts.len(),
+        bytes = total,
+        "开始合并分片"
+    );
     let list = final_path.with_extension("concat.txt");
     let mut body = String::new();
     for part in &parts {
@@ -125,6 +138,14 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         let _ = tokio::fs::remove_file(part).await;
     }
     let _ = tokio::fs::remove_file(&list).await;
+    tracing::info!(
+        target: "hivecast_lib::segment",
+        path = %final_path.display(),
+        parts = parts.len(),
+        bytes = size,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "分片合并完成"
+    );
     Ok(size)
 }
 
@@ -137,6 +158,12 @@ pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String
         return Err("没有分片".into());
     }
     let target = final_path.with_extension("ts");
+    tracing::warn!(
+        target: "hivecast_lib::segment",
+        path = %final_path.display(),
+        parts = parts.len(),
+        "改用字节拼接分片"
+    );
     // 上一场兜底留下的同名 .ts 可能还在：直接 create 会把它截断顶掉（H5）。
     let target = if target.exists() {
         crate::filename::reserve_unique_path(&target)
@@ -163,6 +190,12 @@ pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String
     for part in &parts {
         let _ = tokio::fs::remove_file(part).await;
     }
+    tracing::info!(
+        target: "hivecast_lib::segment",
+        path = %target.display(),
+        bytes = size,
+        "字节拼接完成"
+    );
     Ok((target, size))
 }
 
@@ -311,7 +344,8 @@ mod tests {
         ];
         for (path, offset) in artifacts {
             let file = std::fs::File::options().write(true).open(&path).unwrap();
-            file.set_modified(base + Duration::from_secs(offset)).unwrap();
+            file.set_modified(base + Duration::from_secs(offset))
+                .unwrap();
         }
         assert_eq!(
             last_data_at(&final_path.display().to_string()),

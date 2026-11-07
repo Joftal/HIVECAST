@@ -76,7 +76,10 @@ impl Thumbs {
     pub fn remove(&self, session_id: &str) {
         let path = self.dir.join(format!("{session_id}.jpg"));
         if path.is_file() {
-            let _ = std::fs::remove_file(path);
+            match std::fs::remove_file(&path) {
+                Ok(()) => tracing::debug!(id = %session_id, "已删除录像缩略图"),
+                Err(err) => tracing::warn!(id = %session_id, error = %err, "删除录像缩略图失败"),
+            }
         }
     }
 
@@ -86,10 +89,12 @@ impl Thumbs {
             if self.url_for(&session_id).is_some() {
                 continue;
             }
+            tracing::debug!(id = %session_id, duration_ms, "缩略图已排队");
             let this = self.clone();
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let Ok(_permit) = this.slots.acquire().await else {
+                    tracing::warn!(id = %session_id, "缩略图队列已关闭，跳过生成");
                     return;
                 };
                 // 排队期间可能已经被别的请求生成好了。
@@ -102,7 +107,15 @@ impl Thumbs {
                 {
                     Ok(_) => {
                         if let Some(url) = this.url_for(&session_id) {
-                            let _ = app.emit(EVENT_THUMB, ThumbReady { session_id, url });
+                            let event = ThumbReady {
+                                session_id: session_id.clone(),
+                                url,
+                            };
+                            if let Err(err) = app.emit(EVENT_THUMB, event) {
+                                tracing::warn!(id = %session_id, error = %err, "缩略图完成事件发送失败");
+                            } else {
+                                tracing::debug!(id = %session_id, "缩略图已生成");
+                            }
                         }
                     }
                     Err(err) => {

@@ -37,6 +37,8 @@ pub struct AppState {
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
     /// 启动时媒体目录不可用、被迫回落：(设置里的路径, 真正用的路径)。只在启动那一刻有值。
     pub media_fallback: Option<(String, String)>,
+    /// 启动时日志目录不可用、被迫回落：(设置里的路径, 真正用的路径)。只在启动那一刻有值。
+    pub log_fallback: Option<(String, String)>,
 }
 
 impl AppState {
@@ -50,22 +52,37 @@ impl AppState {
             .app_data_dir()
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
+        tracing::info!(
+            data_dir = %data_dir.display(),
+            cache_dir = %cache_root.display(),
+            "应用状态初始化开始"
+        );
+
         tokio::fs::create_dir_all(&cache_root)
             .await
-            .map_err(|err| AppError::from_io(err, &cache_root))?;
-        tokio::fs::create_dir_all(&data_dir)
-            .await
-            .map_err(|err| AppError::from_io(err, &data_dir))?;
+            .map_err(|err| {
+                tracing::error!(dir = %cache_root.display(), error = %err, "创建缓存目录失败");
+                AppError::from_io(err, &cache_root)
+            })?;
+        tokio::fs::create_dir_all(&data_dir).await.map_err(|err| {
+            tracing::error!(dir = %data_dir.display(), error = %err, "创建数据目录失败");
+            AppError::from_io(err, &data_dir)
+        })?;
 
-        let db = Arc::new(Db::open(&data_dir.join("hivecast.db"))?);
+        let db_path = data_dir.join("hivecast.db");
+        let db = Arc::new(Db::open(&db_path).map_err(|err| {
+            tracing::error!(db = %db_path.display(), error = %err, "打开数据库失败");
+            err
+        })?);
+        tracing::info!(db = %db_path.display(), "数据库已打开");
         // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
         // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
         crate::recorder::reap_orphans(&db);
         // 收尾要放在合并之前：合并会删掉分片，之后就取不到最后写入时间了（I1）。
-        if let Ok(count) = db.close_orphan_sessions() {
-            if count > 0 {
-                tracing::info!(count, "收尾上次异常退出的录制记录");
-            }
+        match db.close_orphan_sessions() {
+            Ok(count) if count > 0 => tracing::info!(count, "收尾上次异常退出的录制记录"),
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "收尾上次异常退出的录制记录失败"),
         }
         // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
         crate::retention::enforce_from_settings(&db);
@@ -116,9 +133,31 @@ impl AppState {
             media_fallback = Some((configured, settings.media_root.clone()));
         }
 
-        let server = StreamServer::start()
-            .await
-            .map_err(|err| AppError::Internal(err.to_string()))?;
+        // 日志目录在设置加载后应用；不可用时保留用户设置、回落到平台默认目录，
+        // 并把「设置里写的」与「实际写的」留给 lib.rs 通知。
+        let log_fallback =
+            match crate::logging::apply_settings(&settings.log_dir, settings.log_retention_days) {
+                Ok(dir) => {
+                    tracing::info!(dir = %dir.display(), "日志目录已就绪");
+                    None
+                }
+                Err(reason) => {
+                    tracing::warn!(error = %reason, "日志目录不可用，已回落到默认目录");
+                    crate::logging::take_fallback().or_else(|| {
+                        Some((
+                            settings.log_dir.clone(),
+                            crate::logging::default_dir().display().to_string(),
+                        ))
+                    })
+                }
+            };
+        crate::logging::cleanup(settings.log_retention_days);
+
+        let server = StreamServer::start().await.map_err(|err| {
+            tracing::error!(error = %err, "启动回环播放服务失败");
+            AppError::Internal(err.to_string())
+        })?;
+        tracing::info!(port = server.port(), "回环播放服务已就绪");
 
         let broker = Arc::new(StreamBroker::new());
         let danmaku = DanmakuHub::new(app.clone());
@@ -138,7 +177,10 @@ impl AppState {
         ));
         tokio::fs::create_dir_all(thumbs.dir())
             .await
-            .map_err(|err| AppError::from_io(err, thumbs.dir()))?;
+            .map_err(|err| {
+                tracing::error!(dir = %thumbs.dir().display(), error = %err, "创建缩略图目录失败");
+                AppError::from_io(err, thumbs.dir())
+            })?;
         // 录制收尾时自己生成封面，媒体库不用再等 ffmpeg。
         recorder.attach_thumbs(thumbs.clone());
 
@@ -155,6 +197,13 @@ impl AppState {
             loopback_port: server.port(),
         };
 
+        tracing::info!(
+            media_root = %media_root.display(),
+            cache_root = %cache_root.display(),
+            thumbs = %thumbs.dir().display(),
+            "应用状态初始化完成"
+        );
+
         Ok(Self {
             info,
             server,
@@ -170,6 +219,7 @@ impl AppState {
             jobs: crate::jobs::Jobs::new(),
             demo: tokio::sync::Mutex::new(None),
             media_fallback,
+            log_fallback,
         })
     }
 }

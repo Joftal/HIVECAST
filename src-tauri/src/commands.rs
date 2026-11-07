@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, MediaHostPage, MediaPage,
-    Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord, RoomView, Settings,
-    StreamDescriptor, ViewSlotInfo,
+    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, LogStatus, MediaHostPage,
+    MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord, RoomView,
+    Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::db::{now_ts, MediaFilter, MediaHostFilter};
 use crate::error::AppError;
@@ -113,10 +114,20 @@ pub async fn room_add(
     };
 
     let room = state.db.insert_room(&draft, &info)?;
+    tracing::info!(
+        target: "hivecast_lib::commands",
+        room_id = %room.id,
+        platform = %room.platform,
+        room_key = %room.room_key,
+        monitor = !room.monitor_paused,
+        auto_record = room.auto_record,
+        "添加房间"
+    );
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
 
     if room.is_live && room.auto_record {
         if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
+            tracing::warn!(target: "hivecast_lib::commands", room_id = %room.id, error = %err, "添加房间后自动开录失败");
             state.recorder.set_error(&room.id, err.to_string());
         }
     }
@@ -134,8 +145,11 @@ pub async fn room_remove(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, "移除房间");
     if state.recorder.is_recording(&id) {
-        let _ = state.recorder.stop(&app, &id, "stopped").await;
+        if let Err(err) = state.recorder.stop(&app, &id, "stopped").await {
+            tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "移除房间时停止录制失败");
+        }
     }
     state.view.close_room(&app, &id).await;
     // 停止录制会顺手打上「手动停录」标记；房间都移除了，别让它跨到下次重新添加。
@@ -152,6 +166,7 @@ pub async fn room_refresh(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<RoomView, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, "手动刷新房间");
     let room = state
         .db
         .get_room(&id)?
@@ -159,6 +174,7 @@ pub async fn room_refresh(
     let reference = room_ref(&room);
     state.broker.invalidate(&reference);
     let info = state.broker.room_info(&reference).await?;
+    tracing::debug!(target: "hivecast_lib::commands", room_id = %id, live = info.is_live, "房间刷新完成");
     state.db.update_room_info(&room.id, &info)?;
 
     if info.is_live {
@@ -216,6 +232,7 @@ pub async fn room_set_auto_record(
     id: String,
     enabled: bool,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, enabled, "设置自动录制");
     state.db.set_auto_record(&id, enabled)?;
     let room = state
         .db
@@ -227,10 +244,13 @@ pub async fn room_set_auto_record(
     }
     if enabled && room.is_live && !state.recorder.is_recording(&id) {
         if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
+            tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "开启自动录制后开录失败");
             state.recorder.set_error(&id, err.to_string());
         }
     } else if !enabled && state.recorder.is_recording(&id) {
-        let _ = state.recorder.stop(&app, &id, "stopped").await;
+        if let Err(err) = state.recorder.stop(&app, &id, "stopped").await {
+            tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "关闭自动录制时停止录制失败");
+        }
     }
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -244,6 +264,7 @@ pub async fn room_set_monitor(
     id: String,
     paused: bool,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, paused, "设置房间监控");
     state.db.set_monitor_paused(&id, paused)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -257,6 +278,7 @@ pub async fn room_set_quality(
     record_qn: u32,
     view_qn: u32,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, record_qn, view_qn, "设置房间画质");
     state.db.set_quality(&id, record_qn, view_qn)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -277,6 +299,7 @@ pub async fn room_lines(
         .broker
         .groups(&room_ref(&room), qn.unwrap_or(room.record_qn))
         .await?;
+    tracing::debug!(target: "hivecast_lib::commands", room_id = %id, groups = groups.len(), "查询房间线路");
     Ok(groups
         .iter()
         .map(|group| LineInfo {
@@ -301,6 +324,7 @@ pub async fn room_set_line(
     id: String,
     line: Option<String>,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, line = ?line, "设置录制线路");
     state.db.set_record_line(&id, line.as_deref())?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -317,8 +341,10 @@ pub async fn record_start(
         .get_room(&id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
     if !room.is_live {
+        tracing::warn!(target: "hivecast_lib::commands", room_id = %id, "手动开录被拒绝：房间未开播");
         return Err(AppError::Internal("房间未开播".into()));
     }
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, "手动开始录制");
     // 手动开录视为用户重新授权自动录制。
     state.recorder.resume_auto(&id);
     match state.recorder.start(&app, &state.broker, &room).await {
@@ -337,6 +363,7 @@ pub async fn record_stop(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, "手动停止录制");
     state.recorder.stop(&app, &id, "stopped").await?;
     Ok(())
 }
@@ -370,6 +397,7 @@ pub async fn view_open(
         .get_room(&room_id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
     if !room.is_live {
+        tracing::warn!(target: "hivecast_lib::commands", room_id = %room_id, "观看请求被拒绝：房间未开播");
         return Err(AppError::User("房间未开播".into()));
     }
     if let Some(qn) = qn {
@@ -381,7 +409,10 @@ pub async fn view_open(
         .db
         .get_room(&room_id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
-    state.view.open(&app, state.broker.clone(), &room).await
+    tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, qn = ?qn, "打开观看");
+    let slot = state.view.open(&app, state.broker.clone(), &room).await?;
+    tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, slot = slot.slot, "观看已打开");
+    Ok(slot)
 }
 
 #[tauri::command]
@@ -390,6 +421,7 @@ pub async fn view_close(
     state: State<'_, AppState>,
     slot: u8,
 ) -> Result<(), AppError> {
+    tracing::debug!(target: "hivecast_lib::commands", slot, "关闭观看槽位");
     state.view.close(&app, slot).await
 }
 
@@ -406,8 +438,10 @@ pub async fn view_replace(
         .get_room(&room_id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
     if !room.is_live {
+        tracing::warn!(target: "hivecast_lib::commands", room_id = %room_id, slot, "替换观看被拒绝：房间未开播");
         return Err(AppError::User("房间未开播".into()));
     }
+    tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, slot, "替换观看槽位");
     state
         .view
         .replace(&app, state.broker.clone(), slot, &room)
@@ -417,6 +451,7 @@ pub async fn view_replace(
 /// 离开观看页：停掉全部观看管道，保留房间与布局，回来时再按布局恢复。
 #[tauri::command]
 pub async fn view_suspend(app: AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", "离开观看页，挂起全部观看");
     state.view.suspend_all(&app).await;
     Ok(())
 }
@@ -429,6 +464,7 @@ pub async fn view_set_quality(
     slot: u8,
     qn: u32,
 ) -> Result<ViewSlotInfo, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", slot, qn, "切换观看画质");
     state.view.set_quality(&app, slot, qn)
 }
 
@@ -439,6 +475,7 @@ pub fn view_set_line(
     slot: u8,
     line: Option<String>,
 ) -> Result<ViewSlotInfo, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", slot, line = ?line, "切换观看线路");
     state.view.set_line(&app, state.broker.clone(), slot, line)
 }
 
@@ -448,6 +485,7 @@ pub async fn view_retry(
     state: State<'_, AppState>,
     slot: u8,
 ) -> Result<ViewSlotInfo, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", slot, "重试观看");
     state.view.retry(&app, state.broker.clone(), slot).await
 }
 
@@ -490,6 +528,7 @@ pub async fn session_remux(
     let _job = state
         .jobs
         .begin("remux", file_label(&path), session.quality.clone());
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), "开始转封装");
     let progress = postprocess::Progress {
         app: &app,
         task: &session_id,
@@ -524,6 +563,7 @@ pub async fn room_merge_sessions(
         .or_else(|| files.first().map(file_label))
         .unwrap_or_else(|| room_id.clone());
     let _job = state.jobs.begin("merge", title, None);
+    tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, files = files.len(), "开始合并房间录像");
     postprocess::merge(&files, None).await
 }
 
@@ -554,6 +594,7 @@ pub async fn sessions_merge(
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
     let _job = state.jobs.begin("merge", file_label(&files[0]), None);
+    tracing::info!(target: "hivecast_lib::commands", count = files.len(), "开始合并选中录像");
     let progress = postprocess::Progress {
         app: &app,
         task: "merge",
@@ -679,11 +720,112 @@ pub async fn settings_update(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, AppError> {
-    let saved = crate::settings::save(&state.db, &settings)?;
+    let saved = match crate::settings::save(&state.db, &settings) {
+        Ok(saved) => saved,
+        Err(err) => {
+            tracing::warn!(target: "hivecast_lib::settings", error = %err, "设置保存被拒绝");
+            return Err(err);
+        }
+    };
     crate::settings::apply(&saved, &state.recorder);
+    if let Err(reason) = crate::logging::apply_settings(&saved.log_dir, saved.log_retention_days) {
+        tracing::warn!(error = %reason, "日志目录切换失败，已回落到默认目录");
+        let pair = crate::logging::take_fallback();
+        let body = pair
+            .map(|(from, to)| format!("{from} 不可写，日志已改写到 {to}；设置里仍保留原路径"))
+            .unwrap_or(reason);
+        if let Err(err) = app
+            .notification()
+            .builder()
+            .title("HIVECAST 日志目录已切换")
+            .body(body)
+            .show()
+        {
+            tracing::warn!(%err, "系统通知发送失败");
+        }
+    }
+    crate::logging::cleanup(saved.log_retention_days);
+    tracing::info!(
+        target: "hivecast_lib::settings",
+        log_dir = %saved.log_dir,
+        log_retention_days = saved.log_retention_days,
+        "设置已保存"
+    );
     // 托盘菜单文案跟随界面语言。
     crate::tray::refresh(&app);
     Ok(saved)
+}
+
+// ---- 日志 ----
+
+#[tauri::command]
+pub fn logs_status(state: State<'_, AppState>) -> Result<LogStatus, AppError> {
+    let settings = crate::settings::load(&state.db);
+    let mut status = crate::logging::status();
+    status.configured = settings.log_dir;
+    status.retention_days = settings.log_retention_days;
+    Ok(status)
+}
+
+/// 只打开「当前实际生效」的日志目录，不接受前端传路径，避免变成任意目录打开器。
+#[tauri::command]
+pub fn logs_open() -> Result<(), AppError> {
+    let dir = std::path::PathBuf::from(crate::logging::status().dir);
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        tracing::warn!(target: "hivecast_lib::commands", dir = %dir.display(), error = %err, "创建日志目录失败");
+        AppError::from_io(err, &dir)
+    })?;
+    tracing::info!(target: "hivecast_lib::commands", dir = %dir.display(), "打开日志目录");
+    open_directory(&dir)
+}
+
+/// 前端未捕获错误兜底。截断到 4 KiB，避免把整块 React 树塞进日志。
+#[tauri::command]
+pub fn ui_log(level: String, message: String, context: Option<String>) -> Result<(), AppError> {
+    let message: String = message.chars().take(4096).collect();
+    let context: String = context.unwrap_or_default().chars().take(4096).collect();
+    match level.as_str() {
+        "error" => {
+            tracing::error!(target: "hivecast_lib::ui", context = %context, message = %message, "界面错误")
+        }
+        "warn" => {
+            tracing::warn!(target: "hivecast_lib::ui", context = %context, message = %message, "界面警告")
+        }
+        "debug" => {
+            tracing::debug!(target: "hivecast_lib::ui", context = %context, message = %message, "界面调试")
+        }
+        _ => {
+            tracing::info!(target: "hivecast_lib::ui", context = %context, message = %message, "界面日志")
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_directory(path: &std::path::Path) -> Result<(), AppError> {
+    std::process::Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开日志目录：{err}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_directory(path: &std::path::Path) -> Result<(), AppError> {
+    std::process::Command::new("explorer")
+        .arg(path)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开日志目录：{err}")))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_directory(path: &std::path::Path) -> Result<(), AppError> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开日志目录：{err}")))?;
+    Ok(())
 }
 
 // ---- 观看页布局（分屏树与比例，JSON 原文存 app_setting） ----
@@ -697,8 +839,10 @@ pub fn layout_get(state: State<'_, AppState>) -> Result<Option<String>, AppError
 #[tauri::command]
 pub fn layout_set(state: State<'_, AppState>, layout: String) -> Result<(), AppError> {
     if layout.len() > 64 * 1024 {
+        tracing::warn!(target: "hivecast_lib::commands", bytes = layout.len(), "观看布局被拒绝：数据过大");
         return Err(AppError::User("布局数据过大".into()));
     }
+    tracing::debug!(target: "hivecast_lib::commands", bytes = layout.len(), "保存观看布局");
     state.db.set_setting("view.layout", &layout)
 }
 
@@ -717,6 +861,7 @@ pub async fn credential_save(
     platform: String,
     cookie: String,
 ) -> Result<CredentialInfo, AppError> {
+    tracing::debug!(target: "hivecast_lib::commands", platform = %platform, "保存平台登录凭据");
     crate::account::save_cookie(&state.db, &platform, &cookie).await
 }
 
@@ -725,6 +870,7 @@ pub async fn credential_delete(
     state: State<'_, AppState>,
     platform: String,
 ) -> Result<(), AppError> {
+    tracing::info!(target: "hivecast_lib::commands", platform = %platform, "删除平台登录凭据");
     crate::account::delete(&state.db, &platform)
 }
 
@@ -779,6 +925,7 @@ pub async fn media_list(
             pending.push((item.id.clone(), item.path.clone(), item.duration_ms));
         }
     }
+    tracing::debug!(target: "hivecast_lib::commands", total, page = items.len(), thumbs_queued = pending.len(), "媒体库列表");
     state.thumbs.ensure(app, pending);
     let platform_counts = state.db.media_platform_counts(&filter)?;
     Ok(MediaPage {
@@ -807,7 +954,9 @@ pub async fn media_hosts(
         limit: limit.unwrap_or(60) as usize,
         offset: offset.unwrap_or(0) as usize,
     };
-    state.db.media_hosts(&filter)
+    let page = state.db.media_hosts(&filter)?;
+    tracing::debug!(target: "hivecast_lib::commands", total = page.total, page = page.items.len(), "主播墙列表");
+    Ok(page)
 }
 
 /// 把这条录像的弹幕 JSONL 导出成 ASS 字幕，返回产物路径。
@@ -824,6 +973,7 @@ pub async fn session_export_danmaku(
     let _job = state
         .jobs
         .begin("danmaku", file_label(&PathBuf::from(&path)), None);
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, file = %path, "导出弹幕为 ASS");
     postprocess::danmaku_to_ass(std::path::Path::new(&path))
 }
 
@@ -849,19 +999,23 @@ pub async fn media_delete(
         if let Some(path) = session.file_path.as_deref() {
             let path = std::path::Path::new(path);
             if path.is_file() {
-                tokio::fs::remove_file(path)
-                    .await
-                    .map_err(|err| AppError::from_io(err, path))?;
+                tokio::fs::remove_file(path).await.map_err(|err| {
+                    tracing::warn!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), error = %err, "删除录像文件失败");
+                    AppError::from_io(err, path)
+                })?;
             }
         }
         if let Some(path) = session.danmaku_path.as_deref() {
             let path = std::path::Path::new(path);
             if path.is_file() {
-                let _ = tokio::fs::remove_file(path).await;
+                if let Err(err) = tokio::fs::remove_file(path).await {
+                    tracing::warn!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), error = %err, "删除弹幕文件失败");
+                }
             }
         }
     }
 
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, delete_file, "删除录像");
     state.thumbs.remove(&session_id);
     state.db.delete_session(&session_id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
@@ -879,6 +1033,7 @@ pub async fn media_reveal(state: State<'_, AppState>, session_id: String) -> Res
         .file_path
         .filter(|p| std::path::Path::new(p).is_file())
         .ok_or_else(|| AppError::User("录像文件已不存在".into()))?;
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, file = %path, "在文件管理器中定位录像");
     reveal_in_file_manager(std::path::Path::new(&path))
 }
 
@@ -888,12 +1043,14 @@ pub async fn media_play(
     session_id: String,
     position_ms: Option<i64>,
 ) -> Result<Playback, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, position_ms = ?position_ms, "本地回放");
     state.local.open(&state.db, &session_id, position_ms).await
 }
 
 /// 停止一条回放；只影响这一条，其余各格继续放。
 #[tauri::command]
 pub async fn media_stop(state: State<'_, AppState>, session_id: String) -> Result<(), AppError> {
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, "停止本地回放");
     state.local.stop(&session_id).await;
     Ok(())
 }
@@ -938,17 +1095,20 @@ pub fn active_tasks(state: State<'_, AppState>) -> Vec<ActiveTask> {
 /// 用户确认「现在就退出」；只有任务清空后前端才会走到这里。
 #[tauri::command]
 pub fn close_quit_now(app: AppHandle) {
+    tracing::info!(target: "hivecast_lib::commands", "用户确认立即退出");
     crate::lifecycle::quit_now(&app);
 }
 
 /// 用户勾了「任务完成后自动退出」。
 #[tauri::command]
 pub fn close_arm_quit(app: AppHandle) {
+    tracing::info!(target: "hivecast_lib::commands", "用户选择任务完成后自动退出");
     crate::lifecycle::arm_auto_quit(&app);
 }
 
 /// 撤销「任务完成后自动退出」，应用继续留着。
 #[tauri::command]
 pub fn close_cancel_quit() {
+    tracing::info!(target: "hivecast_lib::commands", "用户取消任务完成后自动退出");
     crate::lifecycle::cancel_auto_quit();
 }

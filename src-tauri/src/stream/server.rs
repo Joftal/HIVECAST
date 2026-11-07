@@ -50,16 +50,24 @@ impl StreamServer {
     }
 
     pub fn register(&self, session_id: &str, dir: PathBuf) {
-        if let Ok(mut map) = self.sessions.write() {
-            map.insert(session_id.to_string(), dir);
+        match self.sessions.write() {
+            Ok(mut map) => {
+                map.insert(session_id.to_string(), dir.clone());
+                tracing::debug!(session = session_id, dir = %dir.display(), "登记回环播放会话");
+            }
+            Err(_) => tracing::warn!(session = session_id, "登记回环播放会话失败：会话表锁被污染"),
         }
     }
 
     /// 会话结束时调用；M0 的演示流常驻，M2 起每个槽位结束即注销。
     #[allow(dead_code)]
     pub fn unregister(&self, session_id: &str) {
-        if let Ok(mut map) = self.sessions.write() {
-            map.remove(session_id);
+        match self.sessions.write() {
+            Ok(mut map) => {
+                map.remove(session_id);
+                tracing::debug!(session = session_id, "注销回环播放会话");
+            }
+            Err(_) => tracing::warn!(session = session_id, "注销回环播放会话失败：会话表锁被污染"),
         }
     }
 
@@ -170,6 +178,7 @@ fn safe_relative_path(path: &str) -> Option<&str> {
 
 async fn preflight(State(state): State<Arc<StreamServer>>, headers: HeaderMap) -> Response {
     if !is_loopback_host(&headers, state.port) {
+        tracing::warn!("拒绝非回环 Host 的预检请求");
         return StatusCode::FORBIDDEN.into_response();
     }
     let origin = headers
@@ -178,6 +187,7 @@ async fn preflight(State(state): State<Arc<StreamServer>>, headers: HeaderMap) -
         .unwrap_or_default()
         .to_string();
     if !allowed_origin(&origin) {
+        tracing::warn!(origin = %origin, "拒绝来源不在白名单的预检请求");
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut res = StatusCode::NO_CONTENT.into_response();
@@ -190,10 +200,13 @@ async fn serve_file(
     Path((token, session, path)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    // token 本身是访问凭据，只记录「不匹配」，不落任何一段明文。
     if token != state.token {
+        tracing::debug!(session = %session, path = %path, "回环播放 token 不匹配");
         return StatusCode::NOT_FOUND.into_response();
     }
     if !is_loopback_host(&headers, state.port) {
+        tracing::warn!(session = %session, "拒绝非回环 Host 的播放请求");
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -203,13 +216,16 @@ async fn serve_file(
         .unwrap_or_default()
         .to_string();
     if !origin.is_empty() && !allowed_origin(&origin) {
+        tracing::warn!(session = %session, origin = %origin, "拒绝来源不在白名单的播放请求");
         return StatusCode::FORBIDDEN.into_response();
     }
 
     if !allowed_extension(&path) {
+        tracing::warn!(session = %session, path = %path, "拒绝扩展名不在白名单的播放请求");
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(relative) = safe_relative_path(&path) else {
+        tracing::warn!(session = %session, path = %path, "拒绝路径非法的播放请求");
         return StatusCode::BAD_REQUEST.into_response();
     };
 
@@ -219,13 +235,17 @@ async fn serve_file(
         .ok()
         .and_then(|map| map.get(&session).cloned())
     else {
+        tracing::debug!(session = %session, path = %path, "播放会话不存在或已注销");
         return StatusCode::NOT_FOUND.into_response();
     };
 
     let full = dir.join(relative);
     let bytes = match tokio::fs::read(&full).await {
         Ok(bytes) => bytes,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::debug!(session = %session, file = %full.display(), error = %err, "读取播放缓存文件失败");
+            return StatusCode::NOT_FOUND.into_response();
+        }
     };
 
     let mutable_playlist = relative.ends_with(".m3u8");

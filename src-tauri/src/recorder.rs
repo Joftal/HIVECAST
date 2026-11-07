@@ -9,7 +9,7 @@
 //! 意外断流（不是用户停、也不是平台下播）会先在同一个会话里续录最多 3 次，
 //! 分片接着编号，避免一次抖动就把整场切成两条历史；彻底失败才收尾。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -93,6 +93,8 @@ struct Active {
     /// 本场开录时的画质档位与线路：中途改设置不该渗进正在录的这一场（A3）
     qn: u32,
     line: Option<String>,
+    /// ffmpeg 最近几十行 stderr：默认只进 debug，异常收尾时把尾部打进 WARN。
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
@@ -731,18 +733,22 @@ impl Recorder {
         }
 
         if let Some(existing) = self.active(&room.id) {
+            tracing::debug!(room_id = %room.id, session_id = %existing.session_id, "房间已在录制，复用现有会话");
             return Ok(existing);
         }
         // 应用已经在退出：退出流程会收掉所有会话，此刻再起一条只会立刻被
         // 第二次收尾杀成 0 字节记录（C1）。
         if self.is_shutting_down() {
+            tracing::info!(room_id = %room.id, "拒绝开录：应用正在退出");
             return Err(AppError::User("应用正在退出".into()));
         }
         // 上一场正在合成 / 写库：它其实还在「这一场」的收尾里，不能重开（C4）。
         if self.is_finalizing(&room.id) {
+            tracing::debug!(room_id = %room.id, "拒绝开录：上一场仍在收尾");
             return Err(AppError::User("上一场正在收尾".into()));
         }
         if self.cooling_down(&room.id) {
+            tracing::warn!(room_id = %room.id, "拒绝开录：该房间连续录制失败，仍在冷却");
             return Err(AppError::User("该房间连续录制失败，已暂停自动重试".into()));
         }
         // 连续失败冷却（R6/R7）只拦自动开录：用户手动点「录制」说明他知道源可能有问题，
@@ -763,6 +769,7 @@ impl Recorder {
         let limit = self.max_concurrent();
         let occupied = self.active_count() + self.starting_count();
         if limit > 0 && occupied > limit {
+            tracing::warn!(limit, occupied, "拒绝开录：同时录制已达上限");
             return Err(AppError::User(format!(
                 "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
             )));
@@ -774,6 +781,13 @@ impl Recorder {
         let media_root = self.media_root();
         if !disk::can_start(&media_root) || disk::is_low(&media_root) {
             let message = disk::start_blocked_message(&media_root);
+            tracing::warn!(
+                room_id = %room.id,
+                media_root = %media_root.display(),
+                can_start = disk::can_start(&media_root),
+                low = disk::is_low(&media_root),
+                "拒绝开录：磁盘空间不足"
+            );
             self.set_error(&room.id, message.clone());
             let _ = app.emit(EVENT_ROOMS_CHANGED, ());
             return Err(AppError::User(message));
@@ -790,10 +804,22 @@ impl Recorder {
                 room.record_qn,
             )
             .await
-            .map_err(AppError::from)?;
+            .map_err(|err| {
+                tracing::warn!(room_id = %room.id, room = %room.host_name, error = %err, "开录解析线路失败");
+                AppError::from(err)
+            })?;
 
-        let (candidate, group) = pick_candidate(&groups, room.record_line.as_deref())
-            .ok_or_else(|| AppError::User("没有可用的线路".into()))?;
+        let (candidate, group) =
+            pick_candidate(&groups, room.record_line.as_deref()).ok_or_else(|| {
+                tracing::warn!(
+                    room_id = %room.id,
+                    room = %room.host_name,
+                    groups = groups.len(),
+                    line = ?room.record_line,
+                    "开录没有可用线路"
+                );
+                AppError::User("没有可用的线路".into())
+            })?;
 
         let started_at = crate::db::now_ts();
         let path = session_path(
@@ -812,14 +838,17 @@ impl Recorder {
             &self.naming(),
         );
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|err| AppError::from_io(err, parent))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                tracing::warn!(room_id = %room.id, dir = %parent.display(), error = %err, "创建录制目录失败");
+                AppError::from_io(err, parent)
+            })?;
         }
         // 同名会同时覆盖视频和旁挂弹幕，落盘前先让开；这里是原子占位，
         // 两路同一秒开录也不会拿到同一个路径（D1）。目录必须先建好。
-        let path = crate::filename::reserve_unique_path(&path)
-            .map_err(|err| AppError::Internal(format!("无法创建录制文件：{err}")))?;
+        let path = crate::filename::reserve_unique_path(&path).map_err(|err| {
+            tracing::warn!(room_id = %room.id, file = %path.display(), error = %err, "预占录制文件失败");
+            AppError::Internal(format!("无法创建录制文件：{err}"))
+        })?;
 
         let headers: Vec<(String, String)> = candidate
             .headers
@@ -834,11 +863,20 @@ impl Recorder {
             Err(err) => {
                 // reserve_unique_path 已经建了一个空占位文件；启动失败不删，
                 // 媒体库里就会留一条 0 字节录像（H3）。
+                tracing::warn!(
+                    room_id = %room.id,
+                    room = %room.host_name,
+                    file = %path.display(),
+                    quality = %candidate.name,
+                    line = %group.name,
+                    error = %err,
+                    "启动录制 ffmpeg 失败"
+                );
                 let _ = tokio::fs::remove_file(&path).await;
                 return Err(AppError::Ffmpeg(format!("启动 ffmpeg 失败：{err}")));
             }
         };
-        drain_stderr(&mut child);
+        let stderr_tail = drain_stderr(&mut child);
         write_pid_file(&path, child.id());
 
         // 弹幕落盘与视频同名，只换扩展名；后处理阶段按这个约定找旁挂文件。
@@ -870,6 +908,14 @@ impl Recorder {
             danmaku_count: 0,
         });
         if let Err(err) = created {
+            tracing::error!(
+                room_id = %room.id,
+                room = %room.host_name,
+                session_id = %session_id,
+                file = %path.display(),
+                error = %err,
+                "创建录制会话失败，回收 ffmpeg 与占位文件"
+            );
             // 建会话失败时 ffmpeg 已经起来了：不收掉会变成一个没人管的进程（C5）。
             let _ = child.start_kill();
             remove_pid_file(&path);
@@ -907,6 +953,7 @@ impl Recorder {
             eof_retries: 0,
             qn: room.record_qn,
             line: room.record_line.clone(),
+            stderr_tail,
         };
         {
             let mut inner = self.inner.lock().expect("录制状态被污染");
@@ -968,9 +1015,13 @@ impl Recorder {
         self.resume_auto(&room.id);
 
         tracing::info!(
+            room_id = %room.id,
+            session_id = %recording.session_id,
             room = %room.host_name,
             file = %path.display(),
             quality = %candidate.name,
+            qn = room.record_qn,
+            line = ?room.record_line,
             "开始录制"
         );
         self.clear_error(&room.id);
@@ -1048,6 +1099,11 @@ impl Recorder {
             .keys()
             .cloned()
             .collect();
+        if ids.is_empty() {
+            tracing::debug!("退出收尾：没有进行中的录制会话");
+            return;
+        }
+        tracing::info!(count = ids.len(), "开始收尾全部录制会话");
         {
             let mut inner = self.inner.lock().expect("录制状态被污染");
             for (_, active) in inner.iter_mut() {
@@ -1055,6 +1111,7 @@ impl Recorder {
                 send_graceful(&mut active.child);
             }
         }
+        let total = ids.len();
         for id in ids {
             let mut status = None;
             for _ in 0..40 {
@@ -1067,6 +1124,7 @@ impl Recorder {
             let status = match status {
                 Some(status) => status,
                 None => {
+                    tracing::warn!(room_id = %id, "录制 ffmpeg 未在 2 秒内退出，强制结束");
                     {
                         let mut inner = self.inner.lock().expect("录制状态被污染");
                         if let Some(active) = inner.get_mut(&id) {
@@ -1085,6 +1143,7 @@ impl Recorder {
             };
             self.finalize(app, &id, status.0, status.1, true).await;
         }
+        tracing::info!(count = total, "录制会话收尾完成");
     }
 
     fn spawn_watcher(self: &Arc<Self>, app: AppHandle, room_id: String) {
@@ -1139,7 +1198,11 @@ impl Recorder {
                         .await;
                         return;
                     }
-                    tracing::warn!(room_id, "录制长时间没有新数据，重启 ffmpeg");
+                    tracing::warn!(
+                        room_id,
+                        tail = %rec.stderr_tail(&room_id),
+                        "录制长时间没有新数据，重启 ffmpeg"
+                    );
                     let killed = rec.kill_and_wait(&room_id).await;
                     let stalls = rec.bump_stall(&room_id);
                     let broker = {
@@ -1257,6 +1320,15 @@ impl Recorder {
                 return;
             }
         });
+    }
+
+    fn stderr_tail(&self, room_id: &str) -> String {
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .get(room_id)
+            .map(|active| tail_text(&active.stderr_tail))
+            .unwrap_or_default()
     }
 
     /// 文件是否已经 STALL_TIMEOUT 没有增长；活着且正常写入时顺便刷新基线。
@@ -1406,7 +1478,7 @@ impl Recorder {
                 return false;
             }
         };
-        drain_stderr(&mut child);
+        let stderr_tail = drain_stderr(&mut child);
         write_pid_file(&path, child.id());
 
         {
@@ -1427,6 +1499,7 @@ impl Recorder {
                 return false;
             }
             active.child = child;
+            active.stderr_tail = stderr_tail;
             active.restarts = restarts + 1;
             active.started = Instant::now();
             tracing::info!(
@@ -1514,6 +1587,13 @@ impl Recorder {
             }
         };
 
+        if final_status == "failed" {
+            let tail = tail_text(&active.stderr_tail);
+            if !tail.is_empty() {
+                tracing::warn!(room_id, tail = %tail, "ffmpeg 错误输出");
+            }
+        }
+
         // 自然结束（下播 / 断流收尾）后先静默一会儿：平台状态常滞后一两轮，
         // 不挡住的话监控会立刻再开一条秒退的会话（S2）。
         if final_status == "finished" && reason == "stream_ended" && confirmed_end {
@@ -1585,9 +1665,12 @@ impl Recorder {
 
         tracing::info!(
             room_id,
+            session_id = %active.recording.session_id,
             status = final_status,
             reason,
             file_size,
+            restarts = active.restarts,
+            elapsed_ms = active.started.elapsed().as_millis() as u64,
             "录制结束"
         );
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
@@ -1981,24 +2064,55 @@ fn build_command(
     command
 }
 
-/// 把 ffmpeg 的 stderr 读空。
+/// 每路 ffmpeg 保留最近这么多行 stderr，异常收尾时一次性打进 WARN。
+const STDERR_TAIL_LINES: usize = 40;
+
+/// 把 ffmpeg 的 stderr 读空，同时留一圈尾部。
 ///
 /// 不读会死锁：管道缓冲区（约 64KB）写满后 ffmpeg 就卡在写日志上，
-/// 表现是「录到一半没声音也没退出」。这里只做排水，内容进 debug 日志。
-fn drain_stderr(child: &mut Child) {
+/// 表现是「录到一半没声音也没退出」。逐行进 debug（默认过滤掉），
+/// 但非 0 退出 / 假死时把尾部提成 WARN，否则用户只能看到一句「异常退出」。
+fn drain_stderr(child: &mut Child) -> Arc<Mutex<VecDeque<String>>> {
+    let tail = Arc::new(Mutex::new(VecDeque::new()));
     let Some(stderr) = child.stderr.take() else {
-        return;
+        return tail;
     };
+    let sink = tail.clone();
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
-            if !line.is_empty() {
-                tracing::debug!(target: "ffmpeg", %line, "录制 ffmpeg");
+            if line.is_empty() {
+                continue;
+            }
+            tracing::debug!(target: "ffmpeg", %line, "录制 ffmpeg");
+            if let Ok(mut tail) = sink.lock() {
+                let mut line: String = line.chars().take(400).collect();
+                if line.len() < line.chars().count() {
+                    line.push('…');
+                }
+                tail.push_back(line);
+                while tail.len() > STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
             }
         }
     });
+    tail
+}
+
+fn tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    let Ok(tail) = tail.lock() else {
+        return String::new();
+    };
+    let joined = tail.iter().cloned().collect::<Vec<_>>().join("\n");
+    let chars: Vec<char> = joined.chars().collect();
+    if chars.len() <= 8000 {
+        joined
+    } else {
+        chars[chars.len() - 8000..].iter().collect()
+    }
 }
 
 /// 收尾产物落定，返回（最终路径, 字节数）。

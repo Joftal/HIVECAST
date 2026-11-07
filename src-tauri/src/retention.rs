@@ -30,6 +30,7 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
     let days = read_u32(db, crate::settings::KEY_RETENTION_DAYS).min(3650);
     let max_gb = read_u32(db, crate::settings::KEY_MAX_TOTAL_GB).min(100_000);
     if days == 0 && max_gb == 0 {
+        tracing::debug!("保留策略未启用（天数和容量上限都为 0）");
         return Cleaned::default();
     }
     let rows = match db.retention_rows() {
@@ -55,6 +56,12 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
         max_gb as u64 * 1024 * 1024 * 1024,
     );
     if victims.is_empty() {
+        tracing::debug!(
+            total = entries.len(),
+            days,
+            max_gb,
+            "保留策略扫描完成，没有需要清理的录像"
+        );
         return Cleaned::default();
     }
 
@@ -65,9 +72,17 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
         // 只删 mp4 与 .jsonl 会留下 .ass / .concat.txt / 残留分片（I4）：
         // 这些文件不进数据库，媒体库里看不见，但会一直占盘。
         for target in artifacts(path) {
-            if let Ok(meta) = std::fs::metadata(&target) {
-                if std::fs::remove_file(&target).is_ok() {
-                    freed += meta.len();
+            match std::fs::metadata(&target) {
+                Ok(meta) => match std::fs::remove_file(&target) {
+                    Ok(()) => freed += meta.len(),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        tracing::warn!(id = %entry.id, path = %target.display(), error = %err, "保留策略删除文件失败");
+                    }
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::debug!(id = %entry.id, path = %target.display(), error = %err, "保留策略读取文件信息失败");
                 }
             }
         }
@@ -195,7 +210,8 @@ mod tests {
         let started = crate::db::now_ts() - 3 * 86_400;
         std::fs::write(&final_path, vec![0u8; 1_048_576]).expect("写成品");
         for (suffix, bytes) in [("jsonl", 56usize), ("ass", 14), ("concat.txt", 84)] {
-            std::fs::write(final_path.with_extension(suffix), vec![b'x'; bytes]).expect("写旁路文件");
+            std::fs::write(final_path.with_extension(suffix), vec![b'x'; bytes])
+                .expect("写旁路文件");
         }
         let part = crate::segment::part_name(&final_path, 0);
         std::fs::write(&part, vec![b'x'; 32_768]).expect("写残留分片");

@@ -56,10 +56,19 @@ fn is_dark<R: Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!("托盘唤回主窗口失败：窗口不存在");
+        return;
+    };
+    tracing::debug!("托盘唤回主窗口");
+    if let Err(err) = window.show() {
+        tracing::warn!(error = %err, "显示主窗口失败");
+    }
+    if let Err(err) = window.unminimize() {
+        tracing::warn!(error = %err, "取消最小化主窗口失败");
+    }
+    if let Err(err) = window.set_focus() {
+        tracing::warn!(error = %err, "聚焦主窗口失败");
     }
 }
 
@@ -98,18 +107,27 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         builder = builder.icon_as_template(true);
     }
     builder.build(app)?;
+    tracing::info!("系统托盘已创建");
     Ok(())
 }
 
 /// 语言或系统主题变化后刷新托盘（菜单文案 + 图标）。
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        tracing::debug!("托盘尚未创建，跳过刷新");
         return;
     };
-    if let Ok(menu) = build_menu(app) {
-        let _ = tray.set_menu(Some(menu));
+    match build_menu(app) {
+        Ok(menu) => {
+            if let Err(err) = tray.set_menu(Some(menu)) {
+                tracing::warn!(error = %err, "更新托盘菜单失败");
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "重建托盘菜单失败"),
     }
-    let _ = tray.set_icon(Some(tray_image(app)));
+    if let Err(err) = tray.set_icon(Some(tray_image(app))) {
+        tracing::warn!(error = %err, "更新托盘图标失败");
+    }
     #[cfg(target_os = "macos")]
     {
         // set_icon 会覆盖模板标记，重设一次，深色菜单栏下才不会变成黑块。

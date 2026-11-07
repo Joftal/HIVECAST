@@ -89,7 +89,15 @@ async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(AppError::Ffmpeg(describe_failure(label, &stderr)))
+    let message = describe_failure(label, &stderr);
+    tracing::warn!(
+        target: "hivecast_lib::postprocess",
+        label,
+        status = %output.status,
+        tail = %stderr.trim().chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>(),
+        "{message}"
+    );
+    Err(AppError::Ffmpeg(message))
 }
 
 /// 进度上下文：有总时长才发进度（否则 ffmpeg 的 out_time 没有参照）。
@@ -191,16 +199,27 @@ pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostRe
         "make_zero".into(),
         out.as_os_str().to_os_string(),
     ];
+    let started = std::time::Instant::now();
     match progress {
         Some(progress) if progress.total_ms > 0 => {
             run_ffmpeg_progress(args, "转封装", progress).await?
         }
         _ => run_ffmpeg(args, "转封装").await?,
     }
+    let size = size_of(&out);
+    tracing::info!(
+        target: "hivecast_lib::postprocess",
+        task = "remux",
+        src = %src.display(),
+        out = %out.display(),
+        bytes = size,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "转封装完成"
+    );
     Ok(PostResult {
         kind: "mp4".into(),
         path: out.to_string_lossy().to_string(),
-        size: size_of(&out),
+        size,
         message: None,
     })
 }
@@ -245,6 +264,7 @@ pub async fn merge(
         "+faststart".into(),
         out.as_os_str().to_os_string(),
     ];
+    let started = std::time::Instant::now();
     let result = match progress {
         Some(progress) if progress.total_ms > 0 => {
             run_ffmpeg_progress(args, "合并", progress).await
@@ -253,10 +273,20 @@ pub async fn merge(
     };
     let _ = std::fs::remove_file(&list_path);
     result?;
+    let size = size_of(&out);
+    tracing::info!(
+        target: "hivecast_lib::postprocess",
+        task = "merge",
+        sources = sources.len(),
+        out = %out.display(),
+        bytes = size,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "多段合并完成"
+    );
     Ok(PostResult {
         kind: "merge".into(),
         path: out.to_string_lossy().to_string(),
-        size: size_of(&out),
+        size,
         message: Some(format!("共 {} 段", sources.len())),
     })
 }
@@ -305,6 +335,7 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
     );
 
+    let line_count = lines.len();
     let lane_count = ((PLAY_RES_Y - LANE_TOP) / LANE_HEIGHT).max(1);
     let mut lane_free = vec![0i64; lane_count as usize];
     // 公告只占顶部三条泳道，避免盖住画面主体。
@@ -339,6 +370,15 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
 
     let out = sibling(jsonl, "", "ass");
     std::fs::write(&out, ass)?;
+    tracing::info!(
+        target: "hivecast_lib::postprocess",
+        task = "ass",
+        src = %jsonl.display(),
+        out = %out.display(),
+        lines = line_count,
+        bytes = size_of(&out),
+        "弹幕字幕导出完成"
+    );
     Ok(PostResult {
         kind: "ass".into(),
         path: out.to_string_lossy().to_string(),

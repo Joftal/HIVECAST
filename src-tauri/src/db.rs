@@ -214,6 +214,7 @@ fn host_where(filter: &MediaHostFilter, include_platform: bool) -> (String, Vec<
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self, AppError> {
+        tracing::debug!(path = %path.display(), "打开数据库");
         let conn = Connection::open(path).map_err(db_err)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(db_err)?;
@@ -1049,6 +1050,7 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             [],
         )
         .map_err(db_err)?;
+        tracing::info!(column = "record_session.danmaku_path", "数据库迁移：新增列");
     }
     if !columns.iter().any(|name| name == "danmaku_count") {
         conn.execute(
@@ -1056,6 +1058,10 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             [],
         )
         .map_err(db_err)?;
+        tracing::info!(
+            column = "record_session.danmaku_count",
+            "数据库迁移：新增列"
+        );
     }
 
     let mut stmt = conn.prepare("PRAGMA table_info(room)").map_err(db_err)?;
@@ -1067,6 +1073,7 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
     if !room_columns.iter().any(|name| name == "record_line") {
         conn.execute("ALTER TABLE room ADD COLUMN record_line TEXT", [])
             .map_err(db_err)?;
+        tracing::info!(column = "room.record_line", "数据库迁移：新增列");
     }
     if !room_columns.iter().any(|name| name == "monitor_paused") {
         conn.execute(
@@ -1074,10 +1081,12 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             [],
         )
         .map_err(db_err)?;
+        tracing::info!(column = "room.monitor_paused", "数据库迁移：新增列");
     }
     if !room_columns.iter().any(|name| name == "removed_at") {
         conn.execute("ALTER TABLE room ADD COLUMN removed_at INTEGER", [])
             .map_err(db_err)?;
+        tracing::info!(column = "room.removed_at", "数据库迁移：新增列");
     }
     Ok(())
 }
@@ -1257,7 +1266,10 @@ mod tests {
         let final_path = dir.join("崩溃场.mp4");
         let part = crate::segment::part_name(&final_path, 0);
         std::fs::write(&part, vec![0u8; 32_768]).expect("写分片失败");
-        let file = std::fs::File::options().write(true).open(&part).expect("开分片");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&part)
+            .expect("开分片");
         file.set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_060))
             .expect("改 mtime");
 

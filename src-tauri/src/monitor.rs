@@ -526,6 +526,16 @@ async fn check_room(
                 || info.area_name != room.area_name
                 || info.started_at != room.started_at;
             if structural {
+                // 在播/离线翻转是用户最关心的状态变化，留一条 INFO 方便回溯。
+                if info.is_live != room.is_live {
+                    tracing::info!(
+                        room = %room.host_name,
+                        room_id = %room.id,
+                        live = info.is_live,
+                        started_at = info.started_at,
+                        "房间开播状态变化"
+                    );
+                }
                 if let Err(err) = db.update_room_info(&room.id, &info) {
                     tracing::warn!(%err, "更新房间信息失败");
                 }

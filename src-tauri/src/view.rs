@@ -127,7 +127,10 @@ fn notify_failure(app: &AppHandle, room: &RoomRecord, detail: &str) {
         host_name: room.host_name.clone(),
         detail: Some(detail.to_string()),
     };
-    let _ = app.emit(crate::recorder::EVENT_APP_NOTICE, notice);
+    tracing::warn!(room_id = %room.id, room = %room.host_name, detail, "观看失败，通知前端");
+    if let Err(err) = app.emit(crate::recorder::EVENT_APP_NOTICE, notice) {
+        tracing::warn!(room_id = %room.id, error = %err, "观看失败通知发送失败");
+    }
 }
 
 enum Cycle {
@@ -180,8 +183,10 @@ impl ViewManager {
         let _gate = self.open_gate.lock().await;
         if let Some((slot, handle)) = self.find_by_room(&room.id) {
             if handle.lock().alive {
+                tracing::debug!(room_id = %room.id, slot, "观看已在运行，复用现有槽位");
                 return Ok(handle.info(slot));
             }
+            tracing::info!(room_id = %room.id, slot, "观看槽位已退出，重新拉起监督循环");
             // 上次失败的槽位：重新拉起，而不是再占一个格子。
             self.restart_supervisor(app, broker, slot, handle.clone(), room.clone());
             return Ok(handle.info(slot));
@@ -191,7 +196,10 @@ impl ViewManager {
             let mut slots = self.slots.lock().expect("观看槽位被污染");
             let slot = (0..MAX_SLOTS)
                 .find(|index| !slots.contains_key(index))
-                .ok_or_else(|| AppError::User("观看槽位已满（最多同时看 4 路）".into()))?;
+                .ok_or_else(|| {
+                    tracing::warn!(room_id = %room.id, "观看被拒绝：槽位已满");
+                    AppError::User("观看槽位已满（最多同时看 4 路）".into())
+                })?;
             let handle = Arc::new(Slot::new(room.clone()));
             slots.insert(slot, handle.clone());
             (slot, handle)
@@ -200,6 +208,7 @@ impl ViewManager {
         // 先占住弹幕引用再起管道：这样弹幕能覆盖到第一帧，而不是等 ffmpeg 就绪。
         self.danmaku.retain(room);
         self.emit(app);
+        tracing::info!(room_id = %room.id, room = %room.host_name, slot, "打开观看");
         self.restart_supervisor(app, broker, slot, handle.clone(), room.clone());
         Ok(handle.info(slot))
     }
@@ -229,8 +238,10 @@ impl ViewManager {
                     .lock()
                     .expect("观看槽位被污染")
                     .insert(slot, old.clone());
+                tracing::debug!(room_id = %room.id, slot, "观看替换目标与当前一致，保持原槽位");
                 return Ok(old.info(slot));
             }
+            tracing::info!(room_id = %old.room.id, slot, "观看替换：摘掉旧房间");
             self.detach(app, slot, &old);
         }
 
@@ -241,12 +252,14 @@ impl ViewManager {
             .insert(slot, handle.clone());
         self.danmaku.retain(room);
         self.emit(app);
+        tracing::info!(room_id = %room.id, room = %room.host_name, slot, "替换观看槽位");
         self.restart_supervisor(app, broker, slot, handle.clone(), room.clone());
         Ok(handle.info(slot))
     }
 
     /// 停掉一个槽位：从表里摘除、释放弹幕、通知监督循环退出，收尾放到后台。
     fn detach(self: &Arc<Self>, _app: &AppHandle, slot: u8, handle: &Arc<Slot>) {
+        tracing::debug!(room_id = %handle.room.id, slot, "摘除观看槽位并排后台收尾");
         self.slots.lock().expect("观看槽位被污染").remove(&slot);
         self.danmaku.release(&handle.room.id);
         {
@@ -270,8 +283,10 @@ impl ViewManager {
             slots.remove(&slot)
         };
         let Some(handle) = handle else {
+            tracing::debug!(slot, "关闭观看：槽位本来就不存在");
             return Ok(());
         };
+        tracing::info!(room_id = %handle.room.id, slot, "关闭观看槽位");
         self.danmaku.release(&handle.room.id);
 
         {
@@ -287,10 +302,11 @@ impl ViewManager {
         // 等监督循环把子进程收掉，最多 3 秒；收不掉也没关系，后台会继续清理。
         for _ in 0..30 {
             if handle.lock().child.is_none() {
-                break;
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        tracing::debug!(slot, "关闭观看：3 秒内子进程尚未收尾，交给后台继续清理");
         Ok(())
     }
 
@@ -307,6 +323,7 @@ impl ViewManager {
             if state.requested_qn == qn {
                 return Ok(state.info(slot, &handle.room.id));
             }
+            tracing::info!(slot, room_id = %handle.room.id, from = state.requested_qn, to = qn, "切换观看画质");
             state.requested_qn = qn;
             state.generation += 1;
             state.status = "starting".into();
@@ -330,6 +347,7 @@ impl ViewManager {
             if state.preferred_line == line {
                 return Ok(state.info(slot, &handle.room.id));
             }
+            tracing::info!(slot, room_id = %handle.room.id, line = ?line, "切换观看线路");
             state.preferred_line = line;
             state.generation += 1;
             state.status = "starting".into();
@@ -351,6 +369,7 @@ impl ViewManager {
         slot: u8,
     ) -> Result<ViewSlotInfo, AppError> {
         let handle = self.handle(slot)?;
+        tracing::info!(slot, room_id = %handle.room.id, "手动重试观看");
         let needs_spawn = {
             let mut state = handle.lock();
             state.generation += 1;
@@ -375,6 +394,9 @@ impl ViewManager {
                 .map(|(slot, _)| *slot)
                 .collect()
         };
+        if !targets.is_empty() {
+            tracing::info!(room_id, slots = targets.len(), "房间已删除，关闭其观看槽位");
+        }
         for slot in targets {
             let _ = self.close(app, slot).await;
         }
@@ -389,8 +411,10 @@ impl ViewManager {
             slots.drain().map(|(_, handle)| handle).collect()
         };
         if handles.is_empty() {
+            tracing::debug!("离开观看页：没有需要收尾的槽位");
             return;
         }
+        tracing::info!(count = handles.len(), "离开观看页，收尾全部槽位");
         for handle in &handles {
             self.danmaku.release(&handle.room.id);
             let mut state = handle.lock();
@@ -411,6 +435,9 @@ impl ViewManager {
             let mut slots = self.slots.lock().expect("观看槽位被污染");
             slots.drain().map(|(_, handle)| handle).collect()
         };
+        if !handles.is_empty() {
+            tracing::info!(count = handles.len(), "退出前收尾全部观看槽位");
+        }
 
         for handle in &handles {
             self.danmaku.release(&handle.room.id);
@@ -429,17 +456,41 @@ impl ViewManager {
 
     /// 启动时清掉上次异常退出留下的分片目录。
     pub async fn clean_cache(&self) {
-        let Ok(mut entries) = tokio::fs::read_dir(&self.root).await else {
-            let _ = tokio::fs::create_dir_all(&self.root).await;
-            return;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.is_dir() {
-                let _ = tokio::fs::remove_dir_all(&path).await;
-            } else {
-                let _ = tokio::fs::remove_file(&path).await;
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::debug!(dir = %self.root.display(), error = %err, "读取观看缓存目录失败，尝试重建");
+                if let Err(err) = tokio::fs::create_dir_all(&self.root).await {
+                    tracing::warn!(dir = %self.root.display(), error = %err, "重建观看缓存目录失败");
+                }
+                return;
             }
+        };
+        let mut removed = 0usize;
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(dir = %self.root.display(), error = %err, "遍历观看缓存目录中断");
+                    break;
+                }
+            };
+            let path = entry.path();
+            let result = if path.is_dir() {
+                tokio::fs::remove_dir_all(&path).await
+            } else {
+                tokio::fs::remove_file(&path).await
+            };
+            match result {
+                Ok(()) => removed += 1,
+                Err(err) => {
+                    tracing::debug!(path = %path.display(), error = %err, "清理观看缓存条目失败")
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, dir = %self.root.display(), "清理上次遗留的观看缓存");
         }
     }
 
@@ -461,7 +512,9 @@ impl ViewManager {
     }
 
     fn emit(&self, app: &AppHandle) {
-        let _ = app.emit(EVENT_VIEW_CHANGED, self.snapshot());
+        if let Err(err) = app.emit(EVENT_VIEW_CHANGED, self.snapshot()) {
+            tracing::debug!(error = %err, "广播观看状态失败");
+        }
     }
 
     fn restart_supervisor(
@@ -542,6 +595,13 @@ impl ViewManager {
                                 notify_failure(&app, &room, message);
                                 break;
                             }
+                            tracing::warn!(
+                                slot,
+                                room_id = %room.id,
+                                attempt = attempts,
+                                max = MAX_RETRIES,
+                                "观看转封装中断，准备重连"
+                            );
                             {
                                 let mut state = handle.lock();
                                 state.status = "reconnecting".into();
@@ -572,6 +632,7 @@ impl ViewManager {
                     attempts += 1;
                     let message = err.to_string();
                     if attempts > MAX_RETRIES {
+                        tracing::warn!(slot, room_id = %room.id, attempts, error = %message, "观看多次起播失败，放弃重连");
                         {
                             let mut state = handle.lock();
                             state.status = "error".into();
@@ -582,6 +643,7 @@ impl ViewManager {
                         self.teardown(&handle).await;
                         break;
                     }
+                    tracing::warn!(slot, room_id = %room.id, attempt = attempts, max = MAX_RETRIES, error = %message, "观看起播失败，准备重连");
                     {
                         let mut state = handle.lock();
                         state.status = "reconnecting".into();
@@ -617,21 +679,26 @@ impl ViewManager {
     ) -> Result<(), AppError> {
         handle.lock().retry_at = None;
         if ffmpeg::resolve().is_none() {
+            tracing::warn!(room_id = %room.id, "观看起播失败：找不到 ffmpeg");
             return Err(AppError::FfmpegMissing);
         }
 
-        let groups = broker
-            .groups(&room_ref(room), qn)
-            .await
-            .map_err(AppError::from)?;
-        let (candidate, group) = pick_view_candidate(&groups, preferred.as_deref())
-            .ok_or_else(|| AppError::User("没有可用的线路".into()))?;
+        let groups = broker.groups(&room_ref(room), qn).await.map_err(|err| {
+            tracing::warn!(room_id = %room.id, qn, error = %err, "观看解析线路失败");
+            AppError::from(err)
+        })?;
+        let (candidate, group) =
+            pick_view_candidate(&groups, preferred.as_deref()).ok_or_else(|| {
+                tracing::warn!(room_id = %room.id, qn, groups = groups.len(), "观看没有可用线路");
+                AppError::User("没有可用的线路".into())
+            })?;
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = self.root.join(&session_id);
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|err| AppError::from_io(err, &dir))?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|err| {
+            tracing::warn!(room_id = %room.id, dir = %dir.display(), error = %err, "创建观看缓存目录失败");
+            AppError::from_io(err, &dir)
+        })?;
 
         let mut command = tokio::process::Command::new(ffmpeg::binary());
         command
@@ -682,9 +749,16 @@ impl ViewManager {
             .stdout(Stdio::null())
             .stderr(ffmpeg_log(&self.root));
 
-        let child = command
-            .spawn()
-            .map_err(|err| AppError::Ffmpeg(format!("启动转封装失败：{err}")))?;
+        let child = command.spawn().map_err(|err| {
+            tracing::warn!(
+                slot = %handle.room.id,
+                quality = %candidate.name,
+                line = %group.name,
+                %err,
+                "启动观看转封装失败"
+            );
+            AppError::Ffmpeg(format!("启动转封装失败：{err}"))
+        })?;
         self.server.register(&session_id, dir.clone());
 
         {
@@ -724,6 +798,12 @@ impl ViewManager {
             }
             Ready::Closed => Err(AppError::User("会话已取消".into())),
             Ready::Timeout => {
+                tracing::warn!(
+                    slot = %handle.room.id,
+                    quality = %candidate.name,
+                    line = %group.name,
+                    "观看起播超时（12 秒内没有输出分片）"
+                );
                 let mut state = handle.lock();
                 if let Some(child) = state.child.as_mut() {
                     send_graceful(child);
@@ -804,7 +884,9 @@ impl ViewManager {
             self.server.unregister(session);
         }
         if let Some(dir) = dir {
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            if let Err(err) = tokio::fs::remove_dir_all(&dir).await {
+                tracing::debug!(slot = handle.room.id, dir = %dir.display(), error = %err, "删除观看分片目录失败");
+            }
         }
 
         let mut state = handle.lock();

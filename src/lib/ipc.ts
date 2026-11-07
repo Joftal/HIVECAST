@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "./invoke";
 import type { ActiveTask } from "./bindings/ActiveTask";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
@@ -9,6 +9,7 @@ import type { QrTicket } from "./bindings/QrTicket";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
+import type { LogStatus } from "./bindings/LogStatus";
 import type { MediaHost } from "./bindings/MediaHost";
 import type { MediaHostPage } from "./bindings/MediaHostPage";
 import type { MediaItem } from "./bindings/MediaItem";
@@ -34,6 +35,7 @@ export type {
   DanmakuBatch,
   DanmakuMessage,
   LineInfo,
+  LogStatus,
   MediaHost,
   MediaHostPage,
   MediaItem,
@@ -228,6 +230,16 @@ export async function settingsGet(): Promise<Settings> {
 
 export async function settingsUpdate(settings: Settings): Promise<Settings> {
   return invoke<Settings>("settings_update", { settings });
+}
+
+/** 日志运行状态：实际目录、当前文件、丢弃计数与最近错误。 */
+export async function logsStatus(): Promise<LogStatus> {
+  return invoke<LogStatus>("logs_status");
+}
+
+/** 打开当前实际生效的日志目录（后端不接受路径参数）。 */
+export async function logsOpen(): Promise<void> {
+  return invoke("logs_open");
 }
 
 /** 用示例房间预览文件名模板（与真正落盘同一套逻辑）。 */

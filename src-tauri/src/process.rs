@@ -12,10 +12,15 @@ pub fn send_graceful(child: &mut Child) {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {
-            let _ = unsafe { libc::kill(pid as i32, libc::SIGINT) };
+            if unsafe { libc::kill(pid as i32, libc::SIGINT) } == 0 {
+                return;
+            }
+            tracing::warn!(pid, error = %std::io::Error::last_os_error(), "发送 SIGINT 失败，改为强制结束");
+            let _ = child.start_kill();
             return;
         }
     }
+    tracing::debug!("子进程没有 pid，直接强制结束");
     let _ = child.start_kill();
 }
 
@@ -28,7 +33,10 @@ pub async fn wait_exit(child: &mut Child, timeout: Duration) -> Option<std::proc
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
             Ok(None) => {}
-            Err(_) => return None,
+            Err(err) => {
+                tracing::warn!(error = %err, "等待子进程退出失败");
+                return None;
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.start_kill();

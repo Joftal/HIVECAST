@@ -115,7 +115,7 @@ pub fn root_ready(path: &Path) -> bool {
 /// 5 秒足够发现拔盘，又不会让监控循环每秒多做几次目录操作。
 pub fn cached_root_ready(path: &Path) -> bool {
     let now = Instant::now();
-    {
+    let (previous, ready) = {
         let mut guard = READY.lock().unwrap_or_else(|err| err.into_inner());
         let map = guard.get_or_insert_with(HashMap::new);
         if let Some(hit) = map.get(path) {
@@ -123,10 +123,22 @@ pub fn cached_root_ready(path: &Path) -> bool {
                 return hit.ready;
             }
         }
+        let previous = map.get(path).map(|hit| hit.ready);
         let ready = root_ready(path);
         map.insert(path.to_path_buf(), ReadyCached { at: now, ready });
-        ready
+        (previous, ready)
+    };
+    // 目录可用性每秒都会被问一次，只在状态真的翻转时记一条，避免刷屏。
+    match (previous, ready) {
+        (None, false) | (Some(true), false) => {
+            tracing::warn!(path = %path.display(), "录制目录不可用（掉盘或权限变化）");
+        }
+        (Some(false), true) => {
+            tracing::info!(path = %path.display(), "录制目录已恢复");
+        }
+        _ => {}
     }
+    ready
 }
 
 /// 一次判定：目录不可用优先于空间不足——盘都掉线了，容量数字没有意义。

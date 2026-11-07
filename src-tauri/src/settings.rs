@@ -45,6 +45,10 @@ pub const KEY_FILENAME_TEMPLATE: &str = "media.filename_template";
 pub const KEY_STRIP_EMOJI: &str = "media.strip_emoji";
 /// 按「平台/主播」建子目录。
 pub const KEY_GROUP_DIRS: &str = "media.group_dirs";
+/// 日志目录；空串表示使用平台默认目录。
+pub const KEY_LOG_DIR: &str = "log.dir";
+/// 日志保留天数；0 = 不按天清理（当天日志仍按 16 MiB 续段，不设总量上限）。
+pub const KEY_LOG_RETENTION_DAYS: &str = "log.retention_days";
 
 /// 关闭行为的两种取值，前端也按这两个字符串渲染。
 pub const CLOSE_TRAY: &str = "tray";
@@ -53,6 +57,7 @@ pub const CLOSE_QUIT: &str = "quit";
 pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
 pub const MAX_TOTAL_GB: u32 = 100_000;
+pub const MAX_LOG_RETENTION_DAYS: u32 = 3650;
 /// 监控间隔上限：一天。再大就没有「监控」的意义了。
 pub const MAX_MONITOR_INTERVAL: u32 = 86_400;
 /// 回退上限的取值范围。
@@ -82,6 +87,8 @@ pub fn defaults() -> Settings {
         media_filename_template: crate::filename::DEFAULT_TEMPLATE.into(),
         media_strip_emoji: false,
         media_group_dirs: true,
+        log_dir: String::new(),
+        log_retention_days: 7,
     }
 }
 
@@ -158,6 +165,12 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_GROUP_DIRS).and_then(|v| v.parse::<bool>().ok()) {
         settings.media_group_dirs = value;
     }
+    if let Some(value) = read(KEY_LOG_DIR).filter(|v| !v.trim().is_empty()) {
+        settings.log_dir = value;
+    }
+    if let Some(value) = read(KEY_LOG_RETENTION_DAYS).and_then(|v| v.parse::<u32>().ok()) {
+        settings.log_retention_days = value.min(MAX_LOG_RETENTION_DAYS);
+    }
     settings
 }
 
@@ -193,6 +206,11 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     settings.media_filename_template = settings.media_filename_template.trim().to_string();
     crate::filename::validate(&settings.media_filename_template)
         .map_err(|reason| AppError::User(format!("文件名模板不可用：{reason}")))?;
+    settings.log_retention_days = settings.log_retention_days.min(MAX_LOG_RETENTION_DAYS);
+    settings.log_dir = settings.log_dir.trim().to_string();
+    if !settings.log_dir.is_empty() {
+        settings.log_dir = validate_log_dir(&settings.log_dir)?;
+    }
     let media_root = settings.media_root.trim();
     if media_root.is_empty() {
         return Err(AppError::User("媒体目录不能为空".into()));
@@ -236,6 +254,11 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_FILENAME_TEMPLATE, &settings.media_filename_template)?;
     db.set_setting(KEY_STRIP_EMOJI, &settings.media_strip_emoji.to_string())?;
     db.set_setting(KEY_GROUP_DIRS, &settings.media_group_dirs.to_string())?;
+    db.set_setting(KEY_LOG_DIR, &settings.log_dir)?;
+    db.set_setting(
+        KEY_LOG_RETENTION_DAYS,
+        &settings.log_retention_days.to_string(),
+    )?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
     Ok(settings)
@@ -250,10 +273,68 @@ pub fn apply(settings: &Settings, recorder: &Recorder) {
         settings.media_strip_emoji,
         settings.media_group_dirs,
     );
+    tracing::debug!(
+        media_root = %settings.media_root,
+        max_concurrent = settings.max_concurrent_records,
+        prevent_sleep = settings.prevent_sleep,
+        "应用运行时设置"
+    );
     // 电源断言与界面无关，启动和保存都走同一条路径，避免两处状态不一致。
     if let Err(err) = crate::power::apply(settings.prevent_sleep) {
         tracing::warn!(error = %err, "设置防休眠失败");
     }
+}
+
+/// 校验日志目录：必须是绝对路径、不能是根目录、不能塞进 macOS .app 包内，
+/// 并实际探一次可写（创建后立刻删掉探测文件）。
+fn validate_log_dir(raw: &str) -> Result<String, AppError> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(AppError::User("日志目录必须是绝对路径".into()));
+    }
+    if path.parent().is_none() {
+        return Err(AppError::User("日志目录不能是磁盘根目录".into()));
+    }
+    #[cfg(target_os = "macos")]
+    if path.to_string_lossy().contains(".app/Contents") {
+        return Err(AppError::User(
+            "不能把日志写进 .app 包内，请选择包外的目录".into(),
+        ));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(AppError::User(format!("{} 不是目录", path.display())));
+    }
+    std::fs::create_dir_all(&path).map_err(|err| AppError::from_io(err, &path))?;
+    // create_dir_all 之前只能用字面路径挡 .app；这里再用真实路径挡一次符号链接与 .. 绕过。
+    let resolved = path
+        .canonicalize()
+        .map_err(|err| AppError::from_io(err, &path))?;
+    if resolved.parent().is_none() {
+        return Err(AppError::User("日志目录不能是磁盘根目录".into()));
+    }
+    #[cfg(target_os = "macos")]
+    if resolved.to_string_lossy().contains(".app/Contents") {
+        return Err(AppError::User(
+            "不能把日志写进 .app 包内，请选择包外的目录".into(),
+        ));
+    }
+    // create_new 不会跟随已存在的符号链接；带纳秒后缀避免覆盖用户同名文件。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = path.join(format!(
+        ".hivecast-write-test-{}-{stamp}",
+        std::process::id()
+    ));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|err| AppError::from_io(err, &path))?;
+    drop(file);
+    let _ = std::fs::remove_file(&probe);
+    Ok(path.display().to_string())
 }
 
 fn normalize_qn(qn: u32) -> u32 {
@@ -276,6 +357,58 @@ mod tests {
         assert_eq!(normalize_qn(10000), 10000);
         assert_eq!(normalize_qn(1), 80);
         assert_eq!(normalize_qn(999_999), 20000);
+    }
+
+    #[test]
+    fn validate_log_dir_rejects_relative_and_root() {
+        assert!(validate_log_dir("relative/logs").is_err());
+        assert!(validate_log_dir("/").is_err());
+    }
+
+    #[test]
+    fn validate_log_dir_accepts_a_writable_directory() {
+        let dir = std::env::temp_dir().join(format!("hivecast-logs-{}", uuid::Uuid::new_v4()));
+        let accepted = validate_log_dir(&dir.display().to_string()).expect("可写目录应当通过");
+        assert_eq!(accepted, dir.display().to_string());
+        assert!(dir.is_dir());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hivecast-write-test")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "探测文件必须清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_log_dir_rejects_root_aliases() {
+        assert!(
+            validate_log_dir("/tmp/../..").is_err(),
+            ".. 不能绕过根目录限制"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let dir = std::env::temp_dir().join(format!("hivecast-logs-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let link = dir.join("root-link");
+            symlink("/", &link).unwrap();
+            assert!(validate_log_dir(&link.display().to_string()).is_err());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn validate_log_dir_rejects_app_bundle_paths() {
+        let dir = std::env::temp_dir().join(format!("hivecast-logs-{}", uuid::Uuid::new_v4()));
+        let inside = dir.join("Foo.app").join("Contents").join("logs");
+        assert!(validate_log_dir(&inside.display().to_string()).is_err());
+        assert!(!dir.exists(), "被拒绝的 .app 路径不应被创建");
     }
 
     #[test]

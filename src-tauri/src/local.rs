@@ -71,17 +71,22 @@ impl LocalPlayer {
     ) -> Result<Playback, AppError> {
         let _gate = self.gate.lock().await;
 
-        let session = db
-            .get_session(session_id)?
-            .ok_or_else(|| AppError::User("录像不存在".into()))?;
+        let session = db.get_session(session_id)?.ok_or_else(|| {
+            tracing::warn!(session_id, "本地回放：录像记录不存在");
+            AppError::User("录像不存在".into())
+        })?;
         if session.status == "recording" {
+            tracing::info!(session_id, "本地回放被拒绝：录像仍在录制");
             return Err(AppError::User("这段还在录制，先停下再回放".into()));
         }
         let path = session
             .file_path
             .clone()
             .filter(|p| Path::new(p).is_file())
-            .ok_or_else(|| AppError::User("录像文件已不存在".into()))?;
+            .ok_or_else(|| {
+                tracing::warn!(session_id, "本地回放：录像文件已丢失");
+                AppError::User("录像文件已不存在".into())
+            })?;
 
         let duration_ms = session.duration_ms.max(0);
         let wanted = position_ms.unwrap_or(0).clamp(0, duration_ms);
@@ -95,6 +100,12 @@ impl LocalPlayer {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
             match guard.get(session_id) {
                 Some(active) if active.contains(wanted) => {
+                    tracing::debug!(
+                        session_id,
+                        position_ms = wanted,
+                        window_start_ms = active.start_ms,
+                        "本地回放命中当前窗口，复用现有转封装"
+                    );
                     return Ok(playback(
                         self.server.playlist_url(&active.key),
                         session_id,
@@ -110,12 +121,23 @@ impl LocalPlayer {
             }
         };
         if let Some(active) = stale {
+            tracing::debug!(
+                session_id,
+                window_start_ms = active.start_ms,
+                "本地回放换窗口，先收掉旧转封装"
+            );
             teardown(self.server.as_ref(), active).await;
         }
 
         {
             let guard = self.current.lock().expect("本地回放状态被污染");
             if guard.len() >= MAX_ACTIVE {
+                tracing::warn!(
+                    session_id,
+                    active = guard.len(),
+                    limit = MAX_ACTIVE,
+                    "本地回放被拒绝：并发已达上限"
+                );
                 return Err(AppError::User(format!(
                     "最多同时回放 {MAX_ACTIVE} 条，先停掉一条再开"
                 )));
@@ -124,11 +146,15 @@ impl LocalPlayer {
 
         let (start_ms, window_ms) = window_for(wanted, duration_ms);
         let dir = self.root.join(format!("{}-{}", session_id, now_ms()));
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|err| AppError::from_io(err, &dir))?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|err| {
+            tracing::warn!(session_id, dir = %dir.display(), error = %err, "本地回放：创建分片目录失败");
+            AppError::from_io(err, &dir)
+        })?;
 
-        let mut child = spawn_window(Path::new(&path), &dir, start_ms, window_ms)?;
+        let mut child = spawn_window(Path::new(&path), &dir, start_ms, window_ms).map_err(|err| {
+            tracing::warn!(session_id, file = %path, error = %err, "本地回放：启动 ffmpeg 失败");
+            err
+        })?;
 
         // 等第一个分片落盘再交给播放器，否则 hls.js 会拿到 404 的 m3u8。
         let deadline = Instant::now() + READY_TIMEOUT;
@@ -137,16 +163,32 @@ impl LocalPlayer {
                 break;
             }
             if let Ok(Some(status)) = child.try_wait() {
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                tracing::warn!(session_id, code = ?status.code(), "本地回放：ffmpeg 在出片前退出");
+                if let Err(err) = tokio::fs::remove_dir_all(&dir).await {
+                    tracing::debug!(dir = %dir.display(), error = %err, "清理本地回放临时目录失败");
+                }
                 return Err(AppError::Ffmpeg(format!(
                     "本地回放启动失败（ffmpeg 退出码 {:?}）",
                     status.code()
                 )));
             }
             if Instant::now() >= deadline {
+                tracing::warn!(
+                    session_id,
+                    timeout_secs = READY_TIMEOUT.as_secs(),
+                    "本地回放：等待首个分片超时"
+                );
                 send_graceful(&mut child);
-                let _ = wait_exit(&mut child, STOP_TIMEOUT).await;
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                if wait_exit(&mut child, STOP_TIMEOUT).await.is_none() {
+                    tracing::debug!(
+                        session_id,
+                        timeout_secs = STOP_TIMEOUT.as_secs(),
+                        "等待本地回放 ffmpeg 退出超时"
+                    );
+                }
+                if let Err(err) = tokio::fs::remove_dir_all(&dir).await {
+                    tracing::debug!(dir = %dir.display(), error = %err, "清理本地回放临时目录失败");
+                }
                 return Err(AppError::User("本地回放启动超时".into()));
             }
             tokio::time::sleep(Duration::from_millis(120)).await;
@@ -154,6 +196,14 @@ impl LocalPlayer {
 
         let key = format!("play-{}", now_ms());
         self.server.register(&key, dir.clone());
+        tracing::info!(
+            session_id,
+            file = %path,
+            start_ms,
+            window_ms,
+            dir = %dir.display(),
+            "本地回放已就绪"
+        );
         {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
             guard.insert(
@@ -187,7 +237,10 @@ impl LocalPlayer {
             guard.remove(session_id)
         };
         if let Some(active) = active {
+            tracing::info!(session_id, "停止本地回放");
             teardown(self.server.as_ref(), active).await;
+        } else {
+            tracing::debug!(session_id, "停止本地回放：当前没有在放");
         }
     }
 
@@ -198,6 +251,9 @@ impl LocalPlayer {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
             std::mem::take(&mut *guard)
         };
+        if !all.is_empty() {
+            tracing::info!(count = all.len(), "退出前停止全部本地回放");
+        }
         for (_, active) in all {
             teardown(self.server.as_ref(), active).await;
         }
@@ -294,9 +350,13 @@ fn playback(
 /// 收尾一个回放：先礼后兵，再注销 URL、删掉分片目录。
 async fn teardown(server: &StreamServer, mut active: Active) {
     send_graceful(&mut active.child);
-    let _ = wait_exit(&mut active.child, STOP_TIMEOUT).await;
+    if wait_exit(&mut active.child, STOP_TIMEOUT).await.is_none() {
+        tracing::debug!(session = %active.key, timeout_secs = STOP_TIMEOUT.as_secs(), "等待本地回放 ffmpeg 退出超时，继续清理");
+    }
     server.unregister(&active.key);
-    let _ = tokio::fs::remove_dir_all(&active.dir).await;
+    if let Err(err) = tokio::fs::remove_dir_all(&active.dir).await {
+        tracing::debug!(session = %active.key, dir = %active.dir.display(), error = %err, "删除本地回放分片目录失败");
+    }
 }
 
 fn now_ms() -> i64 {

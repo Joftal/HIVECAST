@@ -185,7 +185,7 @@ export default function AccountSection() {
   if (!isTauri()) return null;
 
   const cookieEditor = (platform: Platform) => (
-    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-4 py-3">
+    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-5 py-3">
       <div className="flex items-center justify-between">
         <span className="text-[11.5px] text-muted">
           {t("account.cookieTitle", {
@@ -226,7 +226,7 @@ export default function AccountSection() {
   );
 
   const qrPanel = qr ? (
-    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-4 py-3">
+    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-5 py-3">
       <div className="flex items-center justify-between">
         <span className="text-[11.5px] text-muted">{t("account.qrTitle")}</span>
         <button
@@ -277,8 +277,8 @@ export default function AccountSection() {
   ) : null;
 
   return (
-    <div>
-      <div className="border-b border-line px-4 py-2 text-[10.5px] text-faint">
+    <div className="divide-y divide-line">
+      <div className="px-5 py-2.5 text-[10.5px] text-faint">
         {t("account.singleAccountHint")}
       </div>
 
@@ -287,7 +287,7 @@ export default function AccountSection() {
         const expired = item?.status === "expired";
         return (
           <div key={platform}>
-            <div className="flex items-center gap-3 px-4 py-3">
+            <div className="flex items-center gap-3 px-5 py-3">
               <span className="flex w-[76px] shrink-0 items-center gap-1.5 text-[12.5px] text-ink">
                 <span
                   className="h-1.5 w-1.5 rounded-full"
@@ -356,10 +356,10 @@ export default function AccountSection() {
             </div>
 
             {platform === "bilibili" && !item && !qr && (
-              <p className="px-4 pb-3 text-[10.5px] leading-4 text-faint">{t("account.bilibiliHint")}</p>
+              <p className="px-5 pb-3 text-[10.5px] leading-4 text-faint">{t("account.bilibiliHint")}</p>
             )}
             {expired && (
-              <p className="px-4 pb-3 text-[10.5px] leading-4 text-warn">{t("account.expiredHint")}</p>
+              <p className="px-5 pb-3 text-[10.5px] leading-4 text-warn">{t("account.expiredHint")}</p>
             )}
 
             {editing === platform ? cookieEditor(platform) : null}
@@ -369,7 +369,7 @@ export default function AccountSection() {
       })}
 
       {(notice || error) && (
-        <div className="space-y-1 px-4 py-3">
+        <div className="space-y-1 px-5 py-3">
           {notice && <p className="animate-fade-rise text-[11px] text-live">{notice}</p>}
           {error && <p className="animate-fade-rise text-[11px] leading-4 text-rec">{error}</p>}
         </div>

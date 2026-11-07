@@ -179,7 +179,9 @@ mod imp {
 
 /// 开/关防休眠；重复调用是幂等的。
 pub fn apply(enabled: bool) -> Result<(), String> {
-    imp::set(enabled)
+    imp::set(enabled)?;
+    tracing::info!(enabled, "更新防休眠状态");
+    Ok(())
 }
 
 /// 当前是否真的持有电源断言（设置里存的是意愿，这里问的是实际状态）。

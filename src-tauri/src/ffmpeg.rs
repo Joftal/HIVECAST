@@ -26,7 +26,16 @@ pub fn path_string() -> Option<String> {
 
 /// 真正启动 ffmpeg 时用这个：解析成功就用绝对路径，否则退回裸名由 PATH 决定。
 pub fn binary() -> String {
-    path_string().unwrap_or_else(|| exe_name().to_string())
+    match resolve() {
+        Some(path) => {
+            tracing::debug!(path = %path.display(), "使用 ffmpeg 可执行文件");
+            path.display().to_string()
+        }
+        None => {
+            tracing::warn!("未找到 ffmpeg 可执行文件，将直接按 PATH 调用");
+            exe_name().to_string()
+        }
+    }
 }
 
 fn exe_name() -> &'static str {
