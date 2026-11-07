@@ -192,7 +192,9 @@ pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostRe
         out.as_os_str().to_os_string(),
     ];
     match progress {
-        Some(progress) if progress.total_ms > 0 => run_ffmpeg_progress(args, "转封装", progress).await?,
+        Some(progress) if progress.total_ms > 0 => {
+            run_ffmpeg_progress(args, "转封装", progress).await?
+        }
         _ => run_ffmpeg(args, "转封装").await?,
     }
     Ok(PostResult {
@@ -204,7 +206,10 @@ pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostRe
 }
 
 // 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
-pub async fn merge(sources: &[PathBuf], progress: Option<&Progress<'_>>) -> Result<PostResult, AppError> {
+pub async fn merge(
+    sources: &[PathBuf],
+    progress: Option<&Progress<'_>>,
+) -> Result<PostResult, AppError> {
     if sources.len() < 2 {
         return Err(AppError::User("至少需要两段录像才能合并".into()));
     }
@@ -241,7 +246,9 @@ pub async fn merge(sources: &[PathBuf], progress: Option<&Progress<'_>>) -> Resu
         out.as_os_str().to_os_string(),
     ];
     let result = match progress {
-        Some(progress) if progress.total_ms > 0 => run_ffmpeg_progress(args, "合并", progress).await,
+        Some(progress) if progress.total_ms > 0 => {
+            run_ffmpeg_progress(args, "合并", progress).await
+        }
         _ => run_ffmpeg(args, "合并").await,
     };
     let _ = std::fs::remove_file(&list_path);
@@ -294,7 +301,9 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
         "Style: Danmaku,PingFang SC,{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,7,0,0,0,1\n\n"
     ));
     ass.push_str("[Events]\n");
-    ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+    ass.push_str(
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+    );
 
     let lane_count = ((PLAY_RES_Y - LANE_TOP) / LANE_HEIGHT).max(1);
     let mut lane_free = vec![0i64; lane_count as usize];
@@ -353,7 +362,11 @@ fn pick_lane(free: &[i64], at: i64) -> usize {
 fn estimate_width(text: &str) -> u32 {
     let mut width = 0.0f64;
     for ch in text.chars() {
-        width += if (ch as u32) < 0x2e80 { FONT_SIZE as f64 * 0.55 } else { FONT_SIZE as f64 };
+        width += if (ch as u32) < 0x2e80 {
+            FONT_SIZE as f64 * 0.55
+        } else {
+            FONT_SIZE as f64
+        };
     }
     width.max(40.0) as u32
 }
@@ -369,7 +382,11 @@ fn ass_time(ms: i64) -> String {
 
 /// ASS 用 BGR 顺序；0 表示默认白色（B 站把白色存成 0xFFFFFF，也有用 0 的）。
 fn ass_colour(value: u32) -> String {
-    let rgb = if value == 0 { 0xFFFFFF } else { value & 0xFFFFFF };
+    let rgb = if value == 0 {
+        0xFFFFFF
+    } else {
+        value & 0xFFFFFF
+    };
     let r = (rgb >> 16) & 0xFF;
     let g = (rgb >> 8) & 0xFF;
     let b = rgb & 0xFF;

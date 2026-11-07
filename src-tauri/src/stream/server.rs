@@ -87,7 +87,10 @@ impl StreamServer {
 
 fn router(state: Arc<StreamServer>) -> Router {
     Router::new()
-        .route("/s/{token}/{session}/{*path}", get(serve_file).options(preflight))
+        .route(
+            "/s/{token}/{session}/{*path}",
+            get(serve_file).options(preflight),
+        )
         .with_state(state)
 }
 
@@ -115,8 +118,14 @@ fn cors_headers(headers: &HeaderMap, origin: &str) -> HeaderMap {
         out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
     }
     out.insert(header::VARY, HeaderValue::from_static("Origin"));
-    out.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, HEAD, OPTIONS"));
-    out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Range"));
+    out.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, HEAD, OPTIONS"),
+    );
+    out.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Range"),
+    );
     out.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         HeaderValue::from_static("Content-Length, Content-Range, Accept-Ranges"),
@@ -228,9 +237,18 @@ async fn serve_file(
 
     let mut res = Response::new(Body::from(bytes));
     let h = res.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type(relative)));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
-    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(relative)),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     if !origin.is_empty() {
         h.extend(cors_headers(&headers, &origin));
     }

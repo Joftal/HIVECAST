@@ -253,15 +253,11 @@ impl PlatformAdapter for DouyuAdapter {
         let rate = rate_for_qn(qn);
 
         let enc = fetch_encryption(&self.did, &referer).await?;
-        let ts = enc
-            .date
-            .unwrap_or_else(|| chrono::Utc::now().timestamp());
-        let enc_data = enc
-            .data
-            .ok_or_else(|| PlatformError::Upstream {
-                code: enc.error,
-                message: non_empty(&enc.msg, "拿不到斗鱼加密参数"),
-            })?;
+        let ts = enc.date.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let enc_data = enc.data.ok_or_else(|| PlatformError::Upstream {
+            code: enc.error,
+            message: non_empty(&enc.msg, "拿不到斗鱼加密参数"),
+        })?;
         if enc.error != 0 {
             return Err(PlatformError::Upstream {
                 code: enc.error,
@@ -308,10 +304,7 @@ impl PlatformAdapter for DouyuAdapter {
             .map(|entry| (entry.cdn.clone(), label(&entry.name, &entry.cdn)))
             .collect();
         if lines.is_empty() {
-            lines.push((
-                data.rtmp_cdn.clone(),
-                label("", &data.rtmp_cdn),
-            ));
+            lines.push((data.rtmp_cdn.clone(), label("", &data.rtmp_cdn)));
         }
 
         let mut groups: Vec<StreamGroup> = Vec::new();
@@ -632,13 +625,16 @@ mod tests {
             "9999"
         );
         assert_eq!(
-            adapter.resolve("https://www.douyu.com/xxkk")
+            adapter
+                .resolve("https://www.douyu.com/xxkk")
                 .unwrap()
                 .room_key,
             "xxkk"
         );
         assert!(adapter.resolve("https://www.huya.com/660000").is_none());
-        assert!(adapter.resolve("https://live.bilibili.com/545068").is_none());
+        assert!(adapter
+            .resolve("https://live.bilibili.com/545068")
+            .is_none());
     }
 
     #[test]

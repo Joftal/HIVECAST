@@ -71,10 +71,7 @@ impl Secret {
             return None;
         }
         let (nonce, cipher) = packed.split_at(12);
-        let plain = self
-            .cipher
-            .decrypt(Nonce::from_slice(nonce), cipher)
-            .ok()?;
+        let plain = self.cipher.decrypt(Nonce::from_slice(nonce), cipher).ok()?;
         String::from_utf8(plain).ok()
     }
 
@@ -112,7 +109,10 @@ mod tests {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("hivecast-secret-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("secret-{tag}-{}.bin", SEQ.fetch_add(1, Ordering::SeqCst)));
+        let path = dir.join(format!(
+            "secret-{tag}-{}.bin",
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
         let _ = std::fs::remove_file(&path);
         let secret = Secret::load_or_create(&path).expect("密钥生成失败");
         (secret, path)
@@ -155,7 +155,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).expect("无元数据").permissions().mode();
+            let mode = std::fs::metadata(&path)
+                .expect("无元数据")
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }

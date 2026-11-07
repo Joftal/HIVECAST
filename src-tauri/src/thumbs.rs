@@ -66,8 +66,10 @@ impl Thumbs {
     /// 已经生成过的直接返回可访问地址，省一次 ffmpeg。
     pub fn url_for(&self, session_id: &str) -> Option<String> {
         let path = self.dir.join(format!("{session_id}.jpg"));
-        path.is_file()
-            .then(|| self.server.asset_url("thumbs", &format!("{session_id}.jpg")))
+        path.is_file().then(|| {
+            self.server
+                .asset_url("thumbs", &format!("{session_id}.jpg"))
+        })
     }
 
     /// 删掉一条录像时顺手清掉它的缩略图，避免缓存越积越多。
@@ -94,7 +96,10 @@ impl Thumbs {
                 if this.url_for(&session_id).is_some() {
                     return;
                 }
-                match this.generate(&session_id, Path::new(&source), duration_ms).await {
+                match this
+                    .generate(&session_id, Path::new(&source), duration_ms)
+                    .await
+                {
                     Ok(_) => {
                         if let Some(url) = this.url_for(&session_id) {
                             let _ = app.emit(EVENT_THUMB, ThumbReady { session_id, url });
@@ -115,7 +120,10 @@ impl Thumbs {
         duration_ms: i64,
     ) -> Result<PathBuf, AppError> {
         if !source.is_file() {
-            return Err(AppError::Path(format!("源文件不存在：{}", source.display())));
+            return Err(AppError::Path(format!(
+                "源文件不存在：{}",
+                source.display()
+            )));
         }
         tokio::fs::create_dir_all(&self.dir)
             .await
@@ -234,9 +242,7 @@ pub fn tile_filter(duration_ms: i64) -> String {
     } else {
         0.1
     };
-    format!(
-        "fps={fps:.6},scale={CELL_WIDTH}:-2,tile=3x3:padding={PAD}:margin=0:color=0x101010"
-    )
+    format!("fps={fps:.6},scale={CELL_WIDTH}:-2,tile=3x3:padding={PAD}:margin=0:color=0x101010")
 }
 
 #[cfg(test)]
@@ -269,7 +275,10 @@ mod tests {
         let filter = grid_filter();
         assert!(filter.contains("[8:v]"), "{filter}");
         assert!(filter.contains("xstack=inputs=9"), "{filter}");
-        assert!(filter.contains("0_0|324_0|648_0|0_184|324_184|648_184|0_368|324_368|648_368"), "{filter}");
+        assert!(
+            filter.contains("0_0|324_0|648_0|0_184|324_184|648_184|0_368|324_368|648_368"),
+            "{filter}"
+        );
     }
 
     #[test]

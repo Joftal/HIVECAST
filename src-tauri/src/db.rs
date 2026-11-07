@@ -102,11 +102,7 @@ fn media_where(filter: &MediaFilter, include_platform: bool) -> (String, Vec<Sql
             args.push(SqlValue::Text(platform.to_string()));
         }
     }
-    if let Some(room_id) = filter
-        .room_id
-        .as_deref()
-        .filter(|one| !one.is_empty())
-    {
+    if let Some(room_id) = filter.room_id.as_deref().filter(|one| !one.is_empty()) {
         where_sql.push_str(" AND s.room_id = ?");
         args.push(SqlValue::Text(room_id.to_string()));
     }
@@ -178,8 +174,9 @@ impl MediaHostFilter {
 
 /// 主播墙的 WHERE 片段：只统计有文件、已结束的会话。
 fn host_where(filter: &MediaHostFilter, include_platform: bool) -> (String, Vec<SqlValue>) {
-    let mut where_sql =
-        String::from(" WHERE s.file_path IS NOT NULL AND s.file_path <> '' AND s.status = 'finished'");
+    let mut where_sql = String::from(
+        " WHERE s.file_path IS NOT NULL AND s.file_path <> '' AND s.status = 'finished'",
+    );
     let mut args: Vec<SqlValue> = Vec::new();
     if let Some(keyword) = filter
         .query
@@ -239,23 +236,51 @@ impl Db {
         })
     }
 
+    /// 只给单测用：跨模块播种数据（retention 等测试需要直接写表）。
+    #[cfg(test)]
+    pub(crate) fn exec_batch_for_test(&self, sql: &str) -> Result<(), AppError> {
+        self.lock().execute_batch(sql).map_err(db_err)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("数据库连接被污染")
     }
 
     /// 启动时把上次异常退出留下的 recording 记录收尾，避免历史页永远显示「录制中」。
+    ///
+    /// 结束时间取这批分片最后一次写入的 mtime，而不是「这次启动的时刻」（I1）：
+    /// 崩溃后隔一夜再打开应用，32 KB 的残留分片不该显示成录了十个小时。
+    /// 连文件都找不到时才退回 now。
     pub fn close_orphan_sessions(&self) -> Result<usize, AppError> {
         let now = now_ts();
-        let changed = self
-            .lock()
-            .execute(
-                "UPDATE record_session
-                    SET status = 'aborted', reason = 'app_exit',
-                        ended_at = ?, duration_ms = (? - started_at) * 1000
-                  WHERE status = 'recording'",
-                params![now, now],
-            )
-            .map_err(db_err)?;
+        let rows: Vec<(String, Option<String>, i64)> = {
+            let conn = self.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, file_path, started_at FROM record_session
+                      WHERE status = 'recording'",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
+        };
+        let mut changed = 0;
+        for (id, file_path, started_at) in rows {
+            let last_data = file_path.as_deref().and_then(crate::segment::last_data_at);
+            let ended_at = orphan_ended_at(started_at, last_data, now);
+            changed += self
+                .lock()
+                .execute(
+                    "UPDATE record_session
+                        SET status = 'aborted', reason = 'app_exit',
+                            ended_at = ?2, duration_ms = (?2 - started_at) * 1000
+                      WHERE id = ?1 AND status = 'recording'",
+                    params![id, ended_at],
+                )
+                .map_err(db_err)?;
+        }
         Ok(changed)
     }
 
@@ -281,7 +306,11 @@ impl Db {
         .map_err(db_err)
     }
 
-    pub fn find_room(&self, platform: &str, room_key: &str) -> Result<Option<RoomRecord>, AppError> {
+    pub fn find_room(
+        &self,
+        platform: &str,
+        room_key: &str,
+    ) -> Result<Option<RoomRecord>, AppError> {
         let conn = self.lock();
         conn.query_row(
             &format!("{ROOM_SELECT} WHERE platform = ?1 AND room_key = ?2"),
@@ -384,6 +413,29 @@ impl Db {
             )
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// 没有结构性变化时的写库：只更新在线人数与检测时间，且最多 min_interval 秒一次（G2）。
+    ///
+    /// 条件写在 UPDATE 里而不是「先查再写」：监控可能同时在检测同一个房间，
+    /// 两次都读到旧时间就会都写一遍。返回是否真的落库。
+    pub fn touch_room_throttled(
+        &self,
+        id: &str,
+        online: Option<u64>,
+        min_interval: i64,
+    ) -> Result<bool, AppError> {
+        let now = now_ts();
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE room SET online = ?2, last_checked_at = ?3, updated_at = ?3
+                  WHERE id = ?1
+                    AND (last_checked_at IS NULL OR last_checked_at <= ?3 - ?4)",
+                params![id, online, now, min_interval.max(0)],
+            )
+            .map_err(db_err)?;
+        Ok(changed > 0)
     }
 
     pub fn set_auto_record(&self, id: &str, enabled: bool) -> Result<(), AppError> {
@@ -506,7 +558,16 @@ impl Db {
                     duration_ms = MAX(0, (?4 - started_at) * 1000), error = ?6,
                     danmaku_path = ?7, danmaku_count = ?8
                   WHERE id = ?1",
-                params![id, status, reason, now, file_size, error, danmaku_path, danmaku_count],
+                params![
+                    id,
+                    status,
+                    reason,
+                    now,
+                    file_size,
+                    error,
+                    danmaku_path,
+                    danmaku_count
+                ],
             )
             .map_err(db_err)?;
         Ok(())
@@ -535,18 +596,26 @@ impl Db {
         match room_id {
             Some(id) => {
                 let mut stmt = conn
-                    .prepare(&format!("{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC LIMIT ?2"))
+                    .prepare(&format!(
+                        "{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC LIMIT ?2"
+                    ))
                     .map_err(db_err)?;
-                let rows = stmt.query_map(params![id, limit], map_session).map_err(db_err)?;
+                let rows = stmt
+                    .query_map(params![id, limit], map_session)
+                    .map_err(db_err)?;
                 for row in rows {
                     sessions.push(row.map_err(db_err)?);
                 }
             }
             None => {
                 let mut stmt = conn
-                    .prepare(&format!("{SESSION_SELECT} ORDER BY started_at DESC LIMIT ?1"))
+                    .prepare(&format!(
+                        "{SESSION_SELECT} ORDER BY started_at DESC LIMIT ?1"
+                    ))
                     .map_err(db_err)?;
-                let rows = stmt.query_map(params![limit], map_session).map_err(db_err)?;
+                let rows = stmt
+                    .query_map(params![limit], map_session)
+                    .map_err(db_err)?;
                 for row in rows {
                     sessions.push(row.map_err(db_err)?);
                 }
@@ -765,13 +834,41 @@ impl Db {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 已收尾但可能留下分片的会话：失败/中止的收尾可能没来得及合并（G4）。
+    ///
+    /// 只取最近 200 条：再老的残片早被保留策略清掉，全量扫库没有意义。
+    pub fn unfinished_sessions(&self) -> Result<Vec<(String, String)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path FROM record_session
+                  WHERE status IN ('failed', 'aborted')
+                    AND file_path IS NOT NULL AND file_path <> ''
+                  ORDER BY started_at DESC LIMIT 200",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
     /// 修正会话的产物路径与大小：合并失败降级成 .ts、或崩溃恢复后路径变化时用。
-    pub fn update_session_file(&self, id: &str, path: &str, file_size: i64) -> Result<(), AppError> {
+    pub fn update_session_file(
+        &self,
+        id: &str,
+        path: &str,
+        file_size: i64,
+    ) -> Result<(), AppError> {
         self.lock()
             .execute(
                 "UPDATE record_session SET file_path = ?2, file_size = ?3 WHERE id = ?1",
@@ -924,7 +1021,10 @@ impl Db {
 
     pub fn delete_credential(&self, platform: &str) -> Result<(), AppError> {
         self.lock()
-            .execute("DELETE FROM credential WHERE platform = ?1", params![platform])
+            .execute(
+                "DELETE FROM credential WHERE platform = ?1",
+                params![platform],
+            )
             .map_err(db_err)?;
         Ok(())
     }
@@ -944,8 +1044,11 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         .filter_map(Result::ok)
         .collect();
     if !columns.iter().any(|name| name == "danmaku_path") {
-        conn.execute("ALTER TABLE record_session ADD COLUMN danmaku_path TEXT", [])
-            .map_err(db_err)?;
+        conn.execute(
+            "ALTER TABLE record_session ADD COLUMN danmaku_path TEXT",
+            [],
+        )
+        .map_err(db_err)?;
     }
     if !columns.iter().any(|name| name == "danmaku_count") {
         conn.execute(
@@ -983,9 +1086,6 @@ fn db_err(err: rusqlite::Error) -> AppError {
     AppError::Db(err.to_string())
 }
 
-
-
-
 pub fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -1014,7 +1114,9 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         area_name: row.get(8)?,
         is_live: row.get::<_, i64>(9)? != 0,
         started_at: row.get(10)?,
-        online: row.get::<_, Option<i64>>(11)?.map(|value| value.max(0) as u64),
+        online: row
+            .get::<_, Option<i64>>(11)?
+            .map(|value| value.max(0) as u64),
         auto_record: row.get::<_, i64>(12)? != 0,
         monitor_paused: row.get::<_, i64>(13)? != 0,
         record_qn: row.get(14)?,
@@ -1024,6 +1126,11 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         created_at: row.get(18)?,
         updated_at: row.get(19)?,
     })
+}
+
+/// 崩溃会话的结束时刻（I1）：优先用磁盘上最后一次写入的时间，没有文件才用 now。
+pub(crate) fn orphan_ended_at(started_at: i64, last_data: Option<i64>, now: i64) -> i64 {
+    last_data.unwrap_or(now).clamp(started_at, now)
 }
 
 fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
@@ -1058,10 +1165,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_db(tag: &str) -> (Db, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "hivecast-db-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("hivecast-db-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录失败");
         let path = dir.join("t.db");
@@ -1069,7 +1173,7 @@ mod tests {
         (db, path)
     }
 
-fn seed_media(db: &Db) {
+    fn seed_media(db: &Db) {
         db.lock()
             .execute_batch(
                 "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
@@ -1085,11 +1189,128 @@ fn seed_media(db: &Db) {
     }
 
     #[test]
+    fn room_touch_is_throttled_but_still_records_online() {
+        let (db, _path) = temp_db("touch");
+        db.lock()
+            .execute(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-t', 'test', 't1', 'https://example.test/t1', '主播', '房间', 0, 0)",
+                [],
+            )
+            .expect("插入房间失败");
+
+        // 第一次没有 last_checked_at，条件成立，必须写进去。
+        assert!(db
+            .touch_room_throttled("rm-t", Some(7), 10)
+            .expect("首次节流写入失败"));
+        let first = db
+            .find_room("test", "t1")
+            .expect("读房间失败")
+            .expect("房间存在");
+        assert_eq!(first.online, Some(7));
+        let checked = first.last_checked_at.expect("首次写入要有检测时间");
+
+        // 同一秒内第二次：节流条件不成立，返回 false 且时间不变。
+        assert!(!db
+            .touch_room_throttled("rm-t", Some(8), 10)
+            .expect("第二次节流写入失败"));
+        let second = db
+            .find_room("test", "t1")
+            .expect("读房间失败")
+            .expect("房间存在");
+        assert_eq!(
+            second.last_checked_at,
+            Some(checked),
+            "节流时不该更新检测时间"
+        );
+        assert_eq!(second.online, Some(7), "节流时在线人数也不该变");
+
+        // min_interval=0 表示不节流：立刻写。
+        assert!(db
+            .touch_room_throttled("rm-t", Some(9), 0)
+            .expect("不节流写入失败"));
+        let third = db
+            .find_room("test", "t1")
+            .expect("读房间失败")
+            .expect("房间存在");
+        assert_eq!(third.online, Some(9));
+    }
+
+    #[test]
+    fn orphan_ended_at_prefers_the_last_write() {
+        // 重启时刻是 10 小时后，但最后一片数据是 60 秒时写的：只该记 60 秒。
+        assert_eq!(orphan_ended_at(1_000, Some(1_060), 37_000), 1_060);
+        // 没有文件：只能按 now 收尾。
+        assert_eq!(orphan_ended_at(1_000, None, 37_000), 37_000);
+        // mtime 比开始还早（时钟回拨 / 复制过文件）：至少是 0 秒。
+        assert_eq!(orphan_ended_at(1_000, Some(10), 37_000), 1_000);
+        // mtime 在未来：不能超过 now。
+        assert_eq!(orphan_ended_at(1_000, Some(99_999), 37_000), 37_000);
+    }
+
+    #[test]
+    fn orphan_close_uses_part_mtime_for_duration() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let (db, _path) = temp_db("orphan");
+        let dir = std::env::temp_dir().join(format!("hivecast-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录失败");
+        let final_path = dir.join("崩溃场.mp4");
+        let part = crate::segment::part_name(&final_path, 0);
+        std::fs::write(&part, vec![0u8; 32_768]).expect("写分片失败");
+        let file = std::fs::File::options().write(true).open(&part).expect("开分片");
+        file.set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_060))
+            .expect("改 mtime");
+
+        db.lock()
+            .execute_batch(&format!(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-o', 'bilibili', '9', 'https://live.bilibili.com/9', '主播', '房间', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms)
+                 VALUES ('s-o', 'rm-o', 1700000000, 'recording', '{}', 0, 0);",
+                final_path.display()
+            ))
+            .expect("播种失败");
+
+        assert_eq!(db.close_orphan_sessions().expect("收尾失败"), 1);
+        let (status, reason, ended_at, duration_ms): (String, Option<String>, i64, i64) = db
+            .lock()
+            .query_row(
+                "SELECT status, reason, ended_at, duration_ms FROM record_session WHERE id = 's-o'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("读会话失败");
+        assert_eq!(status, "aborted");
+        assert_eq!(reason.as_deref(), Some("app_exit"));
+        assert_eq!(ended_at, 1_700_000_060);
+        assert_eq!(duration_ms, 60_000, "只该按最后一片的写入时间算");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unfinished_sessions_only_covers_failed_and_aborted() {
+        let (db, _path) = temp_db("unfinished");
+        seed_media(&db);
+        db.lock()
+            .execute(
+                "UPDATE record_session SET status = 'failed' WHERE id = 's-a1'",
+                [],
+            )
+            .expect("改成失败态失败");
+
+        let rows = db.unfinished_sessions().expect("查询遗留分片失败");
+        assert_eq!(rows.len(), 1, "只有 failed/aborted 算遗留：{rows:?}");
+        assert_eq!(rows[0].0, "s-a1");
+    }
+
+    #[test]
     fn media_hosts_aggregates_finished_sessions_per_room() {
         let (db, _path) = temp_db("hosts");
         seed_media(&db);
 
-        let page = db.media_hosts(&MediaHostFilter::default()).expect("主播墙查询失败");
+        let page = db
+            .media_hosts(&MediaHostFilter::default())
+            .expect("主播墙查询失败");
         assert_eq!(page.total, 2);
         // 默认按主播名升序（码点序）：乙 在 甲 前面。
         assert_eq!(page.items[0].room_id, "rm-b");

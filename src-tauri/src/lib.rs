@@ -3,12 +3,13 @@ mod broker;
 mod commands;
 mod credential;
 mod danmaku;
-mod douyin_ws;
 mod db;
 mod disk;
+mod douyin_ws;
 mod error;
 mod ffmpeg;
 mod filename;
+mod instance;
 mod jce;
 mod jobs;
 mod lifecycle;
@@ -31,6 +32,7 @@ mod view;
 
 use state::AppState;
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing() {
@@ -50,9 +52,46 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 单实例锁：两个进程同时录同一批房间会抢分片、抢缩略图缓存（A7）。
+            // 锁跟着进程走，崩溃遗留的 lock 文件不会挡住下次启动。
+            let data_dir = handle
+                .path()
+                .app_data_dir()
+                .map_err(|err| Box::<dyn std::error::Error>::from(err.to_string()))?;
+            let lock = match crate::instance::acquire(&data_dir) {
+                Ok(lock) => lock,
+                Err(err) => {
+                    tracing::warn!(%err, "已有实例在运行，本次启动退出");
+                    eprintln!("HIVECAST 已在运行，本次启动退出");
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("HIVECAST")
+                        .body("HIVECAST 已在运行，本次启动已退出")
+                        .show();
+                    // 给通知留出送达时间，再干净退出。
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    std::process::exit(0);
+                }
+            };
+            app.manage(lock);
+
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。
             let state = tauri::async_runtime::block_on(AppState::init(&handle))?;
+            let media_fallback = state.media_fallback.clone();
             app.manage(state);
+            // 媒体目录回落是「静默改了用户设置」，必须明确告诉用户（H2）。
+            if let Some((configured, actual)) = media_fallback {
+                let _ = handle
+                    .notification()
+                    .builder()
+                    .title("HIVECAST 媒体目录已切换")
+                    .body(format!(
+                        "{configured} 当前不可用，新录像已改存到 {actual}；设置里已同步为后者"
+                    ))
+                    .show();
+            }
 
             // 托盘：关闭窗口只隐藏，录制与监控继续跑。托盘建不出来就退回「关窗即退出」。
             let tray_ready = match crate::tray::build(&handle) {

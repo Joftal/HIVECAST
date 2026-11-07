@@ -98,11 +98,19 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .await
-        .map_err(|err| format!("启动 ffmpeg 失败：{err}"))?;
+        .await;
+    // 清单只是 ffmpeg 的输入，失败时留着只会变成媒体库里看不见的垃圾（I3）。
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&list).await;
+            return Err(format!("启动 ffmpeg 失败：{err}"));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = tokio::fs::remove_file(&list).await;
         return Err(format!("合并失败：{}", tail(&stderr, 240)));
     }
     let size = tokio::fs::metadata(final_path)
@@ -110,6 +118,7 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         .map(|meta| meta.len())
         .unwrap_or(0);
     if size == 0 {
+        let _ = tokio::fs::remove_file(&list).await;
         return Err("合并产物为空".into());
     }
     for part in &parts {
@@ -128,6 +137,13 @@ pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String
         return Err("没有分片".into());
     }
     let target = final_path.with_extension("ts");
+    // 上一场兜底留下的同名 .ts 可能还在：直接 create 会把它截断顶掉（H5）。
+    let target = if target.exists() {
+        crate::filename::reserve_unique_path(&target)
+            .map_err(|err| format!("创建 {} 失败：{err}", target.display()))?
+    } else {
+        target
+    };
     let mut out = tokio::fs::File::create(&target)
         .await
         .map_err(|err| format!("创建 {} 失败：{err}", target.display()))?;
@@ -148,6 +164,35 @@ pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String
         let _ = tokio::fs::remove_file(part).await;
     }
     Ok((target, size))
+}
+
+/// 一条会话最后一次「有数据」的时间（I1）。
+///
+/// 崩溃恢复不能把结束时间记成重启时刻——那会让 32 KB 的残留分片显示成
+/// 录了五个小时。取成品、弹幕、分片里最新的 mtime，都找不到时返回 None。
+pub fn last_data_at(final_path: &str) -> Option<i64> {
+    use std::time::UNIX_EPOCH;
+    let path = Path::new(final_path);
+    let mut newest: Option<i64> = None;
+    let mut consider = |candidate: &Path| {
+        let Ok(meta) = std::fs::metadata(candidate) else {
+            return;
+        };
+        let Ok(modified) = meta.modified() else {
+            return;
+        };
+        let Ok(age) = modified.duration_since(UNIX_EPOCH) else {
+            return;
+        };
+        let secs = age.as_secs() as i64;
+        newest = Some(newest.map_or(secs, |old: i64| old.max(secs)));
+    };
+    consider(path);
+    consider(&path.with_extension("jsonl"));
+    for part in collect_parts(path) {
+        consider(&part);
+    }
+    newest
 }
 
 /// 分片总大小（合并彻底失败时用来填历史记录）。
@@ -224,6 +269,57 @@ mod tests {
         assert_eq!(size, 6);
         assert_eq!(std::fs::read(&target).unwrap(), b"AAABBB");
         assert!(collect_parts(&final_path).is_empty(), "拼接后分片应清掉");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn fallback_concat_keeps_an_existing_target() {
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        // 上一场兜底留下的同名 .ts：不能被这一场截断覆盖（H5）。
+        let existing = final_path.with_extension("ts");
+        std::fs::write(&existing, b"OLD").unwrap();
+        std::fs::write(part_name(&final_path, 0), b"AAA").unwrap();
+
+        let (target, size) = fallback_concat(&final_path).await.expect("拼接");
+        assert_ne!(target, existing);
+        assert_eq!(size, 3);
+        assert_eq!(std::fs::read(&target).unwrap(), b"AAA");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"OLD");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn last_data_at_uses_the_newest_artifact() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        let old = part_name(&final_path, 0);
+        std::fs::write(&old, b"a").unwrap();
+        std::fs::write(&final_path, b"old-mp4").unwrap();
+        std::fs::write(final_path.with_extension("jsonl"), b"{}").unwrap();
+
+        // 把三份产物设成不同时间：取最新的那片。
+        let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let jsonl = final_path.with_extension("jsonl");
+        let artifacts = vec![
+            (std::path::PathBuf::from(old), 10u64),
+            (final_path.clone(), 30),
+            (jsonl, 20),
+        ];
+        for (path, offset) in artifacts {
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(base + Duration::from_secs(offset)).unwrap();
+        }
+        assert_eq!(
+            last_data_at(&final_path.display().to_string()),
+            Some(1_700_000_030)
+        );
+
+        // 全都不存在时返回 None，让调用方退回 now。
+        assert_eq!(last_data_at("/tmp/definitely-missing-hivecast.mp4"), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

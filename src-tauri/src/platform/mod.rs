@@ -194,7 +194,11 @@ pub trait PlatformAdapter: Send + Sync {
     fn resolve(&self, input: &str) -> Option<RoomRef>;
     async fn room_info(&self, room: &RoomRef) -> Result<RoomInfo, PlatformError>;
     /// qn 为期望清晰度，平台可能返回更低的档位（未登录/无权限）
-    async fn stream_groups(&self, room: &RoomRef, qn: u32) -> Result<Vec<StreamGroup>, PlatformError>;
+    async fn stream_groups(
+        &self,
+        room: &RoomRef,
+        qn: u32,
+    ) -> Result<Vec<StreamGroup>, PlatformError>;
 }
 
 fn registry() -> &'static Vec<Arc<dyn PlatformAdapter>> {
@@ -225,7 +229,9 @@ pub fn resolve_input(input: &str) -> Result<RoomRef, PlatformError> {
                     .ok_or_else(|| PlatformError::Unsupported(raw.to_string()));
             }
         }
-        return Err(PlatformError::Unsupported(format!("暂不支持的直播地址：{raw}")));
+        return Err(PlatformError::Unsupported(format!(
+            "暂不支持的直播地址：{raw}"
+        )));
     }
 
     for adapter in registry() {

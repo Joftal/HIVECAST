@@ -174,7 +174,12 @@ pub fn sanitize(input: &str, fallback: &str, max_chars: usize, strip_emoji: bool
         result = fallback.to_string();
     }
     // Windows 保留名：CON、PRN、AUX、NUL、COM1-9、LPT1-9（不区分大小写，带扩展名也算）。
-    let base = result.split('.').next().unwrap_or("").trim().to_ascii_uppercase();
+    let base = result
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
     let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (base.len() == 4
             && (base.starts_with("COM") || base.starts_with("LPT"))
@@ -201,34 +206,46 @@ fn is_emoji(ch: char) -> bool {
     )
 }
 
-/// 同名时追加 (2)、(3)…；同时看旁挂的 .jsonl/.ass，避免视频换了名字、弹幕被覆盖。
-pub fn unique_path(path: &Path) -> PathBuf {
-    if !taken(path) {
-        return path.to_path_buf();
-    }
+/// 原子地占住一个不冲突的文件名（先创建空文件），返回最终路径。
+///
+/// unique_path 只是「查一下有没有」，两路同时开录会双双查到空、拿到同一个
+/// 路径，两个 ffmpeg 写同一个文件（D1，真机复现：两个房间同一秒开录）。
+/// create_new 由内核保证只有一个能成功。
+pub fn reserve_unique_path(path: &Path) -> std::io::Result<PathBuf> {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let stem = path
         .file_stem()
         .map(|one| one.to_string_lossy().to_string())
         .unwrap_or_default();
-    let ext = path.extension().map(|one| one.to_string_lossy().to_string());
-    for index in 2..=99 {
-        let name = match &ext {
-            Some(ext) => format!("{stem} ({index}).{ext}"),
-            None => format!("{stem} ({index})"),
+    let ext = path
+        .extension()
+        .map(|one| one.to_string_lossy().to_string());
+    for index in 1..=999 {
+        let name = match (index, &ext) {
+            (1, Some(ext)) => format!("{stem}.{ext}"),
+            (1, None) => stem.clone(),
+            (_, Some(ext)) => format!("{stem} ({index}).{ext}"),
+            (_, None) => format!("{stem} ({index})"),
         };
         let candidate = parent.join(name);
-        if !taken(&candidate) {
-            return candidate;
+        // 旁挂弹幕/缩略图同名也算占用，否则会覆盖上一场的副本。
+        if candidate.with_extension("jsonl").exists() {
+            continue;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
         }
     }
-    path.to_path_buf()
-}
-
-fn taken(path: &Path) -> bool {
-    path.exists()
-        || path.with_extension("jsonl").exists()
-        || path.with_extension("ass").exists()
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "同名文件过多",
+    ))
 }
 
 /// 按目录长度算出文件名可用的字符预算，避免撞上 Windows 260 上限。
@@ -295,15 +312,19 @@ mod tests {
     }
 
     #[test]
-    fn unique_path_avoids_overwriting_sidecars() {
-        let dir = std::env::temp_dir().join(format!("hivecast-name-{}", uuid::Uuid::new_v4()));
+    fn reserve_unique_path_is_atomic() {
+        let dir = std::env::temp_dir().join(format!("hivecast-reserve-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let base = dir.join("a.mp4");
-        assert_eq!(unique_path(&base), base);
-        std::fs::write(base.with_extension("jsonl"), "x").expect("write");
-        assert_eq!(unique_path(&base), dir.join("a (2).mp4"));
-        std::fs::write(dir.join("a (2).mp4"), "x").expect("write");
-        assert_eq!(unique_path(&base), dir.join("a (3).mp4"));
+        let first = reserve_unique_path(&base).expect("第一个");
+        let second = reserve_unique_path(&base).expect("第二个");
+        assert_eq!(first, base);
+        assert_eq!(second, dir.join("a (2).mp4"));
+        assert!(first.exists() && second.exists());
+        // 旁挂文件存在时也要让开。
+        std::fs::write(dir.join("a (3).jsonl"), "x").expect("write");
+        let third = reserve_unique_path(&base).expect("第三个");
+        assert_eq!(third, dir.join("a (4).mp4"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

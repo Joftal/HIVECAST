@@ -170,7 +170,10 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
     headers.insert("User-Agent", UA.parse().expect("UA 头非法"));
     headers.insert("Origin", HOME.parse().expect("Origin 头非法"));
     let cookie = format!("ttwid={ttwid}");
-    headers.insert("Cookie", cookie.parse().map_err(|_| "Cookie 头非法".to_string())?);
+    headers.insert(
+        "Cookie",
+        cookie.parse().map_err(|_| "Cookie 头非法".to_string())?,
+    );
 
     let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
@@ -181,7 +184,11 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
     // 第一次 tick 会立刻触发，先消耗掉，之后才是真正的 5 秒间隔。
     heartbeat.tick().await;
 
-    Ok(Stream { ws, heartbeat, seq: 0 })
+    Ok(Stream {
+        ws,
+        heartbeat,
+        seq: 0,
+    })
 }
 
 /// 网页参数：与 bililive-go 保持同一套（抖音对差异很敏感，字段缺一个就签不过）。
@@ -248,7 +255,8 @@ fn user_unique_id() -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     now.hash(&mut hasher);
     std::process::id().hash(&mut hasher);
-    let value = 1_000_000_000_000_000_000u128 + hasher.finish() as u128 % 9_000_000_000_000_000_000u128;
+    let value =
+        1_000_000_000_000_000_000u128 + hasher.finish() as u128 % 9_000_000_000_000_000_000u128;
     value.to_string()
 }
 
@@ -499,7 +507,11 @@ fn decode_chat(body: &[u8]) -> Option<Event> {
     }
     Some(Event {
         kind: "chat",
-        user: if nickname.is_empty() { "未知用户".into() } else { nickname },
+        user: if nickname.is_empty() {
+            "未知用户".into()
+        } else {
+            nickname
+        },
         content,
     })
 }
@@ -540,7 +552,11 @@ fn decode_gift(body: &[u8]) -> Option<Event> {
     }
     Some(Event {
         kind: "gift",
-        user: if nickname.is_empty() { "未知用户".into() } else { nickname },
+        user: if nickname.is_empty() {
+            "未知用户".into()
+        } else {
+            nickname
+        },
         content: format!("赠送 {gift_name} × {count}"),
     })
 }
@@ -552,13 +568,19 @@ mod tests {
     #[test]
     fn extracts_escaped_room_id() {
         let body = r#"<script>self.__pace_f.push("{\"roomIdStr\\":\\"7392091211001140287\\",\\"roomId\\":7392091211001140287}")</script>"#;
-        assert_eq!(extract_room_id(body).as_deref(), Some("7392091211001140287"));
+        assert_eq!(
+            extract_room_id(body).as_deref(),
+            Some("7392091211001140287")
+        );
     }
 
     #[test]
     fn extracts_plain_room_id() {
         let body = r#"{"roomIdStr":"1234567890123456789"}"#;
-        assert_eq!(extract_room_id(body).as_deref(), Some("1234567890123456789"));
+        assert_eq!(
+            extract_room_id(body).as_deref(),
+            Some("1234567890123456789")
+        );
     }
 
     #[test]
@@ -636,10 +658,11 @@ mod tests {
         let mut seen = 0;
         for index in 0..6 {
             println!("等待第 {} 批…", index + 1);
-            let events = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next_events())
-                .await
-                .expect("10 秒内没有数据帧")
-                .expect("读取失败");
+            let events =
+                tokio::time::timeout(std::time::Duration::from_secs(10), stream.next_events())
+                    .await
+                    .expect("10 秒内没有数据帧")
+                    .expect("读取失败");
             for event in &events {
                 println!("[{}] {}: {}", event.kind, event.user, event.content);
                 seen += 1;

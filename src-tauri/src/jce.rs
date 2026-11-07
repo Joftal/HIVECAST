@@ -77,7 +77,8 @@ impl Enc {
         let bytes = value.as_bytes();
         if bytes.len() > 255 {
             self.head(tag, T_STRING4);
-            self.buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            self.buf
+                .extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         } else {
             self.head(tag, T_STRING1);
             self.buf.push(bytes.len() as u8);

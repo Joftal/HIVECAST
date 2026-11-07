@@ -113,8 +113,7 @@ impl DouyinAdapter {
                 message: format!("抖音房间 {rid} 返回空响应"),
             });
         }
-        serde_json::from_str(&body)
-            .map_err(|err| PlatformError::Parse(format!("{ENTER} → {err}")))
+        serde_json::from_str(&body).map_err(|err| PlatformError::Parse(format!("{ENTER} → {err}")))
     }
 }
 
@@ -217,10 +216,7 @@ impl PlatformAdapter for DouyinAdapter {
         let entered = self.enter(&rid).await?;
         let (payload, _, _) = unwrap_enter(entered, &rid)?;
 
-        let stream = payload
-            .stream_url
-            .as_ref()
-            .ok_or(PlatformError::NotLive)?;
+        let stream = payload.stream_url.as_ref().ok_or(PlatformError::NotLive)?;
         if payload.status != 2 {
             return Err(PlatformError::NotLive);
         }
@@ -394,7 +390,9 @@ struct Quality {
 
 /// 弹幕长连接需要真实 room_id。页面 SSR 并不保证带 roomIdStr（实测常是 "$undefined"），
 /// 所以统一走 enter 接口拿 id_str。
-pub(crate) async fn live_room_id(web_rid: &str) -> Result<(String, bool), crate::platform::PlatformError> {
+pub(crate) async fn live_room_id(
+    web_rid: &str,
+) -> Result<(String, bool), crate::platform::PlatformError> {
     let adapter = DouyinAdapter::new();
     let entered = adapter.enter(web_rid).await?;
     let (payload, _, _) = unwrap_enter(entered, web_rid)?;
@@ -824,7 +822,8 @@ mod tests {
     fn enter_params_keep_order() {
         let params = enter_params("123456");
         assert!(params.starts_with("aid=6383&live_id=1&device_platform=web"));
-        assert!(params.contains("&web_rid=123456&Room-Enter-User-Login-Ab=0&is_need_double_stream=false"));
+        assert!(params
+            .contains("&web_rid=123456&Room-Enter-User-Login-Ab=0&is_need_double_stream=false"));
         assert!(!params.contains("a_bogus"));
     }
 
@@ -904,7 +903,10 @@ mod tests {
         assert_eq!(payload.title, "测试直播间");
         assert_eq!(payload.status, 2);
         assert_eq!(payload.user_count_str.as_deref(), Some("1.2万"));
-        assert_eq!(anchor.map(|user| user.nickname), Some("测试主播".to_string()));
+        assert_eq!(
+            anchor.map(|user| user.nickname),
+            Some("测试主播".to_string())
+        );
 
         let stream = payload.stream_url.expect("stream_url");
         let qualities = collect_qualities(&stream);

@@ -295,7 +295,12 @@ impl ViewManager {
     }
 
     /// 切换某槽位的画质。只影响这个槽位的租约，录制侧完全不受影响。
-    pub fn set_quality(&self, app: &AppHandle, slot: u8, qn: u32) -> Result<ViewSlotInfo, AppError> {
+    pub fn set_quality(
+        &self,
+        app: &AppHandle,
+        slot: u8,
+        qn: u32,
+    ) -> Result<ViewSlotInfo, AppError> {
         let handle = self.handle(slot)?;
         {
             let mut state = handle.lock();
@@ -545,12 +550,14 @@ impl ViewManager {
                             let wait = backoff(attempts);
                             {
                                 let mut state = handle.lock();
-                                state.retry_at =
-                                    Some(chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64);
+                                state.retry_at = Some(
+                                    chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64,
+                                );
                             }
                             self.emit(&app);
-                            // 丢掉缓存，重连时拿一条新线路
-                            broker.invalidate(&room_ref(&room));
+                            // 丢掉地址缓存，重连时拿一条新线路。
+                            // 别用 invalidate：它会把录制侧共享的失败退避也清掉（A5）。
+                            broker.invalidate_address(&room_ref(&room));
                             tokio::time::sleep(wait).await;
                             handle.lock().retry_at = None;
                         }
@@ -587,7 +594,7 @@ impl ViewManager {
                             Some(chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64);
                     }
                     self.emit(&app);
-                    broker.invalidate(&room_ref(&room));
+                    broker.invalidate_address(&room_ref(&room));
                     tokio::time::sleep(wait).await;
                     handle.lock().retry_at = None;
                 }
@@ -780,7 +787,11 @@ impl ViewManager {
     async fn teardown(&self, handle: &Arc<Slot>) {
         let (session, dir, mut child) = {
             let mut state = handle.lock();
-            (state.session_id.take(), state.dir.take(), state.child.take())
+            (
+                state.session_id.take(),
+                state.dir.take(),
+                state.child.take(),
+            )
         };
 
         if let Some(child) = child.as_mut() {
@@ -819,7 +830,11 @@ async fn playlist_ready(dir: &PathBuf) -> bool {
 /// 转封装失败时唯一的现场：把 stderr 落到 <cache>/view/ffmpeg.log，随启动清空。
 fn ffmpeg_log(root: &std::path::Path) -> Stdio {
     let path = root.join("ffmpeg.log");
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(file) => Stdio::from(file),
         Err(_) => Stdio::null(),
     }
@@ -969,7 +984,10 @@ mod tests {
 
     #[test]
     fn preferred_line_wins() {
-        let groups = vec![line_group("A", Some("https://a/1.flv")), line_group("B", Some("https://b/1.flv"))];
+        let groups = vec![
+            line_group("A", Some("https://a/1.flv")),
+            line_group("B", Some("https://b/1.flv")),
+        ];
         let (picked, group) = pick_view_candidate(&groups, Some("B")).expect("应该挑到候选");
         assert_eq!(group.name, "B");
         assert_eq!(picked.url.as_deref(), Some("https://b/1.flv"));
@@ -977,7 +995,10 @@ mod tests {
 
     #[test]
     fn preferred_line_without_url_falls_back() {
-        let groups = vec![line_group("A", Some("https://a/1.flv")), line_group("C", None)];
+        let groups = vec![
+            line_group("A", Some("https://a/1.flv")),
+            line_group("C", None),
+        ];
         let (_, group) = pick_view_candidate(&groups, Some("C")).expect("应该回退到可用线路");
         assert_eq!(group.name, "A");
     }

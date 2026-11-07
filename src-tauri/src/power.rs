@@ -107,7 +107,10 @@ mod imp {
 
     #[cfg(test)]
     pub fn enabled() -> bool {
-        ASSERTION.lock().map(|guard| guard.is_some()).unwrap_or(false)
+        ASSERTION
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 }
 

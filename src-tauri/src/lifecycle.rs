@@ -41,6 +41,24 @@ pub fn active_tasks(state: &AppState) -> Vec<ActiveTask> {
             detail: Some(recording.quality),
         });
     }
+    // 开录还没挂进 active 的那几百毫秒也算任务：此时退出会把刚拉起的 ffmpeg
+    // 留在后台写文件（H6）。
+    for room_id in state.recorder.starting_rooms() {
+        let title = state
+            .db
+            .get_room(&room_id)
+            .ok()
+            .flatten()
+            .map(|room| room.title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| room_id.clone());
+        tasks.push(ActiveTask {
+            id: format!("record:starting:{room_id}"),
+            kind: "record".into(),
+            title,
+            detail: Some("开录中".into()),
+        });
+    }
     tasks.extend(state.jobs.list());
     tasks
 }

@@ -13,11 +13,11 @@ use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
+use super::http;
 use super::{
     Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
     StreamFormat, StreamGroup,
 };
-use super::http;
 
 const API: &str = "https://api.live.bilibili.com";
 const REFERER: &str = "https://live.bilibili.com/";
@@ -103,7 +103,8 @@ impl LiveTime {
         match self {
             LiveTime::Number(value) => (*value > 0).then_some(*value),
             LiveTime::Text(text) => {
-                let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()?;
+                let naive =
+                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()?;
                 let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
                 Some(naive.and_local_timezone(offset).single()?.timestamp())
             }
@@ -242,7 +243,9 @@ impl PlatformAdapter for BilibiliAdapter {
             data.room_id
         );
         let anchor = match http::get_json::<Envelope<AnchorData>>(&anchor_url, REFERER, &[]).await {
-            Ok(envelope) => unwrap_envelope(envelope, "anchor").ok().and_then(|d| d.info),
+            Ok(envelope) => unwrap_envelope(envelope, "anchor")
+                .ok()
+                .and_then(|d| d.info),
             Err(_) => None,
         };
 
@@ -332,7 +335,10 @@ impl PlatformAdapter for BilibiliAdapter {
 
                         let mut headers = BTreeMap::new();
                         headers.insert("Referer".to_string(), REFERER.to_string());
-                        headers.insert("Origin".to_string(), "https://live.bilibili.com".to_string());
+                        headers.insert(
+                            "Origin".to_string(),
+                            "https://live.bilibili.com".to_string(),
+                        );
                         headers.insert("User-Agent".to_string(), http::USER_AGENT.to_string());
 
                         let candidate = StreamCandidate {
@@ -349,8 +355,16 @@ impl PlatformAdapter for BilibiliAdapter {
                             weight: codec.current_qn as f64,
                             format: format_kind,
                             codec: Some(codec_kind),
-                            width: codec.media_info.as_ref().map(|info| info.width).filter(|w| *w > 0),
-                            height: codec.media_info.as_ref().map(|info| info.height).filter(|h| *h > 0),
+                            width: codec
+                                .media_info
+                                .as_ref()
+                                .map(|info| info.width)
+                                .filter(|w| *w > 0),
+                            height: codec
+                                .media_info
+                                .as_ref()
+                                .map(|info| info.height)
+                                .filter(|h| *h > 0),
                             fps: None,
                             bitrate_kbps: codec
                                 .media_info
@@ -538,15 +552,28 @@ mod tests {
         let adapter = BilibiliAdapter::new();
         let room = adapter.resolve("545068").expect("解析房间号失败");
         let info = adapter.room_info(&room).await.expect("取房间信息失败");
-        println!("room: {} / {} live={}", info.host_name, info.room_name, info.is_live);
+        println!(
+            "room: {} / {} live={}",
+            info.host_name, info.room_name, info.is_live
+        );
 
         match adapter.stream_groups(&room, QN_ORIGIN).await {
             Ok(groups) => {
                 println!("groups={}", groups.len());
                 for group in groups.iter().take(3) {
-                    println!("  line {} priority {} candidates {}", group.name, group.priority, group.candidates.len());
+                    println!(
+                        "  line {} priority {} candidates {}",
+                        group.name,
+                        group.priority,
+                        group.candidates.len()
+                    );
                     for candidate in group.candidates.iter().take(3) {
-                        println!("    {} weight={} url={}", candidate.name, candidate.weight, candidate.url.as_deref().unwrap_or(""));
+                        println!(
+                            "    {} weight={} url={}",
+                            candidate.name,
+                            candidate.weight,
+                            candidate.url.as_deref().unwrap_or("")
+                        );
                     }
                 }
                 assert!(!groups.is_empty());

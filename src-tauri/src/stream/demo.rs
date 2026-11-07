@@ -83,7 +83,14 @@ pub async fn ensure_demo(cache_root: &Path) -> Result<PathBuf, AppError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(600)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         return Err(AppError::Ffmpeg(tail));
     }
 

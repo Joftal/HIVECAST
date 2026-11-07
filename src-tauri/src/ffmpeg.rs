@@ -14,7 +14,9 @@ pub fn resolve() -> Option<PathBuf> {
     }
     candidates.extend(extra_dirs().into_iter().map(|dir| dir.join(exe_name())));
 
-    candidates.into_iter().find(|candidate| is_runnable(candidate))
+    candidates
+        .into_iter()
+        .find(|candidate| is_runnable(candidate))
 }
 
 /// 供前端展示的绝对路径。

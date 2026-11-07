@@ -41,7 +41,10 @@ pub fn sign(x_ms_stub: &str) -> Result<String, String> {
         ctx.eval::<(), _>(PRELUDE).map_err(js_err)?;
         ctx.eval::<(), _>(SIGN_JS).map_err(js_err)?;
         // 用 JSON 字符串字面量拼参数，避免用户可控内容注入脚本。
-        let call = format!("get_sign({})", serde_json::to_string(x_ms_stub).map_err(|e| e.to_string())?);
+        let call = format!(
+            "get_sign({})",
+            serde_json::to_string(x_ms_stub).map_err(|e| e.to_string())?
+        );
         let signature: String = ctx.eval(call).map_err(js_err)?;
         if signature.is_empty() {
             return Err("get_sign 返回空值".to_string());
@@ -67,7 +70,9 @@ mod tests {
         // X-Bogus 形如 base64：字母数字加 + / =，长度 15–40。
         assert!(signature.len() >= 12, "签名太短：{signature}");
         assert!(
-            signature.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')),
+            signature
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')),
             "签名含异常字符：{signature}"
         );
     }

@@ -62,11 +62,11 @@ pub const MAX_BACKOFF_CAP: u32 = 3_600;
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
     Settings {
-            default_record_qn: 10000,
-            default_view_qn: 0,
-            media_root: default_media_root().display().to_string(),
-            max_concurrent_records: 4,
-            notify_enabled: true,
+        default_record_qn: 10000,
+        default_view_qn: 0,
+        media_root: default_media_root().display().to_string(),
+        max_concurrent_records: 4,
+        notify_enabled: true,
         notify_error: true,
         notify_auth: true,
         language: "system".into(),
@@ -111,10 +111,14 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_NOTIFY_AUTH).and_then(|v| v.parse::<bool>().ok()) {
         settings.notify_auth = value;
     }
-    if let Some(value) = read(KEY_LANGUAGE).filter(|v| matches!(v.as_str(), "zh-CN" | "en-US" | "system")) {
+    if let Some(value) =
+        read(KEY_LANGUAGE).filter(|v| matches!(v.as_str(), "zh-CN" | "en-US" | "system"))
+    {
         settings.language = value;
     }
-    if let Some(value) = read(KEY_THEME).filter(|v| matches!(v.as_str(), "light" | "dark" | "system")) {
+    if let Some(value) =
+        read(KEY_THEME).filter(|v| matches!(v.as_str(), "light" | "dark" | "system"))
+    {
         settings.theme = value;
     }
     if let Some(value) = read(KEY_RETENTION_DAYS).and_then(|v| v.parse::<u32>().ok()) {
@@ -157,6 +161,12 @@ pub fn load(db: &Db) -> Settings {
     settings
 }
 
+/// 只把媒体目录写回设置：启动时目录不可用、回落默认目录后用（H2）。
+/// 不走 save()，因为这里已经知道目录能建出来，校验只会重复一次 IO。
+pub fn persist_media_root(db: &Db, path: &str) -> Result<(), AppError> {
+    db.set_setting(KEY_MEDIA_ROOT, path)
+}
+
 /// 校验并落库；返回纠正过的值（例如并发数被夹到 1..=8），前端据此回填输入框。
 pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let mut settings = input.clone();
@@ -192,8 +202,7 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         return Err(AppError::User(format!("{} 不是目录", path.display())));
     }
     if !path.exists() {
-        std::fs::create_dir_all(&path)
-            .map_err(|err| AppError::from_io(err, &path))?;
+        std::fs::create_dir_all(&path).map_err(|err| AppError::from_io(err, &path))?;
     }
     settings.media_root = path.display().to_string();
 
@@ -212,8 +221,14 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
     db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
     db.set_setting(KEY_POST_AUTO_REMUX, &settings.auto_remux.to_string())?;
-    db.set_setting(KEY_MONITOR_INTERVAL, &settings.monitor_interval_sec.to_string())?;
-    db.set_setting(KEY_MONITOR_BACKOFF, &settings.monitor_backoff_enabled.to_string())?;
+    db.set_setting(
+        KEY_MONITOR_INTERVAL,
+        &settings.monitor_interval_sec.to_string(),
+    )?;
+    db.set_setting(
+        KEY_MONITOR_BACKOFF,
+        &settings.monitor_backoff_enabled.to_string(),
+    )?;
     db.set_setting(
         KEY_MONITOR_BACKOFF_CAP,
         &settings.monitor_backoff_cap_sec.to_string(),
@@ -296,7 +311,10 @@ mod tests {
         assert_eq!(saved.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert_eq!(saved.language, "system", "未知语言回落到跟随系统");
         assert_eq!(saved.theme, "light", "未知主题回落到浅色");
-        assert_eq!(saved.retention_days, MAX_RETENTION_DAYS, "保留天数被夹到上限");
+        assert_eq!(
+            saved.retention_days, MAX_RETENTION_DAYS,
+            "保留天数被夹到上限"
+        );
         assert_eq!(saved.max_total_gb, MAX_TOTAL_GB, "容量上限被夹到上限");
         assert!(!saved.auto_remux, "文件后处理开关应原样保存");
         assert!(media.is_dir(), "保存时应把媒体目录建出来");

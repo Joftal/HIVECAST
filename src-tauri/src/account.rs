@@ -8,8 +8,8 @@
 //! 其余平台没有公开的扫码接口（斗鱼/虎牙/抖音都依赖风控），v1 走粘贴 Cookie。
 
 use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket};
-use tauri::Emitter;
 use serde::Deserialize;
+use tauri::Emitter;
 
 use crate::credential;
 use crate::db::{now_ts, CredentialRow, Db};
@@ -196,7 +196,10 @@ fn cookies_from_set_cookie(headers: &[String]) -> String {
             let first = raw.split(';').next()?.trim();
             let (name, value) = first.split_once('=')?;
             let name = name.trim();
-            if name.is_empty() || name.eq_ignore_ascii_case("path") || name.eq_ignore_ascii_case("expires") {
+            if name.is_empty()
+                || name.eq_ignore_ascii_case("path")
+                || name.eq_ignore_ascii_case("expires")
+            {
                 return None;
             }
             Some(format!("{name}={}", value.trim()))
@@ -236,7 +239,12 @@ pub async fn bilibili_nav(cookie: &str) -> Result<Account, AppError> {
     })
 }
 
-fn store_account(db: &Db, platform: &str, cookie: &str, account: &Account) -> Result<CredentialRow, AppError> {
+fn store_account(
+    db: &Db,
+    platform: &str,
+    cookie: &str,
+    account: &Account,
+) -> Result<CredentialRow, AppError> {
     let row = CredentialRow {
         platform: platform.to_string(),
         account_id: String::new(),
@@ -353,18 +361,16 @@ mod tests {
     fn merges_set_cookie_into_existing() {
         let base = "SESSDATA=old; dy_did=keep";
         let extra = cookies_from_set_cookie(&["SESSDATA=new; Path=/".to_string()]);
-        assert_eq!(
-            credential::merge(base, &extra),
-            "SESSDATA=new; dy_did=keep"
-        );
+        assert_eq!(credential::merge(base, &extra), "SESSDATA=new; dy_did=keep");
     }
 
     #[test]
     fn parses_poll_expires_in() {
         // B 站 poll 返回的 data 里带 expires_in（剩余秒数），缺字段时按 0 处理。
-        let with: Envelope<PollData> =
-            serde_json::from_str(r#"{"code":0,"data":{"code":86101,"message":"","expires_in":145}}"#)
-                .unwrap();
+        let with: Envelope<PollData> = serde_json::from_str(
+            r#"{"code":0,"data":{"code":86101,"message":"","expires_in":145}}"#,
+        )
+        .unwrap();
         assert_eq!(with.data.unwrap().expires_in, 145);
         let without: Envelope<PollData> =
             serde_json::from_str(r#"{"code":0,"data":{"code":86101}}"#).unwrap();

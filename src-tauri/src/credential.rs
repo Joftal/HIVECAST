@@ -41,11 +41,7 @@ pub fn remove(platform: &str) {
 }
 
 pub fn get(platform: &str) -> Option<String> {
-    store()
-        .read()
-        .expect("凭据表被污染")
-        .get(platform)
-        .cloned()
+    store().read().expect("凭据表被污染").get(platform).cloned()
 }
 
 /// 按请求 URL 的域名找对应平台的 Cookie。
@@ -219,7 +215,10 @@ mod tests {
             Some("dy_did=abc")
         );
         // CDN 域名不匹配平台，避免把登录态发给第三方节点。
-        assert_eq!(cookie_for_url("https://hw-tct.douyucdn.cn/live/x.flv"), None);
+        assert_eq!(
+            cookie_for_url("https://hw-tct.douyucdn.cn/live/x.flv"),
+            None
+        );
         remove("douyu");
         assert_eq!(cookie_for_url("https://www.douyu.com/9999"), None);
     }

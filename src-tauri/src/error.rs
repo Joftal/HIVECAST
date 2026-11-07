@@ -28,10 +28,7 @@ pub enum AppError {
 
     /// 平台侧错误：code 直接沿用 platform 层的错误码，前端按 code 分支。
     #[error("{message}")]
-    Platform {
-        code: &'static str,
-        message: String,
-    },
+    Platform { code: &'static str, message: String },
 }
 
 impl AppError {

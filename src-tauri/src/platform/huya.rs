@@ -73,7 +73,10 @@ impl PlatformAdapter for HuyaAdapter {
         let (body, _) = http::get_text(&referer, REFERER_HOME, &[]).await?;
 
         if body.contains("虎牙君找不到这个主播") || body.contains("该主播不存在") {
-            return Err(PlatformError::RoomNotFound(format!("虎牙房间 {}", room.room_key)));
+            return Err(PlatformError::RoomNotFound(format!(
+                "虎牙房间 {}",
+                room.room_key
+            )));
         }
 
         let banned = body.contains("该主播涉嫌违规");
@@ -94,8 +97,7 @@ impl PlatformAdapter for HuyaAdapter {
         let started_at = field(&body, "startTime")
             .and_then(|value| value.parse::<i64>().ok())
             .filter(|value| *value > 0);
-        let online = field(&body, "totalCount")
-            .and_then(|value| value.parse::<u64>().ok());
+        let online = field(&body, "totalCount").and_then(|value| value.parse::<u64>().ok());
 
         Ok(RoomInfo {
             host_name: nick,
@@ -126,7 +128,10 @@ impl PlatformAdapter for HuyaAdapter {
         let referer = format!("{ROOM_HOST}/{}", room.room_key);
         let (body, _) = http::get_text(&referer, REFERER_HOME, &[]).await?;
         if body.contains("虎牙君找不到这个主播") {
-            return Err(PlatformError::RoomNotFound(format!("虎牙房间 {}", room.room_key)));
+            return Err(PlatformError::RoomNotFound(format!(
+                "虎牙房间 {}",
+                room.room_key
+            )));
         }
         if !parse_is_on(&body) {
             return Err(PlatformError::NotLive);
@@ -153,9 +158,11 @@ impl PlatformAdapter for HuyaAdapter {
                 .unwrap_or(-1);
 
             let mut candidates = Vec::new();
-            if let (Some(base), Some(anti)) = (text(entry, "sFlvUrl"), text(entry, "sFlvAntiCode")) {
+            if let (Some(base), Some(anti)) = (text(entry, "sFlvUrl"), text(entry, "sFlvAntiCode"))
+            {
                 let suffix = text(entry, "sFlvUrlSuffix").unwrap_or_else(|| "flv".to_string());
-                if let Some(url) = build_stream_url(&base, &stream_name, &suffix, &anti, quality.bitrate)
+                if let Some(url) =
+                    build_stream_url(&base, &stream_name, &suffix, &anti, quality.bitrate)
                 {
                     candidates.push(candidate(
                         url,
@@ -359,7 +366,10 @@ fn build_stream_url(
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
     let fm = params.get("fm")?;
-    let ctype = params.get("ctype").map(String::as_str).unwrap_or("huya_live");
+    let ctype = params
+        .get("ctype")
+        .map(String::as_str)
+        .unwrap_or("huya_live");
     let ws_time = params.get("wsTime")?;
     let fs = params.get("fs").map(String::as_str).unwrap_or("bgct");
 
@@ -585,11 +595,17 @@ mod tests {
         let adapter = HuyaAdapter::new();
         assert_eq!(adapter.resolve("huya:660000").unwrap().room_key, "660000");
         assert_eq!(
-            adapter.resolve("https://www.huya.com/11342412?x=1").unwrap().room_key,
+            adapter
+                .resolve("https://www.huya.com/11342412?x=1")
+                .unwrap()
+                .room_key,
             "11342412"
         );
         assert_eq!(
-            adapter.resolve("https://www.huya.com/lpl").unwrap().room_key,
+            adapter
+                .resolve("https://www.huya.com/lpl")
+                .unwrap()
+                .room_key,
             "lpl"
         );
         assert!(adapter.resolve("https://www.douyu.com/9999").is_none());
@@ -646,7 +662,10 @@ mod tests {
         assert!(parse_is_on(r#"{"isOn":"true"}"#));
         assert!(!parse_is_on(r#"{"isOn":false}"#));
         assert_eq!(unescape(r#"\u4e2d\u6587"#), "中文");
-        assert_eq!(field(r#"{"nick":"\u5c0f\u660e","b":2}"#, "nick"), Some(r#"\u5c0f\u660e"#));
+        assert_eq!(
+            field(r#"{"nick":"\u5c0f\u660e","b":2}"#, "nick"),
+            Some(r#"\u5c0f\u660e"#)
+        );
     }
 
     #[test]
@@ -661,7 +680,10 @@ mod tests {
     fn extracts_balanced_stream_object() {
         let body = r#"var x = 1; stream: {"data":[{"a":{"b":1}}]} ; var y = 2;"#;
         let value = extract_stream_json(body).expect("解析失败");
-        assert_eq!(value.pointer("/data/0/a/b").and_then(Value::as_i64), Some(1));
+        assert_eq!(
+            value.pointer("/data/0/a/b").and_then(Value::as_i64),
+            Some(1)
+        );
     }
 
     /// 联网冒烟：cargo test --lib -- --ignored --nocapture huya
@@ -671,7 +693,10 @@ mod tests {
         let adapter = HuyaAdapter::new();
         let room = adapter.resolve("huya:660000").expect("解析房间号失败");
         let info = adapter.room_info(&room).await.expect("取房间信息失败");
-        println!("room: {} / {} live={}", info.host_name, info.room_name, info.is_live);
+        println!(
+            "room: {} / {} live={}",
+            info.host_name, info.room_name, info.is_live
+        );
         match adapter.stream_groups(&room, 10000).await {
             Ok(groups) => {
                 println!("groups={}", groups.len());
@@ -683,7 +708,11 @@ mod tests {
                             candidate.name,
                             candidate.weight,
                             candidate.attrs.get("qn").cloned().unwrap_or_default(),
-                            candidate.attrs.get("bitrateKbps").cloned().unwrap_or_default(),
+                            candidate
+                                .attrs
+                                .get("bitrateKbps")
+                                .cloned()
+                                .unwrap_or_default(),
                             candidate.url.as_deref().unwrap_or("")
                         );
                     }

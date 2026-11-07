@@ -203,7 +203,10 @@ impl DanmakuHub {
 
 /// 是否已有该平台的弹幕接入（M3 B 站；M7.3 起加斗鱼、虎牙）。
 pub fn supports(room: &RoomRecord) -> bool {
-    matches!(room.platform.as_str(), "bilibili" | "douyu" | "huya" | "douyin")
+    matches!(
+        room.platform.as_str(),
+        "bilibili" | "douyu" | "huya" | "douyin"
+    )
 }
 
 /// 单个录制会话的 JSONL 写入器。
@@ -347,8 +350,7 @@ const MIXIN_KEY_ENC_TAB: [usize; 64] = [
 ];
 
 /// mixin key 一小时有效，缓存一份即可。
-static WBI_KEY: tokio::sync::Mutex<Option<(String, Instant)>> =
-    tokio::sync::Mutex::const_new(None);
+static WBI_KEY: tokio::sync::Mutex<Option<(String, Instant)>> = tokio::sync::Mutex::const_new(None);
 
 #[derive(Deserialize)]
 struct NavData {
@@ -388,7 +390,11 @@ async fn wbi_mixin_key() -> Result<String, String> {
         .data
         .and_then(|data| data.wbi_img)
         .ok_or_else(|| format!("nav 未下发 WBI 密钥（code={}）", envelope.code))?;
-    let raw = format!("{}{}", key_from_url(&img.img_url), key_from_url(&img.sub_url));
+    let raw = format!(
+        "{}{}",
+        key_from_url(&img.img_url),
+        key_from_url(&img.sub_url)
+    );
     if raw.len() < 64 {
         return Err("WBI 密钥长度异常".into());
     }
@@ -416,19 +422,19 @@ async fn sign_url(raw: &str) -> Result<String, String> {
             (key.into_owned(), cleaned)
         })
         .collect();
-    pairs.push((
-        "wts".into(),
-        chrono::Utc::now().timestamp().to_string(),
-    ));
+    pairs.push(("wts".into(), chrono::Utc::now().timestamp().to_string()));
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
     let query = pairs
         .iter()
-        .fold(url::form_urlencoded::Serializer::new(String::new()), |acc, (key, value)| {
-            let mut acc = acc;
-            acc.append_pair(key, value);
-            acc
-        })
+        .fold(
+            url::form_urlencoded::Serializer::new(String::new()),
+            |acc, (key, value)| {
+                let mut acc = acc;
+                acc.append_pair(key, value);
+                acc
+            },
+        )
         .finish();
     let signature = format!("{:x}", md5::compute(format!("{query}{mixin}")));
 
@@ -666,7 +672,11 @@ async fn connect(session: &DanmuSession) -> Result<WsStream, String> {
         .iter()
         .filter(|entry| !entry.host.is_empty())
         .map(|entry| {
-            let port = if entry.wss_port == 0 { 443 } else { entry.wss_port };
+            let port = if entry.wss_port == 0 {
+                443
+            } else {
+                entry.wss_port
+            };
             format!("wss://{}:{}/sub", entry.host, port)
         })
         .collect();
@@ -688,9 +698,22 @@ async fn try_connect(url: &str) -> Result<WsStream, String> {
         .map_err(|err| format!("构造 WS 请求失败：{err}"))?;
     {
         let headers = request.headers_mut();
-        headers.insert("User-Agent", http::USER_AGENT.parse().map_err(|_| "UA 非法".to_string())?);
-        headers.insert("Origin", "https://live.bilibili.com".parse().map_err(|_| "Origin 非法".to_string())?);
-        headers.insert("Referer", REFERER.parse().map_err(|_| "Referer 非法".to_string())?);
+        headers.insert(
+            "User-Agent",
+            http::USER_AGENT
+                .parse()
+                .map_err(|_| "UA 非法".to_string())?,
+        );
+        headers.insert(
+            "Origin",
+            "https://live.bilibili.com"
+                .parse()
+                .map_err(|_| "Origin 非法".to_string())?,
+        );
+        headers.insert(
+            "Referer",
+            REFERER.parse().map_err(|_| "Referer 非法".to_string())?,
+        );
     }
     let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
@@ -967,11 +990,17 @@ mod tests {
             "token_len={} room_id={} hosts={:?}",
             session.token.len(),
             session.room_id,
-            session.hosts.iter().map(|h| (&h.host, h.wss_port)).collect::<Vec<_>>()
+            session
+                .hosts
+                .iter()
+                .map(|h| (&h.host, h.wss_port))
+                .collect::<Vec<_>>()
         );
 
         let mut ws = connect(&session).await.expect("连接失败");
-        send_packet(&mut ws, 7, &auth_body(&session)).await.expect("认证包发送失败");
+        send_packet(&mut ws, 7, &auth_body(&session))
+            .await
+            .expect("认证包发送失败");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         let mut frames = 0usize;
@@ -1223,7 +1252,14 @@ async fn douyu_connect() -> Result<WsStream, String> {
     let mut last = String::new();
     for port in DOUYU_PORTS {
         let url = format!("wss://danmuproxy.douyu.com:{port}/");
-        match tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector.clone())).await {
+        match tokio_tungstenite::connect_async_tls_with_config(
+            &url,
+            None,
+            false,
+            Some(connector.clone()),
+        )
+        .await
+        {
             Ok((ws, _)) => return Ok(ws),
             Err(err) => last = format!("{url} → {err}"),
         }
@@ -1339,7 +1375,6 @@ mod douyu_tests {
         assert_eq!(message.content, "火箭 x2");
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // 虎牙弹幕（M7.3）
@@ -1848,18 +1883,23 @@ async fn douyin_session(app: &AppHandle, conn: &RoomConn) -> Result<(), String> 
             flush(app, conn, &mut batch);
             return Ok(());
         }
-        let events = match tokio::time::timeout(Duration::from_millis(200), stream.next_events()).await {
-            Err(_) => Vec::new(),
-            Ok(Err(err)) => return Err(err),
-            Ok(Ok(events)) => events,
-        };
+        let events =
+            match tokio::time::timeout(Duration::from_millis(200), stream.next_events()).await {
+                Err(_) => Vec::new(),
+                Ok(Err(err)) => return Err(err),
+                Ok(Ok(events)) => events,
+            };
         for event in events {
             let message = DanmakuMessage {
                 offset_ms: 0,
                 kind: event.kind.into(),
                 user: Some(event.user),
                 content: event.content,
-                color: if event.kind == "gift" { 0xFFB027 } else { 0xFFFFFF },
+                color: if event.kind == "gift" {
+                    0xFFB027
+                } else {
+                    0xFFFFFF
+                },
             };
             accept(conn, &mut window, &mut count, &mut batch, message);
         }

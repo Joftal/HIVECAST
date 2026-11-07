@@ -2,16 +2,16 @@ use std::path::PathBuf;
 
 use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, MediaHostPage, MediaPage,
-    Playback, PostResult,
-    QrPoll, QrTicket, RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, ViewSlotInfo,
+    Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord, RoomView, Settings,
+    StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{now_ts, MediaFilter, MediaHostFilter};
 use crate::error::AppError;
 use crate::monitor::room_ref;
-use crate::postprocess;
 use crate::platform::resolve_input;
+use crate::postprocess;
 use crate::recorder::EVENT_ROOMS_CHANGED;
 use crate::state::AppState;
 use crate::stream::demo;
@@ -161,12 +161,40 @@ pub async fn room_refresh(
     let info = state.broker.room_info(&reference).await?;
     state.db.update_room_info(&room.id, &info)?;
 
-    if info.is_live && room.auto_record && !state.recorder.is_recording(&room.id) {
-        if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
-            state.recorder.set_error(&room.id, err.to_string());
+    if info.is_live {
+        state.recorder.clear_offline(&room.id);
+        // 和监控同一套门槛（B9）：手动暂停监控、手动停过这一场、刚自然结束
+        // 还在静默期、连续失败冷却中——这些情况下「刷新」都不该把录制止起来。
+        // 以前只看 auto_record，点一下刷新就能绕过用户刚做的停录决定。
+        if room.auto_record
+            && !state.recorder.is_recording(&room.id)
+            && !room.monitor_paused
+            && !state.recorder.auto_suppressed(&room.id, info.started_at)
+            && !state.recorder.auto_blocked(&room.id, info.started_at)
+            && !state.recorder.in_failure_cooldown(&room.id)
+        {
+            // 用刚写回库的房间记录开录：画质 / 线路 / 开播时间都以这次刷新为准。
+            let room_id = room.id.clone();
+            let fresh = state.db.get_room(&room_id)?.unwrap_or(room);
+            // start_checked 会再查一遍「已被移除 / 监控已暂停」和失败冷却，
+            // 与监控路径完全同构，避免刷新走一条更宽松的旁路。
+            if let Err(err) = state
+                .recorder
+                .start_checked(&app, &state.broker, &fresh)
+                .await
+            {
+                state.recorder.set_error(&room_id, err.to_string());
+            }
         }
-    } else if !info.is_live && state.recorder.is_recording(&room.id) {
-        let _ = state.recorder.stop(&app, &room.id, "stream_ended").await;
+    } else if state.recorder.is_recording(&room.id) {
+        // 手动刷新只拿到一次离线：和监控同口径，确认两次、且文件确实不长了
+        // 才停录（A1）。否则平台一次状态抖动就会把一场健康录像切断。
+        let confirmed = state.recorder.confirm_offline(&room.id);
+        let flowing = confirmed && state.recorder.flowing(&room.id);
+        if crate::monitor::should_stop_for_offline(confirmed, flowing) {
+            state.recorder.note_offline_stop(&room.id);
+            let _ = state.recorder.stop(&app, &room.id, "stream_ended").await;
+        }
     }
 
     let room = state
@@ -357,7 +385,11 @@ pub async fn view_open(
 }
 
 #[tauri::command]
-pub async fn view_close(app: AppHandle, state: State<'_, AppState>, slot: u8) -> Result<(), AppError> {
+pub async fn view_close(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: u8,
+) -> Result<(), AppError> {
     state.view.close(&app, slot).await
 }
 
@@ -416,10 +448,7 @@ pub async fn view_retry(
     state: State<'_, AppState>,
     slot: u8,
 ) -> Result<ViewSlotInfo, AppError> {
-    state
-        .view
-        .retry(&app, state.broker.clone(), slot)
-        .await
+    state.view.retry(&app, state.broker.clone(), slot).await
 }
 
 // ---- M5 本地后处理 ----
@@ -458,7 +487,9 @@ pub async fn session_remux(
     let session = session_file(&state, &session_id)?;
     let path = session_video(&session, session.status == "recording")?;
     // 先登记再开跑：退出流程要能看到这个任务，命令返回（含报错）时 guard 自动注销。
-    let _job = state.jobs.begin("remux", file_label(&path), session.quality.clone());
+    let _job = state
+        .jobs
+        .begin("remux", file_label(&path), session.quality.clone());
     let progress = postprocess::Progress {
         app: &app,
         task: &session_id,
@@ -514,7 +545,10 @@ pub async fn sessions_merge(
         }
         sessions.push(session);
     }
-    let total_ms: i64 = sessions.iter().map(|session| session.duration_ms.max(0)).sum();
+    let total_ms: i64 = sessions
+        .iter()
+        .map(|session| session.duration_ms.max(0))
+        .sum();
     let files = merge_files_in_order(sessions);
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
@@ -592,7 +626,7 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppError> {
 /// 文件名模板预览：用一份固定的示例房间渲染，保证与真正落盘时同一套逻辑。
 #[tauri::command]
 pub fn filename_preview(
-    state: State<'_ , AppState>,
+    state: State<'_, AppState>,
     template: String,
     strip_emoji: bool,
     group_dirs: bool,
@@ -859,10 +893,7 @@ pub async fn media_play(
 
 /// 停止一条回放；只影响这一条，其余各格继续放。
 #[tauri::command]
-pub async fn media_stop(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), AppError> {
+pub async fn media_stop(state: State<'_, AppState>, session_id: String) -> Result<(), AppError> {
     state.local.stop(&session_id).await;
     Ok(())
 }
@@ -896,7 +927,6 @@ fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
     Ok(())
 }
 
-
 // ---- 关闭与退出 ----
 
 /// 当前还没结束的录制与后处理任务，前端在退出提示里逐条列出。
@@ -922,4 +952,3 @@ pub fn close_arm_quit(app: AppHandle) {
 pub fn close_cancel_quit() {
     crate::lifecycle::cancel_auto_quit();
 }
-

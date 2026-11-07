@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hivecast_ipc::{AppInfo, StreamDescriptor};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::broker::StreamBroker;
 use crate::danmaku::DanmakuHub;
@@ -35,6 +35,8 @@ pub struct AppState {
     pub jobs: Arc<crate::jobs::Jobs>,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
+    /// 启动时媒体目录不可用、被迫回落：(设置里的路径, 真正用的路径)。只在启动那一刻有值。
+    pub media_fallback: Option<(String, String)>,
 }
 
 impl AppState {
@@ -56,12 +58,10 @@ impl AppState {
             .map_err(|err| AppError::from_io(err, &data_dir))?;
 
         let db = Arc::new(Db::open(&data_dir.join("hivecast.db"))?);
-        // 顺序很重要：先把崩溃遗留的分片合成 mp4，再收尾状态。
-        // 反过来的话状态已经变成 aborted，就找不到「待恢复」的会话了。
-        let (recovered, recovered_bytes) = crate::recorder::recover_parts(&db).await;
-        if recovered > 0 {
-            tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");
-        }
+        // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
+        // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
+        crate::recorder::reap_orphans(&db);
+        // 收尾要放在合并之前：合并会删掉分片，之后就取不到最后写入时间了（I1）。
         if let Ok(count) = db.close_orphan_sessions() {
             if count > 0 {
                 tracing::info!(count, "收尾上次异常退出的录制记录");
@@ -69,6 +69,18 @@ impl AppState {
         }
         // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
         crate::retention::enforce_from_settings(&db);
+        // 分片合成搬到后台（I2）：10 GB 残留分片要合并几分钟，不能挡主窗口出现。
+        // 收尾后这些会话已是 aborted，recover_parts 会从「失败/中止」列表里捞回来。
+        let recovery_db = db.clone();
+        let recovery_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let (recovered, recovered_bytes) = crate::recorder::recover_parts(&recovery_db).await;
+            if recovered > 0 {
+                tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");
+                // 媒体库可能已经打开并拉过列表：合并完成后让它重新取一次。
+                let _ = recovery_app.emit(crate::recorder::EVENT_MEDIA_CHANGED, ());
+            }
+        });
 
         // 账号凭据先灌进内存，之后所有 HTTP 请求按域名自动带上。
         if let Err(err) = db.reseal_credentials() {
@@ -85,10 +97,23 @@ impl AppState {
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut settings = crate::settings::load(&db);
         let mut media_root = PathBuf::from(&settings.media_root);
+        let mut media_fallback = None;
         if tokio::fs::create_dir_all(&media_root).await.is_err() {
+            let configured = settings.media_root.clone();
             media_root = default_media_root();
             let _ = tokio::fs::create_dir_all(&media_root).await;
             settings.media_root = media_root.display().to_string();
+            // 只改内存会让「设置里写着 A、文件全在 B」并且之后任何一次保存设置都失败（H2）。
+            // 这里把回落结果落库，并留给 lib.rs 弹一条系统通知。
+            tracing::warn!(
+                configured = %configured,
+                actual = %media_root.display(),
+                "媒体目录不可用，已回落到默认目录"
+            );
+            if let Err(err) = crate::settings::persist_media_root(&db, &settings.media_root) {
+                tracing::warn!(error = %err, "回落的媒体目录写库失败");
+            }
+            media_fallback = Some((configured, settings.media_root.clone()));
         }
 
         let server = StreamServer::start()
@@ -144,6 +169,7 @@ impl AppState {
             thumbs,
             jobs: crate::jobs::Jobs::new(),
             demo: tokio::sync::Mutex::new(None),
+            media_fallback,
         })
     }
 }

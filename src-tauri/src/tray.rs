@@ -63,7 +63,6 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let (show, quit) = labels(&language(app));
     let show_item = MenuItem::with_id(app, MENU_SHOW, show, true, None::<&str>)?;
