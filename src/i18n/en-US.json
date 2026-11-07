@@ -447,6 +447,10 @@
       "title": "Not enough disk space",
       "body": "Recording for {{host}} was stopped. Free up space and start it again"
     },
+    "diskLost": {
+      "title": "Recording folder unavailable",
+      "body": "Recording for {{host}} was stopped: the drive or folder is unavailable. Reconnect it and start again"
+    },
     "viewFailed": {
       "title": "Playback stopped",
       "body": "Playback for {{host}} failed after several retries: {{detail}}"

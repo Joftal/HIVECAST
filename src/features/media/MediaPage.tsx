@@ -11,6 +11,7 @@ import {
   mediaPlay,
   mediaReveal,
   mediaStop,
+  onMediaChanged,
   onMediaThumb,
   onPostProgress,
   sessionExportDanmaku,
@@ -313,6 +314,21 @@ export default function MediaPage() {
     setConfirmDelete(false);
     void loadFiles(0);
   }, [loadFiles, hostId]);
+
+  // 启动后的崩溃恢复合并在后台跑完时会改文件路径/大小，重新拉一遍列表（I2）。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let dispose: (() => void) | undefined;
+    void onMediaChanged(() => {
+      void loadHosts(0);
+      if (hostId) void loadFiles(0);
+    })
+      .then((off) => {
+        dispose = off;
+      })
+      .catch(() => undefined);
+    return () => dispose?.();
+  }, [hostId, loadFiles, loadHosts]);
 
   // 生成好的九宫格封面按 id 替换，不整页重载。
   useEffect(() => {

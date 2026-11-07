@@ -187,11 +187,13 @@ export default function App() {
           const key =
             notice.kind === "disk_full"
               ? "diskFull"
-              : notice.kind === "view_failed"
-                ? "viewFailed"
-                : notice.kind === "credential_expired"
-                  ? "credentialExpired"
-                  : notice.kind;
+              : notice.kind === "disk_lost"
+                ? "diskLost"
+                : notice.kind === "view_failed"
+                  ? "viewFailed"
+                  : notice.kind === "credential_expired"
+                    ? "credentialExpired"
+                    : notice.kind;
           sendNotification({
             title: t(`notice.${key}.title`),
             body: t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" }),

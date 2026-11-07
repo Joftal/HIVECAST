@@ -289,6 +289,13 @@ export async function mediaHosts(query: HostQuery = {}): Promise<MediaHostPage> 
 
 export const EVENT_MEDIA_THUMB = "media://thumb";
 
+export const EVENT_MEDIA_CHANGED = "media://changed";
+
+/** 启动后的崩溃恢复合并完成：媒体库需要重新拉一次列表。 */
+export function onMediaChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen(EVENT_MEDIA_CHANGED, () => handler());
+}
+
 export type ThumbReady = { sessionId: string; url: string };
 
 /** 九宫格缩略图生成完成（后台限流，一张一张回推）。 */
