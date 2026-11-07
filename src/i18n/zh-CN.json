@@ -83,7 +83,11 @@
       "goneBody": "录像可能已被删除或移出媒体库。",
       "sortName": "按主播名"
     },
-    "searchFiles": "搜索这个主播的录像"
+    "searchFiles": "搜索这个主播的录像",
+    "clipCount": "{{n}} 个片段",
+        "loadClips": "加载剩余 {{n}} 个片段",
+    "clipIndex": "第 {{n}} 段",
+    "selectSession": "选择整场"
   },
   "settings": {
     "title": "设置",
@@ -104,6 +108,7 @@
     "saving": "保存中…",
     "close": "关闭",
     "qnAuto": "自动（平台决定）",
+    "qnHighest": "最高可用（自动降级）",
     "qnOrigin": "原画",
     "qnBluray": "蓝光",
     "qnUltra": "超清",
@@ -146,6 +151,30 @@
     "searchEmptyHint": "试试平台名、画质、通知或目录",
     "searchClear": "清空搜索",
     "sectionQuality": "默认画质",
+    "sectionStream": "录制流偏好",
+    "sectionStreamDesc": "先按画质选流，同画质再按编码和源流格式匹配；匹配不到时自动回退到可用流。",
+    "sectionViewQuality": "默认观看画质",
+    "sectionSplit": "视频分割",
+    "sectionSplitDesc": "录制过程不中断，只在分片边界切分文件；一场直播仍归为一个场次。",
+    "sourceFormat": "源流格式",
+    "sourceFormatHint": "优先拉取这种源流；平台没有该格式时自动回退。",
+    "formatAuto": "自动（优先 FLV/TS）",
+    "formatFlv": "FLV",
+    "formatHls": "HLS（m3u8）",
+    "formatTs": "TS",
+    "recordCodec": "视频编码",
+    "recordCodecHint": "优先选择这种编码；平台只提供其它编码时仍会正常录制。",
+    "codecAuto": "自动（优先 H.264）",
+    "codecH264": "H.264",
+    "codecH265": "H.265 / HEVC",
+    "splitOnTitle": "标题变化时分割",
+    "splitOnTitleHint": "检测到直播间标题变化时，在最近的分片边界切出新片段。",
+    "splitMaxDuration": "最大录制时长",
+    "splitMaxDurationHint": "单个片段达到这个时长就切分。填 0 表示不限；最短 60 秒，1–59 会按 60 秒保存。",
+    "splitMaxSize": "最大文件大小",
+    "splitMaxSizeHint": "单个片段接近这个体积就切分。填 0 表示不限；最短 64 MB，1–63 MB 会按 64 MB 保存。",
+    "unitMB": "MB",
+    "unitGB": "GB",
     "sectionConcurrency": "录制并发",
     "sectionPost": "文件后处理",
     "sectionDirectory": "目录",
@@ -166,7 +195,7 @@
     "sectionRetention": "清理策略",
     "sectionEvents": "通知事件",
     "sectionInterface": "主题与语言",
-    "recordQualityHint": "新房间默认按这个画质录制",
+    "recordQualityHint": "新房间默认画质；单个房间可改为「跟随全局」或单独指定。",
     "viewQualityHint": "打开观看时的默认画质",
     "mediaRootHint": "录像按「平台 / 主播 / 时间」分目录存放",
     "themeHint": "深色模式使用暖黑底",
@@ -281,11 +310,13 @@
       "app_exit": "应用退出"
     },
     "qn": {
+      "0": "跟随全局",
       "80": "流畅",
       "150": "高清",
       "250": "超清",
       "400": "蓝光",
-      "10000": "原画"
+      "10000": "原画",
+      "40000": "最高可用"
     },
     "onlineCount": "在线 {{n}}",
     "recordingCount": "录制 {{n}}",
@@ -407,6 +438,7 @@
       "10000": "原画",
       "20000": "4K",
       "30000": "杜比",
+      "40000": "最高可用",
       "auto": "自动"
     },
     "buffering": "缓冲中…",
@@ -477,6 +509,10 @@
     "viewFailed": {
       "title": "观看已停止",
       "body": "{{host}} 的观看多次重连失败：{{detail}}"
+    },
+    "qualityFallback": {
+      "title": "画质已降档",
+      "body": "{{host}} 请求的画质当前不可用，已按 {{detail}} 档位继续录制，录像不会中断"
     },
     "credentialExpired": {
       "title": "登录态失效",

@@ -83,7 +83,11 @@
       "goneBody": "The recordings may have been deleted or removed.",
       "sortName": "Host name"
     },
-    "searchFiles": "Search this host's recordings"
+    "searchFiles": "Search this host's recordings",
+    "clipCount": "{{n}} clips",
+        "loadClips": "Load {{n}} more clips",
+    "clipIndex": "Clip {{n}}",
+    "selectSession": "Select session"
   },
   "settings": {
     "title": "Settings",
@@ -104,6 +108,7 @@
     "saving": "Saving…",
     "close": "Close",
     "qnAuto": "Auto (platform decides)",
+    "qnHighest": "Highest available (auto fallback)",
     "qnOrigin": "Original",
     "qnBluray": "Blu-ray",
     "qnUltra": "Ultra HD",
@@ -146,6 +151,30 @@
     "searchEmptyHint": "Try a platform, quality, notification, or folder",
     "searchClear": "Clear search",
     "sectionQuality": "Default quality",
+    "sectionStream": "Recording stream preferences",
+    "sectionStreamDesc": "Quality is matched first, then codec and source format; if nothing matches, it falls back to an available stream.",
+    "sectionViewQuality": "Default viewing quality",
+    "sectionSplit": "Video splitting",
+    "sectionSplitDesc": "Recording never stops; files are cut at segment boundaries and the session stays grouped as one live.",
+    "sourceFormat": "Source format",
+    "sourceFormatHint": "Prefer this source format; fall back automatically when the platform does not offer it.",
+    "formatAuto": "Auto (prefer FLV/TS)",
+    "formatFlv": "FLV",
+    "formatHls": "HLS (m3u8)",
+    "formatTs": "TS",
+    "recordCodec": "Video codec",
+    "recordCodecHint": "Prefer this codec; recording still works when the platform only offers another codec.",
+    "codecAuto": "Auto (prefer H.264)",
+    "codecH264": "H.264",
+    "codecH265": "H.265 / HEVC",
+    "splitOnTitle": "Split when the title changes",
+    "splitOnTitleHint": "When the live title changes, cut a new clip at the nearest segment boundary.",
+    "splitMaxDuration": "Maximum clip duration",
+    "splitMaxDurationHint": "Cut a clip when it reaches this duration. 0 disables it; the minimum is 60 s, and 1–59 is saved as 60.",
+    "splitMaxSize": "Maximum file size",
+    "splitMaxSizeHint": "Cut a clip as it approaches this size. 0 disables it; the minimum is 64 MB, and 1–63 MB is saved as 64 MB.",
+    "unitMB": "MB",
+    "unitGB": "GB",
     "sectionConcurrency": "Recording concurrency",
     "sectionPost": "Post-processing",
     "sectionDirectory": "Folder",
@@ -166,7 +195,7 @@
     "sectionRetention": "Retention",
     "sectionEvents": "Notification events",
     "sectionInterface": "Theme & language",
-    "recordQualityHint": "New rooms record at this quality",
+    "recordQualityHint": "Default for new rooms; each room can follow the global value or override it.",
     "viewQualityHint": "Default quality when opening a stream",
     "mediaRootHint": "Recordings are stored as platform / host / time",
     "themeHint": "Dark mode uses a warm black base",
@@ -281,11 +310,13 @@
       "app_exit": "App exited"
     },
     "qn": {
+      "0": "Follow global",
       "80": "Low",
       "150": "SD",
       "250": "HD",
       "400": "Blu-ray",
-      "10000": "Source"
+      "10000": "Source",
+      "40000": "Best available"
     },
     "onlineCount": "{{n}} live",
     "recordingCount": "{{n}} recording",
@@ -407,6 +438,7 @@
       "10000": "Original",
       "20000": "4K",
       "30000": "Dolby",
+      "40000": "Best available",
       "auto": "Auto"
     },
     "buffering": "Buffering…",
@@ -477,6 +509,10 @@
     "viewFailed": {
       "title": "Playback stopped",
       "body": "Playback for {{host}} failed after several retries: {{detail}}"
+    },
+    "qualityFallback": {
+      "title": "Quality lowered",
+      "body": "Requested quality for {{host}} is unavailable. Recording continues at quality level {{detail}}; the recording will not stop"
     },
     "credentialExpired": {
       "title": "Session expired",

@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -541,17 +541,58 @@ impl Db {
         Ok(())
     }
 
-    pub fn finish_session(
+    /// 创建一个分割片段：group_id 指向首片段，clip_index 从 0 递增。
+    pub fn create_clip(
+        &self,
+        session: &RecordSession,
+        group_id: &str,
+        clip_index: i64,
+        split_reason: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "INSERT INTO record_session (
+                    id, room_id, started_at, ended_at, status, reason, file_path,
+                    file_size, duration_ms, quality, line, error,
+                    danmaku_path, danmaku_count, group_id, clip_index, split_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    session.id,
+                    session.room_id,
+                    session.started_at,
+                    session.ended_at,
+                    session.status,
+                    session.reason,
+                    session.file_path,
+                    session.file_size,
+                    session.duration_ms,
+                    session.quality,
+                    session.line,
+                    session.error,
+                    session.danmaku_path,
+                    session.danmaku_count,
+                    group_id,
+                    clip_index,
+                    split_reason,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 指定结束时刻：分割录制时首片段在边界就结束了，不能按收尾时刻算时长。
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_session_at(
         &self,
         id: &str,
         status: &str,
         reason: &str,
+        ended_at: i64,
         file_size: i64,
         danmaku_path: Option<&str>,
         danmaku_count: i64,
         error: Option<&str>,
     ) -> Result<(), AppError> {
-        let now = now_ts();
         self.lock()
             .execute(
                 "UPDATE record_session SET
@@ -563,7 +604,7 @@ impl Db {
                     id,
                     status,
                     reason,
-                    now,
+                    ended_at,
                     file_size,
                     error,
                     danmaku_path,
@@ -649,6 +690,30 @@ impl Db {
         Ok(())
     }
 
+    /// 媒体库单行映射：列表和整组补齐共用，避免两处 SELECT 漂移。
+    fn media_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
+        let path: String = row.get(5)?;
+        Ok(MediaItem {
+            id: row.get(0)?,
+            room_id: row.get(1)?,
+            platform: row.get(2)?,
+            title: row.get(3)?,
+            host_name: row.get(4)?,
+            path: path.clone(),
+            size: row.get(6)?,
+            duration_ms: row.get(7)?,
+            started_at: row.get(8)?,
+            status: row.get(9)?,
+            danmaku_count: row.get(10)?,
+            has_file: std::path::Path::new(&path).is_file(),
+            thumbnail_url: None,
+            group_id: row.get(11)?,
+            clip_index: row.get(12)?,
+            split_reason: row.get(13)?,
+            clip_count: row.get(14)?,
+        })
+    }
+
     /// 媒体库列表：会话左连房间，筛选/排序/分页全部下推到 SQL。
     ///
     /// has_file 在这里就判断好：前端逐个文件调元数据接口太慢，
@@ -672,7 +737,10 @@ impl Db {
         page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
         let sql = format!(
             "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
-                    s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count
+                    s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
+                    COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
+                    (SELECT COUNT(*) FROM record_session x
+                      WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id))
                FROM record_session s
                JOIN room r ON r.id = s.room_id{where_sql}
               ORDER BY {}
@@ -681,27 +749,36 @@ impl Db {
         );
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(page_args.iter()), |row| {
-                let path: String = row.get(5)?;
-                Ok(MediaItem {
-                    id: row.get(0)?,
-                    room_id: row.get(1)?,
-                    platform: row.get(2)?,
-                    title: row.get(3)?,
-                    host_name: row.get(4)?,
-                    path: path.clone(),
-                    size: row.get(6)?,
-                    duration_ms: row.get(7)?,
-                    started_at: row.get(8)?,
-                    status: row.get(9)?,
-                    danmaku_count: row.get(10)?,
-                    has_file: std::path::Path::new(&path).is_file(),
-                    thumbnail_url: None,
-                })
-            })
+            .query_map(
+                rusqlite::params_from_iter(page_args.iter()),
+                Self::media_item_from_row,
+            )
             .map_err(db_err)?;
         let items = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
         Ok((items, total))
+    }
+
+    /// 取一整场直播的全部片段：分页只按片段返回时，前端可能拿不到整组，
+    /// 单独用这个接口补齐，避免“+N”点了没反应。
+    pub fn media_group_items(&self, group_id: &str) -> Result<Vec<MediaItem>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
+                        s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
+                        COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
+                        (SELECT COUNT(*) FROM record_session x
+                          WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id))
+                   FROM record_session s
+                   JOIN room r ON r.id = s.room_id
+                  WHERE COALESCE(s.group_id, s.id) = ?1
+                  ORDER BY s.clip_index ASC, s.started_at ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([group_id], Self::media_item_from_row)
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
     /// 各平台在当前筛选条件下的条数（忽略平台筛选本身）。
@@ -712,11 +789,11 @@ impl Db {
         let conn = self.lock();
         let (where_sql, args) = media_where(filter, false);
         let sql = format!(
-            "SELECT r.platform, COUNT(*)
+            "SELECT r.platform, COUNT(DISTINCT COALESCE(s.group_id, s.id))
                FROM record_session s
                JOIN room r ON r.id = s.room_id{where_sql}
               GROUP BY r.platform
-              ORDER BY COUNT(*) DESC, r.platform ASC"
+              ORDER BY COUNT(DISTINCT COALESCE(s.group_id, s.id)) DESC, r.platform ASC"
         );
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
@@ -753,7 +830,8 @@ impl Db {
         page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
         let sql = format!(
             "SELECT r.id, r.platform, r.host_name, r.title, r.avatar_url, r.cover_url,
-                    COUNT(s.id), COALESCE(SUM(s.file_size), 0), MAX(s.started_at)
+                    COUNT(DISTINCT COALESCE(s.group_id, s.id)),
+                    COALESCE(SUM(s.file_size), 0), MAX(s.started_at)
                FROM record_session s
                JOIN room r ON r.id = s.room_id{where_sql}
               GROUP BY r.id
@@ -821,6 +899,37 @@ impl Db {
         Ok(())
     }
 
+    /// 这条录像所属场次一共有几个片段。老数据没有 group_id 时算 1。
+    pub fn session_group_size(&self, id: &str) -> Result<i64, AppError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM record_session
+              WHERE COALESCE(group_id, id) = COALESCE(
+                  (SELECT COALESCE(group_id, id) FROM record_session WHERE id = ?1), ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)
+    }
+
+    /// 同一场直播的全部片段。老数据 group_id 为空时按自己的 id 成组。
+    pub fn group_sessions(&self, group_id: &str) -> Result<Vec<RecordSession>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "{SESSION_SELECT} WHERE COALESCE(group_id, id) = ?1 ORDER BY clip_index, started_at"
+            ))
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![group_id], map_session)
+            .map_err(db_err)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(db_err)?);
+        }
+        Ok(sessions)
+    }
+
     // ---- 崩溃恢复与保留策略（M7.1） ----
 
     /// 上次没收尾的会话：启动时据此把遗留分片合成 mp4。
@@ -863,7 +972,52 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
+    /// 记录 / 清除分割收尾清单。写清单后、收尾完成前崩溃，启动时按清单恢复。
+    pub fn set_split_manifest(&self, id: &str, manifest: Option<&str>) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session SET split_manifest = ?2 WHERE id = ?1",
+                params![id, manifest],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 有分割清单的会话：不论状态都要先按清单恢复，不能走普通整段合并。
+    pub fn manifest_sessions(&self) -> Result<Vec<(String, String)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, split_manifest FROM record_session
+                  WHERE split_manifest IS NOT NULL AND split_manifest <> ''",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
     /// 修正会话的产物路径与大小：合并失败降级成 .ts、或崩溃恢复后路径变化时用。
+    /// 给已经写入的会话补上片段归属（首片段收尾后才知道自己是 group 的起点）。
+    pub fn set_session_group(
+        &self,
+        id: &str,
+        group_id: &str,
+        clip_index: i64,
+        split_reason: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session
+                    SET group_id = ?2, clip_index = ?3, split_reason = ?4
+                  WHERE id = ?1",
+                params![id, group_id, clip_index, split_reason],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn update_session_file(
         &self,
         id: &str,
@@ -1020,6 +1174,29 @@ impl Db {
         Ok(())
     }
 
+    /// 只更新账号展示信息与状态，不碰 cookie。
+    ///
+    /// 复验结果可能来自旧 cookie：用户在这期间重新登录/替换了 cookie 时，
+    /// 不能再把整行写回去，否则新 cookie 会被旧值覆盖。
+    pub fn update_credential_profile(
+        &self,
+        platform: &str,
+        status: &str,
+        account_name: &str,
+        avatar: Option<&str>,
+        updated_at: i64,
+    ) -> Result<bool, AppError> {
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE credential SET status = ?2, account_name = ?3, avatar = ?4, updated_at = ?5
+                  WHERE platform = ?1",
+                params![platform, status, account_name, avatar, updated_at],
+            )
+            .map_err(db_err)?;
+        Ok(changed > 0)
+    }
+
     pub fn delete_credential(&self, platform: &str) -> Result<(), AppError> {
         self.lock()
             .execute(
@@ -1051,6 +1228,29 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         )
         .map_err(db_err)?;
         tracing::info!(column = "record_session.danmaku_path", "数据库迁移：新增列");
+    }
+    for (name, ddl) in [
+        (
+            "group_id",
+            "ALTER TABLE record_session ADD COLUMN group_id TEXT",
+        ),
+        (
+            "clip_index",
+            "ALTER TABLE record_session ADD COLUMN clip_index INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "split_reason",
+            "ALTER TABLE record_session ADD COLUMN split_reason TEXT",
+        ),
+        (
+            "split_manifest",
+            "ALTER TABLE record_session ADD COLUMN split_manifest TEXT",
+        ),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
     }
     if !columns.iter().any(|name| name == "danmaku_count") {
         conn.execute(
@@ -1361,6 +1561,84 @@ mod tests {
     }
 
     #[test]
+    fn split_clips_form_one_session_in_library_and_host_counts() {
+        let (db, _path) = temp_db("clips");
+        seed_media(&db);
+        // 把 a2 挂到 a1 下，模拟一场直播切成两段。
+        db.lock()
+            .execute(
+                "UPDATE record_session
+                    SET group_id = 's-a1', clip_index = 1, split_reason = 'duration'
+                  WHERE id = 's-a2'",
+                [],
+            )
+            .expect("标记片段失败");
+
+        let (items, total) = db.media_list(&MediaFilter::default()).expect("媒体库失败");
+        assert_eq!(total, 4, "分页仍按片段计数");
+        assert_eq!(items.len(), 4);
+
+        let clips = db.media_group_items("s-a1").expect("整组查询失败");
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, "s-a1");
+        assert_eq!(clips[1].split_reason.as_deref(), Some("duration"));
+        assert_eq!(clips.iter().map(|one| one.clip_count).max(), Some(2));
+
+        // 主播墙按“场”计数，但体积/最新时间仍按片段累计。
+        let hosts = db
+            .media_hosts(&MediaHostFilter {
+                sort: "size".into(),
+                ..MediaHostFilter::default()
+            })
+            .expect("主播墙失败");
+        let room_a = hosts
+            .items
+            .iter()
+            .find(|one| one.room_id == "rm-a")
+            .expect("主播甲");
+        assert_eq!(room_a.count, 1, "两段只算一场直播");
+        assert_eq!(room_a.bytes, 400);
+        assert_eq!(room_a.latest_at, 3000);
+        assert_eq!(hosts.platform_counts.len(), 2);
+
+        let counts = db
+            .media_platform_counts(&MediaFilter::default())
+            .expect("平台计数失败");
+        let bilibili = counts
+            .iter()
+            .find(|one| one.platform == "bilibili")
+            .expect("B 站计数");
+        // 平台筛选条按“场”计数，和媒体库卡片一致：a1+a2 只算一场。
+        assert_eq!(bilibili.count, 2);
+
+        // create_clip 写入的片段同样能被整组查询与去重计数看到。
+        let mut clip = db
+            .get_session("s-b1")
+            .expect("读会话失败")
+            .expect("会话存在");
+        clip.id = "s-b2".into();
+        clip.started_at = 2500;
+        clip.ended_at = Some(2600);
+        clip.duration_ms = 100;
+        clip.file_size = 50;
+        db.create_clip(&clip, "s-b1", 1, Some("size"))
+            .expect("写入片段失败");
+        assert_eq!(db.session_group_size("s-b1").expect("场次大小"), 2);
+        assert_eq!(db.session_group_size("s-b2").expect("片段大小"), 2);
+        assert_eq!(db.media_group_items("s-b1").expect("整组查询失败").len(), 2);
+        let hosts = db
+            .media_hosts(&MediaHostFilter::default())
+            .expect("主播墙失败");
+        let room_b = hosts
+            .items
+            .iter()
+            .find(|one| one.room_id == "rm-b")
+            .expect("主播乙");
+        assert_eq!(room_b.count, 1);
+        assert_eq!(room_b.bytes, 100);
+    }
+
+    #[test]
     fn media_list_can_be_scoped_to_one_room() {
         let (db, _path) = temp_db("roomfilter");
         seed_media(&db);
@@ -1458,6 +1736,28 @@ mod tests {
         // 幂等：第二次跑没有可迁移的行。
         assert_eq!(db.reseal_credentials().expect("二次迁移失败"), 0);
         assert_eq!(db.credentials().expect("读失败")[0].cookie, "dy_did=1");
+    }
+
+    #[test]
+    fn profile_update_keeps_the_existing_cookie() {
+        let (db, _path) = temp_db("profile");
+        db.save_credential(&row("bilibili", "SESSDATA=old"))
+            .expect("写凭据失败");
+        let raw_before = raw_cookie(&db, "bilibili");
+        assert!(db
+            .update_credential_profile("bilibili", "expired", "新名字", Some("http://a"), 99)
+            .expect("更新资料失败"));
+        // 复验只能改状态与展示信息，不能把旧 cookie 写回去覆盖新登录。
+        assert_eq!(raw_cookie(&db, "bilibili"), raw_before);
+        let rows = db.credentials().expect("读凭据失败");
+        assert_eq!(rows[0].cookie, "SESSDATA=old");
+        assert_eq!(rows[0].status, "expired");
+        assert_eq!(rows[0].account_name, "新名字");
+        assert_eq!(rows[0].avatar.as_deref(), Some("http://a"));
+        assert_eq!(rows[0].updated_at, 99);
+        assert!(!db
+            .update_credential_profile("douyu", "ok", "x", None, 1)
+            .expect("更新不存在行失败"));
     }
 
     #[test]

@@ -4,7 +4,8 @@
  * 应用级播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
  *
  * kind 取值：started | ended | failed | disk_full | disk_lost（录制）、
- * view_failed（观看槽位放弃重连）、credential_expired（登录态复验失败）。
+ * quality_fallback（所选画质不可用，已降档开录）、view_failed（观看槽位放弃重连）、
+ * credential_expired（登录态复验失败）。
  * 非录制类的 room_id 为空串，host_name 放房间名或账号名。
  */
 export type AppNotice = { kind: string, roomId: string, hostName: string, detail: string | null, };

@@ -303,6 +303,18 @@ impl StreamBroker {
         tracing::debug!(platform = room.platform, room = %room.room_key, "已失效地址缓存与失败冷却");
     }
 
+    /// 账号凭据变更（登录 / 退出 / 换号）后清空所有取流缓存。
+    ///
+    /// 候选地址里带着按登录态算出的画质，缓存 60 秒；不清的话，用户刚登录
+    /// 仍可能按游客档位开录，直到下一次监控刷新。失败的冷却保留，避免把
+    /// 一次凭据变更当成放行限流的理由。
+    pub fn clear_groups(&self) {
+        let mut inner = self.inner.lock().expect("broker 状态被污染");
+        inner.groups.clear();
+        inner.infos.clear();
+        tracing::debug!("账号凭据变更，已清空取流与房间信息缓存");
+    }
+
     fn cached_groups(&self, key: &StreamKey) -> Option<Arc<Vec<StreamGroup>>> {
         let inner = self.inner.lock().expect("broker 状态被污染");
         let cached = inner.groups.get(key)?;

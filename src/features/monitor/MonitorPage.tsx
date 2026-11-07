@@ -28,7 +28,7 @@ import {
   type RoomView,
 } from "../../lib/ipc";
 
-const QUALITIES = [10000, 400, 250, 150, 80];
+const QUALITIES = [0, 40000, 10000, 400, 250, 150, 80];
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
 const PLATFORM_DOT: Record<string, string> = {
   bilibili: "#22a7f0",

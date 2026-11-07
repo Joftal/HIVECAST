@@ -305,7 +305,7 @@ impl PlatformAdapter for BilibiliAdapter {
         for stream in &playurl.stream {
             for format in &stream.format {
                 for codec in &format.codec {
-                    let format_kind = map_format(&stream.protocol_name, &format.format_name);
+                    let format_kind = map_format(&format.format_name);
                     let codec_kind = map_codec(&codec.codec_name);
                     let qn_name = qn_desc
                         .get(&codec.current_qn)
@@ -460,11 +460,12 @@ fn host_label(host: &str) -> String {
         .unwrap_or_else(|| host.to_string())
 }
 
-fn map_format(protocol: &str, format: &str) -> StreamFormat {
+fn map_format(format: &str) -> StreamFormat {
     match format {
         "flv" => StreamFormat::Flv,
         "fmp4" => StreamFormat::Hls,
-        "ts" if protocol == "http_hls" => StreamFormat::Hls,
+        // B 站的 HLS/TS 也是 MPEG-TS 源流：既算 HLS，也要能命中「TS」偏好。
+        // 之前把它归成 Hls，用户选 TS 时永远匹配不上，最后会回退到 FLV。
         "ts" => StreamFormat::HttpTs,
         _ => StreamFormat::Hls,
     }
@@ -522,6 +523,13 @@ fn map_codec(name: &str) -> Codec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_ts_is_a_ts_source_not_a_plain_hls_source() {
+        assert_eq!(map_format("flv"), StreamFormat::Flv);
+        assert_eq!(map_format("fmp4"), StreamFormat::Hls);
+        assert_eq!(map_format("ts"), StreamFormat::HttpTs);
+    }
 
     #[test]
     fn resolves_plain_room_id_and_url() {

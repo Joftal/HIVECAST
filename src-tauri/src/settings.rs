@@ -14,6 +14,11 @@ use crate::state::default_media_root;
 
 const KEY_RECORD_QN: &str = "record.default_qn";
 const KEY_VIEW_QN: &str = "view.default_qn";
+const KEY_RECORD_SOURCE_FORMAT: &str = "record.source_format";
+const KEY_RECORD_CODEC: &str = "record.codec";
+const KEY_SPLIT_ON_TITLE: &str = "record.split_on_title";
+const KEY_SPLIT_MAX_DURATION: &str = "record.split_max_duration_sec";
+const KEY_SPLIT_MAX_SIZE_MB: &str = "record.split_max_size_mb";
 const KEY_MEDIA_ROOT: &str = "media.root";
 const KEY_MAX_CONCURRENT: &str = "record.max_concurrent";
 const KEY_NOTIFY: &str = "ui.notify";
@@ -58,6 +63,13 @@ pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
 pub const MAX_TOTAL_GB: u32 = 100_000;
 pub const MAX_LOG_RETENTION_DAYS: u32 = 3650;
+/// 最高可用画质：B 站会请求 4K/HDR 档，其它平台映射到各自的最高档。
+pub const RECORD_QN_HIGHEST: u32 = 40_000;
+/// 分割下限：太短的片段没有观看价值，也会让媒体库被碎片塞满。
+pub const MIN_SPLIT_DURATION_SEC: u32 = 60;
+pub const MIN_SPLIT_SIZE_MB: u32 = 64;
+pub const MAX_SPLIT_DURATION_SEC: u32 = 86_400;
+pub const MAX_SPLIT_SIZE_MB: u32 = 1_048_576;
 /// 监控间隔上限：一天。再大就没有「监控」的意义了。
 pub const MAX_MONITOR_INTERVAL: u32 = 86_400;
 /// 回退上限的取值范围。
@@ -67,8 +79,13 @@ pub const MAX_BACKOFF_CAP: u32 = 3_600;
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
     Settings {
-        default_record_qn: 10000,
+        default_record_qn: RECORD_QN_HIGHEST,
         default_view_qn: 0,
+        record_source_format: "auto".into(),
+        record_codec: "auto".into(),
+        split_on_title: false,
+        split_max_duration_sec: 0,
+        split_max_size_mb: 0,
         media_root: default_media_root().display().to_string(),
         max_concurrent_records: 4,
         notify_enabled: true,
@@ -92,6 +109,15 @@ pub fn defaults() -> Settings {
     }
 }
 
+/// 设置里的布尔值统一是 `true`/`false`，同时容忍手工写入的 `1`/`0`。
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// 从库里读出设置；缺失或损坏的项回落到默认值。
 pub fn load(db: &Db) -> Settings {
     let mut settings = defaults();
@@ -103,19 +129,38 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_VIEW_QN).and_then(|v| v.parse::<u32>().ok()) {
         settings.default_view_qn = value;
     }
+    if let Some(value) = read(KEY_RECORD_SOURCE_FORMAT)
+        .filter(|v| matches!(v.as_str(), "auto" | "flv" | "hls" | "ts"))
+    {
+        settings.record_source_format = value;
+    }
+    if let Some(value) =
+        read(KEY_RECORD_CODEC).filter(|v| matches!(v.as_str(), "auto" | "h264" | "h265"))
+    {
+        settings.record_codec = value;
+    }
+    if let Some(value) = read(KEY_SPLIT_ON_TITLE).and_then(|v| parse_bool(&v)) {
+        settings.split_on_title = value;
+    }
+    if let Some(value) = read(KEY_SPLIT_MAX_DURATION).and_then(|v| v.parse::<u32>().ok()) {
+        settings.split_max_duration_sec = sanitize_split_duration(value);
+    }
+    if let Some(value) = read(KEY_SPLIT_MAX_SIZE_MB).and_then(|v| v.parse::<u32>().ok()) {
+        settings.split_max_size_mb = sanitize_split_size(value);
+    }
     if let Some(value) = read(KEY_MEDIA_ROOT).filter(|v| !v.trim().is_empty()) {
         settings.media_root = value;
     }
     if let Some(value) = read(KEY_MAX_CONCURRENT).and_then(|v| v.parse::<u32>().ok()) {
         settings.max_concurrent_records = value.clamp(1, MAX_CONCURRENT_LIMIT);
     }
-    if let Some(value) = read(KEY_NOTIFY).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_NOTIFY).and_then(|v| parse_bool(&v)) {
         settings.notify_enabled = value;
     }
-    if let Some(value) = read(KEY_NOTIFY_ERROR).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_NOTIFY_ERROR).and_then(|v| parse_bool(&v)) {
         settings.notify_error = value;
     }
-    if let Some(value) = read(KEY_NOTIFY_AUTH).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_NOTIFY_AUTH).and_then(|v| parse_bool(&v)) {
         settings.notify_auth = value;
     }
     if let Some(value) =
@@ -134,19 +179,19 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_MAX_TOTAL_GB).and_then(|v| v.parse::<u32>().ok()) {
         settings.max_total_gb = value.min(MAX_TOTAL_GB);
     }
-    if let Some(value) = read(KEY_POST_AUTO_REMUX).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_POST_AUTO_REMUX).and_then(|v| parse_bool(&v)) {
         settings.auto_remux = value;
     }
     if let Some(value) = read(KEY_CLOSE_ACTION).filter(|v| v == CLOSE_TRAY || v == CLOSE_QUIT) {
         settings.close_action = value;
     }
-    if let Some(value) = read(KEY_PREVENT_SLEEP).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_PREVENT_SLEEP).and_then(|v| parse_bool(&v)) {
         settings.prevent_sleep = value;
     }
     if let Some(value) = read(KEY_MONITOR_INTERVAL).and_then(|v| v.parse::<u32>().ok()) {
         settings.monitor_interval_sec = value.min(MAX_MONITOR_INTERVAL);
     }
-    if let Some(value) = read(KEY_MONITOR_BACKOFF).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_MONITOR_BACKOFF).and_then(|v| parse_bool(&v)) {
         settings.monitor_backoff_enabled = value;
     }
     if let Some(value) = read(KEY_MONITOR_BACKOFF_CAP).and_then(|v| v.parse::<u32>().ok()) {
@@ -159,10 +204,10 @@ pub fn load(db: &Db) -> Settings {
             settings.media_filename_template = value;
         }
     }
-    if let Some(value) = read(KEY_STRIP_EMOJI).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_STRIP_EMOJI).and_then(|v| parse_bool(&v)) {
         settings.media_strip_emoji = value;
     }
-    if let Some(value) = read(KEY_GROUP_DIRS).and_then(|v| v.parse::<bool>().ok()) {
+    if let Some(value) = read(KEY_GROUP_DIRS).and_then(|v| parse_bool(&v)) {
         settings.media_group_dirs = value;
     }
     if let Some(value) = read(KEY_LOG_DIR).filter(|v| !v.trim().is_empty()) {
@@ -185,6 +230,17 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let mut settings = input.clone();
     settings.default_record_qn = normalize_qn(settings.default_record_qn);
     settings.default_view_qn = normalize_qn(settings.default_view_qn);
+    if !matches!(
+        settings.record_source_format.as_str(),
+        "auto" | "flv" | "hls" | "ts"
+    ) {
+        settings.record_source_format = "auto".into();
+    }
+    if !matches!(settings.record_codec.as_str(), "auto" | "h264" | "h265") {
+        settings.record_codec = "auto".into();
+    }
+    settings.split_max_duration_sec = sanitize_split_duration(settings.split_max_duration_sec);
+    settings.split_max_size_mb = sanitize_split_size(settings.split_max_size_mb);
     settings.max_concurrent_records = settings
         .max_concurrent_records
         .clamp(1, MAX_CONCURRENT_LIMIT);
@@ -226,6 +282,17 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
 
     db.set_setting(KEY_RECORD_QN, &settings.default_record_qn.to_string())?;
     db.set_setting(KEY_VIEW_QN, &settings.default_view_qn.to_string())?;
+    db.set_setting(KEY_RECORD_SOURCE_FORMAT, &settings.record_source_format)?;
+    db.set_setting(KEY_RECORD_CODEC, &settings.record_codec)?;
+    db.set_setting(KEY_SPLIT_ON_TITLE, &settings.split_on_title.to_string())?;
+    db.set_setting(
+        KEY_SPLIT_MAX_DURATION,
+        &settings.split_max_duration_sec.to_string(),
+    )?;
+    db.set_setting(
+        KEY_SPLIT_MAX_SIZE_MB,
+        &settings.split_max_size_mb.to_string(),
+    )?;
     db.set_setting(KEY_MEDIA_ROOT, &settings.media_root)?;
     db.set_setting(
         KEY_MAX_CONCURRENT,
@@ -342,7 +409,34 @@ fn normalize_qn(qn: u32) -> u32 {
     if qn == 0 {
         0
     } else {
-        (qn / 100 * 100).clamp(80, 20000)
+        (qn / 100 * 100).clamp(80, RECORD_QN_HIGHEST)
+    }
+}
+
+/// 分割时长：0 = 关闭；否则夹在 60 秒..24 小时。
+fn sanitize_split_duration(value: u32) -> u32 {
+    if value == 0 {
+        0
+    } else {
+        value.clamp(MIN_SPLIT_DURATION_SEC, MAX_SPLIT_DURATION_SEC)
+    }
+}
+
+/// 分割体积：0 = 关闭；否则夹在 64 MiB..1 TiB。
+fn sanitize_split_size(value: u32) -> u32 {
+    if value == 0 {
+        0
+    } else {
+        value.clamp(MIN_SPLIT_SIZE_MB, MAX_SPLIT_SIZE_MB)
+    }
+}
+
+/// 房间录制画质：0 表示跟随全局；显式档位直接用房间自己的值。
+pub fn effective_record_qn(global: u32, room: u32) -> u32 {
+    if room == 0 {
+        global
+    } else {
+        room
     }
 }
 
@@ -356,7 +450,27 @@ mod tests {
         assert_eq!(normalize_qn(12345), 12300);
         assert_eq!(normalize_qn(10000), 10000);
         assert_eq!(normalize_qn(1), 80);
-        assert_eq!(normalize_qn(999_999), 20000);
+        assert_eq!(normalize_qn(999_999), 40000);
+    }
+
+    #[test]
+    fn split_limits_are_sanitized() {
+        assert_eq!(sanitize_split_duration(0), 0, "0 是不限，不能被夹成 60");
+        assert_eq!(sanitize_split_duration(1), MIN_SPLIT_DURATION_SEC);
+        assert_eq!(sanitize_split_duration(86_399), 86_399);
+        assert_eq!(sanitize_split_duration(u32::MAX), MAX_SPLIT_DURATION_SEC);
+        assert_eq!(sanitize_split_size(0), 0, "0 是不限，不能变成最小体积");
+        assert_eq!(sanitize_split_size(1), MIN_SPLIT_SIZE_MB);
+        assert_eq!(sanitize_split_size(1_024), 1_024);
+        assert_eq!(sanitize_split_size(u32::MAX), MAX_SPLIT_SIZE_MB);
+    }
+
+    #[test]
+    fn room_qn_follows_global_only_when_zero() {
+        assert_eq!(effective_record_qn(40_000, 0), 40_000);
+        assert_eq!(effective_record_qn(40_000, 150), 150);
+        assert_eq!(effective_record_qn(400, 0), 400);
+        assert_eq!(effective_record_qn(0, 0), 0);
     }
 
     #[test]
@@ -423,6 +537,11 @@ mod tests {
             &Settings {
                 default_record_qn: 12345,
                 default_view_qn: 0,
+                record_source_format: "hls".into(),
+                record_codec: "h265".into(),
+                split_on_title: true,
+                split_max_duration_sec: 30,
+                split_max_size_mb: 10,
                 media_root: media.display().to_string(),
                 max_concurrent_records: 99,
                 notify_enabled: false,
@@ -441,6 +560,11 @@ mod tests {
         .expect("save settings");
 
         assert_eq!(saved.default_record_qn, 12300);
+        assert_eq!(saved.record_source_format, "hls");
+        assert_eq!(saved.record_codec, "h265");
+        assert!(saved.split_on_title);
+        assert_eq!(saved.split_max_duration_sec, MIN_SPLIT_DURATION_SEC);
+        assert_eq!(saved.split_max_size_mb, MIN_SPLIT_SIZE_MB);
         assert_eq!(saved.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert_eq!(saved.language, "system", "未知语言回落到跟随系统");
         assert_eq!(saved.theme, "light", "未知主题回落到浅色");
@@ -454,6 +578,11 @@ mod tests {
 
         let loaded = load(&db);
         assert_eq!(loaded.default_record_qn, 12300);
+        assert_eq!(loaded.record_source_format, "hls");
+        assert_eq!(loaded.record_codec, "h265");
+        assert!(loaded.split_on_title);
+        assert_eq!(loaded.split_max_duration_sec, MIN_SPLIT_DURATION_SEC);
+        assert_eq!(loaded.split_max_size_mb, MIN_SPLIT_SIZE_MB);
         assert_eq!(loaded.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert!(!loaded.notify_enabled);
         assert!(!loaded.notify_error, "异常通知开关应原样保存");
@@ -478,5 +607,17 @@ mod tests {
         input.media_root = "   ".into();
         assert!(save(&db, &input).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_accepts_numeric_booleans() {
+        let dir = std::env::temp_dir().join(format!("hivecast-bool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).expect("open db");
+        db.set_setting(KEY_SPLIT_ON_TITLE, "1").expect("设置");
+        db.set_setting(KEY_POST_AUTO_REMUX, "0").expect("设置");
+        let loaded = load(&db);
+        assert!(loaded.split_on_title);
+        assert!(!loaded.auto_remux);
     }
 }

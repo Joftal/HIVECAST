@@ -7,9 +7,11 @@
 //!
 //! 其余平台没有公开的扫码接口（斗鱼/虎牙/抖音都依赖风控），v1 走粘贴 Cookie。
 
+use std::time::Duration;
+
 use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket};
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::credential;
 use crate::db::{now_ts, CredentialRow, Db};
@@ -18,6 +20,8 @@ use crate::platform::http;
 
 const PASSPORT: &str = "https://passport.bilibili.com";
 const API: &str = "https://api.bilibili.com";
+/// 运行中定期复验登录态：B 站 Cookie 可能在长时间录制中失效，只在启动时查一次不够。
+pub const REVALIDATE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const REFERER: &str = "https://www.bilibili.com/";
 
 #[derive(Debug, Deserialize)]
@@ -230,7 +234,7 @@ pub async fn bilibili_nav(cookie: &str) -> Result<Account, AppError> {
     let data = match (envelope.code, envelope.data) {
         (0, Some(data)) if data.is_login => data,
         (code, _) => {
-            let hint = if code == -101 {
+            let message = if code == -101 {
                 "Cookie 已失效或未登录".to_string()
             } else {
                 format!(
@@ -238,7 +242,16 @@ pub async fn bilibili_nav(cookie: &str) -> Result<Account, AppError> {
                     envelope.message.unwrap_or_default()
                 )
             };
-            return Err(AppError::User(hint));
+            // 只有明确的「未登录」才算凭据失效；平台临时报错不能把用户有效的
+            // Cookie 标成过期，否则每 30 分钟的复验会误报。
+            return if code == -101 {
+                Err(AppError::User(message))
+            } else {
+                Err(AppError::Platform {
+                    code: "platform_upstream",
+                    message,
+                })
+            };
         }
     };
     Ok(Account {
@@ -318,12 +331,19 @@ pub fn list(db: &Db) -> Result<Vec<CredentialInfo>, AppError> {
     Ok(db.credentials()?.iter().map(info_from_row).collect())
 }
 
-/// 启动后异步复验 B 站登录态：过期就标 expired，设置页会提示重新扫码。
+/// 启动时与运行中定期复验 B 站登录态：过期就标 expired，设置页会提示重新扫码。
+/// 登录态变化后清空取流缓存，避免继续使用旧画质/旧 Cookie 换来的候选地址。
+fn clear_stream_cache(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state.broker.clear_groups();
+    }
+}
+
 pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
     let rows = match db.credentials() {
         Ok(rows) => rows,
         Err(err) => {
-            tracing::warn!(error = %err, "读取平台凭据失败，跳过启动复验");
+            tracing::warn!(error = %err, "读取平台凭据失败，跳过登录态复验");
             return;
         }
     };
@@ -333,39 +353,104 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
             continue;
         }
         checked += 1;
+        // 复验用的是发起请求时读到的 cookie。用户可能在这期间重新登录或删除了账号，
+        // 此时不能再把旧 cookie 或旧状态写回去，否则会把新凭据覆盖掉。
+        // 必须在请求返回后再检查一次，不能在 await 之前取快照。
         match bilibili_nav(&row.cookie).await {
             Ok(account) => {
-                if account.name != row.account_name || row.status != "ok" {
-                    let updated = CredentialRow {
-                        account_name: account.name,
-                        avatar: account.avatar,
-                        status: "ok".to_string(),
-                        ..row
-                    };
-                    if let Err(err) = db.save_credential(&updated) {
-                        tracing::warn!(platform = "bilibili", account = %updated.account_name, error = %err, "更新复验后的账号信息失败");
-                    } else {
-                        tracing::info!(platform = "bilibili", account = %updated.account_name, "B 站登录态复验通过，已更新账号信息");
+                let cookie_unchanged =
+                    credential::get("bilibili").as_deref() == Some(row.cookie.as_str());
+                if !cookie_unchanged {
+                    tracing::info!(
+                        platform = "bilibili",
+                        "登录态复验期间 Cookie 已更新，丢弃本次复验结果"
+                    );
+                    continue;
+                }
+                if account.name == row.account_name && row.status == "ok" {
+                    continue;
+                }
+                match db.update_credential_profile(
+                    "bilibili",
+                    "ok",
+                    &account.name,
+                    account.avatar.as_deref(),
+                    now_ts(),
+                ) {
+                    Ok(true) => {
+                        tracing::info!(
+                            platform = "bilibili",
+                            account = %account.name,
+                            "B 站登录态复验通过，已更新账号信息"
+                        );
+                        clear_stream_cache(app);
                     }
+                    Ok(false) => {
+                        tracing::warn!(platform = "bilibili", "复验通过但账号已被删除，跳过写回")
+                    }
+                    Err(err) => tracing::warn!(
+                        platform = "bilibili",
+                        account = %account.name,
+                        error = %err,
+                        "更新复验后的账号信息失败"
+                    ),
                 }
             }
             Err(err) => {
-                tracing::warn!(
-                    platform = "bilibili",
-                    account = %row.account_name,
-                    error = %err,
-                    "B 站登录态复验失败"
-                );
                 let was_ok = row.status == "ok";
-                let account_name = row.account_name.clone();
-                let updated = CredentialRow {
-                    status: "expired".to_string(),
-                    ..row
-                };
-                if let Err(err) = db.save_credential(&updated) {
-                    tracing::warn!(platform = "bilibili", account = %account_name, error = %err, "标记账号过期失败");
+                if was_ok {
+                    tracing::warn!(
+                        platform = "bilibili",
+                        account = %row.account_name,
+                        error = %err,
+                        "B 站登录态复验失败"
+                    );
+                } else {
+                    // 已经标记过期后每 30 分钟仍会复验一次：失败是预期内的，
+                    // 用 DEBUG 避免把用户的日志刷满同一条警告。
+                    tracing::debug!(
+                        platform = "bilibili",
+                        account = %row.account_name,
+                        error = %err,
+                        "B 站登录态仍为过期"
+                    );
                 }
-                // 只在「从正常变成过期」时播报，避免每次启动都弹一次。
+                // 网络抖动、平台临时错误不代表 Cookie 失效：保留上次状态，等下一轮。
+                if !matches!(err, AppError::User(_)) {
+                    tracing::warn!(platform = "bilibili", "登录态复验暂时不可用，保留原状态");
+                    continue;
+                }
+                let cookie_unchanged =
+                    credential::get("bilibili").as_deref() == Some(row.cookie.as_str());
+                if !cookie_unchanged {
+                    tracing::info!(
+                        platform = "bilibili",
+                        "登录态复验期间 Cookie 已更新，不标记过期"
+                    );
+                    continue;
+                }
+                let account_name = row.account_name.clone();
+                match db.update_credential_profile(
+                    "bilibili",
+                    "expired",
+                    &account_name,
+                    row.avatar.as_deref(),
+                    now_ts(),
+                ) {
+                    Ok(true) => clear_stream_cache(app),
+                    Ok(false) => tracing::warn!(
+                        platform = "bilibili",
+                        account = %account_name,
+                        "复验失败但账号已被删除，跳过写回"
+                    ),
+                    Err(err) => tracing::warn!(
+                        platform = "bilibili",
+                        account = %account_name,
+                        error = %err,
+                        "标记账号过期失败"
+                    ),
+                }
+                // 只在「从正常变成过期」时播报，避免每次复验都弹一次。
                 if was_ok {
                     let notice = AppNotice {
                         kind: "credential_expired".into(),
@@ -381,9 +466,10 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
         }
     }
     if checked > 0 {
-        tracing::info!(checked, "启动登录态复验完成");
+        tracing::info!(checked, "登录态复验完成");
     }
-    credential::load_from_db_quiet(db);
+    // 复验只改状态，不改 Cookie；这里不要整表重载内存凭据，否则会和用户
+    // 同时保存的新 Cookie 抢写，可能把刚保存的凭据冲回旧值。
 }
 
 #[cfg(test)]

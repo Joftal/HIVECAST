@@ -14,15 +14,6 @@ fn store() -> &'static RwLock<BTreeMap<String, String>> {
 
 /// 启动时把库里的凭据灌进内存，之后 HTTP 层直接按 URL 取用。
 pub fn load_from_db(db: &crate::db::Db) {
-    load(db, true);
-}
-
-/// 重新校验账号后刷新内存时使用：内容没有变化就不再打第二条“已加载账号凭据”。
-pub fn load_from_db_quiet(db: &crate::db::Db) {
-    load(db, false);
-}
-
-fn load(db: &crate::db::Db, announce: bool) {
     let rows = match db.credentials() {
         Ok(rows) => rows,
         Err(err) => {
@@ -35,9 +26,7 @@ fn load(db: &crate::db::Db, announce: bool) {
     for row in rows {
         guard.insert(row.platform, row.cookie);
     }
-    if announce {
-        tracing::info!(count = guard.len(), "已加载账号凭据");
-    }
+    tracing::info!(count = guard.len(), "已加载账号凭据");
 }
 
 pub fn set(platform: &str, cookie: &str) {

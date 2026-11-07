@@ -5,7 +5,8 @@ import Player from "../watch/Player";
 import { Button, Select, cx } from "../../components/ui/Controls";
 import {
   isTauri,
-  mediaDelete,
+  mediaDeleteGroup,
+  mediaGroupClips,
   mediaHosts,
   mediaList,
   mediaPlay,
@@ -29,6 +30,18 @@ const VOLUME_KEY = "hivecast.mediaVolume";
 type SortKey = "recent" | "duration" | "size";
 type HostSortKey = "name" | "latest" | "size" | "count";
 type Range = 0 | 1 | 7 | 30;
+
+/** 媒体库卡片：一场直播下挂多个片段。 */
+type MediaGroup = {
+  id: string;
+  clips: MediaItem[];
+  primary: MediaItem;
+  size: number;
+  durationMs: number;
+  danmakuCount: number;
+  hasFile: boolean;
+  clipCount: number;
+};
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return "—";
@@ -205,6 +218,7 @@ export default function MediaPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [groupLoading, setGroupLoading] = useState<string | null>(null);
 
   // —— 共用状态 ——
   const [error, setError] = useState<string | null>(null);
@@ -302,6 +316,31 @@ export default function MediaPage() {
       }
     },
     [hostId, keyword, range, onlyDanmaku, sort],
+  );
+
+  // 分页只按片段返回，一场直播可能只出现在本页一部分；点“+N”补齐整组。
+  const loadGroupClips = useCallback(
+    async (group: MediaGroup) => {
+      setGroupLoading(group.id);
+      try {
+        const clips = await mediaGroupClips(group.id);
+        const withThumbs = clips.map((clip) => ({
+          ...clip,
+          thumbnailUrl: clip.thumbnailUrl ?? thumbsRef.current[clip.id] ?? null,
+        }));
+        setItems((prev) => {
+          const byId = new Map(prev.map((item) => [item.id, item]));
+          for (const clip of withThumbs) byId.set(clip.id, clip);
+          return Array.from(byId.values());
+        });
+        setError(null);
+      } catch (err) {
+        setError(describeError(err));
+      } finally {
+        setGroupLoading(null);
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -426,9 +465,50 @@ export default function MediaPage() {
   );
   const selectedSize = selectedItems.reduce((sum, item) => sum + Math.max(0, item.size), 0);
 
-  const toggleSelected = (id: string) => {
+  // 后端按片段返回；同一场的片段聚成一张卡片，避免媒体库被同标题刷屏。
+  const groups = useMemo(() => {
+    const map = new Map<string, MediaItem[]>();
+    for (const item of items) {
+      const key = item.groupId || item.id;
+      const list = map.get(key);
+      if (list) list.push(item);
+      else map.set(key, [item]);
+    }
+    return [...map.entries()].map(([id, clips]) => {
+      const ordered = [...clips].sort(
+        (a, b) => a.clipIndex - b.clipIndex || a.startedAt - b.startedAt,
+      );
+      const primary = ordered[0];
+      return {
+        id,
+        clips: ordered,
+        primary,
+        size: ordered.reduce((sum, clip) => sum + Math.max(0, clip.size), 0),
+        durationMs: ordered.reduce((sum, clip) => sum + Math.max(0, clip.durationMs), 0),
+        danmakuCount: ordered.reduce((sum, clip) => sum + Math.max(0, clip.danmakuCount), 0),
+        hasFile: ordered.some((clip) => clip.hasFile),
+        clipCount: Math.max(1, primary.clipCount || ordered.length),
+      } satisfies MediaGroup;
+    });
+  }, [items]);
+
+  // 选中一个片段等于选中整个场次；提示数量要按整场算，不能只算当前已加载的片段。
+  const deleteGroups = useMemo(
+    () => groups.filter((group) => group.clips.some((clip) => selected.includes(clip.id))),
+    [groups, selected],
+  );
+  const deleteClipCount = useMemo(
+    () => deleteGroups.reduce((sum, group) => sum + group.clipCount, 0),
+    [deleteGroups],
+  );
+
+  const toggleGroup = (group: MediaGroup) => {
     setConfirmDelete(false);
-    setSelected((prev) => (prev.includes(id) ? prev.filter((one) => one !== id) : [...prev, id]));
+    const ids = group.clips.map((clip) => clip.id);
+    setSelected((prev) => {
+      const all = ids.every((id) => prev.includes(id));
+      return all ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])];
+    });
   };
 
   const stopPlayback = async (id: string) => {
@@ -529,11 +609,11 @@ export default function MediaPage() {
       }
 
       if (kind === "delete") {
-        for (const item of selectedItems) {
-          if (playing && playing.item.id === item.id) await closePlay();
-          await mediaDelete(item.id, item.hasFile);
+        for (const group of deleteGroups) {
+          if (playing && group.clips.some((clip) => clip.id === playing.item.id)) await closePlay();
+          await mediaDeleteGroup(group.id, group.hasFile);
         }
-        setNotice(t("media.deletedBatch", { n: selectedItems.length }));
+        setNotice(t("media.deletedBatch", { n: deleteClipCount }));
         setSelected([]);
         setConfirmDelete(false);
         await refreshAll();
@@ -555,6 +635,9 @@ export default function MediaPage() {
       setSelected([]);
       await refreshAll();
     } catch (err) {
+      // 整组删除是逐段进行的：中途失败时前面的片段可能已经删掉，
+      // 刷新一下列表，避免界面还留着已经不在的卡片。
+      if (kind === "delete") await refreshAll();
       setError(t("media.postFailed") + "：" + describeError(err));
     } finally {
       setBusy(null);
@@ -591,9 +674,18 @@ export default function MediaPage() {
     setBusy(item.id);
     setError(null);
     try {
-      if (playing && playing.item.id === item.id) await closePlay();
-      await mediaDelete(item.id, item.hasFile);
-      setNotice(t("media.deleted"));
+      // 片段不是独立录像：只删其中一段会让整场缺号。抽屉里的删除也按整场处理。
+      const owner = groups.find((group) => group.clips.some((clip) => clip.id === item.id));
+      const groupId = owner?.id ?? item.groupId ?? item.id;
+      const deleteFile = owner?.hasFile ?? item.hasFile;
+      if (
+        playing &&
+        (playing.item.id === item.id || (playing.item.groupId || playing.item.id) === groupId)
+      ) {
+        await closePlay();
+      }
+      await mediaDeleteGroup(groupId, deleteFile);
+      setNotice(t("media.deletedBatch", { n: owner?.clipCount ?? item.clipCount ?? 1 }));
       await refreshAll();
     } catch (err) {
       setError(describeError(err));
@@ -602,7 +694,9 @@ export default function MediaPage() {
     }
   };
 
-  const allSelected = items.length > 0 && items.every((item) => selected.includes(item.id));
+  const allSelected =
+    groups.length > 0 &&
+    groups.every((group) => group.clips.every((clip) => selected.includes(clip.id)));
   const hostFiltersActive = keyword !== "" || platform !== "all";
   const fileFiltersActive = keyword !== "" || range !== 0 || onlyDanmaku;
 
@@ -842,12 +936,18 @@ export default function MediaPage() {
           </div>
         ) : (
           <div className="grid gap-3" style={GRID_STYLE}>
-            {items.map((item) => {
-              const isSelected = selected.includes(item.id);
-              const isPlaying = playing?.item.id === item.id;
+            {groups.map((group) => {
+              const item = group.primary;
+              // 封面优先播放第一个真的有文件的片段：首片段被单独删掉/文件丢失时，
+              // 后面仍在的片段不能因为 primary 不可播而整组都点不开。
+              const playable = group.clips.find((clip) => clip.hasFile) ?? group.primary;
+              const isSelected = group.clips.every((clip) => selected.includes(clip.id));
+              const isPlaying = group.clips.some((clip) => clip.id === playing?.item.id);
+              const isBusy = group.clips.some((clip) => clip.id === playBusy);
+              const missingClips = Math.max(0, group.clipCount - group.clips.length);
               return (
                 <article
-                  key={item.id}
+                  key={group.id}
                   className={cx(
                     "group flex flex-col overflow-hidden rounded-panel border bg-surface transition-colors duration-150",
                     isSelected ? "border-accent/60 shadow-[0_0_0_1px_var(--accent-soft)]" : "border-line hover:border-line-strong",
@@ -863,19 +963,19 @@ export default function MediaPage() {
                       />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-[11px] text-faint">
-                        {item.hasFile ? t("media.thumbsPending") : t("media.missing")}
+                        {group.hasFile ? t("media.thumbsPending") : t("media.missing")}
                       </div>
                     )}
 
                     <button
                       type="button"
-                      onClick={() => void openPlay(item)}
-                      disabled={!item.hasFile}
+                      onClick={() => void openPlay(playable)}
+                      disabled={!group.hasFile}
                       aria-label={t("media.play")}
                       className="absolute inset-0 flex items-center justify-center disabled:cursor-not-allowed"
                     >
                       <span className="flex h-10 w-10 items-center justify-center rounded-full bg-black/55 text-white opacity-0 backdrop-blur-[2px] transition-opacity duration-150 group-hover:opacity-100">
-                        {playBusy === item.id ? (
+                        {isBusy ? (
                           <span className="h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-white/40 border-t-white" />
                         ) : (
                           <IconPlay />
@@ -889,8 +989,8 @@ export default function MediaPage() {
 
                     <button
                       type="button"
-                      onClick={() => toggleSelected(item.id)}
-                      aria-label={t("media.selectAll")}
+                      onClick={() => toggleGroup(group)}
+                      aria-label={t("media.selectSession")}
                       aria-pressed={isSelected}
                       className={cx(
                         "focus-ring absolute right-2 top-2 z-10 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border transition-colors",
@@ -903,11 +1003,11 @@ export default function MediaPage() {
                     </button>
 
                     <span className="pointer-events-none absolute bottom-2 left-2 rounded-[4px] bg-black/60 px-1.5 py-[3px] font-mono text-[10px] tabular-nums leading-none text-white/90">
-                      {formatDuration(item.durationMs)}
+                      {formatDuration(group.durationMs)}
                     </span>
-                    {item.danmakuCount > 0 ? (
+                    {group.danmakuCount > 0 ? (
                       <span className="pointer-events-none absolute bottom-2 right-2 rounded-[4px] bg-black/60 px-1.5 py-[3px] text-[10px] leading-none text-white/85">
-                        {t("media.danmakuCount", { n: item.danmakuCount })}
+                        {t("media.danmakuCount", { n: group.danmakuCount })}
                       </span>
                     ) : null}
                     {isPlaying ? (
@@ -919,10 +1019,47 @@ export default function MediaPage() {
                     <h3 className="line-clamp-2 text-[12.5px] font-medium leading-[1.45] text-ink">
                       {item.title || item.hostName || item.id}
                     </h3>
+                    {group.clipCount > 1 ? (
+                      <div className="flex flex-wrap items-center gap-1">
+                        {group.clips.map((clip) => (
+                          <button
+                            key={clip.id}
+                            type="button"
+                            disabled={!clip.hasFile}
+                            onClick={() => void openPlay(clip)}
+                            title={t("media.clipIndex", { n: clip.clipIndex + 1 })}
+                            className={cx(
+                              "focus-ring rounded-[4px] border px-1.5 py-[1px] font-mono text-[10px] tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                              playing?.item.id === clip.id
+                                ? "border-accent bg-accent-soft text-accent-text"
+                                : "border-line text-faint hover:border-line-strong hover:text-ink",
+                            )}
+                          >
+                            {clip.clipIndex + 1}
+                          </button>
+                        ))}
+                        {missingClips > 0 ? (
+                          <button
+                            type="button"
+                            disabled={groupLoading === group.id}
+                            onClick={() => void loadGroupClips(group)}
+                            title={t("media.loadClips", { n: missingClips })}
+                            className="focus-ring rounded-[4px] border border-dashed border-line px-1.5 py-[1px] font-mono text-[10px] text-faint transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50"
+                          >
+                            {groupLoading === group.id ? "…" : "+" + missingClips}
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="mt-auto flex items-center justify-between gap-2 pt-0.5 text-[10.5px] text-faint">
                       <span className="font-mono tabular-nums">{formatDate(item.startedAt)}</span>
-                      <span className="shrink-0 font-mono tabular-nums">{formatSize(item.size)}</span>
+                      <span className="shrink-0 font-mono tabular-nums">{formatSize(group.size)}</span>
                     </div>
+                    {group.clipCount > 1 && !isPlaying ? (
+                      <div className="text-[10.5px] text-faint">
+                        {t("media.clipCount", { n: group.clipCount })}
+                      </div>
+                    ) : null}
                     {isPlaying ? <div className="text-[10.5px] text-accent-text">{t("media.playing")}</div> : null}
                   </div>
                 </article>
@@ -1033,7 +1170,7 @@ export default function MediaPage() {
                 {t("media.reveal")}
               </Button>
               <Button size="sm" variant="danger" disabled={!!busy} onClick={() => void runBatch("delete")}>
-                {confirmDelete ? t("media.deleteConfirm", { n: selected.length }) : t("media.deleteSelected")}
+                {confirmDelete ? t("media.deleteConfirm", { n: deleteClipCount }) : t("media.deleteSelected")}
               </Button>
               <Button
                 size="sm"

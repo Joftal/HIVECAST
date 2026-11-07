@@ -6,83 +6,103 @@
  * 为什么不用 docs/19 里的四级作用域表：v1 只有单账号单库，
  * 四级覆盖没有真实使用场景；等会话级覆盖真正出现时再拆表。
  */
-export type Settings = { 
+export type Settings = {
 /**
- * 新房间的默认录制画质（qn，10000 = 原画）
+ * 新房间的默认录制画质（qn；0 = 跟随平台，40000 = 最高可用，10000 = 原画）
  */
-defaultRecordQn: number, 
+defaultRecordQn: number,
 /**
  * 新房间的默认观看画质（0 = 自动）
  */
-defaultViewQn: number, 
+defaultViewQn: number,
+/**
+ * 拉流源格式偏好：auto | flv | hls | ts
+ */
+recordSourceFormat: string,
+/**
+ * 拉流编码偏好：auto | h264 | h265
+ */
+recordCodec: string,
+/**
+ * 房间标题变化时切分录像
+ */
+splitOnTitle: boolean,
+/**
+ * 单片最大时长（秒）；0 = 不限
+ */
+splitMaxDurationSec: number,
+/**
+ * 单片最大体积（MB，1 MB = 1024 × 1024 字节）；0 = 不限
+ */
+splitMaxSizeMb: number,
 /**
  * 媒体库根目录
  */
-mediaRoot: string, 
+mediaRoot: string,
 /**
  * 同时录制的上限
  */
-maxConcurrentRecords: number, 
+maxConcurrentRecords: number,
 /**
  * 录制开始/结束时是否发系统通知
  */
-notifyEnabled: boolean, 
+notifyEnabled: boolean,
 /**
  * 播放与录制异常（取流失败、磁盘写满）是否发系统通知
  */
-notifyError: boolean, 
+notifyError: boolean,
 /**
  * 登录失效是否发系统通知
  */
-notifyAuth: boolean, 
+notifyAuth: boolean,
 /**
  * zh-CN | en-US | system
  */
-language: string, 
+language: string,
 /**
  * light | dark | system（默认 light）
  */
-theme: string, 
+theme: string,
 /**
  * 录像保留天数（0 = 不按天删除）
  */
-retentionDays: number, 
+retentionDays: number,
 /**
  * 媒体库总容量上限 GB（0 = 不限）
  */
-maxTotalGb: number, 
+maxTotalGb: number,
 /**
  * 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
  */
-autoRemux: boolean, 
+autoRemux: boolean,
 /**
  * 关闭主窗口时的行为：tray = 最小化到托盘，quit = 退出程序
  */
-closeAction: string, 
+closeAction: string,
 /**
  * 阻止系统空闲休眠（录制/观看期间保持唤醒）
  */
-preventSleep: boolean, 
+preventSleep: boolean,
 /**
  * 监控检测间隔（秒）；0 = 关闭自动检测，只能手动刷新
  */
-monitorIntervalSec: number, 
+monitorIntervalSec: number,
 /**
  * 连续失败（限流/网络）时是否自动加大检测间隔
  */
-monitorBackoffEnabled: boolean, 
+monitorBackoffEnabled: boolean,
 /**
  * 自动回退的间隔上限（秒）
  */
-monitorBackoffCapSec: number, 
+monitorBackoffCapSec: number,
 /**
  * 录制文件名模板（不含目录与扩展名）
  */
-mediaFilenameTemplate: string, 
+mediaFilenameTemplate: string,
 /**
  * 去掉文件名里的 emoji 与特殊符号
  */
-mediaStripEmoji: boolean, 
+mediaStripEmoji: boolean,
 /**
  * 按「平台/主播」建子目录
  */
@@ -92,6 +112,6 @@ mediaGroupDirs: boolean,
  */
 logDir: string,
 /**
- * 日志保留天数（0 = 不按天清理，当天日志仍按 16 MiB 续段，不设总量上限）
+ * 日志保留天数（0 = 不按天清理，磁盘占用只受日志量与保留窗口影响）
  */
 logRetentionDays: number, };

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, LogStatus, MediaHostPage,
-    MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord, RoomView,
-    Settings, StreamDescriptor, ViewSlotInfo,
+    MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord,
+    RoomView, Settings, StreamDescriptor, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -105,7 +105,8 @@ pub async fn room_add(
         online: info.online,
         auto_record,
         monitor_paused: !monitor,
-        record_qn: settings.default_record_qn,
+        // 0 表示跟随全局设置：设置页改画质后，新房间不用逐个重设。
+        record_qn: 0,
         view_qn: settings.default_view_qn,
         record_line: None,
         last_checked_at: Some(timestamp),
@@ -295,10 +296,14 @@ pub async fn room_lines(
         .db
         .get_room(&id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
-    let groups = state
-        .broker
-        .groups(&room_ref(&room), qn.unwrap_or(room.record_qn))
-        .await?;
+    // 房间画质为 0 表示跟随全局；线路列表也要用真正会用于录制的档位，
+    // 否则用户看到的是 qn=0 对应的平台默认档，和实际开录画质对不上。
+    let settings = crate::settings::load(&state.db);
+    let requested_qn = match qn {
+        Some(qn) => qn,
+        None => crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn),
+    };
+    let groups = state.broker.groups(&room_ref(&room), requested_qn).await?;
     tracing::debug!(target: "hivecast_lib::commands", room_id = %id, groups = groups.len(), "查询房间线路");
     Ok(groups
         .iter()
@@ -654,6 +659,37 @@ mod tests {
         assert_eq!(files, vec![a, b]);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn deleting_a_recording_clears_its_generated_sidecars() {
+        let dir = std::env::temp_dir().join(format!("hivecast-sidecars-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("clip.mp4");
+        std::fs::write(&main, b"main").unwrap();
+        let sidecars = [
+            dir.join("clip.ass"),
+            dir.join("clip.jsonl"),
+            dir.join("clip.split.json"),
+            dir.join("clip.ffmpeg.pid"),
+            dir.join("clip.part0000.ts"),
+            dir.join("clip.part0001.ts"),
+            dir.join(".clip.merging.mp4"),
+        ];
+        for sidecar in &sidecars {
+            std::fs::write(sidecar, b"x").unwrap();
+        }
+        let unrelated = dir.join("other.mp4");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        remove_session_sidecars(&main).await;
+
+        assert!(main.is_file(), "主录像不能被伴随文件清理顺带删掉");
+        assert!(unrelated.is_file(), "同目录的其他录像不能被误删");
+        for sidecar in &sidecars {
+            assert!(!sidecar.exists(), "{} 应被清理", sidecar.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ---- 设置 ----
@@ -862,7 +898,9 @@ pub async fn credential_save(
     cookie: String,
 ) -> Result<CredentialInfo, AppError> {
     tracing::debug!(target: "hivecast_lib::commands", platform = %platform, "保存平台登录凭据");
-    crate::account::save_cookie(&state.db, &platform, &cookie).await
+    let info = crate::account::save_cookie(&state.db, &platform, &cookie).await?;
+    state.broker.clear_groups();
+    Ok(info)
 }
 
 #[tauri::command]
@@ -871,7 +909,9 @@ pub async fn credential_delete(
     platform: String,
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", platform = %platform, "删除平台登录凭据");
-    crate::account::delete(&state.db, &platform)
+    crate::account::delete(&state.db, &platform)?;
+    state.broker.clear_groups();
+    Ok(())
 }
 
 #[tauri::command]
@@ -884,7 +924,11 @@ pub async fn bilibili_qr_poll(
     state: State<'_, AppState>,
     qrcode_key: String,
 ) -> Result<QrPoll, AppError> {
-    crate::account::bilibili_qr_poll(&state.db, &qrcode_key).await
+    let poll = crate::account::bilibili_qr_poll(&state.db, &qrcode_key).await?;
+    if poll.state == "confirmed" {
+        state.broker.clear_groups();
+    }
+    Ok(poll)
 }
 
 // ---- 媒体库 ----
@@ -935,6 +979,26 @@ pub async fn media_list(
     })
 }
 
+/// 取一整场直播的全部片段：媒体库分页可能只拿到其中几段，前端点“+N”时补齐。
+#[tauri::command]
+pub async fn media_group_clips(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    group_id: String,
+) -> Result<Vec<MediaItem>, AppError> {
+    let mut items = state.db.media_group_items(&group_id)?;
+    let mut pending = Vec::new();
+    for item in &mut items {
+        item.thumbnail_url = state.thumbs.url_for(&item.id);
+        if item.thumbnail_url.is_none() && item.has_file && item.status != "recording" {
+            pending.push((item.id.clone(), item.path.clone(), item.duration_ms));
+        }
+    }
+    tracing::debug!(target: "hivecast_lib::commands", group_id = %group_id, clips = items.len(), "补齐整场片段");
+    state.thumbs.ensure(app, pending);
+    Ok(items)
+}
+
 /// 主播墙：按房间聚合出主播卡（条数 / 体积 / 最新一条时间）。
 #[tauri::command]
 pub async fn media_hosts(
@@ -977,6 +1041,43 @@ pub async fn session_export_danmaku(
     postprocess::danmaku_to_ass(std::path::Path::new(&path))
 }
 
+/// 删掉录像主文件之外由录制流程生成的伴随文件：分片、分割清单、pid、
+/// 弹幕字幕和合并临时文件。主文件删除失败时不要调用，避免留下半套数据。
+async fn remove_session_sidecars(path: &std::path::Path) {
+    let mut targets = vec![
+        path.with_extension("ass"),
+        path.with_extension("jsonl"),
+        path.with_extension("split.json"),
+        path.with_extension("ffmpeg.pid"),
+    ];
+    targets.extend(crate::segment::collect_parts(path));
+    if let (Some(parent), Some(stem)) = (
+        path.parent(),
+        path.file_stem().and_then(|stem| stem.to_str()),
+    ) {
+        let prefix = format!(".{stem}.merging.");
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    targets.push(entry.path());
+                }
+            }
+        }
+    }
+    for target in targets {
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                target: "hivecast_lib::commands",
+                file = %target.display(),
+                error = %err,
+                "删除录像伴随文件失败"
+            ),
+        }
+    }
+}
+
 /// 删除一条录像：先停掉可能正在回放的它，再按需删文件，最后删库。
 #[tauri::command]
 pub async fn media_delete(
@@ -991,6 +1092,10 @@ pub async fn media_delete(
         .ok_or_else(|| AppError::User("录像不存在".into()))?;
     if session.status == "recording" {
         return Err(AppError::User("这段还在录制，先停下再删除".into()));
+    }
+    // 分割录像是一个整体：单删首段会把其余片段的 group_id 指向不存在的行。
+    if state.db.session_group_size(&session_id)? > 1 {
+        return Err(AppError::User("这段录像包含多个片段，请删除整场".into()));
     }
 
     state.local.stop(&session_id).await;
@@ -1013,6 +1118,9 @@ pub async fn media_delete(
                 }
             }
         }
+        if let Some(path) = session.file_path.as_deref() {
+            remove_session_sidecars(std::path::Path::new(path)).await;
+        }
     }
 
     tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, delete_file, "删除录像");
@@ -1020,6 +1128,81 @@ pub async fn media_delete(
     state.db.delete_session(&session_id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
+}
+
+/// 删除一整场直播（同一 group 下的所有片段）。
+#[tauri::command]
+pub async fn media_delete_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    group_id: String,
+    delete_file: bool,
+) -> Result<u32, AppError> {
+    let sessions = state.db.group_sessions(&group_id)?;
+    if sessions.is_empty() {
+        return Err(AppError::User("录像不存在".into()));
+    }
+    if sessions.iter().any(|session| session.status == "recording") {
+        return Err(AppError::User("这场直播还在录制，先停下再删除".into()));
+    }
+
+    let mut removed = 0u32;
+    // 一个片段删失败不能把后面的片段卡住：先尽力删完，最后再把第一个错误
+    // 返回给界面。视频文件删失败的片段保留数据库行，用户重试时还能再删一次；
+    // 文件已经不在的片段则照常清理数据库，避免留下永远点不掉的幽灵录像。
+    let mut first_error: Option<AppError> = None;
+    for session in &sessions {
+        state.local.stop(&session.id).await;
+        let mut file_failed = false;
+        if delete_file {
+            if let Some(path) = session.file_path.as_deref() {
+                let path = std::path::Path::new(path);
+                if path.is_file() {
+                    if let Err(err) = tokio::fs::remove_file(path).await {
+                        tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, file = %path.display(), error = %err, "删除录像文件失败");
+                        if first_error.is_none() {
+                            first_error = Some(AppError::from_io(err, path));
+                        }
+                        file_failed = true;
+                    }
+                }
+            }
+            if let Some(path) = session.danmaku_path.as_deref() {
+                let path = std::path::Path::new(path);
+                if path.is_file() {
+                    if let Err(err) = tokio::fs::remove_file(path).await {
+                        tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, file = %path.display(), error = %err, "删除弹幕文件失败");
+                    }
+                }
+            }
+        }
+        if file_failed {
+            continue;
+        }
+        // 与单条删除保持一致：用户选择「保留文件」时不要顺手删掉弹幕、
+        // 分割清单和分片，否则留下的 mp4 会缺少可追溯的伴随数据。
+        if delete_file {
+            if let Some(path) = session.file_path.as_deref() {
+                remove_session_sidecars(std::path::Path::new(path)).await;
+            }
+        }
+        state.thumbs.remove(&session.id);
+        if let Err(err) = state.db.delete_session(&session.id) {
+            tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, error = %err, "删除录像记录失败");
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+            continue;
+        }
+        removed += 1;
+    }
+
+    tracing::info!(target: "hivecast_lib::commands", group_id = %group_id, clips = removed, total = sessions.len(), delete_file, "删除整场录像");
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(removed),
+    }
 }
 
 /// 在系统文件管理器里定位文件。

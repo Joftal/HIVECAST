@@ -33,7 +33,7 @@ fileCount: bigint,
  */
 totalBytes: bigint,
 /**
- * 因队列满/写失败被丢弃的日志条数
+ * 因队列满/pending 溢出/写失败被丢弃的日志片段数（按写入批次计，不是行数）
  */
 dropped: bigint,
 /**

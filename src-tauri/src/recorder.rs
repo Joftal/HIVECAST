@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
 use hivecast_ipc::{AppNotice, RecordSession, RecordingInfo, RoomRecord};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
 
@@ -26,8 +27,8 @@ use crate::db::Db;
 use crate::disk;
 use crate::error::AppError;
 use crate::ffmpeg;
-use crate::platform::StreamGroup;
-use crate::process::send_graceful;
+use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+use crate::process::{send_graceful, wait_exit};
 use crate::segment;
 
 /// 进程存活不足这个时长就退出，视为「秒退」，需要换线路重试。
@@ -61,12 +62,123 @@ const START_FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
 const HEALTHY_RESET: Duration = Duration::from_secs(30 * 60);
 /// 平台状态查不到时间隔这么久再问一次，避免把限流当成下播（A4）。
 const PLATFORM_RECHECK_DELAY: Duration = Duration::from_secs(20);
-
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 启动后的崩溃恢复合并完成（I2：合并在后台跑，媒体库要重新取列表）。
 pub const EVENT_MEDIA_CHANGED: &str = "media://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
 pub const EVENT_APP_NOTICE: &str = "app://notice";
+
+/// 视频分割策略：录制时只切分片，收尾时再按这些边界合成多个片段文件。
+#[derive(Debug, Clone)]
+struct SplitPolicy {
+    on_title: bool,
+    max_duration: Option<Duration>,
+    max_size: Option<u64>,
+    /// ffmpeg 分片长度：分割边界只能落在分片边界上。
+    segment_secs: u32,
+}
+
+impl SplitPolicy {
+    fn from_settings(settings: &hivecast_ipc::Settings) -> Self {
+        let max_duration = (settings.split_max_duration_sec > 0)
+            .then(|| Duration::from_secs(u64::from(settings.split_max_duration_sec)));
+        let max_size = (settings.split_max_size_mb > 0)
+            .then(|| u64::from(settings.split_max_size_mb) * 1024 * 1024);
+        // 分片越短边界越准，但 60 秒以下会让分片数量暴涨；300 秒是历史默认。
+        // 只按时长分割时尽量让分片长度整除目标，避免 400 秒切成 300+100 之外的
+        // 600 秒超限；同时开标题/大小分割时用 15..=60 秒的细粒度，保证标题和
+        // 大小边界足够贴近，且时长上限不会被 60 秒粒度顶到 120 秒才切。
+        let duration_segment = max_duration.map(segment_for_duration);
+        let segment_secs = if settings.split_on_title || max_size.is_some() {
+            max_duration.map_or(60, |limit| segment_for_duration_between(limit, 15, 60))
+        } else {
+            duration_segment.unwrap_or(segment::SEGMENT_SECONDS)
+        };
+        Self {
+            on_title: settings.split_on_title,
+            max_duration,
+            max_size,
+            segment_secs: segment_secs.max(15),
+        }
+    }
+}
+
+/// 选流偏好：画质 > 编码 > 格式，都匹配不上时仍返回一个可用候选。
+#[derive(Debug, Clone, Copy)]
+struct StreamPrefs {
+    qn: u32,
+    codec: Option<Codec>,
+    format: Option<StreamFormat>,
+}
+
+impl StreamPrefs {
+    fn from_settings(settings: &hivecast_ipc::Settings, qn: u32) -> Self {
+        let codec = match settings.record_codec.as_str() {
+            "h264" => Some(Codec::H264),
+            "h265" => Some(Codec::H265),
+            _ => None,
+        };
+        let format = match settings.record_source_format.as_str() {
+            "flv" => Some(StreamFormat::Flv),
+            "hls" => Some(StreamFormat::Hls),
+            "ts" => Some(StreamFormat::HttpTs),
+            _ => None,
+        };
+        Self { qn, codec, format }
+    }
+}
+
+/// 续录的选流偏好：钉住首段实际拿到的编码与源流格式，画质仍按用户档位。
+fn respawn_prefs(
+    qn: u32,
+    prefs: StreamPrefs,
+    codec: Option<Codec>,
+    format: StreamFormat,
+) -> StreamPrefs {
+    StreamPrefs {
+        qn,
+        codec: codec.or(prefs.codec),
+        format: Some(format),
+    }
+}
+
+/// 只按时长分割时，选一个 60..=300 秒的分片长度，使总时长尽量贴近上限。
+fn segment_for_duration(limit: Duration) -> u32 {
+    let secs = limit.as_secs().max(1);
+    if secs <= 300 {
+        return secs.clamp(60, 300) as u32;
+    }
+    let mut best = (300u32, u64::MAX);
+    for candidate in 60..=300u32 {
+        let step = u64::from(candidate);
+        let over = secs.div_ceil(step) * step - secs;
+        if over < best.1 || (over == best.1 && candidate > best.0) {
+            best = (candidate, over);
+        }
+    }
+    best.0
+}
+
+/// 标题/大小分割同时开启时，分片还要尽量对齐时长上限。和
+/// `segment_for_duration` 的区别是允许 15 秒的小分片：90 秒上限用 45 秒分片
+/// 正好切在 90 秒，而 60 秒分片会把第一次边界推到 120 秒。
+fn segment_for_duration_between(limit: Duration, min: u32, max: u32) -> u32 {
+    let secs = limit.as_secs().max(1);
+    let min = min.max(1);
+    let max = max.max(min);
+    if secs <= u64::from(min) {
+        return min;
+    }
+    let mut best = (max, u64::MAX);
+    for candidate in min..=max {
+        let step = u64::from(candidate);
+        let over = secs.div_ceil(step) * step - secs;
+        if over < best.1 || (over == best.1 && candidate > best.0) {
+            best = (candidate, over);
+        }
+    }
+    best.0
+}
 
 struct Active {
     recording: RecordingInfo,
@@ -93,6 +205,18 @@ struct Active {
     /// 本场开录时的画质档位与线路：中途改设置不该渗进正在录的这一场（A3）
     qn: u32,
     line: Option<String>,
+    /// 本场开录时的编码/源流格式偏好：续录必须与首段保持一致，
+    /// 否则同一场录像会混入不同编码/封装的分片。
+    prefs: StreamPrefs,
+    /// 首段实际拿到的编码与源流格式：续录优先选同一种，避免同一场
+    /// 的分片从 H.264 切成 H.265 后 mp4 合并/播放异常。
+    codec: Option<Codec>,
+    format: StreamFormat,
+    /// 本场开录时的分割策略与标题快照；标题变化只在收尾时切片段。
+    split: SplitPolicy,
+    title: String,
+    title_changes: Vec<i64>,
+    title_checked: Instant,
     /// ffmpeg 最近几十行 stderr：默认只进 debug，异常收尾时把尾部打进 WARN。
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
@@ -793,6 +917,14 @@ impl Recorder {
             return Err(AppError::User(message));
         }
 
+        // 开录时现取设置：画质/格式/编码偏好与分割策略只影响新会话，
+        // 正在录的这一场不会因为用户中途改设置而换档（A3）。
+        let settings = crate::settings::load(&self.db);
+        let record_qn =
+            crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn);
+        let prefs = StreamPrefs::from_settings(&settings, record_qn);
+        let split = SplitPolicy::from_settings(&settings);
+
         let groups = broker
             .groups(
                 &crate::platform::RoomRef {
@@ -801,7 +933,7 @@ impl Recorder {
                     canonical_url: room.canonical_url.clone(),
                     input: room.canonical_url.clone(),
                 },
-                room.record_qn,
+                record_qn,
             )
             .await
             .map_err(|err| {
@@ -809,8 +941,8 @@ impl Recorder {
                 AppError::from(err)
             })?;
 
-        let (candidate, group) =
-            pick_candidate(&groups, room.record_line.as_deref()).ok_or_else(|| {
+        let (candidate, group) = pick_candidate(&groups, room.record_line.as_deref(), prefs)
+            .ok_or_else(|| {
                 tracing::warn!(
                     room_id = %room.id,
                     room = %room.host_name,
@@ -821,6 +953,7 @@ impl Recorder {
                 AppError::User("没有可用的线路".into())
             })?;
 
+        let actual_qn = candidate_qn(candidate);
         let started_at = crate::db::now_ts();
         let path = session_path(
             &media_root,
@@ -831,7 +964,9 @@ impl Recorder {
                 title: &room.title,
                 area: room.area_name.as_deref().unwrap_or(""),
                 room_key: &room.room_key,
-                qn: room.record_qn,
+                // 文件名里写实际拿到的档位：Cookie 失效时平台会降档，
+                // 写请求值会让用户以为录到的是 4K。
+                qn: if actual_qn > 0 { actual_qn } else { record_qn },
             },
             started_at,
             "mp4",
@@ -857,7 +992,7 @@ impl Recorder {
             .collect();
         let url = candidate.url.clone().unwrap_or_default();
 
-        let mut command = build_command(&path, &url, &headers, 0);
+        let mut command = build_command(&path, &url, &headers, 0, split.segment_secs);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
@@ -917,14 +1052,20 @@ impl Recorder {
                 "创建录制会话失败，回收 ffmpeg 与占位文件"
             );
             // 建会话失败时 ffmpeg 已经起来了：不收掉会变成一个没人管的进程（C5）。
+            // 必须等它真的退出再删文件：Windows 上 ffmpeg 还持有分片句柄时
+            // remove_file 会失败，留下 0 字节录像和孤儿分片。
             let _ = child.start_kill();
+            let _ = wait_exit(&mut child, Duration::from_secs(2)).await;
             remove_pid_file(&path);
             if let (Some(hub), Some(writer)) = (self.danmaku.as_ref(), danmaku.as_ref()) {
                 hub.detach_record(&room.id, writer);
             }
-            // 这次开录没成，留下的空文件/空弹幕也算残留，一并清掉。
+            // 这次开录没成，留下的空文件/空弹幕/已生成分片也算残留，一并清掉。
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(&danmaku_path);
+            for part in segment::collect_parts(&path) {
+                let _ = std::fs::remove_file(part);
+            }
             return Err(AppError::Internal(err.to_string()));
         }
 
@@ -951,38 +1092,55 @@ impl Recorder {
             last_growth: Instant::now(),
             stalls: 0,
             eof_retries: 0,
-            qn: room.record_qn,
+            qn: record_qn,
             line: room.record_line.clone(),
+            prefs,
+            codec: candidate.codec,
+            format: candidate.format,
+            split,
+            title: room.title.clone(),
+            title_changes: Vec::new(),
+            title_checked: Instant::now(),
             stderr_tail,
         };
-        {
+        let mut entry = Some(entry);
+        let over_limit = {
             let mut inner = self.inner.lock().expect("录制状态被污染");
             // 再查一次并发上限：上面那次在网络解析之前，两路同时开录都会看到
             // 「还没满」，各自拉起一个 ffmpeg（C2）。这里和 insert 在同一把锁里，
             // 后到的这一路会看到前一路已经占住名额。
             if limit > 0 && inner.len() >= limit {
-                drop(inner);
-                let mut entry = entry;
-                let _ = entry.child.start_kill();
-                remove_pid_file(&path);
-                if let (Some(hub), Some(writer)) = (self.danmaku.as_ref(), entry.danmaku.as_ref()) {
-                    hub.detach_record(&room.id, writer);
-                }
-                // ffmpeg 可能已经建了空分片，弹幕文件也建好了：都清掉，别留垃圾。
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(&danmaku_path);
-                let _ = std::fs::remove_file(path.with_extension("part0000.ts"));
-                let _ = self.db.delete_session(&entry.recording.session_id);
-                tracing::warn!(
-                    room = %room.host_name,
-                    limit,
-                    "并发已满，放弃本次开录（已清理会话与进程）"
-                );
-                return Err(AppError::User(format!(
-                    "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
-                )));
+                true
+            } else {
+                inner.insert(room.id.clone(), entry.take().expect("本次录制尚未挂载"));
+                false
             }
-            inner.insert(room.id.clone(), entry);
+        };
+        if over_limit {
+            // 锁已经释放：等子进程退出需要 await，不能在上面的 MutexGuard 作用域里做。
+            let mut entry = entry.take().expect("本次录制尚未挂载");
+            let _ = entry.child.start_kill();
+            // 同样等进程退出并回收句柄，否则 Windows 删不掉占位/分片。
+            let _ = wait_exit(&mut entry.child, Duration::from_secs(2)).await;
+            remove_pid_file(&path);
+            if let (Some(hub), Some(writer)) = (self.danmaku.as_ref(), entry.danmaku.as_ref()) {
+                hub.detach_record(&room.id, writer);
+            }
+            // ffmpeg 可能已经建了空分片，弹幕文件也建好了：都清掉，别留垃圾。
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&danmaku_path);
+            for part in segment::collect_parts(&path) {
+                let _ = std::fs::remove_file(part);
+            }
+            let _ = self.db.delete_session(&entry.recording.session_id);
+            tracing::warn!(
+                room = %room.host_name,
+                limit,
+                "并发已满，放弃本次开录（已清理会话与进程）"
+            );
+            return Err(AppError::User(format!(
+                "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
+            )));
         }
         slot.mark_inserted();
         drop(slot);
@@ -1020,13 +1178,54 @@ impl Recorder {
             room = %room.host_name,
             file = %path.display(),
             quality = %candidate.name,
-            qn = room.record_qn,
-            line = ?room.record_line,
+            requested_qn = record_qn,
+            actual_qn,
+            line = %group.name,
+            split_on_title = settings.split_on_title,
+            split_max_duration_sec = settings.split_max_duration_sec,
+            split_max_size_mb = settings.split_max_size_mb,
             "开始录制"
         );
         self.clear_error(&room.id);
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
         emit_notice(app, "started", &room.id, &room.host_name, None);
+        if quality_fallback(record_qn, actual_qn) {
+            // 显式选了档位却只拿到更低档：通常是 Cookie 失效、账号权限不够或平台限流。
+            // 录制照常开始，不能因为画质不达标就放弃；但必须让用户知道实际档位。
+            tracing::warn!(
+                room_id = %room.id,
+                room = %room.host_name,
+                requested_qn = record_qn,
+                actual_qn,
+                quality = %candidate.name,
+                "实际画质低于所选档位，已按可用画质开录"
+            );
+            emit_notice(
+                app,
+                "quality_fallback",
+                &room.id,
+                &room.host_name,
+                Some(format!("{record_qn} → {actual_qn}")),
+            );
+        }
+        if codec_fallback(prefs.codec, candidate.codec) {
+            tracing::warn!(
+                room_id = %room.id,
+                room = %room.host_name,
+                requested_codec = prefs.codec.map(Codec::as_str).unwrap_or("auto"),
+                actual_codec = candidate.codec.map(Codec::as_str).unwrap_or("unknown"),
+                "平台没有所选编码，已按可用编码开录"
+            );
+        }
+        if format_fallback(prefs.format, candidate.format) {
+            tracing::warn!(
+                room_id = %room.id,
+                room = %room.host_name,
+                requested_format = prefs.format.map(StreamFormat::as_str).unwrap_or("auto"),
+                actual_format = candidate.format.as_str(),
+                "平台没有所选源流格式，已按可用格式开录"
+            );
+        }
         self.spawn_watcher(app.clone(), room.id.clone());
         Ok(recording)
     }
@@ -1146,6 +1345,41 @@ impl Recorder {
         tracing::info!(count = total, "录制会话收尾完成");
     }
 
+    /// 轮询标题，记录变化时刻（用于收尾时分割）。每 5 秒最多查一次库。
+    fn track_title(&self, room_id: &str) {
+        let due = {
+            let inner = self.inner.lock().expect("录制状态被污染");
+            match inner.get(room_id) {
+                Some(active) if active.split.on_title => {
+                    active.title_checked.elapsed() >= Duration::from_secs(5)
+                }
+                _ => false,
+            }
+        };
+        if !due {
+            return;
+        }
+        let title = match self.db.get_room(room_id) {
+            Ok(Some(room)) => room.title,
+            _ => return,
+        };
+        let mut inner = self.inner.lock().expect("录制状态被污染");
+        let Some(active) = inner.get_mut(room_id) else {
+            return;
+        };
+        active.title_checked = Instant::now();
+        if active.title != title {
+            tracing::info!(
+                room_id,
+                old = %active.title,
+                new = %title,
+                "直播标题变化，收尾时按此分割"
+            );
+            active.title = title;
+            active.title_changes.push(crate::db::now_ts());
+        }
+    }
+
     fn spawn_watcher(self: &Arc<Self>, app: AppHandle, room_id: String) {
         let recorder = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -1157,6 +1391,8 @@ impl Recorder {
                 if !rec.is_recording(&room_id) {
                     return;
                 }
+                // 标题变化要切片段：只在收尾时按时间点找分片边界，录制过程不打断。
+                rec.track_title(&room_id);
                 // 房间在录制过程中被删掉：删除流程自己会先停录，但那一步可能
                 // 因为并发/异常丢掉。这里兜底按「用户停录」收尾——不续录、
                 // 不弹结束通知，也不给已删房间写静默窗口（F2）。
@@ -1414,9 +1650,20 @@ impl Recorder {
             return false;
         }
         // 取快照后立刻放锁：下面要 await 解析线路，持有 std::sync::Mutex 会卡死整个录制表。
-        // 画质与线路同样取快照：这中间用户可能在设置页改过，
+        // 画质、编码、格式与线路同样取快照：这中间用户可能在设置页改过，
         // 正在录的这一场不该跟着换档（A3）。
-        let (session_id, path, start_number, restarts, qn, line) = {
+        let (
+            session_id,
+            path,
+            start_number,
+            restarts,
+            qn,
+            line,
+            prefs,
+            codec,
+            format,
+            segment_secs,
+        ) = {
             let inner = self.inner.lock().expect("录制状态被污染");
             let Some(active) = inner.get(room_id) else {
                 return false;
@@ -1426,7 +1673,9 @@ impl Recorder {
                 return false;
             }
             let path = PathBuf::from(&active.recording.file_path);
-            let start_number = segment::collect_parts(&path).len() as u32;
+            // 不能按「当前剩余分片数」编号：收尾分割会删掉前段，
+            // 编号回退会覆盖后面已经录好的分片。
+            let start_number = segment::next_part_index(&path);
             (
                 active.recording.session_id.clone(),
                 path,
@@ -1434,6 +1683,10 @@ impl Recorder {
                 active.restarts,
                 active.qn,
                 active.line.clone(),
+                active.prefs,
+                active.codec,
+                active.format,
+                active.split.segment_secs,
             )
         };
 
@@ -1459,10 +1712,41 @@ impl Recorder {
                 return false;
             }
         };
-        let Some((candidate, _group)) = pick_candidate(&groups, line.as_deref()) else {
+        // 续录钉住首段的编码与源流格式：平台中途换编码时，宁可牺牲一点码率，
+        // 也不要让同一场的分片在 H.264/H.265 之间跳变。
+        let prefs = respawn_prefs(qn, prefs, codec, format);
+        let Some((candidate, _group)) = pick_candidate(&groups, line.as_deref(), prefs) else {
             tracing::warn!(room_id, "续录没有可用线路");
             return false;
         };
+        let actual_qn = candidate_qn(candidate);
+        if let (Some(first), Some(next)) = (codec, candidate.codec) {
+            if first != next {
+                tracing::warn!(
+                    room_id,
+                    first = ?first,
+                    next = ?next,
+                    "续录找不到同编码线路，本场可能混入不同编码的分片"
+                );
+            }
+        }
+        if quality_fallback(qn, actual_qn) {
+            tracing::warn!(
+                room_id,
+                requested_qn = qn,
+                actual_qn,
+                quality = %candidate.name,
+                "续录画质低于所选档位，已按可用画质续录"
+            );
+        }
+        if format_fallback(Some(format), candidate.format) {
+            tracing::warn!(
+                room_id,
+                requested_format = format.as_str(),
+                actual_format = candidate.format.as_str(),
+                "续录找不到同源流格式线路，已按可用格式续录"
+            );
+        }
         let headers: Vec<(String, String)> = candidate
             .headers
             .iter()
@@ -1470,7 +1754,7 @@ impl Recorder {
             .collect();
         let url = candidate.url.clone().unwrap_or_default();
 
-        let mut command = build_command(&path, &url, &headers, start_number);
+        let mut command = build_command(&path, &url, &headers, start_number, segment_secs);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
@@ -1507,6 +1791,8 @@ impl Recorder {
                 start_number,
                 restarts = active.restarts,
                 quality = %candidate.name,
+                requested_qn = qn,
+                actual_qn,
                 "断流后续录"
             );
         }
@@ -1557,18 +1843,7 @@ impl Recorder {
             .unwrap_or_else(|| active.recording.session_id.clone());
         let _remux_job = auto_remux
             .then(|| jobs.begin("remux", remux_label, Some(active.recording.quality.clone())));
-        let (stored_path, file_size) = finish_file(&source_path, auto_remux).await;
-        drop(_remux_job);
-        if stored_path != source_path {
-            if let Err(err) = self.db.update_session_file(
-                &active.recording.session_id,
-                &stored_path.display().to_string(),
-                file_size,
-            ) {
-                tracing::warn!(%err, "改写录像路径失败");
-            }
-        }
-
+        // 状态先算出来：分割清单要把最终状态写进去，崩溃恢复才能还原。
         let (final_status, reason, error) = match stop_reason.as_deref() {
             Some("stopped") => ("finished", "stopped", None),
             Some("stream_ended") => ("finished", "stream_ended", None),
@@ -1586,6 +1861,128 @@ impl Recorder {
                 ("failed", "error", Some(message))
             }
         };
+
+        // 分割只在收尾做：录制期间始终是一个连续 ffmpeg，不存在停旧起新的空窗。
+        let plans = clip_plans(&active);
+        let mut rendered: Vec<RenderedClip> = Vec::new();
+        // 即使只有一段也写清单：收尾失败（磁盘满、合并/拼接失败）时
+        // 它能保留「分片还在、成品未落定」的现场，启动后按清单重试。
+        // 成功后清单会被删除，正常录制不会留下额外文件。
+        let mut manifest = if !plans.is_empty() {
+            if plans.len() > 1 {
+                tracing::info!(
+                    session_id = %active.recording.session_id,
+                    clips = plans.len(),
+                    "开始按分片边界生成分割片段"
+                );
+            }
+            let mut clips = Vec::new();
+            for (index, plan) in plans.iter().enumerate() {
+                let output = if index == 0 {
+                    source_path.clone()
+                } else {
+                    clip_output_path(&source_path, index)
+                };
+                let id = if index == 0 {
+                    active.recording.session_id.clone()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
+                clips.push(ManifestClip {
+                    id,
+                    output: output.display().to_string(),
+                    path: output.display().to_string(),
+                    start: plan.start,
+                    end: plan.end,
+                    reason: plan.reason.clone(),
+                    started_at: plan.started_at,
+                    ended_at: plan.ended_at,
+                });
+            }
+            let manifest = SplitManifest {
+                version: 1,
+                session_id: active.recording.session_id.clone(),
+                room_id: active.recording.room_id.clone(),
+                source: source_path.display().to_string(),
+                status: final_status.to_string(),
+                reason: reason.to_string(),
+                error: error.clone(),
+                quality: Some(active.recording.quality.clone()),
+                line: Some(active.recording.line.clone()),
+                remux: auto_remux,
+                clips,
+                rendered: 0,
+                completed: false,
+            };
+            let file = manifest_path(&source_path);
+            if let Err(err) = write_manifest(&file, &manifest) {
+                tracing::warn!(%err, file = %file.display(), "写分割清单失败，崩溃后可能无法按片段恢复");
+            } else if let Err(err) = self.db.set_split_manifest(
+                &active.recording.session_id,
+                Some(&file.display().to_string()),
+            ) {
+                tracing::warn!(%err, "登记分割清单失败");
+            }
+            Some(manifest)
+        } else {
+            None
+        };
+        for (index, plan) in plans.iter().enumerate() {
+            let output = if !plans.is_empty() {
+                PathBuf::from(&manifest.as_ref().expect("有清单").clips[index].output)
+            } else {
+                source_path.clone()
+            };
+            let (path, size) = if !plans.is_empty() {
+                finish_range(&source_path, &output, plan.start, plan.end, auto_remux).await
+            } else {
+                finish_file(&source_path, auto_remux).await
+            };
+            rendered.push(RenderedClip {
+                path: path.clone(),
+                size,
+                reason: plan.reason.clone(),
+                started_at: plan.started_at,
+                ended_at: plan.ended_at,
+            });
+            if let Some(manifest) = manifest.as_mut() {
+                manifest.clips[index].path = path.display().to_string();
+                manifest.rendered = index + 1;
+                let file = manifest_path(&source_path);
+                if let Err(err) = write_manifest(&file, manifest) {
+                    tracing::warn!(%err, file = %file.display(), "更新分割清单失败");
+                }
+            }
+        }
+        drop(_remux_job);
+        let first = rendered.first().cloned().unwrap_or(RenderedClip {
+            path: source_path.clone(),
+            size: 0,
+            reason: None,
+            started_at: active.recording.started_at,
+            ended_at: crate::db::now_ts(),
+        });
+        let (stored_path, file_size) = (first.path, first.size);
+        // 片段历史是否全部落库；失败时不能删清单，否则恢复逻辑再没有重试依据。
+        let mut history_ok = stored_path.is_file() && file_size > 0;
+        if !history_ok {
+            tracing::warn!(
+                room_id,
+                file = %stored_path.display(),
+                size = file_size,
+                "首片段成品缺失，保留分割清单以便恢复"
+            );
+        }
+        if stored_path != source_path {
+            if let Err(err) = self.db.update_session_file(
+                &active.recording.session_id,
+                &stored_path.display().to_string(),
+                file_size,
+            ) {
+                history_ok = false;
+                tracing::warn!(%err, "改写录像路径失败");
+            }
+        }
 
         if final_status == "failed" {
             let tail = tail_text(&active.stderr_tail);
@@ -1631,16 +2028,115 @@ impl Recorder {
             _ => (active.danmaku_path.clone(), 0),
         };
 
-        if let Err(err) = self.db.finish_session(
+        if let Err(err) = self.db.finish_session_at(
             &active.recording.session_id,
             final_status,
             reason,
+            first.ended_at,
             file_size,
             danmaku_path.as_deref(),
             danmaku_count,
             error.as_deref(),
         ) {
+            history_ok = false;
             tracing::warn!(%err, "写入录制历史失败");
+        }
+
+        // 同一场直播的后续片段：共享首片段 id 作为 group_id，媒体库按 group 聚合。
+        if rendered.len() > 1 {
+            let group_id = active.recording.session_id.clone();
+            if let Err(err) = self.db.set_session_group(&group_id, &group_id, 0, None) {
+                history_ok = false;
+                tracing::warn!(%err, "写入首片段分组失败");
+            }
+            for (index, clip) in rendered.iter().enumerate().skip(1) {
+                if !clip.path.is_file() || clip.size <= 0 {
+                    history_ok = false;
+                    tracing::warn!(
+                        room_id,
+                        clip = index,
+                        file = %clip.path.display(),
+                        "片段成品缺失，跳过写库并保留清单"
+                    );
+                    continue;
+                }
+                // 用清单里的 id，崩溃后恢复不会写出两行同一片段。
+                let clip_id = manifest
+                    .as_ref()
+                    .map(|manifest| manifest.clips[index].id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let session = RecordSession {
+                    id: clip_id.clone(),
+                    room_id: active.recording.room_id.clone(),
+                    started_at: clip.started_at,
+                    ended_at: Some(clip.ended_at),
+                    status: final_status.to_string(),
+                    reason: Some(reason.to_string()),
+                    file_path: Some(clip.path.display().to_string()),
+                    file_size: clip.size,
+                    duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
+                    quality: Some(active.recording.quality.clone()),
+                    line: Some(active.recording.line.clone()),
+                    error: error.clone(),
+                    danmaku_path: None,
+                    danmaku_count: 0,
+                };
+                match self
+                    .db
+                    .create_clip(&session, &group_id, index as i64, clip.reason.as_deref())
+                {
+                    Ok(()) => {
+                        if final_status == "finished" {
+                            self.queue_thumb(app, &clip_id);
+                        }
+                    }
+                    Err(err) => {
+                        history_ok = false;
+                        tracing::warn!(
+                            %err,
+                            clip = index,
+                            file = %clip.path.display(),
+                            "写入片段历史失败"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 片段行都写完了才把清单标成完成：中途崩溃时恢复逻辑会按清单补齐。
+        // 只要有一段落库失败/成品缺失就保留清单，下次启动还能重试，不能
+        // 把「已经收尾」当成「历史已经写全」。
+        if let Some(mut manifest) = manifest.take() {
+            let file = manifest_path(&source_path);
+            if history_ok {
+                manifest.completed = true;
+                if let Err(err) = write_manifest(&file, &manifest) {
+                    tracing::warn!(%err, file = %file.display(), "完成分割清单失败");
+                }
+                match std::fs::remove_file(&file) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => tracing::warn!(%err, file = %file.display(), "删除分割清单失败"),
+                }
+                if let Err(err) = self
+                    .db
+                    .set_split_manifest(&active.recording.session_id, None)
+                {
+                    tracing::warn!(%err, "清理分割清单登记失败");
+                }
+            } else {
+                // 清单里保留已成功的 path/rendered，恢复时只补失败的片段和 DB 行。
+                manifest.completed = false;
+                if let Err(err) = write_manifest(&file, &manifest) {
+                    tracing::warn!(%err, file = %file.display(), "保留分割清单失败");
+                }
+                tracing::warn!(
+                    room_id,
+                    session = %active.recording.session_id,
+                    clips = manifest.clips.len(),
+                    "片段历史未全部写入，保留分割清单等待恢复"
+                );
+            }
         }
 
         // 弹幕存档（.jsonl）随录随写；收尾时顺手导出一份 .ass，媒体目录里直接可用。
@@ -2017,6 +2513,7 @@ fn build_command(
     url: &str,
     headers: &[(String, String)],
     start_number: u32,
+    segment_secs: u32,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(ffmpeg::binary());
     command
@@ -2046,7 +2543,7 @@ fn build_command(
         .arg("-f")
         .arg("segment")
         .arg("-segment_time")
-        .arg(segment::SEGMENT_SECONDS.to_string())
+        .arg(segment_secs.to_string())
         .arg("-segment_format")
         .arg("mpegts")
         .arg("-reset_timestamps")
@@ -2115,6 +2612,292 @@ fn tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
     }
 }
 
+/// 分割收尾清单：写完一段就落一次盘，崩溃后据此续做，不会把首片段覆盖掉。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SplitManifest {
+    version: u8,
+    session_id: String,
+    room_id: String,
+    source: String,
+    status: String,
+    reason: String,
+    error: Option<String>,
+    quality: Option<String>,
+    line: Option<String>,
+    /// 收尾时是否尝试合成 mp4；关闭后处理时直接字节拼接成 .ts。
+    remux: bool,
+    clips: Vec<ManifestClip>,
+    /// 已完成渲染的片段数（前 rendered 个的 path 已可播放）。
+    rendered: usize,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestClip {
+    id: String,
+    /// 计划输出路径；恢复时按它重跑合并。
+    output: String,
+    /// 实际产物路径（合并失败会降级成 .ts，与 output 不同）。
+    path: String,
+    start: u32,
+    end: Option<u32>,
+    reason: Option<String>,
+    started_at: i64,
+    ended_at: i64,
+}
+
+/// 一个待生成的片段：分片编号范围 + 切分原因 + 估算时间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClipPlan {
+    start: u32,
+    end: Option<u32>,
+    reason: Option<String>,
+    started_at: i64,
+    ended_at: i64,
+}
+
+/// 收尾后真正落盘的片段。
+#[derive(Debug, Clone)]
+struct RenderedClip {
+    path: PathBuf,
+    size: i64,
+    reason: Option<String>,
+    started_at: i64,
+    ended_at: i64,
+}
+
+fn part_epoch(part: &Path) -> i64 {
+    std::fs::metadata(part)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_else(crate::db::now_ts)
+}
+
+/// 按已落分片规划片段。标题变化映射到分片结束时刻，时长/大小按分片累计；
+/// 边界只落在分片之间，所以不会打断正在写入的 ffmpeg。
+fn clip_plans(active: &Active) -> Vec<ClipPlan> {
+    let source = PathBuf::from(&active.recording.file_path);
+    let parts = segment::collect_parts(&source);
+    let metas: Vec<(u32, u64, i64)> = parts
+        .iter()
+        .filter_map(|part| {
+            let index = segment::part_index(part)?;
+            let bytes = std::fs::metadata(part).map(|meta| meta.len()).unwrap_or(0);
+            Some((index, bytes, part_epoch(part)))
+        })
+        .collect();
+    if metas.is_empty() {
+        return vec![ClipPlan {
+            start: 0,
+            end: None,
+            reason: None,
+            started_at: active.recording.started_at,
+            ended_at: crate::db::now_ts(),
+        }];
+    }
+    let plans = plan_clips(
+        &metas,
+        active.recording.started_at,
+        &active.split,
+        &active.title_changes,
+        crate::db::now_ts(),
+    );
+    for plan in &plans {
+        if let Some(reason) = plan.reason.as_deref() {
+            tracing::info!(
+                source = %source.display(),
+                start = plan.start,
+                end = plan.end.unwrap_or(0),
+                reason,
+                "收尾分割：在分片边界切出片段"
+            );
+        }
+    }
+    plans
+}
+
+/// 纯函数版本，方便覆盖标题 / 时长 / 体积三种边界。
+fn plan_clips(
+    metas: &[(u32, u64, i64)],
+    started_at: i64,
+    split: &SplitPolicy,
+    title_changes: &[i64],
+    now: i64,
+) -> Vec<ClipPlan> {
+    if metas.is_empty() {
+        return vec![ClipPlan {
+            start: 0,
+            end: None,
+            reason: None,
+            started_at,
+            ended_at: now,
+        }];
+    }
+    let split_enabled = split.on_title || split.max_duration.is_some() || split.max_size.is_some();
+    if !split_enabled {
+        return vec![ClipPlan {
+            start: metas[0].0,
+            end: None,
+            reason: None,
+            started_at,
+            ended_at: now,
+        }];
+    }
+
+    let mut plans = Vec::new();
+    let mut start_pos = 0usize;
+    let mut clip_started = started_at;
+    let mut bytes = 0u64;
+    let mut pending_reason: Option<String> = None;
+    // metas 的第三个字段是该分片最后一次写入的时间；它比实际分片结束可能滞后
+    // 数秒（ffmpeg 关闭文件时才刷新），所以时长边界改用标称分片长度推进：
+    // `-segment_time N` 的每一片就是 N 秒，不受 mtime 抖动影响。边界只能落在
+    // 两片之间，标题变化仍按分片实际时间匹配。
+    for (pos, (_index, size, ended)) in metas.iter().enumerate() {
+        bytes = bytes.saturating_add(*size);
+        if pos + 1 == metas.len() {
+            break;
+        }
+        let span = (pos - start_pos + 1) as u64;
+        let nominal_end = clip_started.saturating_add((span * split.segment_secs as u64) as i64);
+        // 分片 mtime 是 ffmpeg 最后一次写入，常常比这一片真正结束早几秒；
+        // 标题恰好在这几秒内变化时，只看 mtime 会把边界拖到下一片。
+        // 取标称结束与 mtime 的较大值，既覆盖 mtime 偏早，也不丢延迟关闭的分片。
+        let title_end = (*ended).max(nominal_end);
+        let title_hit = split.on_title
+            && title_changes
+                .iter()
+                .any(|change| *change > clip_started && *change <= title_end);
+        let duration_hit = split.max_duration.is_some_and(|limit| {
+            nominal_end.saturating_sub(clip_started) as u64 >= limit.as_secs()
+        });
+        let size_hit = split.max_size.is_some_and(|limit| bytes >= limit);
+        let reason = if title_hit {
+            Some("title")
+        } else if duration_hit {
+            Some("duration")
+        } else if size_hit {
+            Some("size")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            // 边界是第 pos+1 片的起点，标称时间比 mtime 更接近真实边界：
+            // mtime 是 ffmpeg 最后一次写入，通常比这一片真正结束早几秒。
+            let boundary_at = nominal_end;
+            plans.push(ClipPlan {
+                start: metas[start_pos].0,
+                end: Some(metas[pos + 1].0),
+                reason: pending_reason.take(),
+                started_at: clip_started,
+                ended_at: boundary_at,
+            });
+            start_pos = pos + 1;
+            clip_started = boundary_at;
+            bytes = 0;
+            pending_reason = Some(reason.to_string());
+        }
+    }
+    plans.push(ClipPlan {
+        start: metas[start_pos].0,
+        end: None,
+        reason: pending_reason,
+        started_at: clip_started,
+        ended_at: now,
+    });
+    plans
+}
+
+/// 后续片段沿用原文件名加 .clipNN 后缀，仍然走原子占位避免撞名。
+fn clip_output_path(source: &Path, index: usize) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clip".into());
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let candidate = parent.join(format!("{stem}.clip{index:02}.mp4"));
+    crate::filename::reserve_unique_path(&candidate).unwrap_or(candidate)
+}
+
+fn manifest_path(source: &Path) -> PathBuf {
+    source.with_extension("split.json")
+}
+
+fn write_manifest(path: &Path, manifest: &SplitManifest) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(manifest).map_err(|err| err.to_string())?;
+    let tmp = path.with_extension("split.tmp");
+    std::fs::write(&tmp, body).map_err(|err| format!("写 {}: {err}", tmp.display()))?;
+    // Unix 上 rename 覆盖是原子的；Windows 不允许覆盖，先删再改名。
+    if let Err(first) = std::fs::rename(&tmp, path) {
+        if !path.exists() {
+            return Err(format!("改名 {}: {first}", path.display()));
+        }
+        std::fs::remove_file(path).map_err(|err| format!("删 {}: {err}", path.display()))?;
+        std::fs::rename(&tmp, path).map_err(|err| format!("改名 {}: {err}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn read_manifest(path: &Path) -> Result<SplitManifest, String> {
+    let body =
+        std::fs::read_to_string(path).map_err(|err| format!("读 {}: {err}", path.display()))?;
+    serde_json::from_str(&body).map_err(|err| format!("解析 {}: {err}", path.display()))
+}
+
+/// 按范围收尾：remux 走 concat 合并，关闭后处理则字节拼接。
+async fn finish_range(
+    base: &Path,
+    output: &Path,
+    start: u32,
+    end: Option<u32>,
+    remux: bool,
+) -> (PathBuf, i64) {
+    // 成品已完整时直接复用。恢复路径通常已经提前判断，这里再兜一层，
+    // 避免 merge 因「目标已存在」失败后又走兜底把完整 mp4 删掉换成 .ts。
+    if let Ok(meta) = tokio::fs::metadata(output).await {
+        if meta.len() > 0 {
+            return (output.to_path_buf(), meta.len() as i64);
+        }
+    }
+    if remux {
+        match segment::merge_range(base, output, start, end).await {
+            Ok(size) => return (output.to_path_buf(), size as i64),
+            Err(err) => {
+                tracing::warn!(%err, path = %output.display(), "片段合成 mp4 失败，改用字节拼接")
+            }
+        }
+    } else {
+        tracing::info!(path = %output.display(), "文件后处理已关闭，保留 .ts 拼接结果");
+    }
+    match segment::fallback_concat_range(base, output, start, end).await {
+        Ok((target, size)) => {
+            // 占位文件是给 mp4 准备的；兜底成 .ts 后别留 0 字节空壳。
+            if target != output {
+                let _ = std::fs::remove_file(output);
+            }
+            (target, size as i64)
+        }
+        Err(err) => {
+            // 合并和字节拼接都失败：分片还在，绝不能再把 0 字节的 mp4 占位
+            // 当成成品写进历史。返回 0 让调用方保留清单/分片，下次启动重试。
+            let total: u64 = segment::collect_parts_range(base, start, end)
+                .iter()
+                .filter_map(|part| std::fs::metadata(part).ok())
+                .map(|meta| meta.len())
+                .sum();
+            tracing::warn!(
+                %err,
+                path = %output.display(),
+                parts_bytes = total,
+                "片段拼接失败，保留分片等待恢复"
+            );
+            (output.to_path_buf(), 0)
+        }
+    }
+}
+
 /// 收尾产物落定，返回（最终路径, 字节数）。
 async fn finish_file(path: &Path, remux: bool) -> (PathBuf, i64) {
     if remux {
@@ -2126,12 +2909,204 @@ async fn finish_file(path: &Path, remux: bool) -> (PathBuf, i64) {
         tracing::info!("文件后处理已关闭，保留 .ts 拼接结果");
     }
     match segment::fallback_concat(path).await {
-        Ok((target, size)) => (target, size as i64),
+        Ok((target, size)) => {
+            // 兜底产物是 .ts：原来的 .mp4 只是 0 字节占位，别留成空壳。
+            if target != path {
+                let _ = std::fs::remove_file(path);
+            }
+            (target, size as i64)
+        }
         Err(err) => {
-            tracing::warn!(%err, "分片拼接失败，只能记录分片总大小");
-            (path.to_path_buf(), segment::parts_total(path) as i64)
+            // 同上：分片还在，保留现场，不要把空占位记成完整录像。
+            tracing::warn!(
+                %err,
+                parts_bytes = segment::parts_total(path),
+                "分片拼接失败，保留分片等待恢复"
+            );
+            (path.to_path_buf(), 0)
         }
     }
+}
+
+/// 按清单恢复一次分割收尾：已渲染的片段直接沿用，缺失的按分片范围重跑。
+///
+/// 返回 None 表示清单不可用（读不到 / 解析失败），调用方应清掉登记并走普通恢复。
+async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
+    let mut manifest = match read_manifest(file) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            tracing::warn!(%err, file = %file.display(), "读取分割清单失败");
+            return None;
+        }
+    };
+    if manifest.completed || manifest.clips.is_empty() {
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(%err, file = %file.display(), "删除已完成的分割清单失败"),
+        }
+        let _ = db.set_split_manifest(&manifest.session_id, None);
+        return Some((0, 0));
+    }
+
+    let source = PathBuf::from(&manifest.source);
+    let mut recovered = 0usize;
+    let mut bytes = 0u64;
+    let mut db_ok = true;
+    for index in 0..manifest.clips.len() {
+        let clip = manifest.clips[index].clone();
+        let planned = PathBuf::from(&clip.output);
+        let mut path = PathBuf::from(&clip.path);
+        let mut size = 0i64;
+        if index < manifest.rendered && path.is_file() {
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                size = meta.len() as i64;
+            }
+        }
+        if size <= 0 {
+            // 先看成品文件，别管分片还剩多少。合并是「先写临时文件、再改名、
+            // 最后删分片」；任何一步崩溃都可能留下「成品完整 + 分片还在」。
+            // 这时重合并会覆盖完整成品，甚至把首段重录成残缺内容。
+            for candidate in [path.clone(), planned.clone(), planned.with_extension("ts")] {
+                if let Ok(meta) = tokio::fs::metadata(&candidate).await {
+                    if meta.len() > 0 {
+                        tracing::warn!(
+                            session = %manifest.session_id,
+                            clip = index,
+                            file = %candidate.display(),
+                            "发现已生成的片段成品，直接沿用"
+                        );
+                        path = candidate;
+                        size = meta.len() as i64;
+                        // 成品已完整，范围分片就是垃圾；不删会占双份空间，
+                        // 也会让下一次普通恢复误以为还没合并。
+                        for part in segment::collect_parts_range(&source, clip.start, clip.end) {
+                            let _ = tokio::fs::remove_file(part).await;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if size <= 0 {
+            let (target, got) =
+                finish_range(&source, &planned, clip.start, clip.end, manifest.remux).await;
+            path = target;
+            size = got;
+        }
+        if size <= 0 {
+            tracing::warn!(
+                session = %manifest.session_id,
+                clip = index,
+                file = %planned.display(),
+                "分割恢复失败：没有可用分片，继续尝试后续片段"
+            );
+            db_ok = false;
+            let _ = write_manifest(file, &manifest);
+            // 不能在这里整体退出：后面片段的分片可能仍然完好，先恢复它们，
+            // 清单保留到所有片段都补齐为止。
+            continue;
+        }
+
+        manifest.clips[index].path = path.display().to_string();
+        manifest.rendered = index + 1;
+        if let Err(err) = write_manifest(file, &manifest) {
+            tracing::warn!(%err, file = %file.display(), "更新分割恢复清单失败");
+        }
+
+        let existing = match db.get_session(&clip.id) {
+            Ok(existing) => existing,
+            Err(err) => {
+                tracing::warn!(%err, id = %clip.id, "恢复片段时读取数据库失败");
+                db_ok = false;
+                continue;
+            }
+        };
+        if let Some(existing) = existing {
+            // 每个片段都要补分组：旧库/早期版本可能只有首片段写了 group_id，
+            // 后续片段缺 group_id 时媒体库会把它们拆成单独一场。
+            if let Err(err) = db.set_session_group(
+                &clip.id,
+                &manifest.session_id,
+                index as i64,
+                clip.reason.as_deref(),
+            ) {
+                tracing::warn!(%err, id = %clip.id, clip = index, "恢复片段分组失败");
+                db_ok = false;
+            }
+            if existing.file_path.as_deref() != Some(path.to_string_lossy().as_ref()) {
+                if let Err(err) =
+                    db.update_session_file(&clip.id, &path.display().to_string(), size)
+                {
+                    db_ok = false;
+                    tracing::warn!(%err, id = %clip.id, "恢复片段路径失败");
+                }
+            }
+            if let Err(err) = db.finish_session_at(
+                &clip.id,
+                &manifest.status,
+                &manifest.reason,
+                clip.ended_at,
+                size,
+                existing.danmaku_path.as_deref(),
+                existing.danmaku_count,
+                manifest.error.as_deref(),
+            ) {
+                db_ok = false;
+                tracing::warn!(%err, id = %clip.id, "恢复片段状态失败");
+            }
+        } else {
+            let session = RecordSession {
+                id: clip.id.clone(),
+                room_id: manifest.room_id.clone(),
+                started_at: clip.started_at,
+                ended_at: Some(clip.ended_at),
+                status: manifest.status.clone(),
+                reason: Some(manifest.reason.clone()),
+                file_path: Some(path.display().to_string()),
+                file_size: size,
+                duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
+                quality: manifest.quality.clone(),
+                line: manifest.line.clone(),
+                error: manifest.error.clone(),
+                danmaku_path: None,
+                danmaku_count: 0,
+            };
+            // 首片段行不存在通常意味着数据库被重建过；create_clip 会补上
+            // group_id/clip_index，finish_session_at 对不存在的行是静默 0 行更新。
+            if let Err(err) = db.create_clip(
+                &session,
+                &manifest.session_id,
+                index as i64,
+                clip.reason.as_deref(),
+            ) {
+                db_ok = false;
+                tracing::warn!(%err, clip = index, "恢复片段历史失败");
+            }
+        }
+        recovered += 1;
+        bytes += size as u64;
+    }
+
+    if recovered == manifest.clips.len() && db_ok {
+        manifest.completed = true;
+        let _ = write_manifest(file, &manifest);
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(%err, file = %file.display(), "删除分割清单失败"),
+        }
+        let _ = db.set_split_manifest(&manifest.session_id, None);
+    }
+    tracing::info!(
+        session = %manifest.session_id,
+        clips = recovered,
+        total = manifest.clips.len(),
+        bytes,
+        db_ok,
+        "按分割清单恢复崩溃收尾"
+    );
+    Some((recovered, bytes))
 }
 
 /// 启动时恢复上次崩溃留下的分片。
@@ -2140,27 +3115,57 @@ async fn finish_file(path: &Path, remux: bool) -> (PathBuf, i64) {
 /// 这里先从「失败/中止」的最近记录里捞回还带分片的，再合并。
 /// 由 state.rs 放在后台任务里跑，不挡窗口出现。
 pub async fn recover_parts(db: &Db) -> (usize, u64) {
+    let mut recovered = 0usize;
+    let mut bytes = 0u64;
+    let mut handled: HashSet<String> = HashSet::new();
+    // 分割收尾的清单优先：里面记着每段的分片范围，先按它补齐，
+    // 否则普通恢复会把剩余分片重新合并进首片段，覆盖已完成的片段文件。
+    match db.manifest_sessions() {
+        Ok(rows) => {
+            for (id, file) in rows {
+                match recover_split_manifest(db, Path::new(&file)).await {
+                    Some((count, size)) => {
+                        handled.insert(id);
+                        recovered += count;
+                        bytes += size;
+                    }
+                    None => {
+                        let _ = db.set_split_manifest(&id, None);
+                    }
+                }
+            }
+        }
+        Err(err) => tracing::warn!(%err, "读取分割清单失败"),
+    }
+
     let rows = match db.recording_sessions() {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(%err, "读取待恢复会话失败");
-            return (0, 0);
+            return (recovered, bytes);
         }
     };
-    let mut recovered = 0usize;
-    let mut bytes = 0u64;
     for (id, file_path) in rows {
+        if handled.contains(&id) {
+            continue;
+        }
         let path = PathBuf::from(&file_path);
+        // 成品非空就说明合并已经完成，不管分片有没有删干净。先复用成品，
+        // 避免在「改名成功、分片还没删完」时崩溃后又重合并覆盖它。
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if meta.len() > 0 {
+                for part in segment::collect_parts(&path) {
+                    let _ = tokio::fs::remove_file(part).await;
+                }
+                let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
+                tracing::info!(id = %id, file = %file_path, size = meta.len(), "沿用已完成的录像成品");
+                recovered += 1;
+                bytes += meta.len();
+                continue;
+            }
+        }
         let has_parts = !segment::collect_parts(&path).is_empty();
         if !has_parts {
-            // 没有分片但成品已存在：可能上次是在合并之后、写库之前被杀。
-            if let Ok(meta) = tokio::fs::metadata(&path).await {
-                if meta.len() > 0 {
-                    let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
-                    recovered += 1;
-                    bytes += meta.len();
-                }
-            }
             continue;
         }
         let (target, size) = finish_file(&path, true).await;
@@ -2178,7 +3183,29 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
     match db.unfinished_sessions() {
         Ok(rows) => {
             for (id, file_path) in rows {
+                if handled.contains(&id) {
+                    continue;
+                }
                 let path = PathBuf::from(&file_path);
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    if meta.len() > 0 {
+                        let parts = segment::collect_parts(&path);
+                        // 正常退出的历史会话也会命中这里：成品已完整、分片也已
+                        // 清理干净时没有可恢复的东西，不要每次启动都报「已恢复」
+                        // 并触发一次媒体库刷新。
+                        if parts.is_empty() {
+                            continue;
+                        }
+                        for part in parts {
+                            let _ = tokio::fs::remove_file(part).await;
+                        }
+                        let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
+                        tracing::info!(id = %id, file = %file_path, size = meta.len(), "沿用失败会话已完成的成品");
+                        recovered += 1;
+                        bytes += meta.len();
+                        continue;
+                    }
+                }
                 if segment::collect_parts(&path).is_empty() {
                     continue;
                 }
@@ -2218,48 +3245,145 @@ fn emit_notice(
     let _ = app.emit(EVENT_APP_NOTICE, notice);
 }
 
-/// 选线：优先 H.264（FLV 兼容最好），其次第一个有地址的候选。
+/// 只有分辨率、没有平台 qn 时，把高度折算到统一档位。
+///
+/// 不能直接用 `height * 10`：1080p 会变成 10800，比「原画 10000」还高，
+/// 用户显式选 250/400 时会被误判成超档。这里只做保守映射，宁可低估。
+fn qn_from_height(height: u32) -> u32 {
+    match height {
+        h if h >= 2160 => crate::settings::RECORD_QN_HIGHEST,
+        h if h >= 1440 => 10_000,
+        h if h >= 1080 => 250,
+        h if h >= 720 => 150,
+        _ => 80,
+    }
+}
+
+/// 候选画质：平台 qn 优先；没有 qn 的平台（或字段缺失）退回分辨率。
+fn candidate_qn(candidate: &StreamCandidate) -> u32 {
+    candidate
+        .attrs
+        .get("qn")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| candidate.height.map(qn_from_height))
+        .unwrap_or(0)
+}
+
+/// 用户明确选了档位，实际却拿到更低档：需要提示，但绝不能因此拒绝录制。
+///
+/// `requested == 0`（跟随平台）和 `requested == 40000`（最高可用）本来就会
+/// 落在平台能给的最好档位，不算降级；`actual == 0` 是平台没给 qn，无法判断。
+fn quality_fallback(requested: u32, actual: u32) -> bool {
+    requested > 0
+        && requested < crate::settings::RECORD_QN_HIGHEST
+        && actual > 0
+        && actual < requested
+}
+
+/// 画质打分：显式档位优先选不高于目标的最高档；目标高于平台上限时直接取最高。
+/// 返回 (是否在目标以内, 画质值)，用元组比较即可。
+fn quality_rank(qn: u32, requested: u32) -> (u8, u32) {
+    if requested == 0 || requested >= crate::settings::RECORD_QN_HIGHEST {
+        return (1, qn);
+    }
+    if qn <= requested {
+        (1, qn)
+    } else {
+        // 没有不高过目标的档位时，宁可超一点也不要落到最低档。
+        (0, u32::MAX.saturating_sub(qn))
+    }
+}
+
+/// 用户明确选了编码，平台却只给得出别的编码。没有编码信息（None）时无法判断，
+/// 不告警；录制照常继续，绝不因为编码不符而拒绝开录。
+fn codec_fallback(requested: Option<Codec>, actual: Option<Codec>) -> bool {
+    requested.is_some() && actual.is_some() && requested != actual
+}
+
+/// 用户明确选了源流格式，实际拿到的格式不同。选 HLS 时 TS 视为同一类；
+/// 其余不匹配都提示，但同样只降级、不拒绝录制。
+fn format_fallback(requested: Option<StreamFormat>, actual: StreamFormat) -> bool {
+    match requested {
+        None => false,
+        Some(want) if want == actual => false,
+        Some(StreamFormat::Hls) if actual == StreamFormat::HttpTs => false,
+        Some(_) => true,
+    }
+}
+
+fn codec_rank(codec: Option<Codec>, preferred: Option<Codec>) -> u8 {
+    let codec = codec.unwrap_or(Codec::Unknown);
+    match preferred {
+        Some(want) if codec == want => 3,
+        Some(Codec::H264) if codec == Codec::H265 => 1,
+        Some(Codec::H265) if codec == Codec::H264 => 1,
+        Some(_) => 0,
+        // 自动：H.264 兼容性最好，H.265 次之。
+        None if codec == Codec::H264 => 2,
+        None if codec == Codec::H265 => 1,
+        None => 0,
+    }
+}
+
+fn format_rank(format: StreamFormat, preferred: Option<StreamFormat>) -> u8 {
+    if let Some(want) = preferred {
+        return match (want, format) {
+            // HLS/TS 同时属于 HLS 和 TS，选 HLS 时也应接受它。
+            (StreamFormat::Hls, StreamFormat::HttpTs) => 2,
+            _ if format == want => 3,
+            _ => 0,
+        };
+    }
+    match format {
+        StreamFormat::Flv => 4,
+        StreamFormat::HttpTs => 3,
+        StreamFormat::Hls => 2,
+        StreamFormat::Dash => 1,
+        StreamFormat::AudioOnly => 0,
+    }
+}
+
+fn candidate_score(candidate: &StreamCandidate, prefs: StreamPrefs) -> ((u8, u32), u8, u8, u64) {
+    let qn = candidate_qn(candidate);
+    (
+        quality_rank(qn, prefs.qn),
+        codec_rank(candidate.codec, prefs.codec),
+        format_rank(candidate.format, prefs.format),
+        // 同档位时码率高的通常更清晰；最后再按平台权重。
+        u64::from(candidate.bitrate_kbps.unwrap_or(0)) * 1000 + candidate.weight.max(0.0) as u64,
+    )
+}
+
+fn best_in_group<'a>(group: &'a StreamGroup, prefs: StreamPrefs) -> Option<&'a StreamCandidate> {
+    group
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.url.is_some())
+        .max_by_key(|candidate| candidate_score(candidate, prefs))
+}
+
+/// 选流：画质 > 编码 > 格式。
+///
+/// 用户指定了线路就只在那条线上挑；线路上没有可用地址时再退回全局最优，
+/// 否则「手动选了一条挂掉的线路」会让录制直接启动失败，反而更难用。
 fn pick_candidate<'a>(
     groups: &'a [StreamGroup],
     preferred: Option<&str>,
-) -> Option<(&'a crate::platform::StreamCandidate, &'a StreamGroup)> {
-    // 用户指定了线路就只在那条线上挑；线路上没有可用地址时再退回全局最优，
-    // 否则「手动选了一条挂掉的线路」会让录制直接启动失败，反而更难用。
+    prefs: StreamPrefs,
+) -> Option<(&'a StreamCandidate, &'a StreamGroup)> {
     if let Some(name) = preferred {
         if let Some(group) = groups.iter().find(|group| group.name == name) {
-            if let Some(picked) = pick_in_group(group) {
-                return Some(picked);
+            if let Some(candidate) = best_in_group(group, prefs) {
+                return Some((candidate, group));
             }
             tracing::warn!(line = name, "指定线路没有可用地址，改用其它线路");
         }
     }
-    let mut fallback = None;
-    for group in groups {
-        for candidate in &group.candidates {
-            if candidate.url.is_none() {
-                continue;
-            }
-            if candidate.codec == Some(crate::platform::Codec::H264) {
-                return Some((candidate, group));
-            }
-            fallback.get_or_insert((candidate, group));
-        }
-    }
-    fallback
-}
-
-fn pick_in_group(group: &StreamGroup) -> Option<(&crate::platform::StreamCandidate, &StreamGroup)> {
-    let mut fallback = None;
-    for candidate in &group.candidates {
-        if candidate.url.is_none() {
-            continue;
-        }
-        if candidate.codec == Some(crate::platform::Codec::H264) {
-            return Some((candidate, group));
-        }
-        fallback.get_or_insert((candidate, group));
-    }
-    fallback
+    groups
+        .iter()
+        .filter_map(|group| best_in_group(group, prefs).map(|candidate| (candidate, group)))
+        .max_by_key(|(candidate, _)| candidate_score(candidate, prefs))
 }
 
 fn platform_label(platform: &str) -> &'static str {
@@ -2354,7 +3478,13 @@ mod tests {
                 candidates: vec![candidate("b", Some("http://b"))],
             },
         ];
-        let (picked, group) = pick_candidate(&groups, Some("线路B")).expect("应能选到指定线路");
+        let prefs = StreamPrefs {
+            qn: 0,
+            codec: None,
+            format: None,
+        };
+        let (picked, group) =
+            pick_candidate(&groups, Some("线路B"), prefs).expect("应能选到指定线路");
         assert_eq!(group.name, "线路B");
         assert_eq!(picked.url.as_deref(), Some("http://b"));
 
@@ -2371,9 +3501,329 @@ mod tests {
                 candidates: vec![candidate("b", None)],
             },
         ];
-        let (picked, group) = pick_candidate(&broken, Some("线路B")).expect("应退回其它线路");
+        let (picked, group) =
+            pick_candidate(&broken, Some("线路B"), prefs).expect("应退回其它线路");
         assert_eq!(group.name, "线路A");
         assert_eq!(picked.url.as_deref(), Some("http://a"));
+    }
+
+    #[test]
+    fn segment_length_tracks_the_duration_limit() {
+        let seconds = |value: u64| segment_for_duration(Duration::from_secs(value));
+        assert_eq!(seconds(60), 60);
+        assert_eq!(seconds(90), 90);
+        assert_eq!(seconds(300), 300);
+        // 能整除时正好卡在上限，不会 400 秒切出 600 秒的片段。
+        assert_eq!(seconds(400), 200);
+        assert_eq!(seconds(600), 300);
+        // 除不尽时选超出最少的分片长度。
+        assert_eq!(seconds(997), 111);
+    }
+
+    #[test]
+    fn combined_split_rules_align_the_duration_cap_with_fine_segments() {
+        let bounded = |value: u64| segment_for_duration_between(Duration::from_secs(value), 15, 60);
+        assert_eq!(bounded(60), 60);
+        // 90 秒上限：45 秒分片正好在 90 秒切，不会拖到 120 秒。
+        assert_eq!(bounded(90), 45);
+        assert_eq!(bounded(100), 50);
+        // 除不尽时选超限最少的分片长度。
+        assert_eq!(bounded(61), 31);
+        assert_eq!(bounded(61) * 2, 62);
+    }
+
+    #[test]
+    fn stream_choice_prefers_quality_then_codec_then_format() {
+        use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+        let candidate = |name: &str, qn: u32, codec: Codec, format: StreamFormat| StreamCandidate {
+            id: name.into(),
+            name: name.into(),
+            weight: 1.0,
+            format,
+            codec: Some(codec),
+            width: None,
+            height: None,
+            fps: None,
+            bitrate_kbps: None,
+            url: Some(format!("http://{name}")),
+            headers: Default::default(),
+            attrs: [("qn".to_string(), qn.to_string())].into_iter().collect(),
+        };
+        let groups = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![
+                candidate("h265-4k", 40_000, Codec::H265, StreamFormat::Hls),
+                candidate("h264-origin", 10_000, Codec::H264, StreamFormat::Flv),
+                candidate("h264-250", 250, Codec::H264, StreamFormat::Flv),
+                candidate("h264-80", 80, Codec::H264, StreamFormat::Flv),
+            ],
+        }];
+        let prefs = |qn, codec, format| StreamPrefs { qn, codec, format };
+        // 画质优先：最高可用即使编码不如 H.264、格式不如 FLV，也先按画质选。
+        let (picked, _) = pick_candidate(&groups, None, prefs(0, None, None)).expect("有候选");
+        assert_eq!(picked.id, "h265-4k");
+        // 显式 250：选不高于目标的最高档。
+        let (picked, _) = pick_candidate(&groups, None, prefs(250, None, None)).expect("有候选");
+        assert_eq!(picked.id, "h264-250");
+        // 同画质下编码偏好优先于格式偏好。
+        let same_qn = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![
+                candidate("h265", 250, Codec::H265, StreamFormat::Flv),
+                candidate("h264", 250, Codec::H264, StreamFormat::Hls),
+            ],
+        }];
+        let (picked, _) =
+            pick_candidate(&same_qn, None, prefs(250, Some(Codec::H265), None)).expect("有候选");
+        assert_eq!(picked.id, "h265");
+        // 编码相同再看格式。
+        let same_codec = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![
+                candidate("flv", 250, Codec::H264, StreamFormat::Flv),
+                candidate("hls", 250, Codec::H264, StreamFormat::Hls),
+            ],
+        }];
+        let (picked, _) =
+            pick_candidate(&same_codec, None, prefs(250, None, Some(StreamFormat::Hls)))
+                .expect("有候选");
+        assert_eq!(picked.id, "hls");
+    }
+
+    #[test]
+    fn format_preference_distinguishes_ts_from_flv_and_hls() {
+        use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+        let candidate = |id: &str, format: StreamFormat| StreamCandidate {
+            id: id.into(),
+            name: id.into(),
+            weight: 1.0,
+            format,
+            codec: Some(Codec::H264),
+            width: None,
+            height: None,
+            fps: None,
+            bitrate_kbps: None,
+            url: Some(format!("http://{id}")),
+            headers: Default::default(),
+            attrs: [("qn".to_string(), "250".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let groups = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![
+                candidate("flv", StreamFormat::Flv),
+                candidate("hls-fmp4", StreamFormat::Hls),
+                candidate("hls-ts", StreamFormat::HttpTs),
+            ],
+        }];
+        let prefs = |format| StreamPrefs {
+            qn: 250,
+            codec: None,
+            format,
+        };
+        assert_eq!(
+            pick_candidate(&groups, None, prefs(Some(StreamFormat::HttpTs)))
+                .expect("有候选")
+                .0
+                .id,
+            "hls-ts"
+        );
+        assert_eq!(
+            pick_candidate(&groups, None, prefs(Some(StreamFormat::Hls)))
+                .expect("有候选")
+                .0
+                .id,
+            "hls-fmp4"
+        );
+        assert_eq!(
+            pick_candidate(&groups, None, prefs(None))
+                .expect("有候选")
+                .0
+                .id,
+            "flv"
+        );
+    }
+
+    #[test]
+    fn respawn_keeps_the_first_segments_codec_and_format() {
+        use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+        let candidate = |id: &str, codec: Codec, format: StreamFormat| StreamCandidate {
+            id: id.into(),
+            name: id.into(),
+            weight: 1.0,
+            format,
+            codec: Some(codec),
+            width: None,
+            height: None,
+            fps: None,
+            bitrate_kbps: None,
+            url: Some(format!("http://{id}")),
+            headers: Default::default(),
+            attrs: [("qn".to_string(), "250".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let groups = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![
+                candidate("h265-flv", Codec::H265, StreamFormat::Flv),
+                candidate("h264-hls", Codec::H264, StreamFormat::Hls),
+            ],
+        }];
+        let user = StreamPrefs {
+            qn: 250,
+            codec: None,
+            format: None,
+        };
+        // 首段是 H.264/HLS：续录即使 auto 也优先同编码同格式，不跟着默认偏好走。
+        let pinned = respawn_prefs(250, user, Some(Codec::H264), StreamFormat::Hls);
+        let (picked, _) = pick_candidate(&groups, None, pinned).expect("有候选");
+        assert_eq!(picked.id, "h264-hls");
+        // 平台只剩 H.265/FLV 时仍要续录，不能因为钉不住就放弃。
+        let only_h265 = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![candidate("h265-flv", Codec::H265, StreamFormat::Flv)],
+        }];
+        let (picked, _) = pick_candidate(&only_h265, None, pinned).expect("应降级续录");
+        assert_eq!(picked.id, "h265-flv");
+    }
+
+    #[test]
+    fn quality_fallback_only_when_an_explicit_target_is_missed() {
+        assert!(quality_fallback(400, 250));
+        assert!(quality_fallback(10_000, 250));
+        assert!(!quality_fallback(400, 400));
+        assert!(!quality_fallback(250, 400));
+        assert!(!quality_fallback(0, 250));
+        assert!(!quality_fallback(crate::settings::RECORD_QN_HIGHEST, 250));
+        assert!(!quality_fallback(400, 0));
+    }
+
+    #[test]
+    fn explicit_codec_and_format_fallbacks_are_detected() {
+        assert!(codec_fallback(Some(Codec::H265), Some(Codec::H264)));
+        assert!(codec_fallback(Some(Codec::H264), Some(Codec::H265)));
+        assert!(!codec_fallback(Some(Codec::H264), Some(Codec::H264)));
+        assert!(!codec_fallback(None, Some(Codec::H265)), "auto 不算降级");
+        assert!(
+            !codec_fallback(Some(Codec::H265), None),
+            "平台不给编码信息时无法判断"
+        );
+
+        assert!(format_fallback(Some(StreamFormat::Flv), StreamFormat::Hls));
+        assert!(format_fallback(
+            Some(StreamFormat::HttpTs),
+            StreamFormat::Hls
+        ));
+        assert!(!format_fallback(
+            Some(StreamFormat::Hls),
+            StreamFormat::HttpTs
+        ));
+        assert!(!format_fallback(Some(StreamFormat::Flv), StreamFormat::Flv));
+        assert!(!format_fallback(None, StreamFormat::Hls), "auto 不算降级");
+    }
+
+    #[test]
+    fn height_fallback_uses_quality_tiers_not_raw_height_times_ten() {
+        use crate::platform::{StreamCandidate, StreamFormat};
+        let candidate = |height| StreamCandidate {
+            id: format!("h{height}"),
+            name: format!("{height}p"),
+            weight: 1.0,
+            format: StreamFormat::Flv,
+            codec: None,
+            width: None,
+            height: Some(height),
+            fps: None,
+            bitrate_kbps: None,
+            url: Some(format!("http://h{height}")),
+            headers: Default::default(),
+            attrs: Default::default(),
+        };
+        assert_eq!(candidate_qn(&candidate(2160)), 40_000);
+        assert_eq!(candidate_qn(&candidate(1440)), 10_000);
+        // 旧实现会得到 10800，比原画 10000 还高，显式选 250 时会被判成超档。
+        assert_eq!(candidate_qn(&candidate(1080)), 250);
+        assert_eq!(candidate_qn(&candidate(720)), 150);
+        assert_eq!(candidate_qn(&candidate(480)), 80);
+    }
+
+    #[test]
+    fn split_plan_honors_title_duration_and_size_boundaries() {
+        let split = |on_title, duration: Option<u64>, size: Option<u64>| SplitPolicy {
+            on_title,
+            max_duration: duration.map(Duration::from_secs),
+            max_size: size,
+            segment_secs: 60,
+        };
+        // 四片，每片 60 秒 / 100 字节；编号故意不连续，边界仍按实际编号。
+        let metas = [(0, 100, 100), (2, 100, 160), (5, 100, 220), (9, 100, 280)];
+
+        let none = plan_clips(&metas, 100, &split(false, None, None), &[], 300);
+        assert_eq!(none.len(), 1);
+        assert_eq!((none[0].start, none[0].end), (0, None));
+
+        let duration = plan_clips(&metas, 100, &split(false, Some(120), None), &[], 300);
+        assert_eq!(duration.len(), 2);
+        assert_eq!((duration[0].start, duration[0].end), (0, Some(5)));
+        assert_eq!(duration[0].reason, None);
+        assert_eq!(duration[1].reason.as_deref(), Some("duration"));
+
+        // 标题在第 1 片内（mtime 100..160）变化：边界应落在第 1 片结束，
+        // 不能因为 mtime 偏早就拖到第 2 片。
+        let title = plan_clips(&metas, 100, &split(true, None, None), &[150], 300);
+        assert_eq!(title.len(), 2);
+        assert_eq!((title[0].start, title[0].end), (0, Some(2)));
+        assert_eq!(title[1].reason.as_deref(), Some("title"));
+
+        // mtime 比标称结束早 6 秒，标题落在最后 6 秒内也要在第 1 片切。
+        let late = plan_clips(&metas, 100, &split(true, None, None), &[158], 300);
+        assert_eq!(late.len(), 2);
+        assert_eq!((late[0].start, late[0].end), (0, Some(2)));
+
+        let size = plan_clips(&metas, 100, &split(false, None, Some(250)), &[], 300);
+        assert_eq!(size.len(), 2);
+        assert_eq!((size[0].start, size[0].end), (0, Some(9)));
+        assert_eq!(size[1].reason.as_deref(), Some("size"));
+
+        // 最后一片不能再切：边界永远落在两片之间。
+        let tiny = plan_clips(&metas[..1], 100, &split(false, Some(60), None), &[], 200);
+        assert_eq!(tiny.len(), 1);
+    }
+
+    #[test]
+    fn split_plan_uses_nominal_segment_length_for_duration() {
+        let split = |duration| SplitPolicy {
+            on_title: false,
+            max_duration: Some(Duration::from_secs(duration)),
+            max_size: None,
+            segment_secs: 60,
+        };
+        // mtime 比实际分片结束早 1 秒也不能把 60 秒目标拖成 120 秒一段。
+        let jitter = [(0, 100, 59), (1, 100, 119), (2, 100, 179), (3, 100, 239)];
+        let plans = plan_clips(&jitter, 0, &split(60), &[], 260);
+        assert_eq!(plans.len(), 4);
+        assert_eq!((plans[0].start, plans[0].end), (0, Some(1)));
+        assert_eq!((plans[1].start, plans[1].end), (1, Some(2)));
+        assert_eq!((plans[2].start, plans[2].end), (2, Some(3)));
+        assert_eq!(plans[3].reason.as_deref(), Some("duration"));
+
+        // 600 秒目标、300 秒分片，两片标称 600 秒就应切。
+        let long = [(0, 100, 299), (1, 100, 598), (2, 100, 897)];
+        let long_split = SplitPolicy {
+            segment_secs: 300,
+            ..split(600)
+        };
+        let plans = plan_clips(&long, 0, &long_split, &[], 920);
+        assert_eq!(plans.len(), 2);
+        assert_eq!((plans[0].start, plans[0].end), (0, Some(2)));
     }
 
     #[test]
@@ -2732,6 +4182,568 @@ mod tests {
         assert!(recorder.confirm_offline("r1"));
         // 确认后清零，下一次重新从 1 开始。
         assert!(!recorder.confirm_offline("r1"));
+    }
+
+    #[test]
+    fn split_manifest_round_trips_and_can_be_completed() {
+        let dir = std::env::temp_dir().join(format!("hivecast-manifest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let file = dir.join("2026-01-01.split.json");
+        let manifest = SplitManifest {
+            version: 1,
+            session_id: "s1".into(),
+            room_id: "r1".into(),
+            source: dir.join("2026-01-01.mp4").display().to_string(),
+            status: "finished".into(),
+            reason: "stream_ended".into(),
+            error: None,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            remux: false,
+            clips: vec![
+                ManifestClip {
+                    id: "s1".into(),
+                    output: dir.join("2026-01-01.mp4").display().to_string(),
+                    path: dir.join("2026-01-01.mp4").display().to_string(),
+                    start: 0,
+                    end: Some(2),
+                    reason: None,
+                    started_at: 100,
+                    ended_at: 300,
+                },
+                ManifestClip {
+                    id: "s2".into(),
+                    output: dir.join("2026-01-01.clip01.mp4").display().to_string(),
+                    path: dir.join("2026-01-01.clip01.ts").display().to_string(),
+                    start: 2,
+                    end: None,
+                    reason: Some("duration".into()),
+                    started_at: 300,
+                    ended_at: 500,
+                },
+            ],
+            rendered: 1,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).expect("写清单");
+        let read = read_manifest(&file).expect("读清单");
+        assert_eq!(read.clips.len(), 2);
+        assert_eq!(read.rendered, 1);
+        assert_eq!(read.clips[1].reason.as_deref(), Some("duration"));
+        assert_eq!(read.clips[1].path, manifest.clips[1].path);
+        assert!(!file.with_extension("split.tmp").exists());
+
+        let mut done = read;
+        done.completed = true;
+        write_manifest(&file, &done).expect("完成清单");
+        assert!(read_manifest(&file).expect("再读清单").completed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn recovery_finishes_split_manifest_without_overwriting_the_first_clip() {
+        let dir = std::env::temp_dir().join(format!("hivecast-recover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        db.insert_room(
+            &RoomRecord {
+                id: "r1".into(),
+                platform: "bilibili".into(),
+                room_key: "1".into(),
+                canonical_url: "https://live.bilibili.com/1".into(),
+                title: "标题".into(),
+                host_name: "主播".into(),
+                avatar_url: None,
+                cover_url: None,
+                area_name: None,
+                is_live: true,
+                started_at: Some(1),
+                online: Some(1),
+                auto_record: true,
+                monitor_paused: false,
+                record_qn: 0,
+                view_qn: 0,
+                record_line: None,
+                last_checked_at: Some(0),
+                created_at: 0,
+                updated_at: 0,
+            },
+            &crate::platform::RoomInfo {
+                host_name: "主播".into(),
+                room_name: "标题".into(),
+                avatar_url: None,
+                cover_url: None,
+                area_name: None,
+                is_live: true,
+                started_at: Some(1),
+                online: Some(1),
+                extra: serde_json::Value::Null,
+            },
+        )
+        .expect("建房间");
+        let first = RecordSession {
+            id: "s1".into(),
+            room_id: "r1".into(),
+            started_at: 100,
+            ended_at: None,
+            status: "recording".into(),
+            reason: None,
+            file_path: Some(source.display().to_string()),
+            file_size: 0,
+            duration_ms: 0,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            error: None,
+            danmaku_path: None,
+            danmaku_count: 0,
+        };
+        db.create_session(&first).expect("建会话");
+
+        // 四个假分片：前两个属于首片段，后两个属于第二段。
+        for (index, size) in [(0, 100usize), (1, 110), (2, 120), (3, 130)] {
+            let part = dir.join(format!("live.part{index:04}.ts"));
+            std::fs::write(part, vec![7u8; size]).expect("写分片");
+        }
+        let file = manifest_path(&source);
+        let manifest = SplitManifest {
+            version: 1,
+            session_id: "s1".into(),
+            room_id: "r1".into(),
+            source: source.display().to_string(),
+            status: "finished".into(),
+            reason: "stream_ended".into(),
+            error: None,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            remux: false,
+            clips: vec![
+                ManifestClip {
+                    id: "s1".into(),
+                    output: source.display().to_string(),
+                    path: source.display().to_string(),
+                    start: 0,
+                    end: Some(2),
+                    reason: None,
+                    started_at: 100,
+                    ended_at: 200,
+                },
+                ManifestClip {
+                    id: "s2".into(),
+                    output: dir.join("live.clip01.mp4").display().to_string(),
+                    path: dir.join("live.clip01.mp4").display().to_string(),
+                    start: 2,
+                    end: None,
+                    reason: Some("duration".into()),
+                    started_at: 200,
+                    ended_at: 300,
+                },
+            ],
+            rendered: 0,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).expect("写清单");
+        db.set_split_manifest("s1", Some(&file.display().to_string()))
+            .expect("登记清单");
+
+        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        assert_eq!(count, 2);
+        assert_eq!(bytes, 460);
+        assert!(!file.exists());
+        assert!(db.manifest_sessions().expect("清单列表").is_empty());
+        // 首片段保住了自己的 210 字节，没有被后面两个分片覆盖。
+        let first = db.get_session("s1").expect("查库").expect("首片段");
+        assert_eq!(first.status, "finished");
+        assert!(first
+            .file_path
+            .as_deref()
+            .unwrap_or("")
+            .ends_with("live.ts"));
+        assert_eq!(first.file_size, 210);
+        let second = db.get_session("s2").expect("查库").expect("第二段");
+        assert_eq!(second.file_size, 250);
+        assert_eq!(db.media_group_items("s1").expect("整组").len(), 2);
+        assert!(!dir.join("live.part0000.ts").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn seed_recovery_session(db: &Db, source: &Path) {
+        db.insert_room(
+            &RoomRecord {
+                id: "r1".into(),
+                platform: "bilibili".into(),
+                room_key: "1".into(),
+                canonical_url: "https://live.bilibili.com/1".into(),
+                title: "标题".into(),
+                host_name: "主播".into(),
+                avatar_url: None,
+                cover_url: None,
+                area_name: None,
+                is_live: true,
+                started_at: Some(1),
+                online: Some(1),
+                auto_record: true,
+                monitor_paused: false,
+                record_qn: 0,
+                view_qn: 0,
+                record_line: None,
+                last_checked_at: Some(0),
+                created_at: 0,
+                updated_at: 0,
+            },
+            &crate::platform::RoomInfo {
+                host_name: "主播".into(),
+                room_name: "标题".into(),
+                avatar_url: None,
+                cover_url: None,
+                area_name: None,
+                is_live: true,
+                started_at: Some(1),
+                online: Some(1),
+                extra: serde_json::Value::Null,
+            },
+        )
+        .expect("建房间");
+        db.create_session(&RecordSession {
+            id: "s1".into(),
+            room_id: "r1".into(),
+            started_at: 100,
+            ended_at: None,
+            status: "recording".into(),
+            reason: None,
+            file_path: Some(source.display().to_string()),
+            file_size: 0,
+            duration_ms: 0,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            error: None,
+            danmaku_path: None,
+            danmaku_count: 0,
+        })
+        .expect("建会话");
+    }
+
+    #[tokio::test]
+    async fn recovery_reuses_a_finished_clip_when_its_parts_are_already_gone() {
+        let dir = std::env::temp_dir().join(format!("hivecast-recover2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        seed_recovery_session(&db, &source);
+        // 首段已经合并成功并删掉分片，但 manifest 还停在 rendered=0。
+        std::fs::write(&source, vec![8u8; 210]).expect("首段成品");
+        for (index, size) in [(2, 120usize), (3, 130)] {
+            std::fs::write(dir.join(format!("live.part{index:04}.ts")), vec![7u8; size])
+                .expect("写分片");
+        }
+        let file = manifest_path(&source);
+        let manifest = SplitManifest {
+            version: 1,
+            session_id: "s1".into(),
+            room_id: "r1".into(),
+            source: source.display().to_string(),
+            status: "finished".into(),
+            reason: "stream_ended".into(),
+            error: None,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            remux: false,
+            clips: vec![
+                ManifestClip {
+                    id: "s1".into(),
+                    output: source.display().to_string(),
+                    path: source.display().to_string(),
+                    start: 0,
+                    end: Some(2),
+                    reason: None,
+                    started_at: 100,
+                    ended_at: 200,
+                },
+                ManifestClip {
+                    id: "s2".into(),
+                    output: dir.join("live.clip01.mp4").display().to_string(),
+                    path: dir.join("live.clip01.mp4").display().to_string(),
+                    start: 2,
+                    end: None,
+                    reason: Some("duration".into()),
+                    started_at: 200,
+                    ended_at: 300,
+                },
+            ],
+            rendered: 0,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).expect("写清单");
+        db.set_split_manifest("s1", Some(&file.display().to_string()))
+            .expect("登记清单");
+
+        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        assert_eq!(count, 2);
+        assert_eq!(bytes, 460);
+        let first = db.get_session("s1").expect("查库").expect("首片段");
+        assert_eq!(first.file_size, 210);
+        assert!(first
+            .file_path
+            .as_deref()
+            .unwrap_or("")
+            .ends_with("live.mp4"));
+        let second = db.get_session("s2").expect("查库").expect("第二段");
+        assert_eq!(second.file_size, 250);
+        assert!(!dir.join("live.part0002.ts").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn recovery_prefers_a_complete_clip_even_when_parts_remain() {
+        let dir = std::env::temp_dir().join(format!("hivecast-recover4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let second = dir.join("live.clip01.mp4");
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        seed_recovery_session(&db, &source);
+        // 模拟「改名成功、清单还没更新、分片也还没删」的崩溃现场。
+        std::fs::write(&source, vec![8u8; 210]).expect("首段成品");
+        std::fs::write(&second, vec![9u8; 250]).expect("第二段成品");
+        for (index, size) in [(0, 50usize), (1, 60), (2, 70), (3, 80)] {
+            std::fs::write(dir.join(format!("live.part{index:04}.ts")), vec![7u8; size])
+                .expect("写分片");
+        }
+        let file = manifest_path(&source);
+        let manifest = SplitManifest {
+            version: 1,
+            session_id: "s1".into(),
+            room_id: "r1".into(),
+            source: source.display().to_string(),
+            status: "finished".into(),
+            reason: "stream_ended".into(),
+            error: None,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            remux: false,
+            clips: vec![
+                ManifestClip {
+                    id: "s1".into(),
+                    output: source.display().to_string(),
+                    path: source.display().to_string(),
+                    start: 0,
+                    end: Some(2),
+                    reason: None,
+                    started_at: 100,
+                    ended_at: 200,
+                },
+                ManifestClip {
+                    id: "s2".into(),
+                    output: second.display().to_string(),
+                    path: second.display().to_string(),
+                    start: 2,
+                    end: None,
+                    reason: Some("duration".into()),
+                    started_at: 200,
+                    ended_at: 300,
+                },
+            ],
+            rendered: 0,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).expect("写清单");
+        db.set_split_manifest("s1", Some(&file.display().to_string()))
+            .expect("登记清单");
+
+        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        assert_eq!(count, 2);
+        assert_eq!(bytes, 460);
+        assert_eq!(
+            db.get_session("s1").expect("查库").expect("首段").file_size,
+            210
+        );
+        assert_eq!(
+            db.get_session("s2").expect("查库").expect("二段").file_size,
+            250
+        );
+        for index in 0..4 {
+            assert!(
+                !dir.join(format!("live.part{index:04}.ts")).exists(),
+                "成品已完整，分片应清理"
+            );
+        }
+        assert!(!file.exists(), "所有片段都恢复后清单应删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn orphan_recovery_reuses_a_complete_file_without_remerging() {
+        let dir = std::env::temp_dir().join(format!("hivecast-recover5-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        seed_recovery_session(&db, &source);
+        std::fs::write(&source, vec![8u8; 210]).expect("成品");
+        for (index, size) in [(0, 50usize), (1, 60)] {
+            std::fs::write(dir.join(format!("live.part{index:04}.ts")), vec![7u8; size])
+                .expect("写分片");
+        }
+
+        let (count, bytes) = recover_parts(&db).await;
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 210);
+        let row = db.get_session("s1").expect("查库").expect("会话");
+        assert_eq!(row.file_size, 210);
+        assert_eq!(row.status, "recording");
+        assert!(!dir.join("live.part0000.ts").exists());
+        assert!(!dir.join("live.part0001.ts").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn recovery_continues_past_a_missing_early_clip() {
+        let dir = std::env::temp_dir().join(format!("hivecast-recover3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        seed_recovery_session(&db, &source);
+        // 第一段的分片和成品都没了（例如用户手工清过），后两段仍完好。
+        for (index, size) in [(2, 120usize), (3, 130), (4, 140), (5, 150)] {
+            std::fs::write(dir.join(format!("live.part{index:04}.ts")), vec![7u8; size])
+                .expect("写分片");
+        }
+        let file = manifest_path(&source);
+        let manifest = SplitManifest {
+            version: 1,
+            session_id: "s1".into(),
+            room_id: "r1".into(),
+            source: source.display().to_string(),
+            status: "finished".into(),
+            reason: "stream_ended".into(),
+            error: None,
+            quality: Some("原画".into()),
+            line: Some("线路1".into()),
+            remux: false,
+            clips: vec![
+                ManifestClip {
+                    id: "s1".into(),
+                    output: source.display().to_string(),
+                    path: source.display().to_string(),
+                    start: 0,
+                    end: Some(2),
+                    reason: None,
+                    started_at: 100,
+                    ended_at: 200,
+                },
+                ManifestClip {
+                    id: "s2".into(),
+                    output: dir.join("live.clip01.mp4").display().to_string(),
+                    path: dir.join("live.clip01.mp4").display().to_string(),
+                    start: 2,
+                    end: Some(4),
+                    reason: Some("duration".into()),
+                    started_at: 200,
+                    ended_at: 300,
+                },
+                ManifestClip {
+                    id: "s3".into(),
+                    output: dir.join("live.clip02.mp4").display().to_string(),
+                    path: dir.join("live.clip02.mp4").display().to_string(),
+                    start: 4,
+                    end: None,
+                    reason: Some("duration".into()),
+                    started_at: 300,
+                    ended_at: 400,
+                },
+            ],
+            rendered: 0,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).expect("写清单");
+        db.set_split_manifest("s1", Some(&file.display().to_string()))
+            .expect("登记清单");
+
+        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        assert_eq!(count, 2, "缺失的首段不能挡住后面两段");
+        assert_eq!(bytes, 540);
+        assert!(file.exists(), "还有片段没恢复时清单必须保留");
+        assert!(!read_manifest(&file).expect("读清单").completed);
+        assert!(db.get_session("s2").expect("查库").is_some());
+        assert!(db.get_session("s3").expect("查库").is_some());
+        assert!(!dir.join("live.part0002.ts").exists());
+        assert!(!dir.join("live.part0004.ts").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "需要本机 ffmpeg"]
+    async fn split_ranges_cut_real_ffmpeg_parts() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir =
+            std::env::temp_dir().join(format!("hivecast-split-real-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let source = dir.join("live.mp4");
+        let status = tokio::process::Command::new(crate::ffmpeg::binary())
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-t",
+                "6",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "10",
+                "-c:a",
+                "aac",
+                "-f",
+                "segment",
+                "-segment_time",
+                "1",
+                "-reset_timestamps",
+                "1",
+                "-segment_format",
+                "mpegts",
+            ])
+            .arg(segment::parts_pattern(&source))
+            .status()
+            .await
+            .expect("生成分片");
+        assert!(status.success());
+        let parts = segment::collect_parts(&source);
+        assert!(parts.len() >= 4, "至少要切出四片，实际 {}", parts.len());
+        // 模拟录制时逐片写出的完成时间：每片 2 秒。
+        let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (index, part) in parts.iter().enumerate() {
+            std::fs::File::options()
+                .write(true)
+                .open(part)
+                .expect("打开分片")
+                .set_modified(base + Duration::from_secs(index as u64 * 2))
+                .expect("改时间");
+        }
+
+        let first = dir.join("live.clip00.mp4");
+        let second = dir.join("live.clip01.mp4");
+        let (path, size) = finish_range(&source, &first, 0, Some(2), true).await;
+        assert_eq!(path, first);
+        assert!(size > 1000, "第一段太小：{size}");
+        let (path, size) = finish_range(&source, &second, 2, None, true).await;
+        assert_eq!(path, second);
+        assert!(size > 1000, "第二段太小：{size}");
+        assert!(first.is_file() && second.is_file());
+        assert!(segment::collect_parts(&source).is_empty(), "分片应被清理");
+        assert!(!dir.join(".live.clip00.merging.mp4").exists());
+        assert!(!dir.join("live.clip00.concat.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -306,9 +306,14 @@ fn target_bitrate(qn: u32) -> u32 {
 }
 
 /// 实际码率 → 反推 qn，供 UI 显示「请求 4M，实际 2M」这类降级提示。
+///
+/// 8M 档是「蓝光」（qn=400），不是「原画」（qn=10000）：把 8000 当成 10000
+/// 会让「指定蓝光」的选择器把这一档当成超高画质而拒绝它，录到更低的 4M。
 fn qn_for_bitrate(bitrate: u32) -> u32 {
-    if bitrate == 0 || bitrate >= 8000 {
+    if bitrate == 0 || bitrate >= 10_000 {
         10000
+    } else if bitrate >= 8000 {
+        400
     } else if bitrate >= 4000 {
         250
     } else if bitrate >= 2000 {
@@ -654,6 +659,17 @@ mod tests {
         assert_eq!(pick_quality(&stream, 80).name, "流畅");
         // 没有 vMultiStreamInfo 时退回原画。
         assert_eq!(pick_quality(&serde_json::json!({}), 250).bitrate, 0);
+    }
+
+    #[test]
+    fn bitrate_maps_8m_to_bluray_not_origin() {
+        assert_eq!(qn_for_bitrate(0), 10000, "0 表示最高档，仍按原画记");
+        assert_eq!(qn_for_bitrate(10_000), 10000);
+        assert_eq!(qn_for_bitrate(20_100), 10000);
+        assert_eq!(qn_for_bitrate(8_000), 400, "8M 是蓝光档，不是原画");
+        assert_eq!(qn_for_bitrate(4_000), 250);
+        assert_eq!(qn_for_bitrate(2_000), 150);
+        assert_eq!(qn_for_bitrate(500), 80);
     }
 
     #[test]

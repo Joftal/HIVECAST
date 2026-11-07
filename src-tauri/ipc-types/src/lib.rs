@@ -170,7 +170,8 @@ pub struct PostProgress {
 /// 应用级播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
 ///
 /// kind 取值：started | ended | failed | disk_full | disk_lost（录制）、
-/// view_failed（观看槽位放弃重连）、credential_expired（登录态复验失败）。
+/// quality_fallback（所选画质不可用，已降档开录）、view_failed（观看槽位放弃重连）、
+/// credential_expired（登录态复验失败）。
 /// 非录制类的 room_id 为空串，host_name 放房间名或账号名。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -255,10 +256,20 @@ pub struct DanmakuBatch {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/lib/bindings/")]
 pub struct Settings {
-    /// 新房间的默认录制画质（qn，10000 = 原画）
+    /// 新房间的默认录制画质（qn；0 = 跟随平台，40000 = 最高可用，10000 = 原画）
     pub default_record_qn: u32,
     /// 新房间的默认观看画质（0 = 自动）
     pub default_view_qn: u32,
+    /// 拉流源格式偏好：auto | flv | hls | ts
+    pub record_source_format: String,
+    /// 拉流编码偏好：auto | h264 | h265
+    pub record_codec: String,
+    /// 房间标题变化时切分录像
+    pub split_on_title: bool,
+    /// 单片最大时长（秒）；0 = 不限
+    pub split_max_duration_sec: u32,
+    /// 单片最大体积（MB，1 MB = 1024 × 1024 字节）；0 = 不限
+    pub split_max_size_mb: u32,
     /// 媒体库根目录
     pub media_root: String,
     /// 同时录制的上限
@@ -383,6 +394,16 @@ pub struct MediaItem {
     pub has_file: bool,
     /// 九宫格缩略图的回环地址；还没生成时为 null
     pub thumbnail_url: Option<String>,
+    /// 同一场直播的分组：首片段的会话 id；老数据等于自己的 id
+    pub group_id: String,
+    /// 片段序号，从 0 开始
+    #[ts(type = "number")]
+    pub clip_index: i64,
+    /// 这一场直播一共有多少个片段
+    #[ts(type = "number")]
+    pub clip_count: i64,
+    /// 为什么从这里切开：title / duration / size；未分割为 null
+    pub split_reason: Option<String>,
 }
 
 /// 媒体库一页数据：items 是本页，total 是当前筛选条件下的总条数。

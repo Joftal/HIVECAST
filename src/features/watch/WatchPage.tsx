@@ -42,7 +42,7 @@ import { whenViewsIdle } from "../../lib/viewLifecycle";
 import { useWatchPrefs } from "../../lib/watchPrefs";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const QN_OPTIONS = [0, 10000, 400, 250, 150, 80] as const;
+const QN_OPTIONS = [0, 40000, 10000, 400, 250, 150, 80] as const;
 const MAX_SLOTS = 4;
 
 export type WatchSeed = { ids: string[]; nonce: number; kind?: LayoutKind };

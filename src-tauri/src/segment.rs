@@ -31,8 +31,55 @@ fn stem_of(final_path: &Path) -> String {
     final_path.with_extension("").display().to_string()
 }
 
+/// 合并时的临时成品路径：保留扩展名，ffmpeg 才能按正确容器写。
+fn staging_path(output: &Path) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("output");
+    let extension = output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("mp4");
+    output.with_file_name(format!(".{stem}.merging.{extension}"))
+}
+
 /// 收集本次录制的全部分片，按编号升序（字典序等于编号序，因为补了零）。
 pub fn collect_parts(final_path: &Path) -> Vec<PathBuf> {
+    collect_parts_range(final_path, 0, None)
+}
+
+/// 只收集编号在 `[start, end)` 里的分片：`end=None` 表示到末尾。
+///
+/// 分割录制时同一个 ffmpeg 持续写 `partNNNN.ts`，收尾按范围把不同的
+/// 片段合并成各自的成品，因此不能再无脑合并全部。
+pub fn collect_parts_range(final_path: &Path, start: u32, end: Option<u32>) -> Vec<PathBuf> {
+    let mut parts = collect_all_parts(final_path);
+    parts.retain(|part| {
+        let index = part_index(part).unwrap_or(u32::MAX);
+        index >= start && end.is_none_or(|end| index < end)
+    });
+    parts
+}
+
+/// 分片文件名的编号；不是本场分片时返回 None。
+pub fn part_index(part: &Path) -> Option<u32> {
+    let name = part.file_name()?.to_str()?;
+    let (_, digits) = name.rsplit_once(".part")?;
+    digits.strip_suffix(".ts")?.parse().ok()
+}
+
+/// 本场分片里最大的编号 + 1：续录时从这里接着编号，
+/// 即使前面的分片已经被分割流程删掉也不会覆盖旧片。
+pub fn next_part_index(final_path: &Path) -> u32 {
+    collect_all_parts(final_path)
+        .iter()
+        .filter_map(|part| part_index(part))
+        .max()
+        .map_or(0, |index| index.saturating_add(1))
+}
+
+fn collect_all_parts(final_path: &Path) -> Vec<PathBuf> {
     let Some(parent) = final_path.parent() else {
         return Vec::new();
     };
@@ -62,9 +109,30 @@ pub fn collect_parts(final_path: &Path) -> Vec<PathBuf> {
 ///
 /// 成功后删除分片与清单；失败保留现场，交给调用方决定是否降级成 .ts。
 pub async fn merge(final_path: &Path) -> Result<u64, String> {
-    let parts = collect_parts(final_path);
+    merge_range(final_path, final_path, 0, None).await
+}
+
+/// 合并指定范围的分片到 `output`。
+///
+/// `final_path` 是分片基名（决定 `partNNNN.ts` 的查找位置），`output`
+/// 是这一段的成品路径。合并成功后只删除本次用到的分片，后面的片段
+/// 仍在被正在运行的 ffmpeg 写入。
+pub async fn merge_range(
+    final_path: &Path,
+    output: &Path,
+    start: u32,
+    end: Option<u32>,
+) -> Result<u64, String> {
+    let parts = collect_parts_range(final_path, start, end);
     if parts.is_empty() {
         return Err("没有分片".into());
+    }
+    // 已经非空的成品说明上一次合并成功但还没来得及删分片/写清单。
+    // 直接报错让调用方复用，别把完整文件覆盖成一次新的（可能残缺的）合并。
+    if let Ok(meta) = tokio::fs::metadata(output).await {
+        if meta.len() > 0 {
+            return Err("合并目标已存在且非空".into());
+        }
     }
     let started = std::time::Instant::now();
     let total: u64 = parts
@@ -74,12 +142,12 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         .sum();
     tracing::debug!(
         target: "hivecast_lib::segment",
-        path = %final_path.display(),
+        path = %output.display(),
         parts = parts.len(),
         bytes = total,
         "开始合并分片"
     );
-    let list = final_path.with_extension("concat.txt");
+    let list = output.with_extension("concat.txt");
     let mut body = String::new();
     for part in &parts {
         // concat 清单里用单引号包路径，路径内的单引号要转义
@@ -90,7 +158,12 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         .await
         .map_err(|err| format!("写合并清单失败：{err}"))?;
 
-    let output = tokio::process::Command::new(ffmpeg::binary())
+    // 先写临时文件，成功后再改名到成品。否则「ffmpeg 已经写完、分片删了
+    // 一半」时崩溃，下次恢复会把剩余分片当成完整范围重新合并，覆盖掉本来
+    // 完好的成品。临时文件用 .merging 保留原扩展名，让 ffmpeg 选对封装器。
+    let staging = staging_path(output);
+    let _ = tokio::fs::remove_file(&staging).await;
+    let run = tokio::process::Command::new(ffmpeg::binary())
         .arg("-hide_banner")
         .arg("-nostdin")
         .arg("-loglevel")
@@ -106,33 +179,43 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
         .arg("copy")
         .arg("-movflags")
         .arg("+faststart")
-        .arg(final_path)
+        .arg(&staging)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await;
     // 清单只是 ffmpeg 的输入，失败时留着只会变成媒体库里看不见的垃圾（I3）。
-    let output = match output {
-        Ok(output) => output,
+    let run = match run {
+        Ok(run) => run,
         Err(err) => {
             let _ = tokio::fs::remove_file(&list).await;
+            let _ = tokio::fs::remove_file(&staging).await;
             return Err(format!("启动 ffmpeg 失败：{err}"));
         }
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !run.status.success() {
+        let stderr = String::from_utf8_lossy(&run.stderr);
         let _ = tokio::fs::remove_file(&list).await;
+        let _ = tokio::fs::remove_file(&staging).await;
         return Err(format!("合并失败：{}", tail(&stderr, 240)));
     }
-    let size = tokio::fs::metadata(final_path)
+    let size = tokio::fs::metadata(&staging)
         .await
         .map(|meta| meta.len())
         .unwrap_or(0);
     if size == 0 {
         let _ = tokio::fs::remove_file(&list).await;
+        let _ = tokio::fs::remove_file(&staging).await;
         return Err("合并产物为空".into());
+    }
+    // 成品路径在开录时就原子占位了（0 字节），改名之前清掉占位。
+    let _ = tokio::fs::remove_file(output).await;
+    if let Err(err) = tokio::fs::rename(&staging, output).await {
+        let _ = tokio::fs::remove_file(&list).await;
+        let _ = tokio::fs::remove_file(&staging).await;
+        return Err(format!("合并产物改名失败：{err}"));
     }
     for part in &parts {
         let _ = tokio::fs::remove_file(part).await;
@@ -140,7 +223,7 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
     let _ = tokio::fs::remove_file(&list).await;
     tracing::info!(
         target: "hivecast_lib::segment",
-        path = %final_path.display(),
+        path = %output.display(),
         parts = parts.len(),
         bytes = size,
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -153,14 +236,24 @@ pub async fn merge(final_path: &Path) -> Result<u64, String> {
 ///
 /// mpegts 是自同步的流式容器，字节级拼接仍然可播——比「合并失败只剩一堆分片」强。
 pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String> {
-    let parts = collect_parts(final_path);
+    fallback_concat_range(final_path, final_path, 0, None).await
+}
+
+/// 把指定范围的分片按字节拼成单个 .ts，目标名由 `output` 决定。
+pub async fn fallback_concat_range(
+    final_path: &Path,
+    output: &Path,
+    start: u32,
+    end: Option<u32>,
+) -> Result<(PathBuf, u64), String> {
+    let parts = collect_parts_range(final_path, start, end);
     if parts.is_empty() {
         return Err("没有分片".into());
     }
-    let target = final_path.with_extension("ts");
+    let target = output.with_extension("ts");
     tracing::warn!(
         target: "hivecast_lib::segment",
-        path = %final_path.display(),
+        path = %output.display(),
         parts = parts.len(),
         "改用字节拼接分片"
     );
@@ -175,18 +268,29 @@ pub async fn fallback_concat(final_path: &Path) -> Result<(PathBuf, u64), String
         .await
         .map_err(|err| format!("创建 {} 失败：{err}", target.display()))?;
     for part in &parts {
-        let mut src = tokio::fs::File::open(part)
-            .await
-            .map_err(|err| format!("读取 {} 失败：{err}", part.display()))?;
-        tokio::io::copy(&mut src, &mut out)
-            .await
-            .map_err(|err| format!("拼接 {} 失败：{err}", part.display()))?;
+        let mut src = match tokio::fs::File::open(part).await {
+            Ok(src) => src,
+            Err(err) => {
+                drop(out);
+                let _ = tokio::fs::remove_file(&target).await;
+                return Err(format!("读取 {} 失败：{err}", part.display()));
+            }
+        };
+        if let Err(err) = tokio::io::copy(&mut src, &mut out).await {
+            drop(out);
+            let _ = tokio::fs::remove_file(&target).await;
+            return Err(format!("拼接 {} 失败：{err}", part.display()));
+        }
     }
     drop(out);
     let size = tokio::fs::metadata(&target)
         .await
         .map(|meta| meta.len())
         .unwrap_or(0);
+    if size == 0 {
+        let _ = tokio::fs::remove_file(&target).await;
+        return Err("拼接产物为空".into());
+    }
     for part in &parts {
         let _ = tokio::fs::remove_file(part).await;
     }
@@ -286,6 +390,40 @@ mod tests {
                 "[t][a][b].part0010.ts"
             ]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn next_part_index_continues_after_the_highest_remaining_part() {
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        assert_eq!(next_part_index(&final_path), 0, "没有分片时从 0 开始");
+        std::fs::write(part_name(&final_path, 0), b"a").unwrap();
+        std::fs::write(part_name(&final_path, 3), b"b").unwrap();
+        std::fs::write(part_name(&final_path, 1), b"c").unwrap();
+        assert_eq!(next_part_index(&final_path), 4, "不能覆盖已有最大编号");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn merge_refuses_to_overwrite_a_complete_output() {
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        let output = dir.join("clip.mp4");
+        std::fs::write(part_name(&final_path, 0), b"AAA").unwrap();
+        std::fs::write(part_name(&final_path, 1), b"BBB").unwrap();
+        std::fs::write(&output, b"COMPLETE").unwrap();
+
+        let err = merge_range(&final_path, &output, 0, None)
+            .await
+            .expect_err("不能覆盖完整成品");
+        assert!(err.contains("已存在"));
+        assert_eq!(std::fs::read(&output).unwrap(), b"COMPLETE");
+        assert_eq!(collect_parts_range(&final_path, 0, None).len(), 2);
+        assert!(!dir.join(".clip.merging.mp4").exists(), "临时文件应清理");
+        assert!(!output.with_extension("concat.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -104,11 +104,15 @@ impl AppState {
             tracing::warn!(error = %err, "历史 Cookie 加密迁移失败");
         }
         crate::credential::load_from_db(&db);
-        // B 站登录态会过期，启动后异步复验一次；网络慢不该拖住启动。
+        // B 站登录态会过期，启动后异步复验一次；之后每 30 分钟再看一次，
+        // 运行中 Cookie 失效也能及时发现（网络慢不该拖住启动）。
         let db_for_auth = db.clone();
         let app_for_auth = app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::account::revalidate(&db_for_auth, &app_for_auth).await;
+            loop {
+                crate::account::revalidate(&db_for_auth, &app_for_auth).await;
+                tokio::time::sleep(crate::account::REVALIDATE_INTERVAL).await;
+            }
         });
 
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。

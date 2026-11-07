@@ -278,6 +278,11 @@ export async function mediaList(query: MediaQuery = {}): Promise<MediaPage> {
   });
 }
 
+/** 补齐一整场直播的全部片段（分页只拿到部分时用）。 */
+export async function mediaGroupClips(groupId: string): Promise<MediaItem[]> {
+  return invoke<MediaItem[]>("media_group_clips", { groupId });
+}
+
 /** 主播墙筛选条件。 */
 export type HostQuery = {
   query?: string | null;
@@ -334,6 +339,11 @@ export async function mediaReveal(sessionId: string): Promise<void> {
 
 export async function mediaDelete(sessionId: string, deleteFile: boolean): Promise<void> {
   return invoke("media_delete", { sessionId, deleteFile });
+}
+
+/** 删除一整场直播的所有片段，返回删掉的片段数。 */
+export async function mediaDeleteGroup(groupId: string, deleteFile: boolean): Promise<number> {
+  return invoke<number>("media_delete_group", { groupId, deleteFile });
 }
 
 

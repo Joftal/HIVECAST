@@ -3,16 +3,32 @@
 /**
  * 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。
  */
-export type MediaItem = { id: string, roomId: string, platform: string, title: string, hostName: string, 
+export type MediaItem = { id: string, roomId: string, platform: string, title: string, hostName: string,
 /**
  * 视频文件绝对路径（可能已不存在，配合 has_file 判断）
  */
-path: string, size: number, durationMs: number, startedAt: number, status: string, danmakuCount: number, 
+path: string, size: number, durationMs: number, startedAt: number, status: string, danmakuCount: number,
 /**
  * 磁盘上还能不能找到这个文件
  */
-hasFile: boolean, 
+hasFile: boolean,
 /**
  * 九宫格缩略图的回环地址；还没生成时为 null
  */
-thumbnailUrl: string | null, };
+thumbnailUrl: string | null,
+/**
+ * 同一场直播的分组：首片段的会话 id；老数据等于自己的 id
+ */
+groupId: string,
+/**
+ * 片段序号，从 0 开始
+ */
+clipIndex: number,
+/**
+ * 这一场直播一共有多少个片段
+ */
+clipCount: number,
+/**
+ * 为什么从这里切开：title / duration / size；未分割为 null
+ */
+splitReason: string | null, };

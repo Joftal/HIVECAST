@@ -37,6 +37,7 @@ function formatBytes(bytes: number): string {
 
 const QN_OPTIONS = [
   { value: 0, key: "qnAuto" },
+  { value: 40000, key: "qnHighest" },
   { value: 10000, key: "qnOrigin" },
   { value: 400, key: "qnBluray" },
   { value: 250, key: "qnUltra" },
@@ -142,7 +143,12 @@ type SearchEntry = { page: PageKey; id: string; titleKey: string; descKey?: stri
 
 const SEARCH_INDEX: SearchEntry[] = [
   { page: "account", id: "set-account", titleKey: "settings.navAccount", descKey: "settings.pageAccountDesc", extra: "cookie 登录 扫码 qr login account" },
-  { page: "record", id: "set-record-quality", titleKey: "settings.recordQuality", descKey: "settings.recordQualityHint", extra: "画质 清晰度 quality qn" },
+  { page: "record", id: "set-record-quality", titleKey: "settings.recordQuality", descKey: "settings.recordQualityHint", extra: "画质 清晰度 quality qn 最高 4K HDR" },
+  { page: "record", id: "set-source-format", titleKey: "settings.sourceFormat", descKey: "settings.sourceFormatHint", extra: "源流 格式 flv hls m3u8 ts stream format" },
+  { page: "record", id: "set-record-codec", titleKey: "settings.recordCodec", descKey: "settings.recordCodecHint", extra: "编码 codec h264 h265 hevc" },
+  { page: "record", id: "set-split-title", titleKey: "settings.splitOnTitle", descKey: "settings.splitOnTitleHint", extra: "分割 标题 split title" },
+  { page: "record", id: "set-split-duration", titleKey: "settings.splitMaxDuration", descKey: "settings.splitMaxDurationHint", extra: "分割 时长 duration split" },
+  { page: "record", id: "set-split-size", titleKey: "settings.splitMaxSize", descKey: "settings.splitMaxSizeHint", extra: "分割 大小 体积 size split" },
   { page: "record", id: "set-view-quality", titleKey: "settings.viewQuality", descKey: "settings.viewQualityHint", extra: "观看 画质 quality qn view" },
   { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
   { page: "record", id: "set-auto-remux", titleKey: "settings.autoRemux", descKey: "settings.autoRemuxHint", extra: "mp4 转码 remux 后处理" },
@@ -201,6 +207,31 @@ function SelectField({
       <select
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
+        className={FIELD + " cursor-pointer appearance-none pr-7"}
+      >
+        {children}
+      </select>
+      {CHEVRON}
+    </div>
+  );
+}
+
+function StringSelectField({
+  value,
+  onChange,
+  children,
+  className,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cx("relative", className ?? "w-[208px]")}>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
         className={FIELD + " cursor-pointer appearance-none pr-7"}
       >
         {children}
@@ -271,6 +302,8 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const [discardOpen, setDiscardOpen] = useState(false);
   const [preview, setPreview] = useState<FilenamePreview | null>(null);
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
+  // 分割体积在 UI 上允许 MB/GB 切换，落库统一存 MB。
+  const [sizeUnit, setSizeUnit] = useState<"MB" | "GB">("MB");
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const dirty = Boolean(settings) && JSON.stringify(settings) !== initial;
@@ -516,7 +549,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     if (page === "record") {
       return (
         <div className="space-y-6">
-          <Section title={t("settings.sectionQuality")}>
+          <Section title={t("settings.sectionStream")} desc={t("settings.sectionStreamDesc")}>
             <Row
               id="set-record-quality"
               focus={focusId === "set-record-quality"}
@@ -535,6 +568,40 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
               </SelectField>
             </Row>
             <Row
+              id="set-source-format"
+              focus={focusId === "set-source-format"}
+              title={t("settings.sourceFormat")}
+              desc={t("settings.sourceFormatHint")}
+            >
+              <StringSelectField
+                value={settings.recordSourceFormat}
+                onChange={(next) => patch({ recordSourceFormat: next })}
+              >
+                <option value="auto">{t("settings.formatAuto")}</option>
+                <option value="flv">{t("settings.formatFlv")}</option>
+                <option value="hls">{t("settings.formatHls")}</option>
+                <option value="ts">{t("settings.formatTs")}</option>
+              </StringSelectField>
+            </Row>
+            <Row
+              id="set-record-codec"
+              focus={focusId === "set-record-codec"}
+              title={t("settings.recordCodec")}
+              desc={t("settings.recordCodecHint")}
+            >
+              <StringSelectField
+                value={settings.recordCodec}
+                onChange={(next) => patch({ recordCodec: next })}
+              >
+                <option value="auto">{t("settings.codecAuto")}</option>
+                <option value="h264">{t("settings.codecH264")}</option>
+                <option value="h265">{t("settings.codecH265")}</option>
+              </StringSelectField>
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionViewQuality")}>
+            <Row
               id="set-view-quality"
               focus={focusId === "set-view-quality"}
               title={t("settings.viewQuality")}
@@ -550,6 +617,87 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                   </option>
                 ))}
               </SelectField>
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionSplit")} desc={t("settings.sectionSplitDesc")}>
+            <Row
+              id="set-split-title"
+              focus={focusId === "set-split-title"}
+              title={t("settings.splitOnTitle")}
+              desc={t("settings.splitOnTitleHint")}
+            >
+              <Switch
+                checked={settings.splitOnTitle}
+                onChange={(next) => patch({ splitOnTitle: next })}
+                label={t("settings.splitOnTitle")}
+              />
+            </Row>
+            <Row
+              id="set-split-duration"
+              focus={focusId === "set-split-duration"}
+              title={t("settings.splitMaxDuration")}
+              desc={t("settings.splitMaxDurationHint")}
+            >
+              <div className="flex items-center gap-1.5">
+                <div className="w-[100px]">
+                  <input
+                    type="number"
+                    min={0}
+                    max={86400}
+                    value={settings.splitMaxDurationSec}
+                    onChange={(event) =>
+                      patch({ splitMaxDurationSec: Number(event.target.value) })
+                    }
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-[11px] text-muted">
+                  {t("settings.unitSeconds")}
+                </span>
+              </div>
+            </Row>
+            <Row
+              id="set-split-size"
+              focus={focusId === "set-split-size"}
+              title={t("settings.splitMaxSize")}
+              desc={t("settings.splitMaxSizeHint")}
+            >
+              <div className="flex items-center gap-1.5">
+                <div className="w-[100px]">
+                  <input
+                    type="number"
+                    min={0}
+                    max={sizeUnit === "GB" ? 1024 : 1048576}
+                    value={
+                      sizeUnit === "GB"
+                        ? Math.round((settings.splitMaxSizeMb / 1024) * 100) / 100
+                        : settings.splitMaxSizeMb
+                    }
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      patch({
+                        splitMaxSizeMb: Math.max(
+                          0,
+                          Math.round(value * (sizeUnit === "GB" ? 1024 : 1)),
+                        ),
+                      });
+                    }}
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                </div>
+                <div className="relative w-[76px]">
+                  <select
+                    value={sizeUnit}
+                    onChange={(event) => setSizeUnit(event.target.value as "MB" | "GB")}
+                    className={FIELD + " cursor-pointer appearance-none pr-7"}
+                  >
+                    <option value="MB">{t("settings.unitMB")}</option>
+                    <option value="GB">{t("settings.unitGB")}</option>
+                  </select>
+                  {CHEVRON}
+                </div>
+              </div>
             </Row>
           </Section>
 

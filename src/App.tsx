@@ -193,7 +193,9 @@ export default function App() {
                   ? "viewFailed"
                   : notice.kind === "credential_expired"
                     ? "credentialExpired"
-                    : notice.kind;
+                    : notice.kind === "quality_fallback"
+                      ? "qualityFallback"
+                      : notice.kind;
           sendNotification({
             title: t(`notice.${key}.title`),
             body: t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" }),
