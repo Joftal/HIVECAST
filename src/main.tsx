@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { ToastStackProvider } from "./components/arc/toast-stack/toast-stack";
 import { logUiError } from "./lib/uiLog";
 import { installDesktopShellGuards } from "./lib/desktopShell";
 import "./i18n";
@@ -24,14 +25,16 @@ const ArcLab = React.lazy(() => import("./features/design/ArcLab"));
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      {lab ? (
-        <React.Suspense fallback={null}>
-          <ArcLab />
-        </React.Suspense>
-      ) : (
-        <App />
-      )}
-    </ErrorBoundary>
+    <ToastStackProvider>
+      <ErrorBoundary>
+        {lab ? (
+          <React.Suspense fallback={null}>
+            <ArcLab />
+          </React.Suspense>
+        ) : (
+          <App />
+        )}
+      </ErrorBoundary>
+    </ToastStackProvider>
   </React.StrictMode>,
 );

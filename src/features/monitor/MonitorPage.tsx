@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Switch, cx } from "../../components/ui/Controls";
 import { Checkbox } from "../../components/arc/checkbox/checkbox";
+import { FloatingButtonGroup } from "../../components/arc/floating-button-group/floating-button-group";
+import { useNotify } from "../../lib/notify";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
 import { PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
-  describeError,
   isTauri,
   mediaReveal,
   onRoomsChanged,
@@ -44,6 +45,15 @@ const PLATFORM_DOT: Record<string, string> = {
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。 */
 const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 76px 138px 148px";
+// 行内动作组比 Arc 默认 sm 再紧一档：英文 Watch/Record 也能放进 148px 操作列。
+const ROW_ACTION_GROUP_STYLE = {
+  "--fbg-h": "28px",
+  "--fbg-pad": "2px",
+  "--fbg-gap": "2px",
+  "--fbg-pad-x": "8px",
+  "--fbg-outer": "8px",
+  "--fbg-radius": "6px",
+} as CSSProperties;
 const ROW_H = 76;
 const THUMB_W = 120;
 const THUMB_H = 68;
@@ -264,8 +274,10 @@ export default function MonitorPage({
   const [addAutoRecord, setAddAutoRecord] = useState(true);
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
+  const [busyAction, setBusyAction] = useState<"watch" | "record" | null>(null);
+  const notify = useNotify();
+  // rooms://changed 可能连续触发；后台加载失败只提示一次。
+  const loadErrorShown = useRef(false);
   const [now, setNow] = useState(() => Date.now());
   // 房间下播后把它从多选里摘掉，避免带着离线房间进分屏。
   useEffect(() => {
@@ -312,10 +324,14 @@ export default function MonitorPage({
       const [rooms, history] = await Promise.all([roomsList(), sessionsList(undefined, 200)]);
       setViews(rooms);
       setSessions(history);
+      loadErrorShown.current = false;
     } catch (err) {
-      setError(describeError(err));
+      if (!loadErrorShown.current) {
+        loadErrorShown.current = true;
+        notify.error(err);
+      }
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -346,7 +362,6 @@ export default function MonitorPage({
   useEffect(() => {
     setLines(null);
     setConfirmId(null);
-    setNotice(null);
     setMenuId(null);
   }, [selectedId]);
 
@@ -428,16 +443,17 @@ export default function MonitorPage({
   const mergeable = selectedSessions.filter((session) => session.status !== "recording" && session.filePath).length;
 
   const run = useCallback(
-    async (id: string, action: () => Promise<unknown>) => {
+    async (id: string, action: () => Promise<unknown>, kind: "record" | null = null) => {
       setBusyId(id);
-      setError(null);
+      setBusyAction(kind);
       try {
         await action();
         await load();
       } catch (err) {
-        setError(describeError(err));
+        notify.error(err);
       } finally {
         setBusyId(null);
+        setBusyAction(null);
       }
     },
     [load],
@@ -447,7 +463,6 @@ export default function MonitorPage({
     const value = input.trim();
     if (!value || adding) return;
     setAdding(true);
-    setError(null);
     try {
       await roomAdd(value, addMonitor, addAutoRecord);
       setInput("");
@@ -456,7 +471,7 @@ export default function MonitorPage({
       setAddOpen(false);
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setAdding(false);
     }
@@ -464,14 +479,15 @@ export default function MonitorPage({
 
   const openWatch = async (roomId: string) => {
     setBusyId(roomId);
-    setError(null);
+    setBusyAction("watch");
     try {
       await viewOpen(roomId);
       onOpenWatch?.();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusyId(null);
+      setBusyAction(null);
     }
   };
 
@@ -481,7 +497,7 @@ export default function MonitorPage({
     try {
       await mediaReveal(last.id);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -494,7 +510,7 @@ export default function MonitorPage({
     setMenuId(null);
     await run(room.id, () => roomRemove(room.id));
     // 移除只隐藏房间，录像历史仍按主播留在媒体库，明确告知免得以为被删了。
-    setNotice({ text: t("monitor.removedKept"), error: false });
+    notify.info(t("monitor.removedKept"));
   };
 
   const loadLines = async (roomId: string, qn: number) => {
@@ -503,7 +519,7 @@ export default function MonitorPage({
       setLines(await roomLines(roomId, qn));
     } catch (err) {
       setLines([]);
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setLineBusy(false);
     }
@@ -511,14 +527,13 @@ export default function MonitorPage({
 
   const doPost = async (roomId: string, kind: PostKind, sessionId?: string) => {
     setPostBusy(postKey(roomId, kind, sessionId));
-    setNotice(null);
     try {
       const result: PostResult = await roomMergeSessions(roomId);
       const name = result.path.split(/[\\/]/).pop() ?? result.path;
-      setNotice({ text: size(result.size) + " · " + name, error: false });
+      notify.success(t("monitor.post.merge"), size(result.size) + " · " + name);
       await load();
     } catch (err) {
-      setNotice({ text: describeError(err), error: true });
+      notify.error(err);
     } finally {
       setPostBusy(null);
     }
@@ -554,7 +569,11 @@ export default function MonitorPage({
 
   const toggleRecording = (view: RoomView) => {
     const isRecording = Boolean(view.recording);
-    void run(view.room.id, () => (isRecording ? recordStop(view.room.id) : recordStart(view.room.id)));
+    void run(
+      view.room.id,
+      () => (isRecording ? recordStop(view.room.id) : recordStart(view.room.id)),
+      "record",
+    );
   };
 
   const togglePick = (view: RoomView) => {
@@ -567,7 +586,7 @@ export default function MonitorPage({
       return;
     }
     if (picked.size >= 4) {
-      setNotice({ text: t("monitor.maxSelection"), error: false });
+      notify.warning(t("monitor.maxSelection"));
       return;
     }
     setPicked(new Set(picked).add(room.id));
@@ -579,6 +598,8 @@ export default function MonitorPage({
     const isSelected = selectedId === room.id;
     const isPicked = picked.has(room.id);
     const busy = busyId === room.id;
+    const watchBusy = busy && busyAction === "watch";
+    const recordBusy = busy && busyAction === "record";
     const elapsed = view.recording ? now / 1000 - view.recording.startedAt : 0;
     const last = lastByRoom.get(room.id);
     const startedAt = view.recording ? view.recording.startedAt : last?.startedAt;
@@ -590,7 +611,6 @@ export default function MonitorPage({
         className={cx(
           "grid cursor-default items-center gap-x-3 border-b border-line px-5 text-left transition-colors",
           isPicked ? "bg-accent-soft" : isSelected ? "bg-raised/60" : "hover:bg-raised/70",
-          busy ? "opacity-60" : "",
         )}
       >
         <div className="relative" style={{ width: THUMB_W, height: THUMB_H }}>
@@ -654,24 +674,36 @@ export default function MonitorPage({
           )}
         </span>
         <span className="relative flex items-center justify-end gap-1.5">
-          <Button
+          <FloatingButtonGroup
+            label={t("monitor.rowActions")}
+            variant="muted"
             size="sm"
-            variant="primary"
-            disabled={busy}
-            onClick={() => void openWatch(room.id)}
-            className="h-8 px-3 text-[12.5px]"
-          >
-            {t("monitor.watch")}
-          </Button>
-          <Button
-            size="sm"
-            disabled={busy || (!room.isLive && !isRecording)}
-            title={isRecording ? t("monitor.stopRecord") : t("monitor.startRecord")}
-            onClick={() => toggleRecording(view)}
-            className={cx("h-8 px-2.5 text-[12.5px]", isRecording ? "border-rec/30 text-rec hover:bg-rec/10" : "")}
-          >
-            {isRecording ? t("monitor.stop") : t("monitor.rec")}
-          </Button>
+            style={ROW_ACTION_GROUP_STYLE}
+            items={[
+              {
+                id: "watch",
+                label: t("monitor.watch"),
+                tone: "accent",
+                loading: watchBusy,
+                onSelect: () => {
+                  if (busy) return;
+                  void openWatch(room.id);
+                },
+              },
+              {
+                id: "record",
+                label: isRecording ? t("monitor.stop") : t("monitor.rec"),
+                reserveLabels: [t("monitor.rec"), t("monitor.stop")],
+                tone: isRecording ? "danger" : "default",
+                disabled: !room.isLive && !isRecording,
+                loading: recordBusy,
+                onSelect: () => {
+                  if (busy) return;
+                  toggleRecording(view);
+                },
+              },
+            ]}
+          />
           <button
             type="button"
             aria-label={t("monitor.more")}
@@ -713,7 +745,7 @@ export default function MonitorPage({
                   type="button"
                   onClick={() => {
                     setMenuId(null);
-                    setNotice({ text: t("monitor.roomSettingsSoon"), error: false });
+                    notify.info(t("monitor.roomSettingsSoon"));
                   }}
                   className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
                 >
@@ -1050,32 +1082,6 @@ export default function MonitorPage({
               </Button>
             </div>
           </form>
-        </div>
-      ) : null}
-
-      {error ? (
-        <div className="flex shrink-0 items-center gap-3 border-b border-rec/20 bg-rec/10 px-5 py-2 text-[12.5px] text-rec">
-          <span className="min-w-0 flex-1 truncate" title={error}>
-            {error}
-          </span>
-          <button type="button" onClick={() => setError(null)} className="focus-ring rounded-ctl px-1 hover:bg-rec/10">
-            ✕
-          </button>
-        </div>
-      ) : null}
-      {notice ? (
-        <div
-          className={cx(
-            "flex shrink-0 items-center gap-3 border-b px-5 py-2 text-[12.5px]",
-            notice.error ? "border-rec/20 bg-rec/10 text-rec" : "border-ok/20 bg-ok/10 text-ok",
-          )}
-        >
-          <span className="min-w-0 flex-1 truncate" title={notice.text}>
-            {notice.text}
-          </span>
-          <button type="button" onClick={() => setNotice(null)} className="focus-ring rounded-ctl px-1 hover:bg-raised">
-            ✕
-          </button>
         </div>
       ) : null}
 

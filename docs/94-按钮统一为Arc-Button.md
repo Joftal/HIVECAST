@@ -60,7 +60,19 @@
 
 ![Arc Button 深色预览](assets/94-arc-button-dark.png)
 
-## 5. 已知限制
+## 5. 监控行操作反馈修复（2026-11-09）
+
+- **现象**：点击监控行的「观看」或「录制」时，整行会短暂变成 `opacity-60`，同时两个 Arc Button 切到 disabled 背景/文字，看起来像整行刷新了一下。
+- **原因**：行级 `busy ? "opacity-60"` 直接作用在整行；Arc Button 的 disabled 样式还会把 secondary 的底色换成 `surface-muted`，两处叠加放大了闪烁感。
+- **修复**：
+  - 移除行级 `opacity-60`，行背景、缩略图、文字在操作期间保持不动；
+  - `Controls.Button` 新增 `loading` 与 `ariaDisabled`，`aria-disabled` 只阻止重复触发，不触发 Arc 的 disabled 换色；
+  - 监控行用 `busyAction` 区分 `watch` / `record`，只有被点击的按钮显示 Arc loading spinner，另一个按钮用 `aria-disabled` 静默锁定；
+  - 两个按钮的 `onClick` 仍保留 `if (busy) return` 兜底，键盘触发也不会重复执行。
+- **结果**：点击后行内容不移动、不整体变暗，只在被点的按钮上出现加载态；录制完成后正常切换成「停止」。
+- **后续**：监控行的观看/录制已换成 `FloatingButtonGroup`，行内 loading 由 item 的 `loading` 承担，`busyAction` 仍沿用；详见 `95-监控行浮动按钮组.md`。
+
+## 6. 已知限制
 
 - **主按钮保留品牌色**：Arc 原生 primary 是黑白；本项目把 `primary` 映射到新增的 `accent` 变体，避免整页主操作从蓝/琥珀变成黑/白。ArcLab 仍保留原生 `primary` 做对照。
 - **`danger` 改为 Arc 风格**：从浅红底改为表面 + 红字 + 红描边；如果想恢复更重的警示底，可再加 `dangerSoft`，不要在业务里手写红色按钮。

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, useReducedMotion } from "motion/react";import { Button, IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
+import { ToastStack } from "./components/arc/toast-stack/toast-stack";
 import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
@@ -27,6 +28,7 @@ import {
   type Settings,
 } from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
+import { useNotify } from "./lib/notify";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
 
@@ -40,6 +42,8 @@ export default function App() {
   // 从缺失提示进入设置时落到存储页；null = 普通打开。
   const [settingsPage, setSettingsPage] = useState<PageKey | null>(null);
   const [ffmpegMissing, setFfmpegMissing] = useState(false);
+  const ffmpegToastShown = useRef(false);
+  const notify = useNotify();
   // 观看页全屏时收起顶栏，把整块窗口让给画面。
   const [immersive, setImmersive] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("light");
@@ -69,6 +73,28 @@ export default function App() {
   useEffect(() => {
     refreshFfmpeg();
   }, [refreshFfmpeg]);
+
+  // ffmpeg 缺失是持久环境问题：用一条不自动消失的顶层 warning toast 代替页面内的横条。
+  useEffect(() => {
+    if (!ffmpegMissing) {
+      ffmpegToastShown.current = false;
+      return;
+    }
+    if (ffmpegToastShown.current) return;
+    ffmpegToastShown.current = true;
+    notify.toast({
+      type: "warning",
+      title: t("app.ffmpegMissing"),
+      action: {
+        label: t("app.ffmpegFix"),
+        onClick: () => {
+          setSettingsPage("storage");
+          setSettingsOpen(true);
+        },
+      },
+      duration: Infinity,
+    });
+  }, [ffmpegMissing, notify, t]);
 
   // 启动时读一次性设置：语言、主题与通知开关。读失败就保持默认，不打扰用户。
   useEffect(() => {
@@ -227,7 +253,7 @@ export default function App() {
 
         const off = await onAppNotice((notice) => {
           const current = notifyRef.current;
-          if (!granted || !current) return;
+          if (!current) return;
           const allowed =
             notice.kind === "credential_expired"
               ? current.notifyAuth
@@ -247,9 +273,20 @@ export default function App() {
                     : notice.kind === "quality_fallback"
                       ? "qualityFallback"
                       : notice.kind;
-          sendNotification({
-            title: t(`notice.${key}.title`),
-            body: t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" }),
+          const title = t(`notice.${key}.title`);
+          const body = t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" });
+          if (granted) sendNotification({ title, body });
+          notify.toast({
+            type:
+              notice.kind === "started" || notice.kind === "ended"
+                ? "success"
+                : notice.kind === "quality_fallback"
+                  ? "info"
+                  : notice.kind === "credential_expired"
+                    ? "warning"
+                    : "error",
+            title,
+            description: body,
           });
         });
         if (disposed) off();
@@ -263,7 +300,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [t]);
+  }, [notify, t]);
 
   const dark = appearance === "dark";
   // macOS 用 Overlay 标题栏，红绿灯浮在自绘顶栏左侧，需要给它让位。
@@ -358,25 +395,7 @@ export default function App() {
       </header>
       )}
 
-      {ffmpegMissing && !(tab === "watch" && immersive) ? (
-        <div
-          style={{ paddingLeft: isMac ? 78 : 14 }}
-          className="flex h-8 shrink-0 items-center gap-2 border-b border-warn/25 bg-warn/10 pr-3 text-[11px] text-warn"
-        >
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
-          <span className="min-w-0 flex-1 truncate">{t("app.ffmpegMissing")}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsPage("storage");
-              setSettingsOpen(true);
-            }}
-            className="focus-ring shrink-0 rounded-ctl px-2 py-0.5 font-medium underline decoration-warn/40 underline-offset-2 hover:bg-warn/10"
-          >
-            {t("app.ffmpegFix")}
-          </button>
-        </div>
-      ) : null}
+
 
       <motion.main
         key={tab}
@@ -416,6 +435,8 @@ export default function App() {
           onQuitNow={quitClose}
         />
       ) : null}
+
+      <ToastStack position="top-center" label={t("toast.region")} />
 
       <SettingsView
         open={settingsOpen}

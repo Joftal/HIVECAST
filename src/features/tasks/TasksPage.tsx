@@ -1,17 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, cx } from "../../components/ui/Controls";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
 import { PageBody, PageChip, PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
-import {
-  describeError,
-  isTauri,
-  postCancel,
-  taskBoard,
-  type TaskBoard,
-  type TaskRecord,
-} from "../../lib/ipc";
+import { isTauri, postCancel, taskBoard, type TaskBoard, type TaskRecord } from "../../lib/ipc";
+import { useNotify } from "../../lib/notify";
 
 const KIND_KEYS: Record<string, string> = {
   record: "tasks.kindRecord",
@@ -67,10 +61,12 @@ function canCancel(task: TaskRecord): boolean {
 export default function TasksPage() {
   const { t } = useTranslation();
   const [board, setBoard] = useState<TaskBoard>({ running: [], history: [] });
-  const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const notify = useNotify();
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState<"all" | "running" | "history">("all");
+  // 2 秒轮询失败时不重复刷错误 toast；恢复成功后重新允许下一次提示。
+  const loadErrorShown = useRef(false);
 
   const load = useCallback(async () => {
     if (!isTauri()) {
@@ -80,13 +76,16 @@ export default function TasksPage() {
     try {
       const next = await taskBoard(100);
       setBoard(next);
-      setError(null);
+      loadErrorShown.current = false;
     } catch (err) {
-      setError(describeError(err));
+      if (!loadErrorShown.current) {
+        loadErrorShown.current = true;
+        notify.error(err);
+      }
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     void load();
@@ -107,12 +106,11 @@ export default function TasksPage() {
   const cancel = async (task: TaskRecord) => {
     if (!task.sessionId) return;
     setBusyId(task.id);
-    setError(null);
     try {
       await postCancel(task.sessionId);
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusyId(null);
     }
@@ -144,12 +142,6 @@ export default function TasksPage() {
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{history.length}</span>
         </PageChip>
       </PageToolbar>
-
-      {error ? (
-        <div className="mx-5 mb-2 rounded-ctl border border-rec/30 bg-rec/8 px-3 py-2 text-[12px] text-rec">
-          {error}
-        </div>
-      ) : null}
 
       <PageBody className="pb-8">
         {loaded && running.length === 0 && history.length === 0 ? (

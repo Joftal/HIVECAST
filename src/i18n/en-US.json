@@ -20,6 +20,11 @@
     "media": "Library",
     "tasks": "Tasks"
   },
+  "toast": {
+    "region": "Notifications",
+    "errorTitle": "Action failed",
+    "warningTitle": "Heads up"
+  },
   "media": {
     "title": "Library",
     "subtitle": "Finished recordings are grouped by host, ready to play, remux, merge, or export.",
@@ -477,6 +482,7 @@
     "statusRecording": "Recording",
     "statusIdle": "Idle",
     "recordDetail": "Recording details",
+    "rowActions": "Room actions",
     "closeDetail": "Close details",
     "filterPlatform": "Platform",
     "statusPaused": "Paused",

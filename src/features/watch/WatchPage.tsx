@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
 import { PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { useNotify } from "../../lib/notify";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
@@ -21,7 +22,6 @@ import {
 import { Button, cx } from "../../components/ui/Controls";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
-  describeError,
   isTauri,
   layoutGet,
   layoutSet,
@@ -67,7 +67,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const [loudHint, setLoudHint] = useState(true);
   const [danmaku, setDanmaku] = useState<Record<number, boolean>>({});
   const [danmakuOpen, setDanmakuOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const notify = useNotify();
+  const loadErrorShown = useRef(false);
   const [busy, setBusy] = useState(false);
   // 紧凑模式与全屏都只影响这一页；紧凑持久化，全屏跟随窗口状态。
   const { compact, setCompact } = useWatchPrefs();
@@ -116,10 +117,14 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       setRooms(nextRooms);
       setSlots(nextSlots);
       setRoomsLoaded(true);
+      loadErrorShown.current = false;
     } catch (err) {
-      setError(describeError(err));
+      if (!loadErrorShown.current) {
+        loadErrorShown.current = true;
+        notify.error(err);
+      }
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -155,7 +160,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
           await restore(savedLayout.rooms);
         }
       } catch (err) {
-        if (!disposed) setError(describeError(err));
+        if (!disposed) notify.error(err);
       }
       if (disposed) return;
       persistOk.current = canPersist;
@@ -238,11 +243,22 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 
   const setVolume = (slot: number, volume: number) => setVolumes((prev) => ({ ...prev, [slot]: volume }));
   const toggleDanmaku = (slot: number) => setDanmaku((prev) => ({ ...prev, [slot]: !(prev[slot] ?? true) }));
-  const muteAll = () => {
+  const muteAll = useCallback(() => {
     const next: Record<number, number> = {};
     for (const session of sessions) next[session.slot] = 0;
     setVolumes(next);
-  };
+  }, [sessions]);
+
+  // 多路同时发声是提示而不是常驻面板：收进顶部 toast，并把静音操作作为 action。
+  useEffect(() => {
+    if (sounding < 3 || !loudHint) return;
+    setLoudHint(false);
+    notify.toast({
+      type: "warning",
+      title: t("watch.multiSound"),
+      action: { label: t("watch.muteAll"), onClick: () => muteAll() },
+    });
+  }, [loudHint, muteAll, notify, sounding, t]);
 
   /** 版式 kind → 分割树；路数对不上时退回该路数的默认版式。 */
   function treeFor(kind: LayoutKind | undefined, n: number) {
@@ -278,7 +294,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     setVariant(layout.variant);
     setPortrait(layout.portrait);
     setBusy(true);
-    setError(null);
     try {
       await whenViewsIdle();
       const current = await viewSlots();
@@ -302,7 +317,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       setPanelOpen(false);
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -343,13 +358,12 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     } else {
       if (order.includes(roomId)) return;
       if (count >= MAX_SLOTS) {
-        setError(t("watch.slotsFull"));
+        notify.warning(t("watch.slotsFull"));
         return;
       }
     }
 
     setBusy(true);
-    setError(null);
     try {
       if (replaceAt !== undefined) {
         const previous = order[replaceAt];
@@ -372,7 +386,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       }
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -382,12 +396,11 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     const value = input.trim();
     if (!value) return;
     setBusy(true);
-    setError(null);
     try {
       const view = await roomAdd(value);
       if (!order.includes(view.room.id)) {
         if (count >= MAX_SLOTS) {
-          setError(t("watch.slotsFull"));
+          notify.warning(t("watch.slotsFull"));
           return;
         }
         await viewOpen(view.room.id);
@@ -398,7 +411,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       setInput("");
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -407,7 +420,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   async function closeSlot(slot: number) {
     const roomId = sessions.find((session) => session.slot === slot)?.roomId;
     if (!roomId) {
-      await viewClose(slot).catch((err) => setError(describeError(err)));
+      await viewClose(slot).catch((err) => notify.error(err));
       await load();
       return;
     }
@@ -421,7 +434,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       await load();
     } catch (err) {
       setOrder(order);
-      setError(describeError(err));
+      notify.error(err);
     }
   }
 
@@ -429,7 +442,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     try {
       await viewSetQuality(slot, qn);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   }
 
@@ -437,7 +450,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     try {
       await viewSetLine(slot, line);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   }
 
@@ -445,19 +458,18 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     try {
       await viewRetry(slot);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   }
 
   /** 占位格重试：房间已开播时把这一格拉起来，不改动版式与其它格。 */
   async function openPlaceholder(roomId: string) {
     setBusy(true);
-    setError(null);
     try {
       await viewOpen(roomId);
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -579,9 +591,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       await getCurrentWindow().setFullscreen(next);
       applyFullscreen(next);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
-  }, [applyFullscreen]);
+  }, [applyFullscreen, notify]);
 
   // 系统全屏（绿灯按钮、Cmd+Ctrl+F）也会改窗口状态，用 resize 事件把本地状态对齐。
   useEffect(() => {
@@ -761,39 +773,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
         ) : (
           <PageToolbar>{toolbar}</PageToolbar>
         )}
-
-        {error ? (
-          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2 rounded-[6px] border border-rec/35 bg-rec/12 px-2.5 py-1.5 text-[11px] text-rec">
-            <span className="flex-1 break-all">{error}</span>
-            <button type="button" onClick={() => setError(null)} className="text-rec/70 hover:text-rec">
-              ✕
-            </button>
-          </div>
-        ) : null}
-
-        {sounding >= 3 && loudHint ? (
-          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2 rounded-[6px] border border-line bg-raised px-2.5 py-1.5 text-[11px] text-ink-soft">
-            <span className="flex-1">{t("watch.multiSound")}</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                muteAll();
-                setLoudHint(false);
-              }}
-            >
-              {t("watch.muteAll")}
-            </Button>
-            <button
-              type="button"
-              aria-label={t("watch.dismissHint")}
-              onClick={() => setLoudHint(false)}
-              className="text-faint hover:text-ink-soft"
-            >
-              ✕
-            </button>
-          </div>
-        ) : null}
 
         {danmakuOpen && count > 0 ? (
           <div className="mx-3 mt-2 grid shrink-0 gap-3 rounded-[8px] border border-line bg-surface p-3 sm:grid-cols-2 lg:grid-cols-4">

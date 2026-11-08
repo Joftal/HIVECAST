@@ -14,6 +14,7 @@ import {
 } from "../../lib/ipc";
 import { formatCountdown, useSecondsLeft } from "../../lib/countdown";
 import { Button } from "../../components/ui/Controls";
+import { useNotify } from "../../lib/notify";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"] as const;
 type Platform = (typeof PLATFORMS)[number];
@@ -36,8 +37,7 @@ type QrState = {
 export default function AccountSection() {
   const { t } = useTranslation();
   const [items, setItems] = useState<CredentialInfo[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const notify = useNotify();
   const [editing, setEditing] = useState<Platform | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -48,11 +48,10 @@ export default function AccountSection() {
     if (!isTauri()) return;
     try {
       setItems(await credentialsList());
-      setError(null);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     void load();
@@ -62,16 +61,14 @@ export default function AccountSection() {
 
   const saveCookie = async (platform: Platform) => {
     setBusy(true);
-    setError(null);
-    setNotice(null);
     try {
       const saved = await credentialSave(platform, draft);
       setEditing(null);
       setDraft("");
-      setNotice(t("account.savedAs", { name: saved.accountName }));
+      notify.success(t("account.savedAs", { name: saved.accountName }));
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -84,14 +81,12 @@ export default function AccountSection() {
     }
     setBusy(true);
     setConfirming(null);
-    setError(null);
-    setNotice(null);
     try {
       await credentialDelete(platform);
-      setNotice(t("account.loggedOut"));
+      notify.success(t("account.loggedOut"));
       await load();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -99,7 +94,6 @@ export default function AccountSection() {
 
   const openQr = async () => {
     setQr(null);
-    setError(null);
     setBusy(true);
     try {
       const ticket = await bilibiliQrStart();
@@ -110,7 +104,7 @@ export default function AccountSection() {
         expiresAt: Date.now() + Math.max(1, ticket.expiresIn) * 1000,
       });
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
@@ -167,7 +161,7 @@ export default function AccountSection() {
         );
         if (poll.state === "confirmed") {
           window.clearInterval(timer);
-          setNotice(poll.message);
+          notify.success(poll.message);
           setQr(null);
           await load();
         }
@@ -334,8 +328,6 @@ export default function AccountSection() {
                     setEditing(platform);
                     setDraft("");
                     setQr(null);
-                    setNotice(null);
-                    setError(null);
                   }}
                 >
                   {item ? t("account.updateCookie") : t("account.pasteCookie")}
@@ -368,12 +360,6 @@ export default function AccountSection() {
         );
       })}
 
-      {(notice || error) && (
-        <div className="space-y-1 px-5 py-3">
-          {notice && <p className="animate-fade-rise text-[11px] text-live">{notice}</p>}
-          {error && <p className="animate-fade-rise text-[11px] leading-4 text-rec">{error}</p>}
-        </div>
-      )}
     </div>
   );
 }

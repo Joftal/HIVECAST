@@ -20,6 +20,11 @@
     "media": "媒体库",
     "tasks": "任务"
   },
+  "toast": {
+    "region": "通知",
+    "errorTitle": "操作失败",
+    "warningTitle": "注意"
+  },
   "media": {
     "title": "媒体库",
     "subtitle": "录制完成的录像按主播归类，可回放、转封装、合并与导出弹幕。",
@@ -477,6 +482,7 @@
     "statusRecording": "录制中",
     "statusIdle": "未录制",
     "recordDetail": "录制详情",
+    "rowActions": "直播间操作",
     "closeDetail": "关闭详情",
     "filterPlatform": "平台",
     "statusPaused": "已暂停监控",

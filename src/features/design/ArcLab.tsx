@@ -2,6 +2,8 @@ import { useState } from "react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Switch } from "@/components/arc/switch/switch";
 import { Checkbox } from "@/components/arc/checkbox/checkbox";
+import { FloatingButtonGroup } from "@/components/arc/floating-button-group/floating-button-group";
+import { ToastStack, useToastStack } from "@/components/arc/toast-stack/toast-stack";
 import { Button } from "@/components/arc/button/button";
 import { SelectMenu } from "@/components/ui/SelectMenu";
 import { applyTheme } from "@/lib/theme";
@@ -18,6 +20,8 @@ export default function ArcLab() {
   const [switchOff, setSwitchOff] = useState(false);
   const [checkA, setCheckA] = useState(true);
   const [checkB, setCheckB] = useState(false);
+  const [demoRecording, setDemoRecording] = useState(false);
+  const { toast } = useToastStack();
 
   const changeTheme = (next: Theme, _variant: unknown, trigger: HTMLElement) => {
     const apply = () => {
@@ -75,6 +79,69 @@ export default function ArcLab() {
             <Button variant="accent" size="lg">
               Large
             </Button>
+          </div>
+        </section>
+
+        <section className="card flex flex-col gap-4 p-6">
+          <h2 className="text-[13px] font-semibold">Toast stack</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" onClick={() => toast({ type: "info", title: "直播间设置即将上线" })}>
+              Info
+            </Button>
+            <Button variant="secondary" onClick={() => toast({ type: "success", title: "已保存", description: "设置已写入本地数据库。" })}>
+              Success
+            </Button>
+            <Button variant="secondary" onClick={() => toast({ type: "warning", title: "多路声音同时播放", description: "需要安静时点「全部静音」。" })}>
+              Warning
+            </Button>
+            <Button variant="secondary" onClick={() => toast({ type: "error", title: "操作失败", description: "无法连接到直播间，请稍后重试。" })}>
+              Error
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                const id = toast({ type: "loading", title: "正在处理", description: "转封装进行中…" });
+                window.setTimeout(() => toast({ type: "success", id, title: "处理完成", description: "已生成 MP4。" }), 1400);
+              }}
+            >
+              Loading → success
+            </Button>
+          </div>
+          <ToastStack position="top-center" label="通知" />
+        </section>
+
+        <section className="card flex flex-col gap-4 p-6">
+          <h2 className="text-[13px] font-semibold">Floating button group</h2>
+          <div className="flex items-center justify-between gap-4 rounded-[10px] border border-line bg-surface px-4 py-3">
+            <span className="min-w-0 text-[12.5px] text-ink">示例直播间</span>
+            <FloatingButtonGroup
+              label="行内操作预览"
+              variant="muted"
+              size="sm"
+              items={[
+                { id: "watch", label: "观看", tone: "accent", onSelect: () => undefined },
+                {
+                  id: "record",
+                  label: demoRecording ? "停止" : "录制",
+                  reserveLabels: ["录制", "停止"],
+                  tone: demoRecording ? "danger" : "default",
+                  onSelect: () => setDemoRecording((value) => !value),
+                },
+              ]}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <FloatingButtonGroup
+              label="浮动操作预览"
+              variant="floating"
+              size="md"
+              items={[
+                { id: "undo", label: "撤销", onSelect: () => undefined },
+                { id: "redo", label: "重做", onSelect: () => undefined },
+                { type: "separator" },
+                { id: "share", label: "分享", onSelect: () => undefined },
+              ]}
+            />
           </div>
         </section>
 

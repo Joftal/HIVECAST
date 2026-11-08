@@ -7,6 +7,7 @@ import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
 import { Checkbox } from "../../components/arc/checkbox/checkbox";
+import { useNotify } from "../../lib/notify";
 import { PageBody, PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import {
   isTauri,
@@ -107,16 +108,7 @@ function formatDate(ts: number): string {
   );
 }
 
-function describeError(err: unknown): string {
-  if (typeof err === "string") return err;
-  if (err instanceof Error) return err.message;
-  // Tauri 把 AppError 序列化成 { code, message }，不是 Error 实例。
-  if (err && typeof err === "object" && "message" in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(err);
-}
+
 
 function loadVolume(): number {
   try {
@@ -233,8 +225,7 @@ export default function MediaPage() {
   const [groupLoading, setGroupLoading] = useState<string | null>(null);
 
   // —— 共用状态 ——
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const notify = useNotify();
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
   const [platform, setPlatform] = useState("all");
@@ -309,15 +300,14 @@ export default function MediaPage() {
         setHosts((prev) => (offset > 0 ? [...prev, ...page.items] : page.items));
         setHostTotal(page.total);
         setHostCounts(page.platformCounts);
-        setError(null);
       } catch (err) {
-        setError(describeError(err));
+        notify.error(err);
       } finally {
         setHostLoading(false);
         setHostLoadingMore(false);
       }
     },
-    [keyword, platform, hostSort],
+    [keyword, platform, hostSort, notify],
   );
 
   const loadFiles = useCallback(
@@ -345,15 +335,14 @@ export default function MediaPage() {
         }));
         setItems((prev) => (offset > 0 ? [...prev, ...withThumbs] : withThumbs));
         setTotal(page.total);
-        setError(null);
       } catch (err) {
-        setError(describeError(err));
+        notify.error(err);
       } finally {
         setLoading(false);
         setLoadingMore(false);
       }
     },
-    [hostId, keyword, range, onlyDanmaku, sort],
+    [hostId, keyword, range, onlyDanmaku, sort, notify],
   );
 
   // 分页只按片段返回，一场直播可能只出现在本页一部分；点“+N”补齐整组。
@@ -371,14 +360,13 @@ export default function MediaPage() {
           for (const clip of withThumbs) byId.set(clip.id, clip);
           return Array.from(byId.values());
         });
-        setError(null);
       } catch (err) {
-        setError(describeError(err));
+        notify.error(err);
       } finally {
         setGroupLoading(null);
       }
     },
-    [],
+    [notify],
   );
 
   useEffect(() => {
@@ -481,8 +469,6 @@ export default function MediaPage() {
     setKeyword("");
     setSelected([]);
     setConfirmDelete(false);
-    setError(null);
-    setNotice(null);
     setHostId(host.roomId);
   };
 
@@ -490,8 +476,6 @@ export default function MediaPage() {
     setHostId(null);
     setSelected([]);
     setConfirmDelete(false);
-    setError(null);
-    setNotice(null);
     void loadHosts(0);
   };
 
@@ -593,14 +577,12 @@ export default function MediaPage() {
       await stopPlayback(previous);
     }
     setPlayBusy(item.id);
-    setError(null);
-    setNotice(null);
     setConfirmSourceDelete(false);
     try {
       const playback = await mediaPlay(item.id, null, source);
       setPlaying({ item, playback, source });
     } catch (err) {
-      setError(t("media.playFailed") + "：" + describeError(err));
+      notify.error(err, t("media.playFailed"));
     } finally {
       setPlayBusy(null);
     }
@@ -611,14 +593,13 @@ export default function MediaPage() {
     if (!playing || playing.source === source) return;
     const item = playing.item;
     setPlayBusy(item.id);
-    setError(null);
     setConfirmSourceDelete(false);
     try {
       await stopPlayback(item.id);
       const playback = await mediaPlay(item.id, null, source);
       setPlaying({ item, playback, source });
     } catch (err) {
-      setError(t("media.playFailed") + "：" + describeError(err));
+      notify.error(err, t("media.playFailed"));
     } finally {
       setPlayBusy(null);
     }
@@ -628,7 +609,7 @@ export default function MediaPage() {
     try {
       await mediaRevealSource(item.id);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -636,7 +617,7 @@ export default function MediaPage() {
     try {
       await mediaRevealFile(file.sessionId, file.path);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -647,7 +628,7 @@ export default function MediaPage() {
       const playback = await mediaPlay(item.id, positionMs, source);
       setPlaying({ item, playback, source });
     } catch (err) {
-      setError(t("media.playFailed") + "：" + describeError(err));
+      notify.error(err, t("media.playFailed"));
     }
   };
 
@@ -678,7 +659,7 @@ export default function MediaPage() {
 
     if (kind === "reveal") {
       for (const item of selectedItems) {
-        await mediaReveal(item.id).catch((err) => setError(describeError(err)));
+        await mediaReveal(item.id).catch((err) => notify.error(err));
       }
       return;
     }
@@ -689,17 +670,15 @@ export default function MediaPage() {
     }
 
     setBusy(kind);
-    setError(null);
-    setNotice(null);
     setProgress(null);
     try {
       if (kind === "merge") {
         if (selectedItems.length < 2) {
-          setError(t("media.mergeHint"));
+          notify.warning(t("media.mergeHint"));
           return;
         }
         const result = await sessionsMerge(selectedItems.map((item) => item.id));
-        setNotice(t("media.mergeDone", { size: formatSize(result.size) }));
+        notify.success(t("media.mergeDone", { size: formatSize(result.size) }));
         setSelected([]);
         await refreshAll();
         return;
@@ -710,7 +689,7 @@ export default function MediaPage() {
           if (playing && group.clips.some((clip) => clip.id === playing.item.id)) await closePlay();
           await mediaDeleteGroup(group.id, group.hasFile);
         }
-        setNotice(t("media.deletedBatch", { n: deleteClipCount }));
+        notify.success(t("media.deletedBatch", { n: deleteClipCount }));
         setSelected([]);
         setConfirmDelete(false);
         await refreshAll();
@@ -724,7 +703,7 @@ export default function MediaPage() {
         else await sessionExportDanmaku(item.id);
         done += 1;
       }
-      setNotice(
+      notify.success(
         kind === "remux"
           ? t("media.remuxDone", { n: done })
           : t("media.exportDone", { n: done }),
@@ -735,7 +714,7 @@ export default function MediaPage() {
       // 整组删除是逐段进行的：中途失败时前面的片段可能已经删掉，
       // 刷新一下列表，避免界面还留着已经不在的卡片。
       if (kind === "delete") await refreshAll();
-      setError(t("media.postFailed") + "：" + describeError(err));
+      notify.error(err, t("media.postFailed"));
     } finally {
       setBusy(null);
       setProgress(null);
@@ -746,8 +725,6 @@ export default function MediaPage() {
   const postOne = async (kind: "remux" | "ass", item: MediaItem) => {
     if (busy) return;
     setBusy(kind);
-    setError(null);
-    setNotice(null);
     try {
       if (kind === "remux") {
         const result = await sessionRemux(item.id);
@@ -768,14 +745,14 @@ export default function MediaPage() {
         };
         setItems((prev) => prev.map((current) => (current.id === item.id ? updated : current)));
         setPlaying((prev) => (prev && prev.item.id === item.id ? { ...prev, item: updated } : prev));
-        setNotice(t("media.remuxOne", { size: formatSize(result.size) }));
+        notify.success(t("media.remuxOne", { size: formatSize(result.size) }));
       } else {
         await sessionExportDanmaku(item.id);
-        setNotice(t("media.exportOne"));
+        notify.success(t("media.exportOne"));
       }
       await refreshAll();
     } catch (err) {
-      setError(t("media.postFailed") + "：" + describeError(err));
+      notify.error(err, t("media.postFailed"));
       await refreshAll();
     } finally {
       setBusy(null);
@@ -786,14 +763,12 @@ export default function MediaPage() {
   const retryOne = async (item: MediaItem) => {
     if (busy) return;
     setBusy("retry:" + item.id);
-    setError(null);
-    setNotice(null);
     try {
       const result = await postRetry(item.id);
-      setNotice(t("media.retryDone", { size: formatSize(result.size) }));
+      notify.success(t("media.retryDone", { size: formatSize(result.size) }));
       await refreshAll();
     } catch (err) {
-      setError(t("media.postFailed") + "：" + describeError(err));
+      notify.error(err, t("media.postFailed"));
       await refreshAll();
     } finally {
       setBusy(null);
@@ -801,12 +776,11 @@ export default function MediaPage() {
   };
 
   const cancelOne = async (item: MediaItem) => {
-    setError(null);
     try {
       const count = await postCancel(item.id);
-      setNotice(count > 0 ? t("media.cancelRequested") : t("media.cancelIdle"));
+      notify.info(count > 0 ? t("media.cancelRequested") : t("media.cancelIdle"));
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -818,8 +792,6 @@ export default function MediaPage() {
       return;
     }
     setBusy("delete-source:" + item.id);
-    setError(null);
-    setNotice(null);
     try {
       await mediaDeleteSource(item.id);
       setConfirmSourceDelete(false);
@@ -830,10 +802,10 @@ export default function MediaPage() {
       setPlaying((prev) =>
         prev && prev.item.id === item.id ? { ...prev, item: updated } : prev,
       );
-      setNotice(t("media.sourceDeleteDone"));
+      notify.success(t("media.sourceDeleteDone"));
       await refreshAll();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(null);
     }
@@ -841,7 +813,6 @@ export default function MediaPage() {
 
   const removeOne = async (item: MediaItem) => {
     setBusy(item.id);
-    setError(null);
     try {
       // 片段不是独立录像：只删其中一段会让整场缺号。抽屉里的删除也按整场处理。
       const owner = groups.find((group) => group.clips.some((clip) => clip.id === item.id));
@@ -854,10 +825,10 @@ export default function MediaPage() {
         await closePlay();
       }
       await mediaDeleteGroup(groupId, deleteFile);
-      setNotice(t("media.deletedBatch", { n: owner?.clipCount ?? item.clipCount ?? 1 }));
+      notify.success(t("media.deletedBatch", { n: owner?.clipCount ?? item.clipCount ?? 1 }));
       await refreshAll();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(null);
     }
@@ -1025,22 +996,9 @@ export default function MediaPage() {
           />
         </PageToolbar>
       )}
-      {error ? (
-        <div className="mx-5 mb-2 flex items-center justify-between rounded-ctl border border-rec/30 bg-rec/10 px-3 py-2 text-[11.5px] text-rec">
-          <span className="truncate">{error}</span>
-          <button type="button" onClick={() => setError(null)} className="focus-ring shrink-0 px-1 text-[11px]">
-            {t("media.cancel")}
-          </button>
-        </div>
-      ) : null}
-      {notice || statusLine ? (
+      {statusLine ? (
         <div className="mx-5 mb-2 flex items-center justify-between rounded-ctl border border-line bg-raised px-3 py-2 text-[11.5px] text-ink-soft">
-          <span className="truncate">{statusLine ?? notice}</span>
-          {notice && !statusLine ? (
-            <button type="button" onClick={() => setNotice(null)} className="focus-ring shrink-0 px-1 text-[11px] text-faint">
-              {t("media.cancel")}
-            </button>
-          ) : null}
+          <span className="truncate">{statusLine}</span>
         </div>
       ) : null}
 
@@ -1402,7 +1360,7 @@ export default function MediaPage() {
                         url={playing.playback.url}
                         volume={volume}
                         onVolumeChange={changeVolume}
-                        onFatal={(detail) => setError(t("media.playFailed") + "：" + detail)}
+                        onFatal={(detail) => notify.error(detail, t("media.playFailed"))}
                         durationMs={playing.item.durationMs}
                         startMs={playing.playback.startMs}
                         leadMs={playing.playback.leadMs}
@@ -1540,7 +1498,7 @@ export default function MediaPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => void mediaReveal(playing.item.id).catch((err) => setError(describeError(err)))}
+                        onClick={() => void mediaReveal(playing.item.id).catch((err) => notify.error(err))}
                       >
                         {t("media.reveal")}
                       </Button>

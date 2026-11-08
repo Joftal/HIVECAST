@@ -112,3 +112,7 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 第四个落地控件是 `Checkbox`：监控行与媒体卡的多选改为 Arc 的 18px 方块 + 32px 命中区，勾线/横杠用同一路径 morph；视频封面使用本地 `tone="overlay"` 半透明深底 + 白描边。详见 `93-复选框统一为Arc-Checkbox.md`。
 
 第五个落地控件是 `Button`：`Controls.Button` / `IconButton` 改为 Arc Button 适配层，覆盖 92 处标准操作按钮；新增 `accent`（品牌色）、`recording`（红色实心）变体与 `icon` 尺寸，`primary` 仍映射品牌强调色。详见 `94-按钮统一为Arc-Button.md`。
+
+第六个落地控件是 `FloatingButtonGroup`：监控行「观看 / 录制」改成 muted/sm 托盘，共享高亮在按钮间按 morph 弹簧滑动，按下加深并缩到 96.5%；本地扩展 item `loading` 与 `tone`，配套接入 Arc `Tooltip` 与 `@radix-ui/react-tooltip`。详见 `95-监控行浮动按钮组.md`。
+
+第七个落地控件是 `ToastStack`：全局 `ToastStackProvider` + 顶部中间唯一 viewport，本地新增 `top-center` 位置（从上方落入、向上收起）；`useNotify` 统一 error/warning/info/success，页面内的临时错误、成功、提示横条全部收口到 toast；ffmpeg 缺失改为持久 warning + 「去设置」action，系统通知事件同时发 OS 通知与 toast。详见 `96-统一顶部Toast提示.md`。

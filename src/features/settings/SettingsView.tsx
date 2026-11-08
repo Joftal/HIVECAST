@@ -20,19 +20,9 @@ import {
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
 import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/Controls";
+import { useNotify } from "../../lib/notify";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import AccountSection from "./AccountSection";
-
-function describeError(err: unknown): string {
-  if (typeof err === "string") return err;
-  if (err instanceof Error) return err.message;
-  // Tauri 把 AppError 序列化成 { code, message }，不是 Error 实例。
-  if (err && typeof err === "object" && "message" in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(err);
-}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -310,7 +300,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   const [initial, setInitial] = useState("");
   const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const notify = useNotify();
   const [query, setQuery] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
@@ -348,11 +338,10 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       const loaded = await settingsGet();
       setSettings(loaded);
       setInitial(JSON.stringify(loaded));
-      setError(null);
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
-  }, []);
+  }, [notify]);
 
   const loadFfmpeg = useCallback(async () => {
     if (!isTauri()) return;
@@ -379,7 +368,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
   useEffect(() => {
     if (!open) return;
-    setError(null);
     setQuery("");
     if (isTauri()) {
       void trashInfo()
@@ -403,7 +391,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   const save = useCallback(async () => {
     if (!settings) return;
     setBusy(true);
-    setError(null);
     try {
       const result = await settingsUpdate(settings);
       setSettings(result);
@@ -416,12 +403,13 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       onSaved(result);
       void loadLogs();
       void loadFfmpeg();
+      notify.success(t("settings.savedAll"));
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     } finally {
       setBusy(false);
     }
-  }, [settings, onSaved]);
+  }, [settings, onSaved, notify, t]);
 
   const attemptClose = useCallback(() => {
     if (dirty) setDiscardOpen(true);
@@ -491,7 +479,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       });
       if (typeof dir === "string" && dir.length > 0) patch({ [target]: dir });
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -509,7 +497,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       });
       if (typeof file === "string" && file.length > 0) patch({ ffmpegPath: file });
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -517,7 +505,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     try {
       await logsOpen();
     } catch (err) {
-      setError(describeError(err));
+      notify.error(err);
     }
   };
 
@@ -1273,7 +1261,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                 size="sm"
                 variant="secondary"
                 onClick={() => {
-                  void trashOpen().catch((err) => setError(describeError(err)));
+                  void trashOpen().catch((err) => notify.error(err));
                 }}
               >
                 {t("settings.trashOpen")}
@@ -1661,9 +1649,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
         <div className="min-h-0 flex-1 overflow-auto px-10 py-6">
           <div className="mx-auto w-full max-w-[760px] space-y-5 pb-4">
-            {error ? (
-              <div className="rounded-[10px] border border-rec/30 bg-rec/8 px-3.5 py-2.5 text-[11.5px] text-rec">{error}</div>
-            ) : null}
             {renderBody()}
           </div>
         </div>

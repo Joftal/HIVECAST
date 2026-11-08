@@ -13,6 +13,9 @@ type ButtonProps = {
   variant?: "primary" | "secondary" | "ghost" | "danger" | "recording";
   size?: "sm" | "md" | "lg";
   disabled?: boolean;
+  /** 阻止再次触发但保留当前外观，避免短暂操作把整行按钮闪成禁用态。 */
+  ariaDisabled?: boolean;
+  loading?: boolean;
   title?: string;
   type?: "button" | "submit";
   className?: string;
@@ -35,6 +38,8 @@ export function Button({
   variant = "secondary",
   size = "md",
   disabled,
+  ariaDisabled,
+  loading,
   title,
   type = "button",
   className,
@@ -46,6 +51,8 @@ export function Button({
       onClick={onClick}
       onBlur={onBlur}
       disabled={disabled}
+      aria-disabled={ariaDisabled || undefined}
+      loading={loading}
       variant={BUTTON_VARIANT[variant]}
       size={size}
       className={className}
