@@ -3,6 +3,7 @@ import { invoke } from "./invoke";
 import type { ActiveTask } from "./bindings/ActiveTask";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
+import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
 import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
@@ -33,6 +34,7 @@ export type {
   ActiveTask,
   AppInfo,
   CredentialInfo,
+  FfmpegStatus,
   FilenamePreview,
   QrPoll,
   QrTicket,
@@ -244,6 +246,11 @@ export function onDanmakuBatch(handler: (batch: DanmakuBatch) => void): Promise<
 
 export async function settingsGet(): Promise<Settings> {
   return invoke<Settings>("settings_get");
+}
+
+/** 当前实际使用的 ffmpeg 路径、来源与版本。 */
+export async function ffmpegStatus(): Promise<FfmpegStatus> {
+  return invoke<FfmpegStatus>("ffmpeg_status");
 }
 
 export async function settingsUpdate(settings: Settings): Promise<Settings> {

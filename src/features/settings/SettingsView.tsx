@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import {
   appInfo,
+  ffmpegStatus,
   filenamePreview,
   isTauri,
   logsOpen,
@@ -11,6 +12,7 @@ import {
   trashInfo,
   trashOpen,
   settingsUpdate,
+  type FfmpegStatus,
   type FilenamePreview,
   type LogStatus,
   type Settings,
@@ -23,6 +25,11 @@ import AccountSection from "./AccountSection";
 function describeError(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
+  // Tauri 把 AppError 序列化成 { code, message }，不是 Error 实例。
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
   return String(err);
 }
 
@@ -54,7 +61,7 @@ const QN_OPTIONS = [
   { value: 80, key: "qnStandard" },
 ];
 
-type PageKey = "account" | "record" | "danmaku" | "storage" | "notify" | "appearance" | "system" | "about";
+export type PageKey = "account" | "record" | "danmaku" | "storage" | "notify" | "appearance" | "system" | "about";
 
 type NavGroup = "account" | "recording" | "app";
 
@@ -177,9 +184,10 @@ const SEARCH_INDEX: SearchEntry[] = [
     { page: "record", id: "set-post-custom-command", titleKey: "settings.postCustomCommand", descKey: "settings.postCustomCommandHint", extra: "自定义 ffmpeg 命令 custom command" },
     { page: "record", id: "set-post-custom-ext", titleKey: "settings.postCustomOutputExt", descKey: "settings.postCustomOutputExtHint", extra: "自定义 输出 扩展名 extension" },
     { page: "record", id: "set-post-custom-timeout", titleKey: "settings.postCustomTimeout", descKey: "settings.postCustomTimeoutHint", extra: "自定义 超时 timeout" },
-  { page: "storage", id: "set-media-root", titleKey: "settings.mediaRoot", descKey: "settings.mediaRootHint", extra: "目录 路径 folder path" },
-  { page: "storage", id: "set-log-dir", titleKey: "settings.logDir", descKey: "settings.logDirHint", extra: "日志 log 目录 folder path" },
-  { page: "storage", id: "set-log-retention", titleKey: "settings.logRetention", descKey: "settings.logRetentionHint", extra: "日志 log 保留 清理 retention" },
+    { page: "storage", id: "set-ffmpeg-path", titleKey: "settings.ffmpegPath", descKey: "settings.ffmpegPathHint", extra: "ffmpeg 工具 路径 tool path" },
+    { page: "storage", id: "set-media-root", titleKey: "settings.mediaRoot", descKey: "settings.mediaRootHint", extra: "目录 路径 folder path" },
+    { page: "storage", id: "set-log-dir", titleKey: "settings.logDir", descKey: "settings.logDirHint", extra: "日志 log 目录 folder path" },
+    { page: "storage", id: "set-log-retention", titleKey: "settings.logRetention", descKey: "settings.logRetentionHint", extra: "日志 log 保留 清理 retention" },
   { page: "record", id: "set-monitor-interval", titleKey: "settings.monitorInterval", descKey: "settings.monitorIntervalHint", extra: "监控 间隔 轮询 monitor interval poll" },
   { page: "record", id: "set-monitor-backoff", titleKey: "settings.monitorBackoff", descKey: "settings.monitorBackoffHint", extra: "退避 限流 失败 backoff throttle" },
   { page: "storage", id: "set-filename-template", titleKey: "settings.filenameTemplate", descKey: "settings.filenameTemplateHint", extra: "文件名 模板 命名 filename template naming" },
@@ -310,11 +318,12 @@ function Section({ title, desc, children }: { title: string; desc?: string; chil
 
 type Props = {
   open: boolean;
+  initialPage?: PageKey;
   onClose: () => void;
   onSaved: (settings: Settings) => void;
 };
 
-export default function SettingsView({ open, onClose, onSaved }: Props) {
+export default function SettingsView({ open, initialPage, onClose, onSaved }: Props) {
   const { t } = useTranslation();
   const [page, setPage] = useState<PageKey>("account");
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -327,6 +336,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const [discardOpen, setDiscardOpen] = useState(false);
   const [preview, setPreview] = useState<FilenamePreview | null>(null);
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
+  const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [trash, setTrash] = useState<TrashInfo | null>(null);
   // 分割体积在 UI 上允许 MB/GB 切换，落库统一存 MB。
   const [sizeUnit, setSizeUnit] = useState<"MB" | "GB">("MB");
@@ -335,6 +345,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const dirty = Boolean(settings) && JSON.stringify(settings) !== initial;
   // macOS 用 Overlay 标题栏，红绿灯浮在左上角，需要给标题让位。
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const isWindows = /Win/.test(navigator.platform || navigator.userAgent);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -342,6 +353,14 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
       .then((info) => setVersion(info.version))
       .catch(() => setVersion(""));
   }, []);
+
+  const ffmpegSourceLabel = useMemo(() => {
+    if (!ffmpeg) return "";
+    if (ffmpeg.source === "manual") return t("settings.ffmpegSourceManual");
+    if (ffmpeg.source === "path") return t("settings.ffmpegSourcePath");
+    if (ffmpeg.source === "candidate") return t("settings.ffmpegSourceCandidate");
+    return t("settings.ffmpegSourceMissing");
+  }, [ffmpeg, t]);
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -355,6 +374,15 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     }
   }, []);
 
+  const loadFfmpeg = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      setFfmpeg(await ffmpegStatus());
+    } catch {
+      setFfmpeg(null);
+    }
+  }, []);
+
   const loadLogs = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -363,6 +391,11 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
       setLogStatus(null);
     }
   }, []);
+
+  // 从「找不到 ffmpeg」横幅进入时直接落到存储页，省掉一次导航。
+  useEffect(() => {
+    if (open && initialPage) setPage(initialPage);
+  }, [open, initialPage]);
 
   useEffect(() => {
     if (!open) return;
@@ -377,6 +410,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     setDiscardOpen(false);
     void load();
     void loadLogs();
+    void loadFfmpeg();
     // 运行中日志目录可能失效并回落到默认目录；设置页开着时也要让状态行跟上。
     const timer = window.setInterval(() => void loadLogs(), 5000);
     return () => window.clearInterval(timer);
@@ -401,6 +435,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
       }
       onSaved(result);
       void loadLogs();
+      void loadFfmpeg();
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -475,6 +510,24 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
             : settings.logDir || logStatus?.defaultDir || settings.mediaRoot,
       });
       if (typeof dir === "string" && dir.length > 0) patch({ [target]: dir });
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
+  // ffmpeg 是可执行文件，不是目录：Windows 只显示 .exe，macOS/Linux 不设过滤。
+  const chooseFfmpeg = async () => {
+    if (!settings) return;
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const file = await openDialog({
+        directory: false,
+        multiple: false,
+        title: t("settings.ffmpegChooseTitle"),
+        defaultPath: settings.ffmpegPath || undefined,
+        filters: isWindows ? [{ name: "ffmpeg", extensions: ["exe"] }] : undefined,
+      });
+      if (typeof file === "string" && file.length > 0) patch({ ffmpegPath: file });
     } catch (err) {
       setError(describeError(err));
     }
@@ -1025,6 +1078,55 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     if (page === "storage") {
       return (
         <div className="space-y-6">
+          <Section title={t("settings.sectionTools")}>
+            <Row
+              id="set-ffmpeg-path"
+              focus={focusId === "set-ffmpeg-path"}
+              title={t("settings.ffmpegPath")}
+              desc={t("settings.ffmpegPathHint")}
+            >
+              <div className="flex w-[480px] items-center gap-1.5">
+                <input
+                  value={settings.ffmpegPath}
+                  onChange={(event) => patch({ ffmpegPath: event.target.value })}
+                  placeholder={t("settings.ffmpegAuto")}
+                  className={FIELD + " font-mono text-[11px]"}
+                  spellCheck={false}
+                />
+                <Button size="sm" variant="secondary" onClick={() => void chooseFfmpeg()}>
+                  {t("settings.ffmpegChoose")}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => patch({ ffmpegPath: "" })}>
+                  {t("settings.ffmpegReset")}
+                </Button>
+              </div>
+            </Row>
+            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
+              {ffmpeg ? (
+                <>
+                  {ffmpeg.path ? (
+                    <p className="break-all font-mono">
+                      {t("settings.ffmpegActual", { path: ffmpeg.path })}
+                    </p>
+                  ) : (
+                    <p className="text-rec">{t("settings.ffmpegMissing")}</p>
+                  )}
+                  <p>
+                    {ffmpegSourceLabel}
+                    {ffmpeg.version ? " · " + t("settings.ffmpegVersion", { version: ffmpeg.version }) : ""}
+                  </p>
+                  {ffmpeg.configured && ffmpeg.source !== "manual" ? (
+                    <p className="break-all text-rec">
+                      {t("settings.ffmpegFallback", { path: ffmpeg.configured })}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p>{t("settings.ffmpegUnavailable")}</p>
+              )}
+            </div>
+          </Section>
+
           <Section title={t("settings.sectionDirectory")}>
             <Row
               id="set-media-root"

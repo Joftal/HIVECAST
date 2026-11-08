@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, LogStatus, MediaFile,
-    MediaHostPage, MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession,
-    RoomRecord, RoomView, Settings, StreamDescriptor, TaskBoard, TaskRecord, TrashInfo,
-    ViewSlotInfo,
+    ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
+    MediaFile, MediaHostPage, MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket,
+    RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, TaskBoard, TaskRecord,
+    TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -21,6 +21,12 @@ use crate::stream::demo;
 #[tauri::command]
 pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo, AppError> {
     Ok(state.info.clone())
+}
+
+/// 当前实际使用的 ffmpeg：手动配置、PATH、候选目录或缺失。
+#[tauri::command]
+pub fn ffmpeg_status() -> FfmpegStatus {
+    crate::ffmpeg::status()
 }
 
 /// 生成（或复用）演示流并注册到本地回环服务，返回可直接交给 hls.js 的地址。

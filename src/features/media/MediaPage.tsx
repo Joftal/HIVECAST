@@ -105,6 +105,11 @@ function formatDate(ts: number): string {
 function describeError(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
+  // Tauri 把 AppError 序列化成 { code, message }，不是 Error 实例。
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
   return String(err);
 }
 

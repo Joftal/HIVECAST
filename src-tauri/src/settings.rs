@@ -20,6 +20,8 @@ const KEY_SPLIT_ON_TITLE: &str = "record.split_on_title";
 const KEY_SPLIT_MAX_DURATION: &str = "record.split_max_duration_sec";
 const KEY_SPLIT_MAX_SIZE_MB: &str = "record.split_max_size_mb";
 const KEY_MEDIA_ROOT: &str = "media.root";
+/// 手动指定的 ffmpeg；空串表示自动检测（PATH + 平台常见安装位置）。
+pub const KEY_FFMPEG_PATH: &str = "ffmpeg.path";
 const KEY_MAX_CONCURRENT: &str = "record.max_concurrent";
 const KEY_NOTIFY: &str = "ui.notify";
 /// 播放/录制异常（取流失败、磁盘写满）是否通知。
@@ -108,6 +110,7 @@ pub fn defaults() -> Settings {
         split_max_duration_sec: 0,
         split_max_size_mb: 0,
         media_root: default_media_root().display().to_string(),
+        ffmpeg_path: String::new(),
         max_concurrent_records: 4,
         notify_enabled: true,
         notify_error: true,
@@ -180,6 +183,9 @@ pub fn load(db: &Db) -> Settings {
     }
     if let Some(value) = read(KEY_MEDIA_ROOT).filter(|v| !v.trim().is_empty()) {
         settings.media_root = value;
+    }
+    if let Some(value) = read(KEY_FFMPEG_PATH).filter(|v| !v.trim().is_empty()) {
+        settings.ffmpeg_path = value;
     }
     if let Some(value) = read(KEY_MAX_CONCURRENT).and_then(|v| v.parse::<u32>().ok()) {
         settings.max_concurrent_records = value.clamp(1, MAX_CONCURRENT_LIMIT);
@@ -362,6 +368,14 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         std::fs::create_dir_all(&path).map_err(|err| AppError::from_io(err, &path))?;
     }
     settings.media_root = path.display().to_string();
+    settings.ffmpeg_path = settings.ffmpeg_path.trim().to_string();
+    if !settings.ffmpeg_path.is_empty() {
+        // 在保存时真正跑一次 -version：路径错了立刻报给用户，
+        // 不要等到开录才在后台日志里发现。
+        let ffmpeg = crate::ffmpeg::validate_selection(&settings.ffmpeg_path)
+            .map_err(|reason| AppError::User(format!("ffmpeg 路径不可用：{reason}")))?;
+        settings.ffmpeg_path = ffmpeg.display().to_string();
+    }
 
     db.set_setting(KEY_RECORD_QN, &settings.default_record_qn.to_string())?;
     db.set_setting(KEY_VIEW_QN, &settings.default_view_qn.to_string())?;
@@ -377,6 +391,7 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         &settings.split_max_size_mb.to_string(),
     )?;
     db.set_setting(KEY_MEDIA_ROOT, &settings.media_root)?;
+    db.set_setting(KEY_FFMPEG_PATH, &settings.ffmpeg_path)?;
     db.set_setting(
         KEY_MAX_CONCURRENT,
         &settings.max_concurrent_records.to_string(),
@@ -438,8 +453,17 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     Ok(settings)
 }
 
+/// 把设置里的 ffmpeg 路径灌给全局解析器；空串恢复自动检测。
+/// 启动阶段要在后处理恢复开始前单独调用一次，不能等 Recorder 建好。
+pub fn apply_ffmpeg_path(raw: &str) {
+    let raw = raw.trim();
+    let path = (!raw.is_empty()).then(|| PathBuf::from(raw));
+    crate::ffmpeg::set_configured_path(path);
+}
+
 /// 应用到运行时对象：目录与并发上限立即生效，语言由前端负责。
 pub fn apply(settings: &Settings, recorder: &Recorder) {
+    apply_ffmpeg_path(&settings.ffmpeg_path);
     recorder.set_media_root(PathBuf::from(&settings.media_root));
     recorder.set_max_concurrent(settings.max_concurrent_records as usize);
     recorder.set_naming(

@@ -75,6 +75,10 @@ impl AppState {
             err
         })?);
         tracing::info!(db = %db_path.display(), "数据库已打开");
+        // 设置要最早读：手动 ffmpeg 路径必须在后处理恢复启动前生效，
+        // 否则启动瞬间的合成会退回 PATH，日志里还会报「未找到 ffmpeg」。
+        let mut settings = crate::settings::load(&db);
+        crate::settings::apply_ffmpeg_path(&settings.ffmpeg_path);
         // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
         // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
         crate::recorder::reap_orphans(&db);
@@ -122,7 +126,6 @@ impl AppState {
         });
 
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
-        let mut settings = crate::settings::load(&db);
         let mut media_root = PathBuf::from(&settings.media_root);
         let mut media_fallback = None;
         if tokio::fs::create_dir_all(&media_root).await.is_err() {

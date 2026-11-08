@@ -15,7 +15,7 @@ pub struct AppInfo {
     pub version: String,
     pub platform: String,
     pub arch: String,
-    /// PATH 中探测到的 ffmpeg；未安装时为 None。
+    /// 当前实际生效的 ffmpeg（手动配置优先，其次 PATH 与常见目录）；未找到时为 None。
     pub ffmpeg_path: Option<String>,
     pub data_dir: String,
     pub cache_dir: String,
@@ -289,6 +289,8 @@ pub struct Settings {
     pub split_max_size_mb: u32,
     /// 媒体库根目录
     pub media_root: String,
+    /// 手动指定的 ffmpeg 可执行文件（绝对路径）；空串表示自动检测
+    pub ffmpeg_path: String,
     /// 同时录制的上限
     pub max_concurrent_records: u32,
     /// 录制开始/结束时是否发系统通知
@@ -345,6 +347,21 @@ pub struct Settings {
     pub record_danmaku_super_chat: bool,
     /// 录像弹幕是否保存舰长开通（B 站）
     pub record_danmaku_guard: bool,
+}
+
+/// ffmpeg 探测状态：设置页用它显示实际使用的路径与来源。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct FfmpegStatus {
+    /// 手动配置的路径；空串表示自动检测
+    pub configured: String,
+    /// 当前实际生效的绝对路径；未找到时为 None
+    pub path: Option<String>,
+    /// manual | path | candidate | missing
+    pub source: String,
+    /// ffmpeg -version 的首行（截断到 160 字符）
+    pub version: Option<String>,
 }
 
 /// 日志运行状态：设置页用它显示「实际写到哪里、有没有降级」。

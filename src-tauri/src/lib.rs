@@ -203,6 +203,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::ffmpeg_status,
             commands::demo_stream,
             commands::rooms_list,
             commands::room_add,

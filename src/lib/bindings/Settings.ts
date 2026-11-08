@@ -40,6 +40,10 @@ splitMaxSizeMb: number,
  */
 mediaRoot: string,
 /**
+ * 手动指定的 ffmpeg 可执行文件（绝对路径）；空串表示自动检测
+ */
+ffmpegPath: string,
+/**
  * 同时录制的上限
  */
 maxConcurrentRecords: number,

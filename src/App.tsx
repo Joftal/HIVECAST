@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { IconButton, cx } from "./components/ui/Controls";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
-import SettingsView from "./features/settings/SettingsView";
+import SettingsView, { type PageKey } from "./features/settings/SettingsView";
 import TasksPage from "./features/tasks/TasksPage";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
@@ -14,6 +14,7 @@ import {
   closeArmQuit,
   closeCancelQuit,
   closeQuitNow,
+  ffmpegStatus,
   isTauri,
   onAppNotice,
   onCloseBlocked,
@@ -32,6 +33,9 @@ export default function App() {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<TabKey>("monitor");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 从缺失提示进入设置时落到存储页；null = 普通打开。
+  const [settingsPage, setSettingsPage] = useState<PageKey | null>(null);
+  const [ffmpegMissing, setFfmpegMissing] = useState(false);
   // 观看页全屏时收起顶栏，把整块窗口让给画面。
   const [immersive, setImmersive] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("light");
@@ -45,6 +49,18 @@ export default function App() {
   const [closeBusy, setCloseBusy] = useState(false);
   const prevTab = useRef<TabKey>(tab);
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
+
+  // 启动和保存设置后都重新探测一次：用户可能刚补上 ffmpeg 或换掉路径。
+  const refreshFfmpeg = useCallback(() => {
+    if (!isTauri()) return;
+    void ffmpegStatus()
+      .then((status) => setFfmpegMissing(status.path === null))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    refreshFfmpeg();
+  }, [refreshFfmpeg]);
 
   // 启动时读一次性设置：语言、主题与通知开关。读失败就保持默认，不打扰用户。
   useEffect(() => {
@@ -289,7 +305,13 @@ export default function App() {
               </svg>
             )}
           </IconButton>
-          <IconButton label={t("settings.title")} onClick={() => setSettingsOpen(true)}>
+          <IconButton
+            label={t("settings.title")}
+            onClick={() => {
+              setSettingsPage(null);
+              setSettingsOpen(true);
+            }}
+          >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.09A1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z" strokeLinecap="round" strokeLinejoin="round" />
@@ -298,6 +320,26 @@ export default function App() {
         </div>
       </header>
       )}
+
+      {ffmpegMissing && !(tab === "watch" && immersive) ? (
+        <div
+          style={{ paddingLeft: isMac ? 78 : 14 }}
+          className="flex h-8 shrink-0 items-center gap-2 border-b border-warn/25 bg-warn/10 pr-3 text-[11px] text-warn"
+        >
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">{t("app.ffmpegMissing")}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsPage("storage");
+              setSettingsOpen(true);
+            }}
+            className="focus-ring shrink-0 rounded-ctl px-2 py-0.5 font-medium underline decoration-warn/40 underline-offset-2 hover:bg-warn/10"
+          >
+            {t("app.ffmpegFix")}
+          </button>
+        </div>
+      ) : null}
 
       <main key={tab} className="flex min-h-0 flex-1 flex-col">
         {tab === "monitor" ? (
@@ -338,12 +380,17 @@ export default function App() {
 
       <SettingsView
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        initialPage={settingsPage ?? undefined}
+        onClose={() => {
+          setSettingsOpen(false);
+          setSettingsPage(null);
+        }}
         onSaved={(settings) => {
           notifyRef.current = settings;
           const mode = (settings.theme as ThemeMode) ?? "light";
           setTheme(mode);
           applyTheme(mode);
+          refreshFfmpeg();
         }}
       />
     </div>
