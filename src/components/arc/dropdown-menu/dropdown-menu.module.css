@@ -30,6 +30,7 @@
 .destructive { color: var(--danger); }
 .destructive .icon { color: var(--danger); }
 .item[data-disabled] { opacity: .45; cursor: default; }
+.footer { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border-subtle); }
 @keyframes menu-exit { to { --menu-exit: 1; } }
 @media (prefers-reduced-transparency: reduce) { .menu { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; } }
 @media (prefers-reduced-motion: reduce) {
@@ -60,6 +61,11 @@
 .trigger[data-variant="bare"][data-state="open"] { border-color: transparent; background: var(--surface-muted); color: var(--foreground); box-shadow: none; }
 .trigger[data-variant="bare"][data-active] { color: var(--accent-text); }
 .trigger[data-variant="bare"][data-active] .chevron { color: currentColor; }
+
+/* HIVECAST: 行尾「⋯」图标触发器；label/chevron 不渲染，命中区 28×28。 */
+.trigger[data-icon-only] { width: var(--control-height-sm); min-height: var(--control-height-sm); padding: 0; gap: 0; justify-content: center; }
+.trigger[data-icon-only] .triggerIcon { color: currentColor; }
+.trigger[data-variant="bare"][data-icon-only] { width: 28px; min-height: 28px; padding: 0; }
 
 .trigger[data-variant="dark"] {
   min-height: 28px;

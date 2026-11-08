@@ -71,21 +71,27 @@ export default function TasksPage() {
   const load = useCallback(async () => {
     if (!isTauri()) {
       setLoaded(true);
-      return;
+      return true;
     }
     try {
       const next = await taskBoard(100);
       setBoard(next);
       loadErrorShown.current = false;
+      return true;
     } catch (err) {
       if (!loadErrorShown.current) {
         loadErrorShown.current = true;
         notify.error(err);
       }
+      return false;
     } finally {
       setLoaded(true);
     }
   }, [notify]);
+
+  const refreshTasks = async () => {
+    if (await load()) notify.success(t("tasks.refreshed"));
+  };
 
   useEffect(() => {
     void load();
@@ -108,6 +114,7 @@ export default function TasksPage() {
     setBusyId(task.id);
     try {
       await postCancel(task.sessionId);
+      notify.info(t("tasks.cancelRequested"));
       await load();
     } catch (err) {
       notify.error(err);
@@ -122,7 +129,7 @@ export default function TasksPage() {
         title={t("tasks.title")}
         subtitle={t("tasks.subtitle")}
         actions={
-          <Button size="lg" variant="secondary" onClick={() => void load()}>
+          <Button size="lg" variant="secondary" onClick={() => void refreshTasks()}>
             {t("tasks.refresh")}
           </Button>
         }

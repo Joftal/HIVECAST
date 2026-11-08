@@ -105,7 +105,7 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 
 ![深色模式下的顶栏：开关显示月亮，强调色切到琥珀](assets/86-theme-switch-dark.png)
 
-第二个落地控件是 `DropdownMenu`：13 处选择菜单统一成同一套浮层，详见 `88-DropdownMenu统一选择菜单.md`。
+第二个落地控件是 `DropdownMenu`：13 处选择菜单统一成同一套浮层，详见 `88-DropdownMenu统一选择菜单.md`。监控行尾动作菜单后来也迁入，并补了 `iconOnly`（28×28 图标触发器）与 `keepOpen`（移除房间二次确认），详见 `98-监控行菜单统一为Arc-DropdownMenu.md`。
 
 第三个落地控件是 `Switch`：应用内全部二元开关（设置 13、添加房间 2、关闭拦截 1）统一使用 Arc 的 42×24 轨道与弹簧 thumb，`Controls.Switch` 作为适配层保留旧 API；预览台新增开/关/只读/禁用四种形态。详见 `91-开关统一为Arc-Switch.md`。
 
@@ -118,3 +118,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 第七个落地控件是 `ToastStack`：全局 `ToastStackProvider` + 顶部中间唯一 viewport，本地新增 `top-center` 位置（从上方落入、向上收起）；`useNotify` 统一 error/warning/info/success，页面内的临时错误、成功、提示横条全部收口到 toast；ffmpeg 缺失改为持久 warning + 「去设置」action，系统通知事件同时发 OS 通知与 toast。详见 `96-统一顶部Toast提示.md`。
 
 第八个落地控件是 `Dialog`：接入 `@radix-ui/react-dialog`，本地给 `DialogContent` 增加 `sm(440px)/md(560px)` 尺寸；添加房间、退出任务拦截、设置放弃更改确认三处居中弹窗改用 Arc Dialog，统一遮罩、标题/说明、关闭按钮、焦点陷阱与进出场弹簧。侧边 Drawer、菜单、Popover、设置全屏页保持原结构。详见 `97-弹窗统一为Arc-Dialog.md`。
+
+第九个落地控件是 `HoldToConfirm`：监控行菜单 footer 的删除动作改成「按住移除直播间」，红色填充跟随按住时间推进、提前松手回退、完整按住后变「已移除」并画勾；失败时恢复确认状态。DropdownMenu 同时补了通用 `footer` 插槽。详见 `100-按住确认删除直播间.md`。

@@ -4,6 +4,8 @@ import { Switch } from "@/components/arc/switch/switch";
 import { Checkbox } from "@/components/arc/checkbox/checkbox";
 import { FloatingButtonGroup } from "@/components/arc/floating-button-group/floating-button-group";
 import { ToastStack, useToastStack } from "@/components/arc/toast-stack/toast-stack";
+import { DropdownMenu } from "@/components/arc/dropdown-menu/dropdown-menu";
+import { HoldToConfirm } from "@/components/arc/hold-to-confirm/hold-to-confirm";
 import { Button } from "@/components/arc/button/button";
 import { SelectMenu } from "@/components/ui/SelectMenu";
 import { applyTheme } from "@/lib/theme";
@@ -21,6 +23,7 @@ export default function ArcLab() {
   const [checkA, setCheckA] = useState(true);
   const [checkB, setCheckB] = useState(false);
   const [demoRecording, setDemoRecording] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const { toast } = useToastStack();
 
   const changeTheme = (next: Theme, _variant: unknown, trigger: HTMLElement) => {
@@ -79,6 +82,48 @@ export default function ArcLab() {
             <Button variant="accent" size="lg">
               Large
             </Button>
+          </div>
+        </section>
+
+        <section className="card flex flex-col gap-4 p-6">
+          <h2 className="text-[13px] font-semibold">Dropdown menu</h2>
+          <div className="flex items-center justify-between gap-4 rounded-[10px] border border-line bg-surface px-4 py-3">
+            <span className="min-w-0 text-[12.5px] text-ink">监控行尾菜单</span>
+            <DropdownMenu
+              label="更多操作"
+              ariaLabel="更多操作"
+              icon={
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                  <circle cx="3" cy="8" r="1.3" />
+                  <circle cx="8" cy="8" r="1.3" />
+                  <circle cx="13" cy="8" r="1.3" />
+                </svg>
+              }
+              iconOnly
+              variant="bare"
+              size="sm"
+              onOpenChange={(open) => {
+                if (open) setConfirmRemove(false);
+              }}
+              footer={
+                <HoldToConfirm
+                  label="按住移除直播间"
+                  confirmedLabel="已移除"
+                  tone="danger"
+                  duration={1400}
+                  confirmed={confirmRemove}
+                  className="w-full"
+                  onConfirm={() => setConfirmRemove(true)}
+                />
+              }
+              items={[
+                { key: "detail", label: "录制详情", onSelect: () => undefined },
+                { key: "refresh", label: "立即刷新", onSelect: () => undefined },
+                { key: "pause", label: "暂停监控", separatorBefore: true, onSelect: () => undefined },
+                { key: "auto", label: "关闭自动录制", onSelect: () => undefined },
+                { key: "reveal", label: "定位录像", disabled: true, onSelect: () => undefined },
+              ]}
+            />
           </div>
         </section>
 

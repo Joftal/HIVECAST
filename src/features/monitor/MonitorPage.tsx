@@ -6,6 +6,8 @@ import { Checkbox } from "../../components/arc/checkbox/checkbox";
 import { FloatingButtonGroup } from "../../components/arc/floating-button-group/floating-button-group";
 import { useNotify } from "../../lib/notify";
 import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
+import { DropdownMenu } from "../../components/arc/dropdown-menu/dropdown-menu";
+import { HoldToConfirm } from "../../components/arc/hold-to-confirm/hold-to-confirm";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
@@ -293,7 +295,6 @@ export default function MonitorPage({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
-  const [menuId, setMenuId] = useState<string | null>(null);
   useEffect(() => {
     if (!addOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -317,7 +318,7 @@ export default function MonitorPage({
   const [lines, setLines] = useState<LineInfo[] | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
   const [postBusy, setPostBusy] = useState<string | null>(null);
-  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [removeDone, setRemoveDone] = useState(false);
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -362,8 +363,7 @@ export default function MonitorPage({
 
   useEffect(() => {
     setLines(null);
-    setConfirmId(null);
-    setMenuId(null);
+    setRemoveDone(false);
   }, [selectedId]);
 
   const counts = useMemo(() => {
@@ -450,14 +450,16 @@ export default function MonitorPage({
       try {
         await action();
         await load();
+        return true;
       } catch (err) {
         notify.error(err);
+        return false;
       } finally {
         setBusyId(null);
         setBusyAction(null);
       }
     },
-    [load],
+    [load, notify],
   );
 
   const add = async () => {
@@ -503,15 +505,10 @@ export default function MonitorPage({
   };
 
   const removeRoom = async (room: RoomView["room"]) => {
-    if (confirmId !== room.id) {
-      setConfirmId(room.id);
-      return;
-    }
-    setConfirmId(null);
-    setMenuId(null);
-    await run(room.id, () => roomRemove(room.id));
+    const ok = await run(room.id, () => roomRemove(room.id));
     // 移除只隐藏房间，录像历史仍按主播留在媒体库，明确告知免得以为被删了。
-    notify.info(t("monitor.removedKept"));
+    if (ok) notify.info(t("monitor.removedKept"));
+    return ok;
   };
 
   const loadLines = async (roomId: string, qn: number) => {
@@ -705,97 +702,85 @@ export default function MonitorPage({
               },
             ]}
           />
-          <button
-            type="button"
-            aria-label={t("monitor.more")}
-            title={t("monitor.more")}
-            onClick={() => setMenuId(menuId === room.id ? null : room.id)}
-            className="focus-ring flex h-8 w-7 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
-          >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-              <circle cx="3" cy="8" r="1.3" />
-              <circle cx="8" cy="8" r="1.3" />
-              <circle cx="13" cy="8" r="1.3" />
-            </svg>
-          </button>
-          {menuId === room.id ? (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
-              <div className="absolute right-0 top-9 z-40 w-[196px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuId(null);
-                    setSelectedId(room.id);
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
-                >
-                  {t("monitor.recordDetail")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuId(null);
-                    void run(room.id, () => roomRefresh(room.id));
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
-                >
-                  {t("monitor.refreshInfo")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuId(null);
-                    notify.info(t("monitor.roomSettingsSoon"));
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
-                >
-                  {t("monitor.roomSettings")}
-                </button>
-                <div className="my-1 border-t border-line" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuId(null);
-                    void run(room.id, () => roomSetMonitor(room.id, !room.monitorPaused));
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
-                >
-                  {room.monitorPaused ? t("monitor.resumeMonitor") : t("monitor.pauseMonitor")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuId(null);
-                    void run(room.id, () => roomSetAutoRecord(room.id, !room.autoRecord));
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised"
-                >
-                  {room.autoRecord ? t("monitor.autoRecordOff") : t("monitor.autoRecordOn")}
-                </button>
-                <button
-                  type="button"
-                  disabled={!last}
-                  onClick={() => {
-                    setMenuId(null);
-                    void reveal(room.id);
-                  }}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-ink-soft transition-colors hover:bg-raised disabled:opacity-40"
-                >
-                  {t("monitor.reveal")}
-                </button>
-                <div className="my-1 border-t border-line" />
-                <button
-                  type="button"
-                  onBlur={() => setConfirmId(null)}
-                  onClick={() => void removeRoom(room)}
-                  className="flex h-8 w-full items-center px-3 text-left text-[12.5px] text-rec transition-colors hover:bg-rec/10"
-                >
-                  {confirmId === room.id ? t("monitor.confirmRemove") : t("monitor.removeRoom")}
-                </button>
-              </div>
-            </>
-          ) : null}
+          <DropdownMenu
+            label={t("monitor.more")}
+            ariaLabel={t("monitor.more")}
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                <circle cx="3" cy="8" r="1.3" />
+                <circle cx="8" cy="8" r="1.3" />
+                <circle cx="13" cy="8" r="1.3" />
+              </svg>
+            }
+            iconOnly
+            variant="bare"
+            size="sm"
+            align="end"
+            onOpenChange={(open) => {
+              if (open) setRemoveDone(false);
+            }}
+            footer={
+              <HoldToConfirm
+                label={t("monitor.holdRemove")}
+                confirmedLabel={t("monitor.removeDone")}
+                duration={1400}
+                tone="danger"
+                confirmed={removeDone}
+                disabled={busy}
+                className="w-full"
+                onConfirm={() => {
+                  setRemoveDone(true);
+                  void removeRoom(room).then((ok) => {
+                    if (!ok) setRemoveDone(false);
+                  });
+                }}
+              />
+            }
+            items={[
+              {
+                key: "detail",
+                label: t("monitor.recordDetail"),
+                onSelect: () => setSelectedId(room.id),
+              },
+              {
+                key: "refresh",
+                label: t("monitor.refreshInfo"),
+                onSelect: () =>
+                  void run(room.id, async () => {
+                    await roomRefresh(room.id);
+                    notify.success(t("monitor.refreshed"));
+                  }),
+              },
+              {
+                key: "settings",
+                label: t("monitor.roomSettings"),
+                onSelect: () => notify.info(t("monitor.roomSettingsSoon")),
+              },
+              {
+                key: "pause",
+                label: room.monitorPaused ? t("monitor.resumeMonitor") : t("monitor.pauseMonitor"),
+                separatorBefore: true,
+                onSelect: () => void run(room.id, () => roomSetMonitor(room.id, !room.monitorPaused)),
+              },
+              {
+                key: "auto-record",
+                label: room.autoRecord ? t("monitor.autoRecordOff") : t("monitor.autoRecordOn"),
+                onSelect: () =>
+                  void run(room.id, async () => {
+                    await roomSetAutoRecord(room.id, !room.autoRecord);
+                    notify.success(
+                      room.autoRecord ? t("monitor.autoRecordDisabled") : t("monitor.autoRecordEnabled"),
+                    );
+                  }),
+              },
+              {
+                key: "reveal",
+                label: t("monitor.reveal"),
+                disabled: !last,
+                onSelect: () => void reveal(room.id),
+              },
+            ]}
+          />
         </span>
       </div>
     );

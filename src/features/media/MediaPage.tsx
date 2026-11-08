@@ -285,7 +285,7 @@ export default function MediaPage() {
     async (offset: number) => {
       if (!isTauri()) {
         setHostLoading(false);
-        return;
+        return true;
       }
       if (offset > 0) setHostLoadingMore(true);
       else setHostLoading(true);
@@ -300,8 +300,10 @@ export default function MediaPage() {
         setHosts((prev) => (offset > 0 ? [...prev, ...page.items] : page.items));
         setHostTotal(page.total);
         setHostCounts(page.platformCounts);
+        return true;
       } catch (err) {
         notify.error(err);
+        return false;
       } finally {
         setHostLoading(false);
         setHostLoadingMore(false);
@@ -312,10 +314,10 @@ export default function MediaPage() {
 
   const loadFiles = useCallback(
     async (offset: number) => {
-      if (!hostId) return;
+      if (!hostId) return false;
       if (!isTauri()) {
         setLoading(false);
-        return;
+        return true;
       }
       if (offset > 0) setLoadingMore(true);
       else setLoading(true);
@@ -335,8 +337,10 @@ export default function MediaPage() {
         }));
         setItems((prev) => (offset > 0 ? [...prev, ...withThumbs] : withThumbs));
         setTotal(page.total);
+        return true;
       } catch (err) {
         notify.error(err);
+        return false;
       } finally {
         setLoading(false);
         setLoadingMore(false);
@@ -650,17 +654,32 @@ export default function MediaPage() {
   }, [hostId]);
 
   const refreshAll = async () => {
-    if (hostId) await loadFiles(0);
-    await loadHosts(0);
+    if (hostId) {
+      const files = await loadFiles(0);
+      const hosts = await loadHosts(0);
+      return files && hosts;
+    }
+    return loadHosts(0);
+  };
+
+  const refreshView = async () => {
+    if (await refreshAll()) notify.success(t("media.refreshed"));
   };
 
   const runBatch = async (kind: "remux" | "ass" | "merge" | "reveal" | "delete") => {
     if (selectedItems.length === 0 || busy) return;
 
     if (kind === "reveal") {
+      let opened = 0;
       for (const item of selectedItems) {
-        await mediaReveal(item.id).catch((err) => notify.error(err));
+        try {
+          await mediaReveal(item.id);
+          opened += 1;
+        } catch (err) {
+          notify.error(err);
+        }
       }
+      if (opened > 0) notify.info(t("media.revealed"));
       return;
     }
 
@@ -923,7 +942,7 @@ export default function MediaPage() {
                 >
                   {t("media.selectAll")}
                 </Button>
-                <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshAll()}>
+                <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshView()}>
                   {t("common.refresh")}
                 </Button>
               </>
@@ -937,7 +956,7 @@ export default function MediaPage() {
           actions={
             <>
               <PageSearch value={query} onChange={setQuery} placeholder={t("media.hosts.search")} />
-              <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
+              <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void refreshView()}>
                 {t("common.refresh")}
               </Button>
             </>
