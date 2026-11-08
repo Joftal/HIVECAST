@@ -19,7 +19,7 @@ import {
   type TrashInfo,
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
-import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
+import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import AccountSection from "./AccountSection";
 
@@ -1513,16 +1513,11 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
             <div className="truncate text-[12.5px] font-semibold text-ink">HIVECAST</div>
             <div className="truncate text-[10px] text-faint">{t("settings.title")}</div>
           </div>
-          <button
-            type="button"
-            onClick={attemptClose}
-            aria-label={t("settings.close")}
-            className="no-drag focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
-          >
+          <IconButton label={t("settings.close")} onClick={attemptClose} className="no-drag">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
               <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
             </svg>
-          </button>
+          </IconButton>
         </div>
 
         <div className="shrink-0 px-3 pb-1 pt-1.5">

@@ -11,26 +11,33 @@
 .labelPhase { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); white-space: nowrap; }
 .labelPhase svg { flex: none; }
 .primary { color: var(--background); background: var(--foreground); border-color: var(--foreground); }
+/* HIVECAST: 品牌强调色主按钮；浅色蓝、深色琥珀，由 arc-bridge 的 --accent-* 控制。 */
+.accent { color: var(--accent-foreground); background: var(--accent); border-color: var(--accent); }
 .secondary { color: var(--foreground); background: var(--surface); border-color: var(--border); }
 .ghost { color: var(--text-secondary); background: transparent; border-color: transparent; }
 .danger { color: var(--danger); background: var(--surface); border-color: var(--border); }
+.recording { color: #fff; background: var(--danger); border-color: var(--danger); }
 /* A disabled outlined button keeps its shape and fades only its label, so it still reads as a button that is off, not as plain text. */
 .secondary:disabled, .danger:disabled { opacity: 1; color: var(--text-muted); background: var(--surface-muted); border-color: var(--border); }
 .danger:disabled { color: color-mix(in oklab, var(--danger) 55%, var(--surface-muted)); }
 .ghost:disabled { opacity: 1; color: var(--text-muted); }
 @media (hover: hover) and (pointer: fine) {
   .primary:hover:not(:disabled) { opacity: .91; box-shadow: var(--shadow-resting); }
+  .accent:hover:not(:disabled), .recording:hover:not(:disabled) { opacity: .92; box-shadow: var(--shadow-resting); }
   .secondary:hover:not(:disabled) { background: var(--surface-muted); box-shadow: var(--shadow-resting); }
   .ghost:hover:not(:disabled) { color: var(--foreground); background: var(--surface-muted); }
   .danger:hover:not(:disabled) { border-color: var(--danger); background: var(--surface-muted); }
 }
 /* Color feedback on press, so touch and menu triggers (which never scale) still answer the finger. */
-.primary:active:not(:disabled) { opacity: .84; }
+.primary:active:not(:disabled), .accent:active:not(:disabled), .recording:active:not(:disabled) { opacity: .84; }
 .secondary:active:not(:disabled), .ghost:active:not(:disabled) { color: var(--foreground); background: var(--surface-muted); }
 .danger:active:not(:disabled) { border-color: var(--danger); background: var(--surface-muted); }
 .sm { min-height: var(--control-height-sm); padding-inline: var(--space-3); font-size: var(--text-sm); }
 .md { min-height: var(--control-height-md); }
 .lg { min-height: var(--control-height-lg); padding-inline: var(--space-5); font-size: var(--text-sm); }
+/* 只有图标的工具按钮：正方形命中区，不保留文本内边距。 */
+.icon { width: var(--control-height-sm); min-height: var(--control-height-sm); padding-inline: 0; }
+.accent:disabled, .recording:disabled { opacity: .45; }
 .loader { position: absolute; left: 50%; top: 50%; display: grid; width: var(--space-4); height: var(--space-4); margin: calc(var(--space-4) / -2); }
 .spinner { border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
 .loadingLabel { opacity: 0; }

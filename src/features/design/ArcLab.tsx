@@ -55,22 +55,24 @@ export default function ArcLab() {
         <section className="card flex flex-col gap-4 p-6">
           <h2 className="text-[13px] font-semibold">Button</h2>
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="primary">开始录制</Button>
+            <Button variant="accent">开始录制</Button>
+            <Button variant="primary">Arc primary</Button>
             <Button variant="secondary">次要操作</Button>
             <Button variant="ghost">Ghost</Button>
             <Button variant="danger">删除</Button>
-            <Button variant="primary" loading>
+            <Button variant="recording">录制中</Button>
+            <Button variant="accent" loading>
               处理中
             </Button>
           </div>
           <div className="flex flex-wrap items-end gap-3">
-            <Button variant="primary" size="sm">
+            <Button variant="accent" size="sm">
               Small
             </Button>
-            <Button variant="primary" size="md">
+            <Button variant="accent" size="md">
               Medium
             </Button>
-            <Button variant="primary" size="lg">
+            <Button variant="accent" size="lg">
               Large
             </Button>
           </div>

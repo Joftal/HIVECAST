@@ -71,7 +71,7 @@ const lab = import.meta.env.DEV && new URLSearchParams(window.location.search).h
 
 ## 4. 已知取舍
 
-- **Button primary 是黑白，不是品牌蓝**：Arc 的 `.primary` 用 `--foreground` 当底色。要不要给 HIVECAST 加一个 accent 主按钮变体，等迭代 Button 时再定；不要在桥接层硬改 `.primary`（CSS Modules 类名带哈希）。
+- **Button primary 与品牌色**：Arc 原生 `.primary` 用 `--foreground` 当底色（黑白/米白）。已单独新增 `.accent` 变体承载品牌强调色，项目 `Button primary` 映射到 `accent`；Arc 原生 primary 保留在预览台对照，不改桥接层。详见 `94-按钮统一为Arc-Button.md`。
 - **组件源码可改但要留痕**：Arc 是 copy-paste 模式，改 `src/components/arc/**` 属于本项目代码；重新执行 `shadcn add --overwrite` 会覆盖，改动前先记录。
 - **shadcn CLI 依赖根 `tsconfig.json` 的 paths**：根配置原本只有 references，CLI 解析不到 `@/` 会真的创建 `@/components/...` 目录。已在根 `tsconfig.json` 补 `baseUrl` 与 `paths`，后续安装不会再跑偏。
 - **CSS Modules 与 Tailwind 并存**：Arc 组件内部不认 Tailwind 类，外层容器仍然用现有 Tailwind；不要在 Arc 组件上叠 `className` 期望改内部样式。
@@ -110,3 +110,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 第三个落地控件是 `Switch`：应用内全部二元开关（设置 13、添加房间 2、关闭拦截 1）统一使用 Arc 的 42×24 轨道与弹簧 thumb，`Controls.Switch` 作为适配层保留旧 API；预览台新增开/关/只读/禁用四种形态。详见 `91-开关统一为Arc-Switch.md`。
 
 第四个落地控件是 `Checkbox`：监控行与媒体卡的多选改为 Arc 的 18px 方块 + 32px 命中区，勾线/横杠用同一路径 morph；视频封面使用本地 `tone="overlay"` 半透明深底 + 白描边。详见 `93-复选框统一为Arc-Checkbox.md`。
+
+第五个落地控件是 `Button`：`Controls.Button` / `IconButton` 改为 Arc Button 适配层，覆盖 92 处标准操作按钮；新增 `accent`（品牌色）、`recording`（红色实心）变体与 `icon` 尺寸，`primary` 仍映射品牌强调色。详见 `94-按钮统一为Arc-Button.md`。

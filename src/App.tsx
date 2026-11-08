@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, useReducedMotion } from "motion/react";import { IconButton, cx } from "./components/ui/Controls";
+import { motion, useReducedMotion } from "motion/react";import { Button, IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
 import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
@@ -326,14 +326,14 @@ export default function App() {
           {!isTauri() && (
             <span className="rounded-full bg-warn/12 px-2 py-1 text-[10.5px] text-warn">preview</span>
           )}
-          <button
-            type="button"
-            onClick={() => pickLanguage(lang === "zh-CN" ? "en-US" : "zh-CN")}
+          <Button
+            size="sm"
+            variant="ghost"
             title={t("settings.language")}
-            className="focus-ring h-7 rounded-ctl px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-ink"
+            onClick={() => pickLanguage(lang === "zh-CN" ? "en-US" : "zh-CN")}
           >
             {lang === "zh-CN" ? "中" : "EN"}
-          </button>
+          </Button>
           <ThemeSwitch
             theme={appearance}
             iconOnly

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Switch as ArcSwitch } from "../arc/switch/switch";
+import { Button as ArcButton, type ButtonVariant as ArcButtonVariant } from "../arc/button/button";
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -17,15 +18,16 @@ type ButtonProps = {
   className?: string;
 };
 
-const BUTTON_VARIANT: Record<NonNullable<ButtonProps["variant"]>, string> = {
-  primary:
-    "bg-accent text-accent-ink shadow-[0_1px_2px_rgba(16,24,40,0.12)] hover:brightness-[0.97] active:brightness-95",
-  secondary: "border border-line bg-surface text-ink hover:bg-raised active:bg-raised",
-  ghost: "text-muted hover:bg-raised hover:text-ink",
-  danger: "border border-rec/25 bg-rec/10 text-rec hover:bg-rec/15",
-  recording: "bg-rec text-white hover:brightness-[0.97] shadow-[0_1px_2px_rgba(229,72,77,0.25)]",
+const BUTTON_VARIANT: Record<NonNullable<ButtonProps["variant"]>, ArcButtonVariant> = {
+  primary: "accent",
+  secondary: "secondary",
+  ghost: "ghost",
+  danger: "danger",
+  recording: "recording",
 };
 
+/** 统一使用 Arc (uiarc.dev) 的 Button：按下缩放、标签切换时弹簧收放。
+ *  保留项目原有的 variant / size 语义，primary 映射到品牌强调色变体。 */
 export function Button({
   children,
   onClick,
@@ -38,22 +40,18 @@ export function Button({
   className,
 }: ButtonProps) {
   return (
-    <button
+    <ArcButton
       type={type}
       title={title}
       onClick={onClick}
       onBlur={onBlur}
       disabled={disabled}
-      className={cx(
-        "focus-ring inline-flex shrink-0 items-center justify-center gap-1.5 rounded-ctl font-medium transition-[background-color,color,box-shadow,filter,transform] duration-150 active:scale-[0.985]",
-        size === "sm" ? "h-7 px-2.5 text-[11.5px]" : size === "lg" ? "h-9 px-3.5 text-[12.5px]" : "h-8 px-3 text-[12px]",
-        BUTTON_VARIANT[variant],
-        disabled ? "pointer-events-none opacity-45" : "",
-        className,
-      )}
+      variant={BUTTON_VARIANT[variant]}
+      size={size}
+      className={className}
     >
       {children}
-    </button>
+    </ArcButton>
   );
 }
 
@@ -63,28 +61,28 @@ export function IconButton({
   label,
   disabled,
   active,
+  className,
 }: {
   children: ReactNode;
   onClick?: () => void;
   label: string;
   disabled?: boolean;
   active?: boolean;
+  className?: string;
 }) {
   return (
-    <button
+    <ArcButton
       type="button"
       title={label}
       aria-label={label}
       onClick={onClick}
       disabled={disabled}
-      className={cx(
-        "focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl transition-colors duration-150",
-        active ? "bg-raised text-ink" : "text-faint hover:bg-raised hover:text-ink",
-        disabled ? "pointer-events-none opacity-40" : "",
-      )}
+      variant={active ? "secondary" : "ghost"}
+      size="icon"
+      className={cx("shrink-0", className)}
     >
       {children}
-    </button>
+    </ArcButton>
   );
 }
 
