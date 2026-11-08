@@ -4,5 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo test --manifest-path src-tauri/ipc-types/Cargo.toml --quiet
+# ts-rs 在类型行尾留空格，清掉，避免 git diff --check 失败。
+perl -pi -e 's/[ \t]+$//' src/lib/bindings/*.ts
 echo "bindings written to src/lib/bindings:"
 ls -1 src/lib/bindings

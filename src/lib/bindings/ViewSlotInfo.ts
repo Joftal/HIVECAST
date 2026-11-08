@@ -5,31 +5,31 @@
  *
  * url 为空表示还没起播（starting / reconnecting / error），前端据此显示占位。
  */
-export type ViewSlotInfo = { 
+export type ViewSlotInfo = {
 /**
  * 0..3
  */
-slot: number, roomId: string, 
+slot: number, roomId: string,
 /**
  * starting | playing | reconnecting | error
  */
-status: string, url: string | null, 
+status: string, url: string | null,
 /**
  * 请求的画质（qn 数值，0 表示跟随平台自动）
  */
-requestedQn: number, 
+requestedQn: number,
 /**
  * 平台实际给的画质
  */
-actualQn: number, quality: string | null, 
+actualQn: number, quality: string | null,
 /**
  * 实际使用的线路组名
  */
-line: string | null, 
+line: string | null,
 /**
  * 用户手选的线路组名；None 表示自动
  */
-preferredLine: string | null, error: string | null, 
+preferredLine: string | null, error: string | null,
 /**
  * 断线重连的锚点（epoch 毫秒）；None 表示当前不在等待重连
  */

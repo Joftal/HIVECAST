@@ -4,15 +4,15 @@ import type { CredentialInfo } from "./CredentialInfo";
 /**
  * 一次扫码轮询的结果。
  */
-export type QrPoll = { 
+export type QrPoll = {
 /**
  * pending | scanned | confirmed | expired | error
  */
-state: string, message: string, 
+state: string, message: string,
 /**
  * 还剩多少秒失效（服务端给出的剩余时间，0 表示未知）
  */
-expiresIn: number, 
+expiresIn: number,
 /**
  * 只有 confirmed 时才有
  */

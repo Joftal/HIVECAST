@@ -5,11 +5,11 @@
  *
  * 不返回 Cookie 本身，只给条目名：设置页只需要展示「带了哪些字段」。
  */
-export type CredentialInfo = { platform: string, accountId: string, accountName: string, uid: string, avatar: string | null, 
+export type CredentialInfo = { platform: string, accountId: string, accountName: string, uid: string, avatar: string | null,
 /**
  * Cookie 里的 name 列表（有序、去重），用于确认导入内容
  */
-cookieNames: Array<string>, 
+cookieNames: Array<string>,
 /**
  * ok | expired
  */

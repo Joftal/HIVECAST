@@ -3,7 +3,7 @@
 /**
  * 一条可用线路（来自取流结果的分组），用于手动指定录制线路。
  */
-export type LineInfo = { name: string, priority: number, 
+export type LineInfo = { name: string, priority: number,
 /**
  * 该线路首选的画质名（用于在选择器里给用户一点判断依据）
  */

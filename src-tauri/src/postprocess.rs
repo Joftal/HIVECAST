@@ -150,7 +150,11 @@ async fn run_ffmpeg_progress(
                     EVENT_POST_PROGRESS,
                     PostProgress {
                         task: progress.task.to_string(),
+                        session_id: progress.task.to_string(),
                         percent,
+                        stage: "converting".into(),
+                        state: "running".into(),
+                        message: None,
                     },
                 );
             }
@@ -174,54 +178,6 @@ fn ensure_file(src: &Path) -> Result<(), AppError> {
         return Err(AppError::Path(format!("源文件不存在：{}", src.display())));
     }
     Ok(())
-}
-
-/// FLV → MP4：只换容器不重编码，几秒完成，生成的 mp4 能直接拖进剪辑软件。
-pub async fn remux(src: &Path, progress: Option<&Progress<'_>>) -> Result<PostResult, AppError> {
-    ensure_file(src)?;
-    if src.extension().and_then(|value| value.to_str()) == Some("mp4") {
-        return Err(AppError::User("源文件已经是 mp4".into()));
-    }
-    let out = sibling(src, "", "mp4");
-    let args: Vec<OsString> = vec![
-        "-hide_banner".into(),
-        "-nostdin".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-y".into(),
-        "-i".into(),
-        src.as_os_str().to_os_string(),
-        "-c".into(),
-        "copy".into(),
-        "-movflags".into(),
-        "+faststart".into(),
-        "-avoid_negative_ts".into(),
-        "make_zero".into(),
-        out.as_os_str().to_os_string(),
-    ];
-    let started = std::time::Instant::now();
-    match progress {
-        Some(progress) if progress.total_ms > 0 => {
-            run_ffmpeg_progress(args, "转封装", progress).await?
-        }
-        _ => run_ffmpeg(args, "转封装").await?,
-    }
-    let size = size_of(&out);
-    tracing::info!(
-        target: "hivecast_lib::postprocess",
-        task = "remux",
-        src = %src.display(),
-        out = %out.display(),
-        bytes = size,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "转封装完成"
-    );
-    Ok(PostResult {
-        kind: "mp4".into(),
-        path: out.to_string_lossy().to_string(),
-        size,
-        message: None,
-    })
 }
 
 // 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
@@ -508,7 +464,7 @@ mod tests {
         assert!(status.success(), "生成测试片失败");
     }
 
-    /// 真跑 ffmpeg 的端到端冒烟：转封装 / 合并都要产出可读文件。
+    /// 真跑 ffmpeg 的端到端冒烟：合并要产出可读文件。
     /// 依赖本机 ffmpeg，默认跳过；手动跑时加 --ignored。
     #[tokio::test]
     #[ignore = "需要本机 ffmpeg"]
@@ -519,10 +475,6 @@ mod tests {
         let second = dir.join("b.flv");
         make_clip(&first, 3).await;
         make_clip(&second, 3).await;
-
-        let mp4 = remux(&first, None).await.unwrap();
-        assert!(mp4.path.ends_with(".mp4"));
-        assert!(mp4.size > 1000, "mp4 太小：{}", mp4.size);
 
         let merged = merge(&[first.clone(), second.clone()], None).await.unwrap();
         let source_total = size_of(&first) + size_of(&second);

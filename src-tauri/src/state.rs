@@ -90,7 +90,13 @@ impl AppState {
         // 收尾后这些会话已是 aborted，recover_parts 会从「失败/中止」列表里捞回来。
         let recovery_db = db.clone();
         let recovery_app = app.clone();
+        // 恢复也可能跑很久的后处理：登记成任务，退出提示里能看见，也不会被静默打断。
+        let jobs = crate::jobs::Jobs::new();
+        jobs.attach_db(db.clone());
+        jobs.mark_interrupted();
+        let recovery_jobs = jobs.clone();
         tauri::async_runtime::spawn(async move {
+            let _recovery_job = recovery_jobs.begin("post", "恢复上次录制", None);
             let (recovered, recovered_bytes) = crate::recorder::recover_parts(&recovery_db).await;
             if recovered > 0 {
                 tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");
@@ -220,7 +226,7 @@ impl AppState {
             local,
             danmaku,
             thumbs,
-            jobs: crate::jobs::Jobs::new(),
+            jobs,
             demo: tokio::sync::Mutex::new(None),
             media_fallback,
             log_fallback,

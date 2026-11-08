@@ -68,6 +68,7 @@ impl LocalPlayer {
         db: &Db,
         session_id: &str,
         position_ms: Option<i64>,
+        source: bool,
     ) -> Result<Playback, AppError> {
         let _gate = self.gate.lock().await;
 
@@ -79,14 +80,23 @@ impl LocalPlayer {
             tracing::info!(session_id, "本地回放被拒绝：录像仍在录制");
             return Err(AppError::User("这段还在录制，先停下再回放".into()));
         }
-        let path = session
-            .file_path
-            .clone()
-            .filter(|p| Path::new(p).is_file())
-            .ok_or_else(|| {
-                tracing::warn!(session_id, "本地回放：录像文件已丢失");
-                AppError::User("录像文件已不存在".into())
-            })?;
+        // 主文件和源封装是两个独立变体：各自一个 HLS 会话，互不覆盖。
+        // 同一会话里切换「看主文件 / 看源封装」时前端会先停旧变体。
+        let slot = format!("{session_id}:{}", if source { "source" } else { "main" });
+        let path = if source {
+            session.source_path.clone()
+        } else {
+            session.file_path.clone()
+        }
+        .filter(|p| Path::new(p).is_file())
+        .ok_or_else(|| {
+            tracing::warn!(session_id, source, "本地回放：录像文件已丢失");
+            AppError::User(if source {
+                "源封装文件已不存在".into()
+            } else {
+                "录像文件已不存在".into()
+            })
+        })?;
 
         let duration_ms = session.duration_ms.max(0);
         let wanted = position_ms.unwrap_or(0).clamp(0, duration_ms);
@@ -98,10 +108,11 @@ impl LocalPlayer {
         // 已经在放同一条、且目标位置在窗口内：复用现成的 HLS，别重复转封装。
         let stale = {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
-            match guard.get(session_id) {
+            match guard.get(&slot) {
                 Some(active) if active.contains(wanted) => {
                     tracing::debug!(
                         session_id,
+                        source,
                         position_ms = wanted,
                         window_start_ms = active.start_ms,
                         "本地回放命中当前窗口，复用现有转封装"
@@ -116,7 +127,7 @@ impl LocalPlayer {
                         wanted - active.start_ms,
                     ));
                 }
-                Some(_) => guard.remove(session_id),
+                Some(_) => guard.remove(&slot),
                 None => None,
             }
         };
@@ -207,7 +218,7 @@ impl LocalPlayer {
         {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
             guard.insert(
-                session_id.to_string(),
+                slot.clone(),
                 Active {
                     key: key.clone(),
                     dir,
@@ -232,15 +243,25 @@ impl LocalPlayer {
     /// 只停指定的一条（媒体库删某条录像时用，不能牵连其它正在放的）。
     pub async fn stop(&self, session_id: &str) {
         let _gate = self.gate.lock().await;
-        let active = {
+        let removed = {
             let mut guard = self.current.lock().expect("本地回放状态被污染");
-            guard.remove(session_id)
+            let prefix = format!("{session_id}:");
+            let keys: Vec<String> = guard
+                .keys()
+                .filter(|key| key.as_str() == session_id || key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| guard.remove(&key))
+                .collect::<Vec<_>>()
         };
-        if let Some(active) = active {
-            tracing::info!(session_id, "停止本地回放");
-            teardown(self.server.as_ref(), active).await;
-        } else {
+        if removed.is_empty() {
             tracing::debug!(session_id, "停止本地回放：当前没有在放");
+        } else {
+            tracing::info!(session_id, count = removed.len(), "停止本地回放");
+            for active in removed {
+                teardown(self.server.as_ref(), active).await;
+            }
         }
     }
 

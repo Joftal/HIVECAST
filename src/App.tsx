@@ -4,6 +4,7 @@ import { IconButton, cx } from "./components/ui/Controls";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsView from "./features/settings/SettingsView";
+import TasksPage from "./features/tasks/TasksPage";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
 import { setLanguage, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
@@ -25,7 +26,7 @@ import {
 import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 
-type TabKey = "monitor" | "watch" | "media";
+type TabKey = "monitor" | "watch" | "media" | "tasks";
 
 export default function App() {
   const { t, i18n } = useTranslation();
@@ -244,6 +245,7 @@ export default function App() {
               { key: "monitor", label: t("tab.monitor") },
               { key: "watch", label: t("tab.watch") },
               { key: "media", label: t("tab.media") },
+              { key: "tasks", label: t("tab.tasks") },
             ] as Array<{ key: TabKey; label: string }>
           ).map((item) => (
             <button
@@ -311,12 +313,14 @@ export default function App() {
             onSeedApplied={() => setWatchSeed(null)}
             onImmersiveChange={setImmersive}
           />
-        ) : (
+        ) : tab === "media" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="flex min-h-full w-full flex-col">
               <MediaPage />
             </div>
           </div>
+        ) : (
+          <TasksPage />
         )}
       </main>
 

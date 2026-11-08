@@ -1846,6 +1846,8 @@ impl Recorder {
         // 进程已经不在了，pid 文件没有保留价值；漏删会让下次启动误杀无关进程。
         remove_pid_file(&source_path);
         let post_cfg = active.post.clone();
+        // 多片段收尾会连续跑多个后处理任务；取消要覆盖整场，先登记会话级作用域。
+        let _post_scope = crate::post::begin_session(&active.recording.session_id);
         // 收尾里的合并与后处理同样会写文件：登记成任务，退出时才会等它写完再走。
         let jobs = app.state::<crate::state::AppState>().jobs.clone();
         let post_label = source_path
@@ -1979,7 +1981,15 @@ impl Recorder {
                 }
                 continue;
             }
-            let outcome = crate::post::run(&source_clip, &post_cfg).await;
+            let task_id = format!("auto:{}:{index}", active.recording.session_id);
+            let outcome = crate::post::run(
+                &task_id,
+                &active.recording.session_id,
+                &source_clip,
+                &post_cfg,
+                Some(app),
+            )
+            .await;
             let clip_state = outcome.state.clone();
             let clip_error = outcome.error.clone();
             if let Some(err) = outcome.error.as_deref() {
@@ -2960,6 +2970,8 @@ async fn post_recovered_file(
     if size <= 0 {
         return (target, size);
     }
+    // 恢复任务也要能被“退出时取消”覆盖：登记会话作用域，run 会继承取消标志。
+    let _post_scope = crate::post::begin_session(id);
     let existing = db.get_session(id).ok().flatten();
     if let Some(existing) = existing.as_ref() {
         // 上次已经完成后处理、只是没来得及删分片：直接沿用最终文件。
@@ -2992,7 +3004,8 @@ async fn post_recovered_file(
             }
         }
     }
-    let outcome = crate::post::run(&target, cfg).await;
+    let task_id = format!("auto:{id}:recover");
+    let outcome = crate::post::run(&task_id, id, &target, cfg, None).await;
     if let Some(existing) = existing.as_ref() {
         let result = db.finish_session_with_post(
             id,
@@ -3134,6 +3147,8 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
         return Some((0, 0));
     }
 
+    // 清单里可能有多个片段要补后处理：作用域覆盖整轮，取消一次就停掉后面的片段。
+    let _post_scope = crate::post::begin_session(&manifest.session_id);
     let source = PathBuf::from(&manifest.source);
     let mut recovered = 0usize;
     let mut bytes = 0u64;
@@ -3197,7 +3212,9 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 continue;
             };
             // 崩溃可能发生在「母带已合并、后处理还没跑完」之间：从源重新执行。
-            let outcome = crate::post::run(src, &manifest.post).await;
+            let task_id = format!("auto:{}:manifest:{index}", manifest.session_id);
+            let outcome =
+                crate::post::run(&task_id, &manifest.session_id, src, &manifest.post, None).await;
             post_state = outcome.state;
             post_error = outcome.error;
             delete_source = outcome.delete_source;

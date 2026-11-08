@@ -3,23 +3,23 @@
 /**
  * 媒体库的「主播卡」：按房间聚合出的一行汇总（v1 主播身份 = room.id）。
  */
-export type MediaHost = { roomId: string, platform: string, 
+export type MediaHost = { roomId: string, platform: string,
 /**
  * 主播名（room.host_name），卡片主标题
  */
-hostName: string, 
+hostName: string,
 /**
  * 房间标题（room.title），卡片副标题
  */
-roomTitle: string, avatarUrl: string | null, coverUrl: string | null, 
+roomTitle: string, avatarUrl: string | null, coverUrl: string | null,
 /**
  * 这个主播名下的录像条数
  */
-count: number, 
+count: number,
 /**
  * 这些录像的体积之和（字节）
  */
-bytes: number, 
+bytes: number,
 /**
  * 最新一条录像的开始时间（unix 秒）
  */

@@ -6,27 +6,40 @@ import { Button, Select, cx } from "../../components/ui/Controls";
 import {
   isTauri,
   mediaDeleteGroup,
+  mediaDeleteSource,
+  mediaFiles,
   mediaGroupClips,
   mediaHosts,
   mediaList,
   mediaPlay,
   mediaReveal,
+  mediaRevealFile,
   mediaRevealSource,
   mediaStop,
   onMediaChanged,
   onMediaThumb,
   onPostProgress,
+  postCancel,
+  postRetry,
   sessionExportDanmaku,
   sessionRemux,
   sessionsMerge,
+  type MediaFile,
   type MediaHost,
   type MediaItem,
   type Playback,
   type PlatformCount,
+  type PostProgress,
 } from "../../lib/ipc";
 
 const PAGE_SIZE = 60;
 const VOLUME_KEY = "hivecast.mediaVolume";
+
+const FILE_ROLE: Record<string, string> = {
+  main: "media.mainFile",
+  source: "media.sourceFile",
+  derived: "media.derivedFile",
+};
 
 type SortKey = "recent" | "duration" | "size";
 type HostSortKey = "name" | "latest" | "size" | "count";
@@ -241,9 +254,17 @@ export default function MediaPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
-  const [postPercent, setPostPercent] = useState<number | null>(null);
+  // 后处理进度按 sessionId 存：自动收尾、手动转封装、重试互不覆盖。
+  const [postJobs, setPostJobs] = useState<Record<string, PostProgress>>({});
+  const [confirmSourceDelete, setConfirmSourceDelete] = useState(false);
+  // 当前抽屉这条录像登记在册的全部文件；转封装/删源后重新拉。
+  const [detailFiles, setDetailFiles] = useState<MediaFile[]>([]);
 
-  const [playing, setPlaying] = useState<{ item: MediaItem; playback: Playback } | null>(null);
+  const [playing, setPlaying] = useState<{
+    item: MediaItem;
+    playback: Playback;
+    source: boolean;
+  } | null>(null);
   const [playBusy, setPlayBusy] = useState<string | null>(null);
   const [volume, setVolume] = useState(loadVolume);
 
@@ -251,6 +272,25 @@ export default function MediaPage() {
   const thumbsRef = useRef<Record<string, string>>({});
   const playingRef = useRef(playing);
   playingRef.current = playing;
+
+  useEffect(() => {
+    const item = playing?.item;
+    if (!item) {
+      setDetailFiles([]);
+      return;
+    }
+    let alive = true;
+    void mediaFiles(item.id)
+      .then((files) => {
+        if (alive) setDetailFiles(files);
+      })
+      .catch(() => {
+        if (alive) setDetailFiles([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [playing?.item.id, playing?.item.path, playing?.item.postState, playing?.item.sourceDeleted]);
 
   // 搜索防抖：每敲一个字都查一次库没必要。
   useEffect(() => {
@@ -395,13 +435,35 @@ export default function MediaPage() {
   useEffect(() => {
     if (!isTauri()) return;
     let dispose: (() => void) | undefined;
-    void onPostProgress((one) => setPostPercent(one.percent))
+    const timers = new Set<number>();
+    void onPostProgress((one) => {
+      setPostJobs((prev) => ({ ...prev, [one.sessionId]: one }));
+      if (one.state === "done" || one.state === "cancelled") {
+        setPostJobs((prev) => {
+          const next = { ...prev };
+          delete next[one.sessionId];
+          return next;
+        });
+      }
+      // 事件比 DB 提交早：等落库后再刷新，避免读到旧的 post_state。
+      if (one.state === "done" || one.state === "failed" || one.state === "cancelled") {
+        const timer = window.setTimeout(() => {
+          timers.delete(timer);
+          if (hostId) void loadFiles(0);
+          else void loadHosts(0);
+        }, 500);
+        timers.add(timer);
+      }
+    })
       .then((off) => {
         dispose = off;
       })
       .catch(() => undefined);
-    return () => dispose?.();
-  }, []);
+    return () => {
+      dispose?.();
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [hostId, loadFiles, loadHosts]);
 
   // 离开媒体库时把回放停掉：缓存目录要清，不能留 ffmpeg 在后台。
   useEffect(
@@ -524,11 +586,12 @@ export default function MediaPage() {
   const closePlay = async () => {
     const current = playing;
     setPlaying(null);
+    setConfirmSourceDelete(false);
     if (current) await stopPlayback(current.item.id);
   };
 
-  const openPlay = async (item: MediaItem) => {
-    if (playing && playing.item.id === item.id) {
+  const openPlay = async (item: MediaItem, source = false) => {
+    if (playing && playing.item.id === item.id && playing.source === source) {
       await closePlay();
       return;
     }
@@ -540,9 +603,28 @@ export default function MediaPage() {
     setPlayBusy(item.id);
     setError(null);
     setNotice(null);
+    setConfirmSourceDelete(false);
     try {
-      const playback = await mediaPlay(item.id);
-      setPlaying({ item, playback });
+      const playback = await mediaPlay(item.id, null, source);
+      setPlaying({ item, playback, source });
+    } catch (err) {
+      setError(t("media.playFailed") + "：" + describeError(err));
+    } finally {
+      setPlayBusy(null);
+    }
+  };
+
+  // 同一个抽屉里切主文件/源封装：先停旧变体，再按新变体起播。
+  const switchVariant = async (source: boolean) => {
+    if (!playing || playing.source === source) return;
+    const item = playing.item;
+    setPlayBusy(item.id);
+    setError(null);
+    setConfirmSourceDelete(false);
+    try {
+      await stopPlayback(item.id);
+      const playback = await mediaPlay(item.id, null, source);
+      setPlaying({ item, playback, source });
     } catch (err) {
       setError(t("media.playFailed") + "：" + describeError(err));
     } finally {
@@ -558,11 +640,20 @@ export default function MediaPage() {
     }
   };
 
+  const revealFile = async (file: MediaFile) => {
+    try {
+      await mediaRevealFile(file.sessionId, file.path);
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
   // 拖到当前窗口外：后端换一个窗口重开，播放器从新窗口的偏移起播。
   const seekTo = async (item: MediaItem, positionMs: number) => {
     try {
-      const playback = await mediaPlay(item.id, positionMs);
-      setPlaying({ item, playback });
+      const source = playing?.source ?? false;
+      const playback = await mediaPlay(item.id, positionMs, source);
+      setPlaying({ item, playback, source });
     } catch (err) {
       setError(t("media.playFailed") + "：" + describeError(err));
     }
@@ -575,6 +666,7 @@ export default function MediaPage() {
       if (playingRef.current) {
         void mediaStop(playingRef.current.item.id).catch(() => undefined);
         setPlaying(null);
+        setConfirmSourceDelete(false);
         return;
       }
       if (hostId) backToHosts();
@@ -614,7 +706,6 @@ export default function MediaPage() {
           setError(t("media.mergeHint"));
           return;
         }
-        setPostPercent(0);
         const result = await sessionsMerge(selectedItems.map((item) => item.id));
         setNotice(t("media.mergeDone", { size: formatSize(result.size) }));
         setSelected([]);
@@ -656,7 +747,6 @@ export default function MediaPage() {
     } finally {
       setBusy(null);
       setProgress(null);
-      setPostPercent(null);
     }
   };
 
@@ -666,19 +756,23 @@ export default function MediaPage() {
     setBusy(kind);
     setError(null);
     setNotice(null);
-    setPostPercent(0);
     try {
       if (kind === "remux") {
         const result = await sessionRemux(item.id);
+        const switched = result.path !== item.path;
+        const sourcePath = item.sourcePath ?? (switched ? item.path : null);
+        // 源已经进过回收站就保持已删状态；不要把「仅删源」的结果覆盖回可见。
+        const sourceDeleted = Boolean(item.sourcePath) && item.sourceDeleted;
         const updated: MediaItem = {
           ...item,
           path: result.path,
           size: result.size,
-          sourcePath: item.sourcePath ?? item.path,
-          hasSource: true,
+          sourcePath,
+          hasSource: sourcePath ? item.hasSource || (switched && !item.sourcePath) : false,
           postMode: "convert",
           postState: "done",
-          sourceDeleted: false,
+          postError: null,
+          sourceDeleted,
         };
         setItems((prev) => prev.map((current) => (current.id === item.id ? updated : current)));
         setPlaying((prev) => (prev && prev.item.id === item.id ? { ...prev, item: updated } : prev));
@@ -690,9 +784,66 @@ export default function MediaPage() {
       await refreshAll();
     } catch (err) {
       setError(t("media.postFailed") + "：" + describeError(err));
+      await refreshAll();
     } finally {
       setBusy(null);
-      setPostPercent(null);
+    }
+  };
+
+  // 后处理失败/取消后重试；后端会用当前设置重新跑，并把结果写回这条录像。
+  const retryOne = async (item: MediaItem) => {
+    if (busy) return;
+    setBusy("retry:" + item.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await postRetry(item.id);
+      setNotice(t("media.retryDone", { size: formatSize(result.size) }));
+      await refreshAll();
+    } catch (err) {
+      setError(t("media.postFailed") + "：" + describeError(err));
+      await refreshAll();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const cancelOne = async (item: MediaItem) => {
+    setError(null);
+    try {
+      const count = await postCancel(item.id);
+      setNotice(count > 0 ? t("media.cancelRequested") : t("media.cancelIdle"));
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
+  // 只删源封装：后端会先 ffprobe 校验主文件，失败时不会动源文件。
+  const deleteSource = async (item: MediaItem) => {
+    if (busy) return;
+    if (!confirmSourceDelete) {
+      setConfirmSourceDelete(true);
+      return;
+    }
+    setBusy("delete-source:" + item.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await mediaDeleteSource(item.id);
+      setConfirmSourceDelete(false);
+      // 正在放的就是被删的源封装：先关抽屉，避免播放器停在已删除的流上。
+      if (playing?.item.id === item.id && playing.source) await closePlay();
+      const updated = { ...item, sourceDeleted: true, hasSource: false };
+      setItems((prev) => prev.map((current) => (current.id === item.id ? updated : current)));
+      setPlaying((prev) =>
+        prev && prev.item.id === item.id ? { ...prev, item: updated } : prev,
+      );
+      setNotice(t("media.sourceDeleteDone"));
+      await refreshAll();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -970,6 +1121,9 @@ export default function MediaPage() {
               const isSelected = group.clips.every((clip) => selected.includes(clip.id));
               const isPlaying = group.clips.some((clip) => clip.id === playing?.item.id);
               const isBusy = group.clips.some((clip) => clip.id === playBusy);
+              const job = postJobs[playable.id] ?? postJobs[item.id];
+              const jobRunning = job?.state === "queued" || job?.state === "running";
+              const retryable = item.postState === "failed" || item.postState === "cancelled";
               const missingClips = Math.max(0, group.clipCount - group.clips.length);
               return (
                 <article
@@ -1013,22 +1167,36 @@ export default function MediaPage() {
                       {t("platformName." + item.platform, { defaultValue: item.platform })}
                     </span>
 
-                    <span
-                      title={item.postState === "failed" ? item.postError ?? undefined : undefined}
-                      className={cx(
-                        "pointer-events-none absolute left-2 top-[26px] rounded-[4px] bg-black/55 px-1.5 py-[3px] text-[10px] leading-none backdrop-blur-[2px]",
-                        item.postState === "failed" ? "text-red-200" : "text-white/85",
-                      )}
-                    >
-                      {item.postState === "failed"
-                        ? t("media.postFailed")
-                        : item.postMode === "convert"
+                    {jobRunning ? (
+                      <button
+                        type="button"
+                        onClick={() => void cancelOne(playable)}
+                        className="focus-ring absolute left-2 top-[26px] z-10 rounded-[4px] bg-black/60 px-1.5 py-[3px] text-[10px] leading-none text-white/90 backdrop-blur-[2px] hover:bg-black/80"
+                      >
+                        {job.stage === "queued"
+                          ? t("media.postQueued")
+                          : job.percent + "% · " + t("media.cancelPost")}
+                      </button>
+                    ) : retryable ? (
+                      <button
+                        type="button"
+                        onClick={() => void retryOne(playable)}
+                        title={item.postError ?? undefined}
+                        className="focus-ring absolute left-2 top-[26px] z-10 rounded-[4px] bg-black/60 px-1.5 py-[3px] text-[10px] leading-none text-red-200 backdrop-blur-[2px] hover:bg-black/80"
+                      >
+                        {item.postState === "cancelled" ? t("media.postCancelled") : t("media.postFailed")} ·{" "}
+                        {t("media.retry")}
+                      </button>
+                    ) : (
+                      <span className="pointer-events-none absolute left-2 top-[26px] rounded-[4px] bg-black/55 px-1.5 py-[3px] text-[10px] leading-none text-white/85 backdrop-blur-[2px]">
+                        {item.postMode === "convert"
                           ? t("media.postConverted")
                           : item.postMode === "custom"
                             ? t("media.postCustom")
                             : t("media.postSource")}
-                      {item.sourceDeleted ? " · " + t("media.sourceDeleted") : ""}
-                    </span>
+                        {item.sourceDeleted ? " · " + t("media.sourceDeleted") : ""}
+                      </span>
+                    )}
 
                     <button
                       type="button"
@@ -1062,7 +1230,7 @@ export default function MediaPage() {
                     <h3 className="line-clamp-2 text-[12.5px] font-medium leading-[1.45] text-ink">
                       {item.title || item.hostName || item.id}
                     </h3>
-                    {item.sourcePath ? (
+                    {item.sourcePath && item.sourcePath !== item.path ? (
                       <div className="mt-0.5 space-y-0.5 rounded-[5px] bg-raised/60 px-1.5 py-1 text-[10px] leading-4">
                         <div className="flex min-w-0 items-center gap-1">
                           <span className="shrink-0 text-faint">{t("media.mainFile")}</span>
@@ -1328,33 +1496,72 @@ export default function MediaPage() {
                       </div>
                     </div>
 
-                    {playing.item.sourcePath ? (
+                    {detailFiles.length > 1 ? (
                       <div className="mt-4 rounded-[7px] border border-line bg-raised/40 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
-                          {t("media.files")}
+                        <div className="flex items-baseline gap-2">
+                          <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
+                            {t("media.files")}
+                          </div>
+                          <span className="text-[10px] tabular-nums text-faint">{detailFiles.length}</span>
                         </div>
                         <div className="mt-1.5 space-y-1 font-mono text-[10.5px] leading-4">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="w-[52px] shrink-0 font-sans text-faint">{t("media.mainFile")}</span>
-                            <span className="truncate text-ink-soft" title={playing.item.path}>
-                              {baseName(playing.item.path)}
-                            </span>
-                          </div>
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="w-[52px] shrink-0 font-sans text-faint">{t("media.sourceFile")}</span>
-                            {playing.item.hasSource ? (
-                              <button
-                                type="button"
-                                onClick={() => void revealSource(playing.item)}
-                                title={playing.item.sourcePath ?? undefined}
-                                className="focus-ring truncate text-left text-accent-text hover:underline"
-                              >
-                                {baseName(playing.item.sourcePath)}
-                              </button>
-                            ) : (
-                              <span className="truncate text-faint">{t("media.sourceDeleted")}</span>
-                            )}
-                          </div>
+                          {detailFiles.map((file) => {
+                            const active = file.state === "present" && file.exists;
+                            return (
+                              <div key={file.path} className="flex min-w-0 items-center gap-2">
+                                <span className="w-[52px] shrink-0 font-sans text-faint">
+                                  {t(FILE_ROLE[file.role] ?? "media.derivedFile")}
+                                </span>
+                                {active ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => void revealFile(file)}
+                                    title={file.path}
+                                    className="focus-ring truncate text-left text-accent-text hover:underline"
+                                  >
+                                    {baseName(file.path)}
+                                  </button>
+                                ) : (
+                                  <span className="truncate text-faint">
+                                    {file.state === "deleted" ? t("media.fileDeleted") : t("media.fileMissing")}
+                                  </span>
+                                )}
+                                <span className="ml-auto shrink-0 font-sans text-[10px] tabular-nums text-faint">
+                                  {file.format ? file.format.toUpperCase() + " · " : ""}
+                                  {formatSize(file.size)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <Button
+                            size="sm"
+                            variant={playing.source ? "ghost" : "secondary"}
+                            disabled={playBusy !== null}
+                            onClick={() => void switchVariant(false)}
+                          >
+                            {t("media.playMain")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant={playing.source ? "secondary" : "ghost"}
+                            disabled={playBusy !== null || !playing.item.hasSource}
+                            onClick={() => void switchVariant(true)}
+                          >
+                            {t("media.playSource")}
+                          </Button>
+                          {playing.item.hasSource && playing.item.sourcePath !== playing.item.path ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-rec"
+                              disabled={busy !== null}
+                              onClick={() => void deleteSource(playing.item)}
+                            >
+                              {confirmSourceDelete ? t("media.confirmDeleteSource") : t("media.deleteSource")}
+                            </Button>
+                          ) : null}
                         </div>
                       </div>
                     ) : null}
@@ -1368,6 +1575,16 @@ export default function MediaPage() {
                       >
                         {t("media.remux")}
                       </Button>
+                      {playing.item.postState === "failed" || playing.item.postState === "cancelled" ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy !== null}
+                          onClick={() => void retryOne(playing.item)}
+                        >
+                          {t("media.retry")}
+                        </Button>
+                      ) : null}
                       <Button
                         size="sm"
                         variant="secondary"
@@ -1394,8 +1611,29 @@ export default function MediaPage() {
                       </Button>
                     </div>
 
-                    {postPercent !== null ? (
-                      <div className="mt-2 font-mono text-[10.5px] tabular-nums text-faint">{postPercent}%</div>
+                    {postJobs[playing.item.id] ? (
+                      <div className="mt-2 flex items-center gap-2 font-mono text-[10.5px] tabular-nums text-faint">
+                        <span>
+                          {postJobs[playing.item.id].stage === "queued"
+                            ? t("media.postQueued")
+                            : postJobs[playing.item.id].percent + "%"}
+                        </span>
+                        {postJobs[playing.item.id].state === "queued" ||
+                        postJobs[playing.item.id].state === "running" ? (
+                          <button
+                            type="button"
+                            onClick={() => void cancelOne(playing.item)}
+                            className="focus-ring font-sans text-accent-text hover:underline"
+                          >
+                            {t("media.cancelPost")}
+                          </button>
+                        ) : null}
+                        {postJobs[playing.item.id].message ? (
+                          <span className="truncate font-sans text-rec">
+                            {postJobs[playing.item.id].message}
+                          </span>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
                 </div>

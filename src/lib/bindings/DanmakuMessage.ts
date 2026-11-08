@@ -3,15 +3,15 @@
 /**
  * 一条弹幕（已归一化，平台差异在客户端层消化）。
  */
-export type DanmakuMessage = { 
+export type DanmakuMessage = {
 /**
  * 相对连接建立（或录制开始）的毫秒偏移
  */
-offsetMs: number, 
+offsetMs: number,
 /**
  * chat | gift | super_chat | guard
  */
-kind: string, user: string | null, content: string, 
+kind: string, user: string | null, content: string,
 /**
  * 0xRRGGBB
  */

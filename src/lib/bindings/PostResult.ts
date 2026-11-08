@@ -3,11 +3,11 @@
 /**
  * 本地后处理的产物：转封装 / 截图 / 弹幕 ASS / 合并。
  */
-export type PostResult = { 
+export type PostResult = {
 /**
  * mp4 | screenshot | ass | merge
  */
-kind: string, path: string, size: number, 
+kind: string, path: string, size: number,
 /**
  * 额外说明（例如合并了几段），前端直接展示
  */

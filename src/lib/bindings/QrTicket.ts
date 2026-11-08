@@ -3,11 +3,11 @@
 /**
  * 扫码登录的起点：二维码 SVG 由后端渲染，前端直接 innerHTML。
  */
-export type QrTicket = { qrcodeKey: string, 
+export type QrTicket = { qrcodeKey: string,
 /**
  * 二维码承载的内容（B 站登录页 URL）
  */
-url: string, svg: string, 
+url: string, svg: string,
 /**
  * 二维码有效期（秒），从生成时刻算起
  */

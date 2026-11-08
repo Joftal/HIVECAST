@@ -3,19 +3,19 @@
 /**
  * 关闭程序时还没结束的任务（录制、转封装、合并、弹幕导出）。
  */
-export type ActiveTask = { 
+export type ActiveTask = {
 /**
  * 稳定标识，前端用它做列表 key
  */
-id: string, 
+id: string,
 /**
  * record | remux | merge | danmaku
  */
-kind: string, 
+kind: string,
 /**
  * 房间标题或文件名，直接展示
  */
-title: string, 
+title: string,
 /**
  * 次要说明（画质、来源文件），可为空
  */

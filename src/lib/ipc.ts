@@ -12,12 +12,16 @@ import type { LineInfo } from "./bindings/LineInfo";
 import type { LogStatus } from "./bindings/LogStatus";
 import type { MediaHost } from "./bindings/MediaHost";
 import type { MediaHostPage } from "./bindings/MediaHostPage";
+import type { MediaFile } from "./bindings/MediaFile";
 import type { MediaItem } from "./bindings/MediaItem";
 import type { MediaPage } from "./bindings/MediaPage";
 import type { PlatformCount } from "./bindings/PlatformCount";
 import type { Playback } from "./bindings/Playback";
 import type { Settings } from "./bindings/Settings";
 import type { PostProgress } from "./bindings/PostProgress";
+import type { TaskBoard } from "./bindings/TaskBoard";
+import type { TaskRecord } from "./bindings/TaskRecord";
+import type { TrashInfo } from "./bindings/TrashInfo";
 import type { PostResult } from "./bindings/PostResult";
 import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
@@ -36,6 +40,7 @@ export type {
   DanmakuMessage,
   LineInfo,
   LogStatus,
+  MediaFile,
   MediaHost,
   MediaHostPage,
   MediaItem,
@@ -44,6 +49,9 @@ export type {
   Playback,
   PostProgress,
   PostResult,
+  TaskBoard,
+  TaskRecord,
+  TrashInfo,
   AppNotice,
   RecordSession,
   RoomView,
@@ -141,6 +149,16 @@ export async function sessionRemux(sessionId: string): Promise<PostResult> {
   return invoke<PostResult>("session_remux", { sessionId });
 }
 
+/** 重试一条失败/已取消的后处理。 */
+export async function postRetry(sessionId: string): Promise<PostResult> {
+  return invoke<PostResult>("post_retry", { sessionId });
+}
+
+/** 取消一条排队/执行中的后处理，返回命中的任务数。 */
+export async function postCancel(sessionId: string): Promise<number> {
+  return invoke<number>("post_cancel", { sessionId });
+}
+
 export async function roomMergeSessions(roomId: string): Promise<PostResult> {
   return invoke<PostResult>("room_merge_sessions", { roomId });
 }
@@ -158,7 +176,7 @@ export function onAppNotice(handler: (notice: AppNotice) => void): Promise<Unlis
   return listen<AppNotice>(EVENT_APP_NOTICE, (event) => handler(event.payload));
 }
 
-// 后处理进度（转封装 / 合并）：task 是录像 id，合并任务为 "merge"。
+// 后处理进度：task 是任务 id，sessionId 对应媒体库条目，stage/state 见 PostProgress。
 export const EVENT_POST_PROGRESS = "post://progress";
 
 export function onPostProgress(handler: (progress: PostProgress) => void): Promise<UnlistenFn> {
@@ -325,8 +343,12 @@ export async function sessionExportDanmaku(sessionId: string): Promise<PostResul
   return invoke<PostResult>("session_export_danmaku", { sessionId });
 }
 
-export async function mediaPlay(sessionId: string, positionMs?: number | null): Promise<Playback> {
-  return invoke<Playback>("media_play", { sessionId, positionMs: positionMs ?? null });
+export async function mediaPlay(
+  sessionId: string,
+  positionMs?: number | null,
+  source = false,
+): Promise<Playback> {
+  return invoke<Playback>("media_play", { sessionId, positionMs: positionMs ?? null, source });
 }
 
 export async function mediaStop(sessionId: string): Promise<void> {
@@ -341,6 +363,21 @@ export async function mediaRevealSource(sessionId: string): Promise<void> {
   return invoke("media_reveal_source", { sessionId });
 }
 
+/** 定位这条录像登记过的任意文件（派生文件也适用）。 */
+export async function mediaRevealFile(sessionId: string, path: string): Promise<void> {
+  return invoke("media_reveal_file", { sessionId, path });
+}
+
+/** 一条录像登记过的全部文件（主文件 / 源封装 / 派生）。 */
+export async function mediaFiles(sessionId: string): Promise<MediaFile[]> {
+  return invoke<MediaFile[]>("media_files", { sessionId });
+}
+
+/** 只删除源封装母带（后端会先校验主文件）。 */
+export async function mediaDeleteSource(sessionId: string): Promise<void> {
+  return invoke("media_delete_source", { sessionId });
+}
+
 export async function mediaDelete(sessionId: string, deleteFile: boolean): Promise<void> {
   return invoke("media_delete", { sessionId, deleteFile });
 }
@@ -350,6 +387,16 @@ export async function mediaDeleteGroup(groupId: string, deleteFile: boolean): Pr
   return invoke<number>("media_delete_group", { groupId, deleteFile });
 }
 
+
+/** 当前平台的回收站能力与位置。 */
+export async function trashInfo(): Promise<TrashInfo> {
+  return invoke<TrashInfo>("trash_info");
+}
+
+/** 在文件管理器中打开回收站。 */
+export async function trashOpen(): Promise<void> {
+  return invoke("trash_open");
+}
 
 // ---- 观看页布局 ----
 
@@ -392,6 +439,11 @@ export async function bilibiliQrPoll(qrcodeKey: string): Promise<QrPoll> {
 /** 还没结束的录制与后处理任务。 */
 export async function activeTasks(): Promise<ActiveTask[]> {
   return invoke<ActiveTask[]>("active_tasks");
+}
+
+/** 任务中心：运行中 + 历史任务。 */
+export async function taskBoard(limit = 100): Promise<TaskBoard> {
+  return invoke<TaskBoard>("task_board", { limit });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

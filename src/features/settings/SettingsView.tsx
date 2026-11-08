@@ -8,10 +8,13 @@ import {
   logsOpen,
   logsStatus,
   settingsGet,
+  trashInfo,
+  trashOpen,
   settingsUpdate,
   type FilenamePreview,
   type LogStatus,
   type Settings,
+  type TrashInfo,
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
@@ -313,6 +316,7 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
   const [discardOpen, setDiscardOpen] = useState(false);
   const [preview, setPreview] = useState<FilenamePreview | null>(null);
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
+  const [trash, setTrash] = useState<TrashInfo | null>(null);
   // 分割体积在 UI 上允许 MB/GB 切换，落库统一存 MB。
   const [sizeUnit, setSizeUnit] = useState<"MB" | "GB">("MB");
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -353,6 +357,11 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
     if (!open) return;
     setError(null);
     setQuery("");
+    if (isTauri()) {
+      void trashInfo()
+        .then(setTrash)
+        .catch(() => setTrash(null));
+    }
     setFocusId(null);
     setDiscardOpen(false);
     void load();
@@ -1094,6 +1103,38 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
                 label={t("settings.groupDirs")}
               />
             </Row>
+          </Section>
+
+          <Section title={t("settings.sectionTrash")}>
+            <Row
+              id="set-trash"
+              focus={focusId === "set-trash"}
+              title={t("settings.trashTitle")}
+              desc={t("settings.trashHint")}
+            >
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  void trashOpen().catch((err) => setError(describeError(err)));
+                }}
+              >
+                {t("settings.trashOpen")}
+              </Button>
+            </Row>
+            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
+              {trash ? (
+                <>
+                  <p className="break-all font-mono">{trash.location}</p>
+                  <p className={trash.canRestore ? "" : "text-warn"}>
+                    {trash.canRestore ? t("settings.trashRestoreYes") : t("settings.trashRestoreNo")}
+                  </p>
+                  <p>{trash.note}</p>
+                </>
+              ) : (
+                <p>{t("settings.trashUnavailable")}</p>
+              )}
+            </div>
           </Section>
 
           <Section title={t("settings.sectionRetention")}>

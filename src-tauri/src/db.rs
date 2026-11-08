@@ -7,7 +7,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use hivecast_ipc::{MediaHost, MediaHostPage, MediaItem, PlatformCount, RecordSession, RoomRecord};
+use hivecast_ipc::{
+    MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, RecordSession, RoomRecord,
+    TaskRecord,
+};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
@@ -35,6 +38,43 @@ CREATE TABLE IF NOT EXISTS credential (
     status TEXT NOT NULL DEFAULT 'ok',
     updated_at INTEGER NOT NULL
 );
+
+-- 任务中心历史：运行中的任务也会先落一行，进程异常退出后启动时改成 interrupted。
+CREATE TABLE IF NOT EXISTS task_history (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT,
+    state TEXT NOT NULL,
+    percent INTEGER NOT NULL DEFAULT 0,
+    stage TEXT,
+    message TEXT,
+    session_id TEXT,
+    room_id TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_history_started
+    ON task_history (started_at DESC);
+
+-- 一条录像登记在册的全部文件：主文件、源封装母带、后处理派生文件。
+-- record_session 的 file_path/source_path 仍是播放与兼容的主索引，这张表负责完整清单。
+CREATE TABLE IF NOT EXISTS media_file (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES record_session(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'derived',
+    size INTEGER NOT NULL DEFAULT 0,
+    format TEXT,
+    state TEXT NOT NULL DEFAULT 'present',
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER,
+    UNIQUE (session_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_file_session
+    ON media_file (session_id, role);
 ";
 
 /// 媒体库筛选条件：全部下推到 SQL，前端不再把 200 条拉回来自己过滤。
@@ -231,10 +271,19 @@ impl Db {
             _ => std::env::temp_dir().join(format!("hivecast-memory-{}.bin", std::process::id())),
         };
         let secret = crate::secret::Secret::load_or_create(&key_path)?;
-        Ok(Self {
+        let db = Self {
             conn: Mutex::new(conn),
             secret,
-        })
+        };
+        // 老库没有 media_file 表：启动时按 file_path/source_path 回填一次。
+        match db.backfill_media_files() {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "数据库迁移：回填媒体文件登记")
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "回填媒体文件登记失败"),
+        }
+        Ok(db)
     }
 
     /// 只给单测用：跨模块播种数据（retention 等测试需要直接写表）。
@@ -513,38 +562,45 @@ impl Db {
     }
 
     pub fn create_session(&self, session: &RecordSession) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "INSERT INTO record_session (
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
                     danmaku_path, danmaku_count, source_path, post_mode, post_state,
                     source_deleted, post_error
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                           ?15, ?16, ?17, ?18, ?19)",
-                params![
-                    session.id,
-                    session.room_id,
-                    session.started_at,
-                    session.ended_at,
-                    session.status,
-                    session.reason,
-                    session.file_path,
-                    session.file_size,
-                    session.duration_ms,
-                    session.quality,
-                    session.line,
-                    session.error,
-                    session.danmaku_path,
-                    session.danmaku_count,
-                    session.source_path,
-                    session.post_mode,
-                    session.post_state,
-                    session.source_deleted as i64,
-                    session.post_error,
-                ],
-            )
-            .map_err(db_err)?;
+            params![
+                session.id,
+                session.room_id,
+                session.started_at,
+                session.ended_at,
+                session.status,
+                session.reason,
+                session.file_path,
+                session.file_size,
+                session.duration_ms,
+                session.quality,
+                session.line,
+                session.error,
+                session.danmaku_path,
+                session.danmaku_count,
+                session.source_path,
+                session.post_mode,
+                session.post_state,
+                session.source_deleted as i64,
+                session.post_error,
+            ],
+        )
+        .map_err(db_err)?;
+        sync_media_files_on(
+            &conn,
+            &session.id,
+            session.file_path.as_deref(),
+            session.source_path.as_deref(),
+            session.source_deleted,
+        );
         Ok(())
     }
 
@@ -556,41 +612,48 @@ impl Db {
         clip_index: i64,
         split_reason: Option<&str>,
     ) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "INSERT INTO record_session (
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
                     danmaku_path, danmaku_count, group_id, clip_index, split_reason,
                     source_path, post_mode, post_state, source_deleted, post_error
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                           ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
-                params![
-                    session.id,
-                    session.room_id,
-                    session.started_at,
-                    session.ended_at,
-                    session.status,
-                    session.reason,
-                    session.file_path,
-                    session.file_size,
-                    session.duration_ms,
-                    session.quality,
-                    session.line,
-                    session.error,
-                    session.danmaku_path,
-                    session.danmaku_count,
-                    group_id,
-                    clip_index,
-                    split_reason,
-                    session.source_path,
-                    session.post_mode,
-                    session.post_state,
-                    session.source_deleted as i64,
-                    session.post_error,
-                ],
-            )
-            .map_err(db_err)?;
+            params![
+                session.id,
+                session.room_id,
+                session.started_at,
+                session.ended_at,
+                session.status,
+                session.reason,
+                session.file_path,
+                session.file_size,
+                session.duration_ms,
+                session.quality,
+                session.line,
+                session.error,
+                session.danmaku_path,
+                session.danmaku_count,
+                group_id,
+                clip_index,
+                split_reason,
+                session.source_path,
+                session.post_mode,
+                session.post_state,
+                session.source_deleted as i64,
+                session.post_error,
+            ],
+        )
+        .map_err(db_err)?;
+        sync_media_files_on(
+            &conn,
+            &session.id,
+            session.file_path.as_deref(),
+            session.source_path.as_deref(),
+            session.source_deleted,
+        );
         Ok(())
     }
 
@@ -613,44 +676,70 @@ impl Db {
         danmaku_count: i64,
         error: Option<&str>,
     ) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "UPDATE record_session SET
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE record_session SET
                     status = ?2, reason = ?3, ended_at = ?4, file_path = ?5,
                     file_size = ?6, duration_ms = MAX(0, (?4 - started_at) * 1000),
                     source_path = ?7, post_mode = ?8, post_state = ?9,
                     source_deleted = ?10, post_error = ?11,
                     danmaku_path = ?12, danmaku_count = ?13, error = ?14
                   WHERE id = ?1",
-                params![
-                    id,
-                    status,
-                    reason,
-                    ended_at,
-                    file_path,
-                    file_size,
-                    source_path,
-                    post_mode,
-                    post_state,
-                    source_deleted as i64,
-                    post_error,
-                    danmaku_path,
-                    danmaku_count,
-                    error
-                ],
-            )
-            .map_err(db_err)?;
+            params![
+                id,
+                status,
+                reason,
+                ended_at,
+                file_path,
+                file_size,
+                source_path,
+                post_mode,
+                post_state,
+                source_deleted as i64,
+                post_error,
+                danmaku_path,
+                danmaku_count,
+                error
+            ],
+        )
+        .map_err(db_err)?;
+        sync_media_files_on(&conn, id, Some(file_path), source_path, source_deleted);
         Ok(())
     }
 
     /// 源已经移进回收站后单独打标；失败只影响展示，不影响播放。
     pub fn set_source_deleted(&self, id: &str, deleted: bool) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "UPDATE record_session SET source_deleted = ?2 WHERE id = ?1",
-                params![id, deleted as i64],
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE record_session SET source_deleted = ?2 WHERE id = ?1",
+            params![id, deleted as i64],
+        )
+        .map_err(db_err)?;
+        let source: Option<Option<String>> = conn
+            .query_row(
+                "SELECT source_path FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
             )
+            .optional()
             .map_err(db_err)?;
+        if let Some(Some(source)) = source {
+            if deleted {
+                conn.execute(
+                    "UPDATE media_file SET state = 'deleted', deleted_at = ?3
+                      WHERE session_id = ?1 AND path = ?2",
+                    params![id, source, now_ts()],
+                )
+                .map_err(db_err)?;
+            } else {
+                conn.execute(
+                    "UPDATE media_file SET state = 'present', deleted_at = NULL
+                      WHERE session_id = ?1 AND path = ?2",
+                    params![id, source],
+                )
+                .map_err(db_err)?;
+            }
+        }
         Ok(())
     }
 
@@ -732,6 +821,12 @@ impl Db {
     /// 媒体库单行映射：列表和整组补齐共用，避免两处 SELECT 漂移。
     fn media_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
         let path: String = row.get(5)?;
+        let source_path: Option<String> = row.get(15)?;
+        let source_deleted = row.get::<_, i64>(18)? != 0;
+        let has_source = !source_deleted
+            && source_path
+                .as_deref()
+                .is_some_and(|source| source != path && std::path::Path::new(source).is_file());
         Ok(MediaItem {
             id: row.get(0)?,
             room_id: row.get(1)?,
@@ -750,16 +845,12 @@ impl Db {
             clip_index: row.get(12)?,
             split_reason: row.get(13)?,
             clip_count: row.get(14)?,
-            source_path: row.get(15)?,
+            source_path,
             post_mode: row.get(16)?,
             post_state: row.get(17)?,
-            source_deleted: row.get::<_, i64>(18)? != 0,
+            source_deleted,
             post_error: row.get(19)?,
-            has_source: row
-                .get::<_, Option<String>>(15)?
-                .map(|path| std::path::Path::new(&path).is_file())
-                .unwrap_or(false)
-                && row.get::<_, i64>(18)? == 0,
+            has_source,
         })
     }
 
@@ -1075,12 +1166,21 @@ impl Db {
         path: &str,
         file_size: i64,
     ) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "UPDATE record_session SET file_path = ?2, file_size = ?3 WHERE id = ?1",
-                params![id, path, file_size],
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE record_session SET file_path = ?2, file_size = ?3 WHERE id = ?1",
+            params![id, path, file_size],
+        )
+        .map_err(db_err)?;
+        let source: Option<Option<String>> = conn
+            .query_row(
+                "SELECT source_path FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
             )
+            .optional()
             .map_err(db_err)?;
+        sync_media_files_on(&conn, id, Some(path), source.flatten().as_deref(), false);
         Ok(())
     }
 
@@ -1098,24 +1198,25 @@ impl Db {
         source_deleted: bool,
         post_error: Option<&str>,
     ) -> Result<(), AppError> {
-        self.lock()
-            .execute(
-                "UPDATE record_session SET
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE record_session SET
                     file_path = ?2, file_size = ?3, source_path = ?4,
                     post_mode = ?5, post_state = ?6, source_deleted = ?7, post_error = ?8
                   WHERE id = ?1",
-                params![
-                    id,
-                    file_path,
-                    file_size,
-                    source_path,
-                    post_mode,
-                    post_state,
-                    source_deleted as i64,
-                    post_error
-                ],
-            )
-            .map_err(db_err)?;
+            params![
+                id,
+                file_path,
+                file_size,
+                source_path,
+                post_mode,
+                post_state,
+                source_deleted as i64,
+                post_error
+            ],
+        )
+        .map_err(db_err)?;
+        sync_media_files_on(&conn, id, Some(file_path), source_path, source_deleted);
         Ok(())
     }
 
@@ -1140,6 +1241,266 @@ impl Db {
             })
             .map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+}
+
+/// 任务中心与文件登记：与录制历史同库，但独立成表，删除录像不会连带删任务历史。
+impl Db {
+    pub fn task_start(&self, task: &TaskRecord) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "INSERT INTO task_history (
+                    id, kind, title, detail, state, percent, stage, message,
+                    session_id, room_id, started_at, finished_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind, title = excluded.title, detail = excluded.detail,
+                    state = excluded.state, percent = excluded.percent, stage = excluded.stage,
+                    message = excluded.message, session_id = excluded.session_id,
+                    room_id = excluded.room_id, started_at = excluded.started_at,
+                    finished_at = NULL",
+                params![
+                    task.id,
+                    task.kind,
+                    task.title,
+                    task.detail,
+                    task.state,
+                    task.percent,
+                    task.stage,
+                    task.message,
+                    task.session_id,
+                    task.room_id,
+                    task.started_at,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn task_progress(
+        &self,
+        id: &str,
+        percent: i64,
+        stage: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE task_history SET state = 'running', percent = ?2, stage = ?3, message = ?4
+                  WHERE id = ?1 AND state = 'running'",
+                params![id, percent.clamp(0, 100), stage, message],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn task_finish(
+        &self,
+        id: &str,
+        state: &str,
+        message: Option<&str>,
+        finished_at: i64,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE task_history SET
+                    state = ?2,
+                    percent = CASE WHEN ?2 = 'done' THEN 100 ELSE percent END,
+                    stage = CASE WHEN ?2 = 'done' THEN 'done' ELSE stage END,
+                    message = ?3, finished_at = ?4
+                  WHERE id = ?1",
+                params![id, state, message, finished_at],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn task_history(&self, limit: usize) -> Result<Vec<TaskRecord>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, title, detail, state, percent, stage, message,
+                        session_id, room_id, started_at, finished_at
+                   FROM task_history WHERE state <> 'running'
+                  ORDER BY started_at DESC LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![limit.clamp(1, 500) as i64], map_task)
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 启动时把上次没来得及收尾的任务标成 interrupted；它们不会再继续跑。
+    pub fn mark_tasks_interrupted(&self) -> Result<usize, AppError> {
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE task_history SET state = 'interrupted',
+                    message = COALESCE(message, '应用上次退出时任务未完成'),
+                    finished_at = ?1
+                  WHERE state = 'running'",
+                params![now_ts()],
+            )
+            .map_err(db_err)?;
+        Ok(changed)
+    }
+
+    pub fn media_files(&self, session_id: &str) -> Result<Vec<MediaFile>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, path, role, size, format, state, created_at, deleted_at
+                   FROM media_file WHERE session_id = ?1
+                  ORDER BY CASE role WHEN 'main' THEN 0 WHEN 'source' THEN 1 ELSE 2 END,
+                           created_at ASC, path ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                let path: String = row.get(1)?;
+                let stored: String = row.get(5)?;
+                let exists = std::path::Path::new(&path).is_file();
+                let state = if stored == "deleted" {
+                    "deleted".to_string()
+                } else if exists {
+                    "present".to_string()
+                } else {
+                    "missing".to_string()
+                };
+                Ok(MediaFile {
+                    session_id: row.get(0)?,
+                    size: row.get(3)?,
+                    format: row.get(4)?,
+                    path,
+                    role: row.get(2)?,
+                    state,
+                    exists,
+                    created_at: row.get(6)?,
+                    deleted_at: row.get(7)?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 老库回填：之前只记了 file_path/source_path，启动时补进登记表。
+    pub fn backfill_media_files(&self) -> Result<usize, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, source_path, source_deleted FROM record_session
+                  WHERE (file_path IS NOT NULL AND file_path <> '')
+                     OR (source_path IS NOT NULL AND source_path <> '')",
+            )
+            .map_err(db_err)?;
+        let rows: Vec<(String, Option<String>, Option<String>, i64)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(db_err)?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        let mut count = 0;
+        for (id, main, source, deleted) in rows {
+            let before: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM media_file WHERE session_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
+            sync_media_files_on(&conn, &id, main.as_deref(), source.as_deref(), deleted != 0);
+            if before == 0 {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
+fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
+    Ok(TaskRecord {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        title: row.get(2)?,
+        detail: row.get(3)?,
+        state: row.get(4)?,
+        percent: row.get(5)?,
+        stage: row.get(6)?,
+        message: row.get(7)?,
+        session_id: row.get(8)?,
+        room_id: row.get(9)?,
+        started_at: row.get(10)?,
+        finished_at: row.get(11)?,
+    })
+}
+
+fn file_format(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+fn upsert_media_file(
+    conn: &Connection,
+    session_id: &str,
+    path: &str,
+    role: &str,
+    state: &str,
+    now: i64,
+) {
+    let size = std::fs::metadata(path)
+        .map(|meta| meta.len() as i64)
+        .unwrap_or(0);
+    let format = file_format(path);
+    let deleted_at = (state == "deleted").then_some(now);
+    if let Err(err) = conn.execute(
+        "INSERT INTO media_file (session_id, path, role, size, format, state, created_at, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(session_id, path) DO UPDATE SET
+            role = excluded.role,
+            size = CASE WHEN excluded.size > 0 THEN excluded.size ELSE media_file.size END,
+            format = COALESCE(excluded.format, media_file.format),
+            state = CASE
+                WHEN excluded.state = 'deleted' OR media_file.state = 'deleted' THEN 'deleted'
+                ELSE 'present'
+            END,
+            deleted_at = CASE
+                WHEN excluded.state = 'deleted' THEN excluded.deleted_at
+                WHEN media_file.state = 'deleted' THEN media_file.deleted_at
+                ELSE NULL
+            END",
+        params![session_id, path, role, size, format, state, now, deleted_at],
+    ) {
+        tracing::warn!(session_id, path, error = %err, "登记媒体文件失败");
+    }
+}
+
+fn sync_media_files_on(
+    conn: &Connection,
+    session_id: &str,
+    main: Option<&str>,
+    source: Option<&str>,
+    source_deleted: bool,
+) {
+    let now = now_ts();
+    // 旧主文件可能已经变成源封装：先降级，随后 source upsert 会把它提回 source。
+    if let Some(main) = main.filter(|path| !path.is_empty()) {
+        if let Err(err) = conn.execute(
+            "UPDATE media_file SET role = 'derived'
+              WHERE session_id = ?1 AND role = 'main' AND path <> ?2",
+            params![session_id, main],
+        ) {
+            tracing::warn!(session_id, error = %err, "降级旧主文件失败");
+        }
+        upsert_media_file(conn, session_id, main, "main", "present", now);
+    }
+    if let Some(source) = source.filter(|path| !path.is_empty() && Some(*path) != main) {
+        let state = if source_deleted { "deleted" } else { "present" };
+        upsert_media_file(conn, session_id, source, "source", state, now);
     }
 }
 
@@ -1847,6 +2208,29 @@ mod tests {
         assert_eq!(committed.duration_ms, 100_000);
         let items = db.media_group_items("s-post").expect("整组查询失败");
         assert!(!items[0].has_source, "源已删标记要同步到媒体库");
+    }
+
+    #[test]
+    fn source_equal_to_main_is_not_reported_as_a_second_file() {
+        let (db, db_path) = temp_db("sourcedup");
+        seed_media(&db);
+        let dir = db_path.parent().expect("库目录").join("media-dup");
+        std::fs::create_dir_all(&dir).expect("建媒体目录失败");
+        let main = dir.join("live.flv");
+        std::fs::write(&main, b"one-file").expect("写源文件失败");
+        let mut session = db
+            .get_session("s-a1")
+            .expect("读会话失败")
+            .expect("会话存在");
+        session.id = "s-dup".into();
+        session.file_path = Some(main.display().to_string());
+        session.source_path = Some(main.display().to_string());
+        session.post_mode = "source".into();
+        session.post_state = "done".into();
+        session.source_deleted = false;
+        db.create_session(&session).expect("写入会话失败");
+        let items = db.media_group_items("s-dup").expect("整组查询失败");
+        assert!(!items[0].has_source, "主文件与源相同时不应显示第二个文件");
     }
 
     #[test]

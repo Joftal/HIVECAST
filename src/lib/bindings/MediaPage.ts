@@ -5,7 +5,7 @@ import type { PlatformCount } from "./PlatformCount";
 /**
  * 媒体库一页数据：items 是本页，total 是当前筛选条件下的总条数。
  */
-export type MediaPage = { items: Array<MediaItem>, total: number, 
+export type MediaPage = { items: Array<MediaItem>, total: number,
 /**
  * 当前筛选条件下各平台的条数（不受平台筛选本身影响），给下拉菜单显示计数。
  */

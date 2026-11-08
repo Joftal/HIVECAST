@@ -165,16 +165,23 @@ pub struct PostResult {
     pub message: Option<String>,
 }
 
-/// 后处理进度：task 是录像 id，合并任务用 "merge"。
+/// 后处理进度：task 是任务 id，session_id 用来对应媒体库条目。
 ///
-/// 只在 ffmpeg 能算出进度时发送（有总时长），0..99，任务结束由返回值表示。
+/// stage 取值：queued | preparing | converting | validating | done | failed | cancelled。
+/// state 是粗粒度状态：queued | running | done | failed | cancelled。
+/// 转换阶段按 ffmpeg 的 out_time 计算百分比；算不出时保持 5%，
+/// 任务结束由 done/failed/cancelled 事件收口。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/lib/bindings/")]
 pub struct PostProgress {
     pub task: String,
+    pub session_id: String,
     #[ts(type = "number")]
     pub percent: i64,
+    pub stage: String,
+    pub state: String,
+    pub message: Option<String>,
 }
 
 /// 应用级播报：前端据此弹系统通知（文案在前端 i18n，后端不硬编码）。
@@ -387,6 +394,81 @@ pub struct ActiveTask {
     pub title: String,
     /// 次要说明（画质、来源文件），可为空
     pub detail: Option<String>,
+}
+
+/// 任务中心的一条记录：运行中的任务来自内存，结束后的任务来自数据库。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskRecord {
+    /// 稳定标识；录制是 record:{session}，后处理沿用 post::run 的 task id
+    pub id: String,
+    /// record | post | remux | merge | danmaku
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    /// running | done | failed | cancelled | interrupted
+    pub state: String,
+    #[ts(type = "number")]
+    pub percent: i64,
+    /// queued / preparing / running / validating / committing / done / failed / cancelled
+    pub stage: Option<String>,
+    pub message: Option<String>,
+    pub session_id: Option<String>,
+    pub room_id: Option<String>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number")]
+    pub finished_at: Option<i64>,
+}
+
+/// 任务中心首页：运行中 + 最近历史。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskBoard {
+    pub running: Vec<TaskRecord>,
+    pub history: Vec<TaskRecord>,
+}
+
+/// 一条录像登记在册的文件（主文件、源封装母带、派生文件）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct MediaFile {
+    pub session_id: String,
+    pub path: String,
+    /// main | source | derived
+    pub role: String,
+    #[ts(type = "number")]
+    pub size: i64,
+    /// 扩展名（不含点），未知为 null
+    pub format: Option<String>,
+    /// present | deleted | missing
+    pub state: String,
+    /// 此刻磁盘上是否还能找到
+    pub exists: bool,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub deleted_at: Option<i64>,
+}
+
+/// 当前平台的回收站能力，用于设置页和删源确认文案。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TrashInfo {
+    /// macos | windows | linux
+    pub platform: String,
+    /// system | freedesktop | plain
+    pub mode: String,
+    /// 系统文件管理器里能否直接还原
+    pub can_restore: bool,
+    /// 回收站目录（文件实际被移动到的位置）
+    pub location: String,
+    /// 给用户看的平台差异说明
+    pub note: String,
 }
 
 /// 媒体库里的一条录像（会话 + 房间展示信息的扁平快照）。

@@ -3,19 +3,19 @@
 /**
  * 文件名模板预览：用示例房间渲染一次，前端直接展示。
  */
-export type FilenamePreview = { 
+export type FilenamePreview = {
 /**
  * 渲染出的文件名（不含扩展名与目录）
  */
-name: string, 
+name: string,
 /**
  * 完整路径（示例根目录 + 目录结构 + 文件名 + .mp4）
  */
-path: string, 
+path: string,
 /**
  * 模板是否可用
  */
-valid: boolean, 
+valid: boolean,
 /**
  * 不可用时的原因
  */

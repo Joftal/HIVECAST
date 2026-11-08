@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, LogStatus, MediaHostPage,
-    MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession, RoomRecord,
-    RoomView, Settings, StreamDescriptor, ViewSlotInfo,
+    ActiveTask, AppInfo, CredentialInfo, FilenamePreview, LineInfo, LogStatus, MediaFile,
+    MediaHostPage, MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket, RecordSession,
+    RoomRecord, RoomView, Settings, StreamDescriptor, TaskBoard, TaskRecord, TrashInfo,
+    ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -529,39 +530,194 @@ pub async fn session_remux(
 ) -> Result<PostResult, AppError> {
     let session = session_file(&state, &session_id)?;
     let path = session_video(&session, session.status == "recording")?;
-    // 先登记再开跑：退出流程要能看到这个任务，命令返回（含报错）时 guard 自动注销。
-    let _job = state
-        .jobs
-        .begin("remux", file_label(&path), session.quality.clone());
+    // 任务由 post::run 统一登记到任务中心，命令层不再重复登记。
     tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), "开始转封装");
-    let progress = postprocess::Progress {
-        app: &app,
-        task: &session_id,
-        total_ms: session.duration_ms,
-    };
-    let result = postprocess::remux(&path, Some(&progress)).await?;
+    // 手动转封装与自动后处理走同一条 convert 实现：临时文件、ffprobe 校验、
+    // 进度、取消、磁盘预检都一致；唯一区别是手动永远保留源封装。
+    let settings = crate::settings::load(&state.db);
+    let mut cfg = crate::post::PostConfig::from_settings(&settings);
+    cfg.mode = crate::settings::POST_MODE_CONVERT.to_string();
+    cfg.convert_format = "mp4".into();
+    cfg.delete_source = false;
+    let task_id = format!("manual:{session_id}");
+    let outcome = crate::post::run(&task_id, &session_id, &path, &cfg, Some(&app)).await;
+    if outcome.state != crate::post::STATE_DONE {
+        let reason = outcome.error.unwrap_or_else(|| "转封装失败".to_string());
+        // 失败/取消也要落库，媒体库才能给出可重试的徽标；主文件保持在原位置。
+        let kept_path = session
+            .file_path
+            .clone()
+            .unwrap_or_else(|| path.display().to_string());
+        let _ = state.db.update_session_post_file(
+            &session_id,
+            &kept_path,
+            session.file_size,
+            session.source_path.as_deref(),
+            "convert",
+            &outcome.state,
+            session.source_deleted,
+            Some(&reason),
+        );
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        return Err(if outcome.state == crate::post::STATE_CANCELLED {
+            AppError::User(reason)
+        } else {
+            AppError::Ffmpeg(reason)
+        });
+    }
     // 手动转封装保留源：第一次转封装时把原文件登记为母带，主文件切到新 mp4。
-    // 这样媒体库既能继续播派生文件，也能定位/回放原始封装。
-    let source_path = session.source_path.clone().or(session.file_path.clone());
+    // 已经存在 source_path 时沿用原状态，不能把用户「仅删源」的结果重置成未删，
+    // 否则媒体库会显示一个已经不在回收站外的源文件。
+    let switched = outcome.path != path;
+    let source_path = session
+        .source_path
+        .clone()
+        .or_else(|| switched.then(|| path.display().to_string()));
+    let source_deleted = source_path.is_some() && session.source_deleted;
     state.db.update_session_post_file(
         &session_id,
-        &result.path,
-        result.size,
+        &outcome.path.display().to_string(),
+        outcome.size,
         source_path.as_deref(),
         "convert",
         "done",
-        false,
+        source_deleted,
         None,
     )?;
     tracing::info!(
         target: "hivecast_lib::commands",
         session_id = %session_id,
-        out = %result.path,
+        out = %outcome.path.display(),
         source = ?source_path,
         "手动转封装完成并切换主文件"
     );
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-    Ok(result)
+    Ok(PostResult {
+        kind: "remux".into(),
+        path: outcome.path.display().to_string(),
+        size: outcome.size,
+        message: Some("已转封装为 MP4，源封装已保留".into()),
+    })
+}
+
+/// 重试一条失败/取消的后处理：仍按当前设置执行，成功的派生文件重新写库。
+#[tauri::command]
+pub async fn post_retry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<PostResult, AppError> {
+    let session = session_file(&state, &session_id)?;
+    if session.status == "recording" {
+        return Err(AppError::User("这段还在录制，先停下再处理".into()));
+    }
+    if !matches!(
+        session.post_state.as_str(),
+        crate::post::STATE_FAILED | crate::post::STATE_CANCELLED
+    ) {
+        return Err(AppError::User("只有失败或已取消的后处理才能重试".into()));
+    }
+    let source = session
+        .source_path
+        .clone()
+        .or_else(|| session.file_path.clone())
+        .ok_or_else(|| AppError::Internal("这段录像没有可处理的源文件".into()))?;
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_file() {
+        return Err(AppError::User("源封装文件已不存在，无法重试".into()));
+    }
+    let settings = crate::settings::load(&state.db);
+    let mut cfg = crate::post::PostConfig::from_settings(&settings);
+    if matches!(
+        session.post_mode.as_str(),
+        crate::settings::POST_MODE_SOURCE
+            | crate::settings::POST_MODE_CONVERT
+            | crate::settings::POST_MODE_CUSTOM
+    ) {
+        cfg.mode = session.post_mode.clone();
+    }
+    let task_id = format!("manual:{session_id}:retry");
+    let outcome = crate::post::run(&task_id, &session_id, &source_path, &cfg, Some(&app)).await;
+    let mode = cfg.mode.clone();
+    if outcome.state == crate::post::STATE_DONE {
+        let main = outcome.path.display().to_string();
+        let keep_source = if outcome.path == source_path {
+            session.source_path.clone()
+        } else {
+            Some(source.clone())
+        };
+        state.db.update_session_post_file(
+            &session_id,
+            &main,
+            outcome.size,
+            keep_source.as_deref(),
+            &mode,
+            &outcome.state,
+            false,
+            None,
+        )?;
+    } else {
+        // 重试失败时主文件仍是源封装，只更新失败原因，不能把可播放路径改坏。
+        state.db.update_session_post_file(
+            &session_id,
+            session.file_path.as_deref().unwrap_or(&source),
+            session.file_size,
+            session.source_path.as_deref(),
+            &mode,
+            &outcome.state,
+            false,
+            outcome.error.as_deref(),
+        )?;
+    }
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(PostResult {
+        kind: "post".into(),
+        path: outcome.path.display().to_string(),
+        size: outcome.size,
+        message: outcome.error,
+    })
+}
+
+/// 取消一条正在排队/执行的后处理。
+#[tauri::command]
+pub fn post_cancel(session_id: String) -> usize {
+    crate::post::cancel_session(&session_id)
+}
+
+/// 只删源封装母带：派生文件必须通过 ffprobe 校验，避免把唯一可播放文件删掉。
+#[tauri::command]
+pub async fn media_delete_source(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    let session = session_file(&state, &session_id)?;
+    if session.status == "recording" {
+        return Err(AppError::User("这段还在录制，先停下再删源".into()));
+    }
+    let Some(main) = session.file_path.as_deref() else {
+        return Err(AppError::User("这段录像没有主文件".into()));
+    };
+    let Some(source) = session.source_path.as_deref() else {
+        return Err(AppError::User("这段录像没有独立的源封装".into()));
+    };
+    if source == main {
+        return Err(AppError::User("源封装就是当前主文件，不能只删源".into()));
+    }
+    if !std::path::Path::new(source).is_file() {
+        state.db.set_source_deleted(&session_id, true)?;
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        return Ok(());
+    }
+    crate::post::validate_media(std::path::Path::new(main))
+        .await
+        .map_err(|err| AppError::User(format!("主文件校验未通过，不能删除源封装：{err}")))?;
+    state.local.stop(&session_id).await;
+    crate::post::trash(std::path::Path::new(source)).map_err(AppError::Internal)?;
+    state.db.set_source_deleted(&session_id, true)?;
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, source, "已把源封装移入回收站");
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(())
 }
 
 /// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
@@ -589,9 +745,14 @@ pub async fn room_merge_sessions(
         .filter(|title| !title.trim().is_empty())
         .or_else(|| files.first().map(file_label))
         .unwrap_or_else(|| room_id.clone());
-    let _job = state.jobs.begin("merge", title, None);
+    let job = state.jobs.begin("merge", title, None);
     tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, files = files.len(), "开始合并房间录像");
-    postprocess::merge(&files, None).await
+    let result = postprocess::merge(&files, None).await;
+    match &result {
+        Ok(_) => job.finish("done", None),
+        Err(err) => job.finish("failed", Some(&err.to_string())),
+    }
+    result
 }
 
 /// 合并选中的多段录像（按开录时间排序），跨房间也可以。
@@ -620,14 +781,19 @@ pub async fn sessions_merge(
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
-    let _job = state.jobs.begin("merge", file_label(&files[0]), None);
+    let job = state.jobs.begin("merge", file_label(&files[0]), None);
     tracing::info!(target: "hivecast_lib::commands", count = files.len(), "开始合并选中录像");
     let progress = postprocess::Progress {
         app: &app,
         task: "merge",
         total_ms,
     };
-    postprocess::merge(&files, Some(&progress)).await
+    let result = postprocess::merge(&files, Some(&progress)).await;
+    match &result {
+        Ok(_) => job.finish("done", None),
+        Err(err) => job.finish("failed", Some(&err.to_string())),
+    }
+    result
 }
 
 /// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的跳过。
@@ -1148,6 +1314,22 @@ pub async fn media_delete(
         if let Some(path) = session.file_path.as_deref() {
             remove_session_sidecars(std::path::Path::new(path)).await;
         }
+        // 源封装与历史派生文件也要一起删，否则转封装几次就会留下孤儿。
+        // 主文件删除失败已经直接返回，这里的派生文件失败只记警告：不能因为
+        // 一个旧的中间产物挡住用户删除整条录像。
+        for file in state.db.media_files(&session_id)? {
+            if file.state != "present" || Some(file.path.as_str()) == session.file_path.as_deref() {
+                continue;
+            }
+            let path = std::path::Path::new(&file.path);
+            if path.is_file() {
+                if let Err(err) = tokio::fs::remove_file(path).await {
+                    tracing::warn!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), error = %err, "删除派生文件失败");
+                    continue;
+                }
+            }
+            remove_session_sidecars(path).await;
+        }
     }
 
     tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, delete_file, "删除录像");
@@ -1212,6 +1394,21 @@ pub async fn media_delete_group(
             if let Some(path) = session.file_path.as_deref() {
                 remove_session_sidecars(std::path::Path::new(path)).await;
             }
+            for file in state.db.media_files(&session.id)? {
+                if file.state != "present"
+                    || Some(file.path.as_str()) == session.file_path.as_deref()
+                {
+                    continue;
+                }
+                let path = std::path::Path::new(&file.path);
+                if path.is_file() {
+                    if let Err(err) = tokio::fs::remove_file(path).await {
+                        tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, file = %path.display(), error = %err, "删除派生文件失败");
+                        continue;
+                    }
+                }
+                remove_session_sidecars(path).await;
+            }
         }
         state.thumbs.remove(&session.id);
         if let Err(err) = state.db.delete_session(&session.id) {
@@ -1265,14 +1462,38 @@ pub async fn media_reveal_source(
     reveal_in_file_manager(std::path::Path::new(&path))
 }
 
+/// 在文件管理器里定位这条录像登记过的任意文件（派生文件也适用）。
+#[tauri::command]
+pub async fn media_reveal_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), AppError> {
+    let registered = state.db.media_files(&session_id)?;
+    let target = registered
+        .iter()
+        .find(|file| file.path == path && file.state != "deleted")
+        .ok_or_else(|| AppError::User("文件未登记在这条录像下".into()))?;
+    if !std::path::Path::new(&target.path).is_file() {
+        return Err(AppError::User("文件已不存在".into()));
+    }
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, file = %target.path, "在文件管理器中定位媒体文件");
+    reveal_in_file_manager(std::path::Path::new(&target.path))
+}
+
 #[tauri::command]
 pub async fn media_play(
     state: State<'_, AppState>,
     session_id: String,
     position_ms: Option<i64>,
+    source: Option<bool>,
 ) -> Result<Playback, AppError> {
-    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, position_ms = ?position_ms, "本地回放");
-    state.local.open(&state.db, &session_id, position_ms).await
+    let source = source.unwrap_or(false);
+    tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, position_ms = ?position_ms, source, "本地回放");
+    state
+        .local
+        .open(&state.db, &session_id, position_ms, source)
+        .await
 }
 
 /// 停止一条回放；只影响这一条，其余各格继续放。
@@ -1312,6 +1533,112 @@ fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
     Ok(())
 }
 
+// ---- 任务中心 ----
+
+/// 任务中心的运行中列表 = 录制（含开录中）+ 后处理/合并/弹幕导出；历史来自 task_history。
+#[tauri::command]
+pub fn task_board(state: State<'_, AppState>, limit: Option<usize>) -> TaskBoard {
+    let mut board = state.jobs.board(limit.unwrap_or(100).clamp(1, 500));
+    let mut live = Vec::new();
+    for recording in state.recorder.active_all() {
+        let room = state.db.get_room(&recording.room_id).ok().flatten();
+        let title = room
+            .as_ref()
+            .map(|room| room.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| recording.room_id.clone());
+        live.push(TaskRecord {
+            id: format!("record:{}", recording.session_id),
+            kind: "record".into(),
+            title,
+            detail: Some(recording.quality),
+            state: "running".into(),
+            percent: 0,
+            stage: Some("recording".into()),
+            message: None,
+            session_id: Some(recording.session_id),
+            room_id: Some(recording.room_id),
+            started_at: recording.started_at,
+            finished_at: None,
+        });
+    }
+    for room_id in state.recorder.starting_rooms() {
+        let title = state
+            .db
+            .get_room(&room_id)
+            .ok()
+            .flatten()
+            .map(|room| room.title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| room_id.clone());
+        live.push(TaskRecord {
+            id: format!("record:starting:{room_id}"),
+            kind: "record".into(),
+            title,
+            detail: Some("开录中".into()),
+            state: "running".into(),
+            percent: 0,
+            stage: Some("starting".into()),
+            message: None,
+            session_id: None,
+            room_id: Some(room_id),
+            started_at: now_ts(),
+            finished_at: None,
+        });
+    }
+    live.append(&mut board.running);
+    board.running = live;
+    board
+}
+
+/// 一条录像登记过的全部文件（主文件、源封装、历史派生）。
+#[tauri::command]
+pub fn media_files(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<MediaFile>, AppError> {
+    state.db.media_files(&session_id)
+}
+
+/// 当前平台的回收站能力与位置。
+#[tauri::command]
+pub fn trash_info() -> TrashInfo {
+    crate::post::trash_info()
+}
+
+/// 在文件管理器里打开回收站；Linux 先确保目录存在（可能还没删过东西）。
+#[tauri::command]
+pub fn trash_open() -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("shell:RecycleBinFolder")
+            .spawn()
+            .map_err(|err| AppError::Internal(format!("打开回收站失败：{err}")))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let dir = crate::post::trash_dir()
+            .ok_or_else(|| AppError::User("当前系统没有可打开的回收站目录".into()))?;
+        std::fs::create_dir_all(&dir).ok();
+        // macOS 的 ~/.Trash 是隐藏目录，用 open -R 只会定位到用户主目录里的隐藏项；
+        // 直接 open 才会让访达打开「废纸篓」窗口。
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(&dir)
+                .spawn()
+                .map_err(|err| AppError::Internal(format!("打开回收站失败：{err}")))?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            reveal_in_file_manager(&dir)
+        }
+    }
+}
+
 // ---- 关闭与退出 ----
 
 /// 当前还没结束的录制与后处理任务，前端在退出提示里逐条列出。
@@ -1322,8 +1649,11 @@ pub fn active_tasks(state: State<'_, AppState>) -> Vec<ActiveTask> {
 
 /// 用户确认「现在就退出」；只有任务清空后前端才会走到这里。
 #[tauri::command]
-pub fn close_quit_now(app: AppHandle) {
+pub async fn close_quit_now(app: AppHandle) {
     tracing::info!(target: "hivecast_lib::commands", "用户确认立即退出");
+    // 先把后处理停下来：run 收到取消后会杀掉 ffmpeg 并删掉半成品临时文件。
+    // 最多等 6 秒，超时也退出，不能让一个卡住的编码器挡住关闭。
+    crate::post::shutdown().await;
     crate::lifecycle::quit_now(&app);
 }
 

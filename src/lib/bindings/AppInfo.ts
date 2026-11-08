@@ -3,11 +3,11 @@
 /**
  * 应用与运行环境信息，用于前端环境自检面板。
  */
-export type AppInfo = { name: string, version: string, platform: string, arch: string, 
+export type AppInfo = { name: string, version: string, platform: string, arch: string,
 /**
  * PATH 中探测到的 ffmpeg；未安装时为 None。
  */
-ffmpegPath: string | null, dataDir: string, cacheDir: string, 
+ffmpegPath: string | null, dataDir: string, cacheDir: string,
 /**
  * 本地回环流服务的端口（每个进程随机）。
  */

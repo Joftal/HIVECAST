@@ -5,11 +5,11 @@ import type { PlatformCount } from "./PlatformCount";
 /**
  * 主播墙一页数据。
  */
-export type MediaHostPage = { items: Array<MediaHost>, 
+export type MediaHostPage = { items: Array<MediaHost>,
 /**
  * 当前筛选条件下的主播总数
  */
-total: number, 
+total: number,
 /**
  * 各平台的主播数（不受平台筛选本身影响）
  */

@@ -6,23 +6,23 @@
  * 平台侧的展示信息会被轮询刷新；auto_record / record_qn / view_qn 是本地设置，
  * 轮询不会覆盖它们。
  */
-export type RoomRecord = { id: string, platform: string, roomKey: string, canonicalUrl: string, title: string, hostName: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean, startedAt: number, online: number, 
+export type RoomRecord = { id: string, platform: string, roomKey: string, canonicalUrl: string, title: string, hostName: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean, startedAt: number, online: number,
 /**
  * 开播后是否自动录制
  */
-autoRecord: boolean, 
+autoRecord: boolean,
 /**
  * 是否暂停监控：暂停后不再定时刷新直播间信息
  */
-monitorPaused: boolean, 
+monitorPaused: boolean,
 /**
  * 录制清晰度（qn 数值，10000 = 原画）
  */
-recordQn: number, 
+recordQn: number,
 /**
  * 观看清晰度（0 = 跟随自动降级）
  */
-viewQn: number, 
+viewQn: number,
 /**
  * 录制线路偏好（线路组名，None = 自动选最优）
  */

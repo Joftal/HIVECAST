@@ -193,6 +193,7 @@ pub fn run() {
                     state.recorder.shutdown_all(&handle).await;
                     state.view.shutdown_all(&handle).await;
                     state.danmaku.shutdown_all();
+                    crate::post::shutdown().await;
                     // 走统一出口：置上 force 标记，避免 ExitRequested 再把退出拦下来。
                     crate::lifecycle::quit_now(&handle);
                 });
@@ -224,6 +225,8 @@ pub fn run() {
             commands::view_set_line,
             commands::view_retry,
             commands::session_remux,
+            commands::post_retry,
+            commands::post_cancel,
             commands::session_export_danmaku,
             commands::room_merge_sessions,
             commands::sessions_merge,
@@ -244,9 +247,15 @@ pub fn run() {
             commands::media_delete_group,
             commands::media_reveal,
             commands::media_reveal_source,
+            commands::media_reveal_file,
+            commands::media_delete_source,
             commands::media_play,
             commands::media_stop,
             commands::active_tasks,
+            commands::task_board,
+            commands::media_files,
+            commands::trash_info,
+            commands::trash_open,
             commands::close_quit_now,
             commands::close_arm_quit,
             commands::close_cancel_quit,
@@ -297,6 +306,8 @@ pub fn run() {
                     state.recorder.shutdown_all(handle).await;
                     state.view.shutdown_all(handle).await;
                     state.danmaku.shutdown_all();
+                    // 兜底：非 close_quit_now 的退出路径（系统注销等）也要取消后处理并清临时文件。
+                    crate::post::shutdown().await;
                 });
             }
             logging::shutdown();
