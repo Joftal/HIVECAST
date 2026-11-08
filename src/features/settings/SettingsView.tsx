@@ -21,6 +21,7 @@ import {
 import appIcon from "../../assets/app-icon.png";
 import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { useNotify } from "../../lib/notify";
+import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import AccountSection from "./AccountSection";
 
@@ -1669,30 +1670,26 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
         </footer>
       </main>
 
-      {discardOpen ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 px-6 backdrop-blur-[2px] animate-fade-in">
-          <div className="w-[380px] rounded-panel border border-line bg-surface p-5 shadow-pop animate-pop">
-            <h2 className="text-[14px] font-semibold text-ink">{t("settings.discardTitle")}</h2>
-            <p className="mt-1.5 text-[11.5px] leading-5 text-muted">{t("settings.discardBody")}</p>
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setDiscardOpen(false)}>
-                {t("settings.keepEditing")}
-              </Button>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  setDiscardOpen(false);
-                  setSettings(null);
-                  setInitial("");
-                  onClose();
-                }}
-              >
-                {t("settings.discard")}
-              </Button>
-            </div>
+      <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>
+        <DialogContent title={t("settings.discardTitle")} description={t("settings.discardBody")}>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setDiscardOpen(false)}>
+              {t("settings.keepEditing")}
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setDiscardOpen(false);
+                setSettings(null);
+                setInitial("");
+                onClose();
+              }}
+            >
+              {t("settings.discard")}
+            </Button>
           </div>
-        </div>
-      ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { Button, Switch, cx } from "../../components/ui/Controls";
 import { Checkbox } from "../../components/arc/checkbox/checkbox";
 import { FloatingButtonGroup } from "../../components/arc/floating-button-group/floating-button-group";
 import { useNotify } from "../../lib/notify";
+import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
@@ -990,46 +991,31 @@ export default function MonitorPage({
         }
       />
 
-      {addOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 px-6 pt-[88px] backdrop-blur-[2px] animate-fade-in"
-          onMouseDown={() => {
-            setAddOpen(false);
-            setInput("");
-          }}
+      <Dialog
+        open={addOpen}
+        onOpenChange={(next) => {
+          setAddOpen(next);
+          if (!next) setInput("");
+        }}
+      >
+        <DialogContent
+          title={t("monitor.addRoom")}
+          description={t("monitor.inputPlaceholder")}
+          size="md"
         >
           <form
-            onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
               void add();
             }}
-            className="w-[560px] max-w-full rounded-panel border border-line bg-surface p-5 shadow-pop animate-pop"
           >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-[15px] font-semibold text-ink">{t("monitor.addRoom")}</h2>
-                <p className="mt-1 text-[12px] leading-relaxed text-muted">{t("monitor.inputPlaceholder")}</p>
-              </div>
-              <button
-                type="button"
-                aria-label={t("monitor.cancel")}
-                onClick={() => {
-                  setAddOpen(false);
-                  setInput("");
-                }}
-                className="focus-ring -mr-1 -mt-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint hover:bg-raised hover:text-ink"
-              >
-                ✕
-              </button>
-            </div>
             <input
               autoFocus
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder="https://live.bilibili.com/6"
               spellCheck={false}
-              className="focus-ring mt-4 h-10 w-full rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
+              className="focus-ring h-10 w-full rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
             />
             <div className="mt-3 divide-y divide-line overflow-hidden rounded-[8px] border border-line">
               <div className="flex items-center gap-3 px-3 py-2.5">
@@ -1082,8 +1068,8 @@ export default function MonitorPage({
               </Button>
             </div>
           </form>
-        </div>
-      ) : null}
+        </DialogContent>
+      </Dialog>
 
       <PageToolbar>
         <PageChip

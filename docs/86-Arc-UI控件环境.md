@@ -116,3 +116,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 第六个落地控件是 `FloatingButtonGroup`：监控行「观看 / 录制」改成 muted/sm 托盘，共享高亮在按钮间按 morph 弹簧滑动，按下加深并缩到 96.5%；本地扩展 item `loading` 与 `tone`，配套接入 Arc `Tooltip` 与 `@radix-ui/react-tooltip`。详见 `95-监控行浮动按钮组.md`。
 
 第七个落地控件是 `ToastStack`：全局 `ToastStackProvider` + 顶部中间唯一 viewport，本地新增 `top-center` 位置（从上方落入、向上收起）；`useNotify` 统一 error/warning/info/success，页面内的临时错误、成功、提示横条全部收口到 toast；ffmpeg 缺失改为持久 warning + 「去设置」action，系统通知事件同时发 OS 通知与 toast。详见 `96-统一顶部Toast提示.md`。
+
+第八个落地控件是 `Dialog`：接入 `@radix-ui/react-dialog`，本地给 `DialogContent` 增加 `sm(440px)/md(560px)` 尺寸；添加房间、退出任务拦截、设置放弃更改确认三处居中弹窗改用 Arc Dialog，统一遮罩、标题/说明、关闭按钮、焦点陷阱与进出场弹簧。侧边 Drawer、菜单、Popover、设置全屏页保持原结构。详见 `97-弹窗统一为Arc-Dialog.md`。
