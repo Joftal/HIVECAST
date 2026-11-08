@@ -864,7 +864,7 @@ export default function MonitorPage({
                   disabled={busy}
                   onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
                   options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
-                  className="flex-1 justify-between"
+                  className="min-w-0 flex-1 justify-between"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -875,7 +875,7 @@ export default function MonitorPage({
                   disabled={lineBusy || busy}
                   onChange={(next) => void run(room.id, () => roomSetLine(room.id, next || null))}
                   options={lineOptions}
-                  className="flex-1 justify-between"
+                  className="min-w-0 flex-1 justify-between"
                 />
               </div>
               {lines === null ? (

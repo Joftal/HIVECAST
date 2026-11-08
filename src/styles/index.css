@@ -129,6 +129,15 @@ body {
   outline-offset: 2px;
 }
 
+/* 桌面壳：WebView 的键盘焦点框在桌面应用里看起来像浏览器，统一收掉；
+   输入框仍靠下面的 border-color 变化提示焦点。 */
+html[data-desktop] {
+  --focus-outline: transparent;
+}
+html[data-desktop] :focus-visible {
+  outline: none !important;
+}
+
 /* 文本类控件在鼠标点击时也会命中 :focus-visible（因为可以继续键入），
    于是搜索框会出现一整圈蓝框。输入框只保留一档更深的描边，键盘 Tab 时也一样克制。 */
 input.focus-ring:focus,

@@ -109,6 +109,21 @@ export default function ArcLab() {
               />
             </span>
           </div>
+          <div className="flex w-[360px] items-center gap-2">
+            <span className="w-[62px] shrink-0 text-[12.5px] text-muted">线路</span>
+            <SelectMenu
+              size="md"
+              value="line"
+              onChange={() => undefined}
+              options={[
+                {
+                  value: "line",
+                  label: "d1--cn-gotcha209.bilivideo.com · 超清 · HLS/fMP4 · 60帧",
+                },
+              ]}
+              className="min-w-0 flex-1 justify-between"
+            />
+          </div>
         </section>
 
         <section className="card flex flex-col gap-3 p-6">
