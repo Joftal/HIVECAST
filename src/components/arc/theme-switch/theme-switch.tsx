@@ -16,6 +16,8 @@ export interface ThemeSwitchProps {
   onThemeChange: (next: Theme, variant: ThemeSwitchVariant, trigger: HTMLElement) => void;
   label?: string;
   iconOnly?: boolean;
+  /** HIVECAST: render as a bare icon button (no plate, border or shadow) so it can sit in a toolbar. */
+  bare?: boolean;
 }
 
 /** Rotation and scale ride the spring; opacity and blur tween so the blur never overshoots below zero. */
@@ -56,11 +58,11 @@ function ThemeIcon({ theme, reduced, settled }: { theme: Theme; reduced: boolean
   );
 }
 
-export function ThemeSwitch({ theme, variant = "reveal", onThemeChange, label, iconOnly = false }: ThemeSwitchProps) {
+export function ThemeSwitch({ theme, variant = "reveal", onThemeChange, label, iconOnly = false, bare = false }: ThemeSwitchProps) {
   const reduced = useReducedMotion() ?? false;
   const settled = useSettled();
   const next = theme === "light" ? "dark" : "light";
-  const classes = [styles.themeSwitch, styles[variant], iconOnly ? styles.iconOnly : "", settled ? styles.settled : ""].join(" ");
+  const classes = [styles.themeSwitch, styles[variant], iconOnly ? styles.iconOnly : "", bare ? styles.bare : "", settled ? styles.settled : ""].join(" ");
 
   return (
     <Button

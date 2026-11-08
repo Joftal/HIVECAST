@@ -67,4 +67,7 @@
   --text-xs: 0.6875rem;
   --text-sm: 0.75rem;
   --text-base: 0.8125rem;
+
+  /* 主题开关的图标 nudge 用 snappy spring 的时长（260ms），赶在整页 View Transition 开始前落定 */
+  --duration-spring: 0.26s;
 }

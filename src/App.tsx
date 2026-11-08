@@ -28,6 +28,7 @@ import {
 } from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
+import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
 
 type TabKey = "monitor" | "watch" | "media" | "tasks";
 
@@ -41,6 +42,9 @@ export default function App() {
   // 观看页全屏时收起顶栏，把整块窗口让给画面。
   const [immersive, setImmersive] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("light");
+  // 实际生效的明暗（theme=system 时取系统值），顶栏的 ThemeSwitch 只看这个。
+  const [appearance, setAppearance] = useState<Theme>("light");
+  const themeTimer = useRef<number | null>(null);
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
   // 通知开关按事件分三类：录制、异常、登录失效。
@@ -76,7 +80,7 @@ export default function App() {
         if (settings.language !== "system") setLanguage(settings.language as Language);
         const mode = (settings.theme as ThemeMode) ?? "light";
         setTheme(mode);
-        applyTheme(mode);
+        setAppearance(applyTheme(mode));
       })
       .catch(() => applyTheme("light"));
   }, []);
@@ -155,8 +159,16 @@ export default function App() {
   // 跟随系统时，系统换主题要跟着换。
   useEffect(() => {
     if (theme !== "system") return;
-    return watchSystemTheme(() => applyTheme("system"));
+    return watchSystemTheme(() => setAppearance(applyTheme("system")));
   }, [theme]);
+
+  // 卸载时清掉还在等待的明暗扩散，避免定时器回调用在已卸载的窗口上。
+  useEffect(
+    () => () => {
+      if (themeTimer.current !== null) window.clearTimeout(themeTimer.current);
+    },
+    [],
+  );
 
   const persist = (patch: Record<string, unknown>) => {
     if (!isTauri()) return;
@@ -171,12 +183,30 @@ export default function App() {
     persist({ language: code });
   };
 
-  const toggleTheme = () => {
-    // 顶栏只做明暗互换；「跟随系统」在设置里选。
-    const resolved: ThemeMode = theme === "dark" ? "light" : "dark";
-    setTheme(resolved);
-    applyTheme(resolved);
-    persist({ theme: resolved });
+  // 顶栏只做明暗互换；「跟随系统」在设置里选。
+  // View Transition 会把整页冻结成快照：如果图标 spring 还在跑，过渡结束的一瞬间才落到终态，看起来会抖一下。
+  // 所以先让图标（260ms spring）跑完，再开始整页扩散，快照里的图标已经是终态。
+  const changeTheme = (next: Theme, _variant: ThemeSwitchVariant, trigger: HTMLElement) => {
+    if (themeTimer.current !== null) window.clearTimeout(themeTimer.current);
+    const { left, top, width, height } = trigger.getBoundingClientRect();
+    const x = `${left + width / 2}px`;
+    const y = `${top + height / 2}px`;
+    setTheme(next);
+    setAppearance(next);
+    themeTimer.current = window.setTimeout(() => {
+      themeTimer.current = null;
+      const apply = () => {
+        applyTheme(next);
+        persist({ theme: next });
+      };
+      if (!document.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        apply();
+        return;
+      }
+      document.documentElement.style.setProperty("--x", x);
+      document.documentElement.style.setProperty("--y", y);
+      document.startViewTransition(apply);
+    }, 320);
   };
 
   // 录制播报走系统通知；文案在前端 i18n，切语言即时生效。
@@ -233,7 +263,7 @@ export default function App() {
     };
   }, [t]);
 
-  const dark = theme === "dark";
+  const dark = appearance === "dark";
   // macOS 用 Overlay 标题栏，红绿灯浮在自绘顶栏左侧，需要给它让位。
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   // Windows 由后端关掉原生边框，顶栏右侧自绘最小化/最大化/关闭。
@@ -298,18 +328,13 @@ export default function App() {
           >
             {lang === "zh-CN" ? "中" : "EN"}
           </button>
-          <IconButton label={dark ? t("settings.themeLight") : t("settings.themeDark")} onClick={toggleTheme}>
-            {dark ? (
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-                <circle cx="8" cy="8" r="3" />
-                <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" strokeLinecap="round" />
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-                <path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8Z" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            )}
-          </IconButton>
+          <ThemeSwitch
+            theme={appearance}
+            iconOnly
+            bare
+            label={dark ? t("app.themeSwitchLight") : t("app.themeSwitchDark")}
+            onThemeChange={changeTheme}
+          />
           <IconButton
             label={t("settings.title")}
             onClick={() => {
@@ -395,7 +420,7 @@ export default function App() {
           notifyRef.current = settings;
           const mode = (settings.theme as ThemeMode) ?? "light";
           setTheme(mode);
-          applyTheme(mode);
+          setAppearance(applyTheme(mode));
           refreshFfmpeg();
         }}
       />

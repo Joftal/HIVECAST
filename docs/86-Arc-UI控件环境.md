@@ -1,6 +1,6 @@
 # 86-Arc UI 控件环境
 
-> 状态：环境就绪（2026-11-08）。尚未替换任何现有界面，控件逐个迭代时再改页面。
+> 状态：环境就绪（2026-11-08）；首个控件 ThemeSwitch 已替换顶栏明暗按钮（见 §6）。
 > 范围：uiarc.dev（Arc）免费组件的安装方式、设计 token 桥接、开发期预览台与验证命令。
 > 前置阅读：`40-UIUX-设计方案.md`（现有 token 与组件层）、`49-设置页重做方案.md`。
 
@@ -11,7 +11,7 @@
 - 已装 `arc-foundation`（`src/components/arc/foundation.css`）与首个示例组件 `theme-switch`（连带 `button`、motion tokens）。
 - 新增 `src/styles/arc-bridge.css`，把 Arc 的语义 token 映射到 HIVECAST 的 `--c-*` 面板，并统一控制高度与控件字号。
 - 开发期预览台：`pnpm dev` 后访问 `http://localhost:1420/?arc-lab=1`，文件 `src/features/design/ArcLab.tsx`。
-- 未做：没有替换顶栏主题按钮、没有引入 Pro 组件、没有改动任何现有页面。
+- 未做：没有引入 Pro 组件，其余页面与控件仍是原实现。
 
 ## 1. 安装与目录
 
@@ -82,9 +82,25 @@ const lab = import.meta.env.DEV && new URLSearchParams(window.location.search).h
 ```bash
 pnpm exec tsc -b          # 组件源码与类型
 pnpm build                # 构建
-pnpm run check:i18n       # 615 keys
+pnpm run check:i18n       # 621 keys
 pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 ```
 
-- 浅色/深色实测：`?arc-lab=1` 下 ThemeSwitch 切换 `data-theme`，页面、按钮、卡片、强调色同步；截图见 `docs/assets/`（本轮未入库）。
-- 本轮 `tsc -b`、`pnpm build` 通过；`check:i18n` 615 keys、`check:docs` 87 files 通过。
+- 浅色/深色实测：`?arc-lab=1` 下 ThemeSwitch 切换 `data-theme`，页面、按钮、卡片、强调色同步。
+- 本轮 `tsc -b`、`pnpm build` 通过；`check:i18n` 621 keys、`check:docs` 88 files 通过。
+
+## 6. 首个落地控件：ThemeSwitch（顶栏明暗切换）
+
+- **位置**：`src/App.tsx` 顶栏右侧，替换原来的自绘月亮/太阳 IconButton。
+- **用法**：`<ThemeSwitch theme={appearance} iconOnly bare label=… onThemeChange={changeTheme} />`，variant 用默认 `reveal`。
+- **无底板**：`bare` 是本项目给 Arc 组件加的适配属性（改在 `src/components/arc/theme-switch/**`）。去掉 secondary 的背景、边框、阴影，命中区 28px、图标 14px，和设置齿轮一致；默认 `text-muted`，hover 才用 `--surface-muted` 浅底。后续 Arc 控件沿用这个原则：先看能不能只留内容，再考虑加表面。
+- **状态**：新增 `appearance`（实际生效的明暗），修掉 `theme="system"` 时旧图标判断错误；启动、系统主题变化、设置页保存三处都会同步。
+- **过渡**：`changeTheme` 把按钮中心写进 `--x` / `--y`；先让图标 spring 跑完（260ms），320ms 后再调用 `document.startViewTransition` 切 `data-theme`，`::view-transition-new(root)` 用 `circle()` 从按钮扩散 480ms。不支持 View Transition 或 reduced motion 时直接切换。
+- **修过的抖动**：View Transition 会把整页冻结成快照。如果图标 spring / nudge 在过渡期间才跑，快照只会拍到初始帧，过渡结束的一瞬间才落到终态，看起来像图标抖一下。现在把图标动画放在扩散之前，`arc-bridge.css` 的 `--duration-spring` 也从 580ms 收到 260ms，快照里的图标已经是终态。
+- **持久化**：仍写 `settings.theme`；顶栏只做 light/dark 互换，「跟随系统」留在设置页。
+- **无障碍**：`aria-pressed` 由组件维护；`label` 用新增的 `app.themeSwitchDark` / `app.themeSwitchLight`。
+- **实测**：浏览器预览（Chromium）点击后 `data-theme=dark`、`aria-pressed=true`，图标从太阳换成月亮；切换中点能看到圆形扩散边界；再点回浅色正常。Tauri 用同一 WebView2 内核，未单独复验。
+
+![明暗切换的圆形扩散：新主题从顶栏开关位置展开](assets/86-theme-switch-reveal.png)
+
+![深色模式下的顶栏：开关显示月亮，强调色切到琥珀](assets/86-theme-switch-dark.png)

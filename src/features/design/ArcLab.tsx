@@ -38,6 +38,7 @@ export default function ArcLab() {
           <div className="flex flex-wrap items-center gap-4">
             <ThemeSwitch theme={theme} onThemeChange={changeTheme} />
             <ThemeSwitch theme={theme} onThemeChange={changeTheme} iconOnly />
+            <ThemeSwitch theme={theme} onThemeChange={changeTheme} iconOnly bare />
             <ThemeSwitch theme={theme} onThemeChange={changeTheme} variant="eclipse" iconOnly />
           </div>
         </section>

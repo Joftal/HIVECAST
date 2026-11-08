@@ -10,7 +10,9 @@
     "windowMinimize": "Minimize",
     "windowMaximize": "Maximize",
     "windowRestore": "Restore",
-    "windowClose": "Close"
+    "windowClose": "Close",
+    "themeSwitchDark": "Switch to dark mode",
+    "themeSwitchLight": "Switch to light mode"
   },
   "tab": {
     "monitor": "Monitor",
