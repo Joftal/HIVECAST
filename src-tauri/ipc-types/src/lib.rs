@@ -337,6 +337,14 @@ pub struct Settings {
     pub log_dir: String,
     /// 日志保留天数（0 = 不按天清理，磁盘占用只受日志量与保留窗口影响）
     pub log_retention_days: u32,
+    /// 录像是否保存弹幕（关闭后不生成 JSONL/ASS，观看端实时弹幕不受影响）
+    pub record_danmaku: bool,
+    /// 录像弹幕是否保存礼物事件
+    pub record_danmaku_gift: bool,
+    /// 录像弹幕是否保存醒目留言（B 站 SC）
+    pub record_danmaku_super_chat: bool,
+    /// 录像弹幕是否保存舰长开通（B 站）
+    pub record_danmaku_guard: bool,
 }
 
 /// 日志运行状态：设置页用它显示「实际写到哪里、有没有降级」。

@@ -71,6 +71,10 @@ pub const KEY_GROUP_DIRS: &str = "media.group_dirs";
 pub const KEY_LOG_DIR: &str = "log.dir";
 /// 日志保留天数；0 = 不按天清理（当天日志仍按 16 MiB 续段，不设总量上限）。
 pub const KEY_LOG_RETENTION_DAYS: &str = "log.retention_days";
+const KEY_RECORD_DANMAKU: &str = "record.danmaku";
+const KEY_RECORD_DANMAKU_GIFT: &str = "record.danmaku_gift";
+const KEY_RECORD_DANMAKU_SUPER_CHAT: &str = "record.danmaku_super_chat";
+const KEY_RECORD_DANMAKU_GUARD: &str = "record.danmaku_guard";
 
 /// 关闭行为的两种取值，前端也按这两个字符串渲染。
 pub const CLOSE_TRAY: &str = "tray";
@@ -128,6 +132,10 @@ pub fn defaults() -> Settings {
         media_group_dirs: true,
         log_dir: String::new(),
         log_retention_days: 7,
+        record_danmaku: true,
+        record_danmaku_gift: true,
+        record_danmaku_super_chat: true,
+        record_danmaku_guard: true,
     }
 }
 
@@ -260,6 +268,18 @@ pub fn load(db: &Db) -> Settings {
     }
     if let Some(value) = read(KEY_LOG_RETENTION_DAYS).and_then(|v| v.parse::<u32>().ok()) {
         settings.log_retention_days = value.min(MAX_LOG_RETENTION_DAYS);
+    }
+    if let Some(value) = read(KEY_RECORD_DANMAKU).and_then(|v| parse_bool(&v)) {
+        settings.record_danmaku = value;
+    }
+    if let Some(value) = read(KEY_RECORD_DANMAKU_GIFT).and_then(|v| parse_bool(&v)) {
+        settings.record_danmaku_gift = value;
+    }
+    if let Some(value) = read(KEY_RECORD_DANMAKU_SUPER_CHAT).and_then(|v| parse_bool(&v)) {
+        settings.record_danmaku_super_chat = value;
+    }
+    if let Some(value) = read(KEY_RECORD_DANMAKU_GUARD).and_then(|v| parse_bool(&v)) {
+        settings.record_danmaku_guard = value;
     }
     settings
 }
@@ -399,6 +419,19 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(
         KEY_LOG_RETENTION_DAYS,
         &settings.log_retention_days.to_string(),
+    )?;
+    db.set_setting(KEY_RECORD_DANMAKU, &settings.record_danmaku.to_string())?;
+    db.set_setting(
+        KEY_RECORD_DANMAKU_GIFT,
+        &settings.record_danmaku_gift.to_string(),
+    )?;
+    db.set_setting(
+        KEY_RECORD_DANMAKU_SUPER_CHAT,
+        &settings.record_danmaku_super_chat.to_string(),
+    )?;
+    db.set_setting(
+        KEY_RECORD_DANMAKU_GUARD,
+        &settings.record_danmaku_guard.to_string(),
     )?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
@@ -617,6 +650,21 @@ mod tests {
     }
 
     #[test]
+    fn danmaku_defaults_to_on_for_missing_keys() {
+        let dir = std::env::temp_dir().join(format!("hivecast-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).expect("open db");
+
+        let loaded = load(&db);
+        assert!(loaded.record_danmaku, "旧库缺少弹幕键时应保持现状（开启）");
+        assert!(loaded.record_danmaku_gift);
+        assert!(loaded.record_danmaku_super_chat);
+        assert!(loaded.record_danmaku_guard);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_clamps_and_roundtrips() {
         let dir = std::env::temp_dir().join(format!("hivecast-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -648,6 +696,10 @@ mod tests {
                 post_custom_output_ext: ".MKV".into(),
                 close_action: "tray".into(),
                 prevent_sleep: false,
+                record_danmaku: false,
+                record_danmaku_gift: false,
+                record_danmaku_super_chat: true,
+                record_danmaku_guard: false,
                 ..defaults()
             },
         )
@@ -694,6 +746,10 @@ mod tests {
         assert_eq!(loaded.post_custom_output_ext, "mkv");
         assert_eq!(loaded.close_action, CLOSE_TRAY, "未知关闭行为回落到托盘");
         assert!(!loaded.prevent_sleep);
+        assert!(!loaded.record_danmaku, "弹幕总开关应原样保存");
+        assert!(!loaded.record_danmaku_gift);
+        assert!(loaded.record_danmaku_super_chat);
+        assert!(!loaded.record_danmaku_guard);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

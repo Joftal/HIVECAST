@@ -134,4 +134,20 @@ logDir: string,
 /**
  * 日志保留天数（0 = 不按天清理，磁盘占用只受日志量与保留窗口影响）
  */
-logRetentionDays: number, };
+logRetentionDays: number,
+/**
+ * 录像是否保存弹幕（关闭后不生成 JSONL/ASS，观看端实时弹幕不受影响）
+ */
+recordDanmaku: boolean,
+/**
+ * 录像弹幕是否保存礼物事件
+ */
+recordDanmakuGift: boolean,
+/**
+ * 录像弹幕是否保存醒目留言（B 站 SC）
+ */
+recordDanmakuSuperChat: boolean,
+/**
+ * 录像弹幕是否保存舰长开通（B 站）
+ */
+recordDanmakuGuard: boolean, };

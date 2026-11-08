@@ -191,7 +191,6 @@ struct Active {
     host_name: String,
     /// 本场录制的弹幕写入器（与视频同名 .jsonl）
     danmaku: Option<Arc<RecordWriter>>,
-    danmaku_path: Option<String>,
     /// 已续录的次数，达到 MAX_RESTARTS 后不再重开
     restarts: u32,
     /// 本场直播的开播时间（平台口径）：用来区分「同一场」与「新一场」
@@ -1020,15 +1019,31 @@ impl Recorder {
         write_pid_file(&path, child.id());
 
         // 弹幕落盘与视频同名，只换扩展名；后处理阶段按这个约定找旁挂文件。
+        // 总开关关闭时整场不挂 writer：既不建 JSONL，也不会在收尾时导出 ASS。
         let danmaku_path = path.with_extension("jsonl");
         let danmaku = self
             .danmaku
             .as_ref()
-            .filter(|_| crate::danmaku::supports(room))
-            .and_then(|hub| hub.attach_record(room, &danmaku_path));
-        if self.danmaku.is_some() && danmaku.is_none() && crate::danmaku::supports(room) {
+            .filter(|_| settings.record_danmaku && crate::danmaku::supports(room))
+            .and_then(|hub| {
+                hub.attach_record(
+                    room,
+                    &danmaku_path,
+                    crate::danmaku::RecordRules::new(
+                        settings.record_danmaku_gift,
+                        settings.record_danmaku_super_chat,
+                        settings.record_danmaku_guard,
+                    ),
+                )
+            });
+        if settings.record_danmaku
+            && self.danmaku.is_some()
+            && danmaku.is_none()
+            && crate::danmaku::supports(room)
+        {
             tracing::warn!(path = %danmaku_path.display(), "弹幕文件创建失败，本场只录视频");
         }
+        let danmaku_path_text = danmaku.as_ref().map(|_| danmaku_path.display().to_string());
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let created = self.db.create_session(&RecordSession {
@@ -1044,7 +1059,7 @@ impl Recorder {
             quality: Some(candidate.name.clone()),
             line: Some(group.name.clone()),
             error: None,
-            danmaku_path: danmaku.as_ref().map(|_| danmaku_path.display().to_string()),
+            danmaku_path: danmaku_path_text.clone(),
             danmaku_count: 0,
             source_path: Some(path.display().to_string()),
             post_mode: post.mode.clone(),
@@ -1095,7 +1110,6 @@ impl Recorder {
             started: Instant::now(),
             host_name: room.host_name.clone(),
             danmaku,
-            danmaku_path: Some(danmaku_path.display().to_string()),
             restarts: 0,
             live_started_at: room.started_at,
             last_bytes: 0,
@@ -2084,12 +2098,15 @@ impl Recorder {
         };
 
         // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
+        // 没有 writer（总开关关闭或平台不支持）就是没有弹幕文件，绝不能回退到
+        // active.danmaku_path：那条路径可能压根没创建，写进库就是假路径。
         let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
-            (Some(hub), Some(writer)) => match hub.detach_record(room_id, writer) {
-                Some((path, count)) => (Some(path.display().to_string()), count as i64),
-                None => (active.danmaku_path.clone(), 0),
-            },
-            _ => (active.danmaku_path.clone(), 0),
+            (Some(hub), Some(writer)) => hub
+                .detach_record(room_id, writer)
+                .map_or((None, 0), |(path, count)| {
+                    (Some(path.display().to_string()), count as i64)
+                }),
+            _ => (None, 0),
         };
 
         match self.db.finish_session_with_post(

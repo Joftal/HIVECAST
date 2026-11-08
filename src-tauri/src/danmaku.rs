@@ -183,12 +183,17 @@ impl DanmakuHub {
     }
 
     /// 录制开始时挂一个 JSONL 写入器；同时自动 retain。
-    pub fn attach_record(&self, room: &RoomRecord, path: &Path) -> Option<Arc<RecordWriter>> {
+    pub fn attach_record(
+        &self,
+        room: &RoomRecord,
+        path: &Path,
+        rules: RecordRules,
+    ) -> Option<Arc<RecordWriter>> {
         if !supports(room) {
             return None;
         }
         self.retain(room);
-        let writer = match RecordWriter::new(path) {
+        let writer = match RecordWriter::new(path, rules) {
             Ok(writer) => writer,
             Err(err) => {
                 tracing::warn!(
@@ -197,11 +202,17 @@ impl DanmakuHub {
                     %err,
                     "弹幕文件创建失败，本场不记录弹幕"
                 );
+                // retain 已经加过引用，创建失败必须释放，否则这个房间的 WS 永远不关。
+                self.release(&room.id);
                 return None;
             }
         };
         let rooms = self.rooms.lock().expect("弹幕房间表被污染");
-        let conn = rooms.get(&room.id)?;
+        let Some(conn) = rooms.get(&room.id) else {
+            drop(rooms);
+            self.release(&room.id);
+            return None;
+        };
         conn.writers
             .lock()
             .expect("弹幕写入器被污染")
@@ -226,7 +237,13 @@ impl DanmakuHub {
         }
         let result = writer.finish();
         self.release(room_id);
-        Some(result)
+        // 整场没有留下任何一条事件时 finish 已删掉空文件，这里返回 None，
+        // 调用方就不会把一条不存在的路径写进数据库。
+        if result.1 == 0 {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     /// 诊断用：连接错误与丢弃计数暂时只在日志/调试里看。
@@ -273,11 +290,46 @@ pub fn supports(room: &RoomRecord) -> bool {
     )
 }
 
+/// 录像侧的事件过滤规则；聊天弹幕与未知类型永远保留。
+#[derive(Debug, Clone, Copy)]
+pub struct RecordRules {
+    pub gift: bool,
+    pub super_chat: bool,
+    pub guard: bool,
+}
+
+impl RecordRules {
+    pub fn new(gift: bool, super_chat: bool, guard: bool) -> Self {
+        Self {
+            gift,
+            super_chat,
+            guard,
+        }
+    }
+
+    fn allows(&self, kind: &str) -> bool {
+        match kind {
+            "gift" => self.gift,
+            "super_chat" => self.super_chat,
+            "guard" => self.guard,
+            // chat 以及后续新增的事件类型默认保留，避免升级后静默丢数据。
+            _ => true,
+        }
+    }
+}
+
+impl Default for RecordRules {
+    fn default() -> Self {
+        Self::new(true, true, true)
+    }
+}
+
 /// 单个录制会话的 JSONL 写入器。
 ///
 /// 时间基准取「写入时刻 - 文件打开时刻」，与 ffmpeg 启动基本同刻，
 /// 因此偏移可直接当视频时间轴使用。
 pub struct RecordWriter {
+    rules: RecordRules,
     inner: Mutex<WriterInner>,
 }
 
@@ -291,12 +343,13 @@ struct WriterInner {
 }
 
 impl RecordWriter {
-    fn new(path: &Path) -> std::io::Result<Arc<Self>> {
+    fn new(path: &Path, rules: RecordRules) -> std::io::Result<Arc<Self>> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let file = std::fs::File::create(path)?;
         Ok(Arc::new(Self {
+            rules,
             inner: Mutex::new(WriterInner {
                 file: Some(std::io::BufWriter::new(file)),
                 path: path.to_path_buf(),
@@ -308,6 +361,9 @@ impl RecordWriter {
     }
 
     fn push(&self, message: &DanmakuMessage) {
+        if !self.rules.allows(&message.kind) {
+            return;
+        }
         let mut inner = self.inner.lock().expect("弹幕文件被污染");
         let offset = inner.started.elapsed().as_millis() as i64;
         // 先把文件取出再写：BufWriter 借用整个 inner 时无法同时改 count。
@@ -335,6 +391,10 @@ impl RecordWriter {
         let mut inner = self.inner.lock().expect("弹幕文件被污染");
         if let Some(mut file) = inner.file.take() {
             let _ = file.flush();
+        }
+        // 没有事件就不要在媒体目录里留一个 0 字节的 .jsonl。
+        if inner.count == 0 {
+            let _ = std::fs::remove_file(&inner.path);
         }
         (inner.path.clone(), inner.count)
     }
@@ -981,6 +1041,52 @@ fn parse_message(body: &[u8]) -> Option<DanmakuMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record_message(kind: &str) -> DanmakuMessage {
+        DanmakuMessage {
+            offset_ms: 0,
+            kind: kind.into(),
+            user: Some("观众".into()),
+            content: format!("{kind} 内容"),
+            color: 0x00_FF_FF,
+        }
+    }
+
+    #[test]
+    fn record_rules_keep_chat_and_unknown_kinds() {
+        let dir = std::env::temp_dir().join(format!("hivecast-danmaku-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("record.jsonl");
+        let writer =
+            RecordWriter::new(&path, RecordRules::new(true, false, false)).expect("writer");
+        for kind in ["chat", "gift", "super_chat", "guard", "system"] {
+            writer.push(&record_message(kind));
+        }
+        let (finished, count) = writer.finish();
+        assert_eq!(finished, path);
+        assert_eq!(count, 3, "chat、gift、未知事件应保留，SC/舰长应过滤");
+        let text = std::fs::read_to_string(&path).expect("jsonl");
+        assert!(text.contains("\"k\":\"chat\""));
+        assert!(text.contains("\"k\":\"gift\""));
+        assert!(text.contains("\"k\":\"system\""));
+        assert!(!text.contains("\"k\":\"super_chat\""));
+        assert!(!text.contains("\"k\":\"guard\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_record_file_is_removed() {
+        let dir = std::env::temp_dir().join(format!("hivecast-danmaku-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("empty.jsonl");
+        let writer =
+            RecordWriter::new(&path, RecordRules::new(false, false, false)).expect("writer");
+        writer.push(&record_message("gift"));
+        let (_, count) = writer.finish();
+        assert_eq!(count, 0);
+        assert!(!path.exists(), "0 条事件时不能留下空 JSONL");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn danmu_packet(json_body: &str) -> Vec<u8> {
         packet(5, json_body.as_bytes())

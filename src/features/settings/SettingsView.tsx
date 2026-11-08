@@ -54,7 +54,7 @@ const QN_OPTIONS = [
   { value: 80, key: "qnStandard" },
 ];
 
-type PageKey = "account" | "record" | "storage" | "notify" | "appearance" | "system" | "about";
+type PageKey = "account" | "record" | "danmaku" | "storage" | "notify" | "appearance" | "system" | "about";
 
 type NavGroup = "account" | "recording" | "app";
 
@@ -79,6 +79,12 @@ const ICON = {
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
       <rect x="1.8" y="3.6" width="8.4" height="8.8" rx="1.6" />
       <path d="M10.2 7.2 14 5.2v5.6l-3.8-2Z" strokeLinejoin="round" />
+    </svg>
+  ),
+  danmaku: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+      <path d="M2.4 3.4h11.2v7.2H8.1l-3.2 2.3v-2.3H2.4Z" strokeLinejoin="round" />
+      <path d="M5.1 6h5.8M5.1 8.2h4.1" strokeLinecap="round" />
     </svg>
   ),
   storage: (
@@ -117,6 +123,7 @@ const ICON = {
 const PAGES: PageMeta[] = [
   { key: "account", labelKey: "settings.navAccount", titleKey: "settings.pageAccount", descKey: "settings.pageAccountDesc", icon: ICON.account, group: "account", tint: "var(--c-accent)" },
   { key: "record", labelKey: "settings.navRecord", titleKey: "settings.pageRecord", descKey: "settings.pageRecordDesc", icon: ICON.record, group: "recording", tint: "var(--c-rec)" },
+  { key: "danmaku", labelKey: "settings.navDanmaku", titleKey: "settings.pageDanmaku", descKey: "settings.pageDanmakuDesc", icon: ICON.danmaku, group: "recording", tint: "#3b82f6" },
   { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage, group: "recording", tint: "var(--c-warn)" },
   { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify, group: "app", tint: "#8b5cf6" },
   { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance, group: "app", tint: "#0f9f9a" },
@@ -159,6 +166,10 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "record", id: "set-split-duration", titleKey: "settings.splitMaxDuration", descKey: "settings.splitMaxDurationHint", extra: "分割 时长 duration split" },
   { page: "record", id: "set-split-size", titleKey: "settings.splitMaxSize", descKey: "settings.splitMaxSizeHint", extra: "分割 大小 体积 size split" },
   { page: "record", id: "set-view-quality", titleKey: "settings.viewQuality", descKey: "settings.viewQualityHint", extra: "观看 画质 quality qn view" },
+  { page: "danmaku", id: "set-danmaku-master", titleKey: "settings.danmakuRecord", descKey: "settings.danmakuRecordHint", extra: "弹幕 录制 danmaku record chat" },
+  { page: "danmaku", id: "set-danmaku-gift", titleKey: "settings.danmakuGift", descKey: "settings.danmakuGiftHint", extra: "礼物 gift 辣条 免费 连击" },
+  { page: "danmaku", id: "set-danmaku-super-chat", titleKey: "settings.danmakuSuperChat", descKey: "settings.danmakuSuperChatHint", extra: "醒目留言 sc super chat 付费" },
+  { page: "danmaku", id: "set-danmaku-guard", titleKey: "settings.danmakuGuard", descKey: "settings.danmakuGuardHint", extra: "舰长 提督 总督 guard 上舰" },
   { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
   { page: "record", id: "set-post-mode", titleKey: "settings.postMode", descKey: "settings.postModeHint", extra: "后处理 源封装 转换 自定义 source convert custom" },
     { page: "record", id: "set-post-convert-format", titleKey: "settings.postConvertFormat", descKey: "settings.postConvertFormatHint", extra: "转封装 mp4 mkv ts 容器" },
@@ -563,6 +574,76 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
         <Section title={t("settings.groupPlatforms")}>
           <AccountSection />
         </Section>
+      );
+    }
+
+    if (page === "danmaku") {
+      const eventsDisabled = !settings.recordDanmaku;
+      return (
+        <div className="space-y-6">
+          <Section title={t("settings.sectionDanmaku")} desc={t("settings.sectionDanmakuDesc")}>
+            <Row
+              id="set-danmaku-master"
+              focus={focusId === "set-danmaku-master"}
+              title={t("settings.danmakuRecord")}
+              desc={t("settings.danmakuRecordHint")}
+            >
+              <Switch
+                checked={settings.recordDanmaku}
+                onChange={(next) => patch({ recordDanmaku: next })}
+                label={t("settings.danmakuRecord")}
+              />
+            </Row>
+          </Section>
+
+          <Section
+            title={t("settings.sectionDanmakuEvents")}
+            desc={t("settings.sectionDanmakuEventsDesc")}
+          >
+            <Row
+              id="set-danmaku-gift"
+              focus={focusId === "set-danmaku-gift"}
+              title={t("settings.danmakuGift")}
+              desc={t("settings.danmakuGiftHint")}
+            >
+              <Switch
+                checked={settings.recordDanmakuGift}
+                onChange={(next) => patch({ recordDanmakuGift: next })}
+                disabled={eventsDisabled}
+                label={t("settings.danmakuGift")}
+              />
+            </Row>
+            <Row
+              id="set-danmaku-super-chat"
+              focus={focusId === "set-danmaku-super-chat"}
+              title={t("settings.danmakuSuperChat")}
+              desc={t("settings.danmakuSuperChatHint")}
+            >
+              <Switch
+                checked={settings.recordDanmakuSuperChat}
+                onChange={(next) => patch({ recordDanmakuSuperChat: next })}
+                disabled={eventsDisabled}
+                label={t("settings.danmakuSuperChat")}
+              />
+            </Row>
+            <Row
+              id="set-danmaku-guard"
+              focus={focusId === "set-danmaku-guard"}
+              title={t("settings.danmakuGuard")}
+              desc={t("settings.danmakuGuardHint")}
+            >
+              <Switch
+                checked={settings.recordDanmakuGuard}
+                onChange={(next) => patch({ recordDanmakuGuard: next })}
+                disabled={eventsDisabled}
+                label={t("settings.danmakuGuard")}
+              />
+            </Row>
+            <div className="px-5 py-3 text-[10.5px] leading-4 text-faint">
+              {t("settings.danmakuChatAlways")}
+            </div>
+          </Section>
+        </div>
       );
     }
 
