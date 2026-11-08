@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Switch, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
+import PageEmpty from "../../components/ui/PageEmpty";
+import EmptyArt from "../../components/ui/EmptyArt";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
@@ -1179,25 +1181,19 @@ export default function MonitorPage({
 
           <div className="min-h-0 flex-1 overflow-auto">
             {views.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-3.5 px-8 pb-10 text-center">
-                <div className="flex h-11 w-11 items-center justify-center rounded-[7px] border border-line text-faint">
-                  <svg width="19" height="19" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                    <rect x="2.2" y="3.4" width="13.6" height="9.2" rx="2" />
-                    <path d="M6.6 15.6h4.8" strokeLinecap="round" />
-                  </svg>
-                </div>
-                <div>
-                  <p className="text-[14px] font-medium text-ink">{t("monitor.emptyTitle")}</p>
-                  <p className="mt-1.5 max-w-[340px] text-[12.5px] leading-5 text-muted">{t("monitor.emptyBody")}</p>
-                </div>
-                <Button size="md" variant="primary" onClick={() => setAddOpen(true)}>
-                  {t("monitor.addRoom")}
-                </Button>
-              </div>
+              <PageEmpty
+                className="h-full"
+                title={t("monitor.emptyTitle")}
+                description={t("monitor.emptyBody")}
+                icon={<EmptyArt kind="monitor" />}
+              />
             ) : shown.length === 0 ? (
-              <div className="flex h-full items-center justify-center px-8 text-center">
-                <p className="text-[12.5px] text-muted">{t("monitor.noMatch")}</p>
-              </div>
+              <PageEmpty
+                className="h-full"
+                title={t("monitor.noMatch")}
+                description={t("monitor.noMatchBody")}
+                icon={<EmptyArt kind="search" />}
+              />
             ) : (
               shown.map(renderRow)
             )}

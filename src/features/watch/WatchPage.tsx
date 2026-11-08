@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
+import PageEmpty from "../../components/ui/PageEmpty";
+import EmptyArt from "../../components/ui/EmptyArt";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
@@ -818,22 +820,12 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 
         <div className="relative min-h-0 flex-1">
           {count === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-              <div className="grid grid-cols-2 gap-1.5 opacity-50">
-                {[0, 1, 2, 3].map((index) => (
-                  <span key={index} className="h-6 w-10 rounded-[4px] border border-line-strong bg-raised" />
-                ))}
-              </div>
-              <div className="space-y-1">
-                <p className="text-[13px] font-medium text-ink">{t("watch.emptyTitle")}</p>
-                <p className="max-w-[380px] text-[11.5px] leading-5 text-muted">{t("watch.emptyBody")}</p>
-              </div>
-              {isTauri() ? (
-                <Button variant="primary" onClick={() => setPanelOpen(true)}>
-                  {t("watch.addRoom")}
-                </Button>
-              ) : null}
-            </div>
+            <PageEmpty
+              className="h-full"
+              title={t("watch.emptyTitle")}
+              description={t("watch.emptyBody")}
+              icon={<EmptyArt kind="watch" />}
+            />
           ) : (
             <SplitStage
               ref={stageRef}

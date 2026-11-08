@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { IconButton, cx } from "./components/ui/Controls";
+import { motion, useReducedMotion } from "motion/react";import { IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
 import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
@@ -31,6 +31,7 @@ import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
 
 type TabKey = "monitor" | "watch" | "media" | "tasks";
+const PAGE_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 export default function App() {
   const { t, i18n } = useTranslation();
@@ -54,6 +55,7 @@ export default function App() {
   const [closeArmed, setCloseArmed] = useState(false);
   const [closeBusy, setCloseBusy] = useState(false);
   const prevTab = useRef<TabKey>(tab);
+  const reduceMotion = useReducedMotion() ?? false;
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
 
   // 启动和保存设置后都重新探测一次：用户可能刚补上 ffmpeg 或换掉路径。
@@ -310,7 +312,11 @@ export default function App() {
             >
               {item.label}
               {tab === item.key ? (
-                <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-t-[2px] bg-accent" />
+                <motion.span
+                  layoutId="tab-underline"
+                  className="absolute inset-x-2 bottom-0 h-[2px] rounded-t-[2px] bg-accent"
+                  transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 36 }}
+                />
               ) : null}
             </button>
           ))}
@@ -372,7 +378,13 @@ export default function App() {
         </div>
       ) : null}
 
-      <main key={tab} className="flex min-h-0 flex-1 flex-col">
+      <motion.main
+        key={tab}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: reduceMotion ? 0 : 0.16, ease: PAGE_EASE }}
+        className="flex min-h-0 flex-1 flex-col"
+      >
         {tab === "monitor" ? (
           <MonitorPage
             onOpenWatch={(ids, kind) => {
@@ -395,7 +407,7 @@ export default function App() {
         ) : (
           <TasksPage />
         )}
-      </main>
+      </motion.main>
 
       {closeTasks ? (
         <CloseDialog

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, cx } from "../../components/ui/Controls";
+import PageEmpty from "../../components/ui/PageEmpty";
+import EmptyArt from "../../components/ui/EmptyArt";
 import {
   describeError,
   isTauri,
@@ -135,6 +137,15 @@ export default function TasksPage() {
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto px-5 pb-8">
+        {loaded && running.length === 0 && history.length === 0 ? (
+          <PageEmpty
+            className="h-full"
+            title={t("tasks.emptyTitle")}
+            description={t("tasks.emptyBody")}
+            icon={<EmptyArt kind="tasks" />}
+          />
+        ) : (
+          <>
         <section>
           <div className="mb-2 flex items-baseline gap-2">
             <h2 className="text-[13px] font-semibold text-ink">{t("tasks.running")}</h2>
@@ -233,6 +244,8 @@ export default function TasksPage() {
             </div>
           )}
         </section>
+          </>
+        )}
       </div>
     </div>
   );

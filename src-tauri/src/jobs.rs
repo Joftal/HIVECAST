@@ -87,6 +87,28 @@ impl Jobs {
         session_id: Option<String>,
         room_id: Option<String>,
     ) -> JobGuard {
+        self.begin_inner(kind, title, detail, session_id, room_id, true)
+    }
+
+    /// 只进运行表、不写任务历史；启动恢复这类后台维护任务用。
+    pub fn begin_silent(
+        self: &Arc<Self>,
+        kind: &str,
+        title: impl Into<String>,
+        detail: Option<String>,
+    ) -> JobGuard {
+        self.begin_inner(kind, title, detail, None, None, false)
+    }
+
+    fn begin_inner(
+        self: &Arc<Self>,
+        kind: &str,
+        title: impl Into<String>,
+        detail: Option<String>,
+        session_id: Option<String>,
+        room_id: Option<String>,
+        persist: bool,
+    ) -> JobGuard {
         let seq = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let id = format!("job:{seq}");
         self.insert(
@@ -104,7 +126,7 @@ impl Jobs {
                 started_at: now_ts(),
                 last_write_ms: now_ms(),
             },
-            true,
+            persist,
         );
         JobGuard {
             jobs: self.clone(),

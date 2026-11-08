@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
 import { Button, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
+import PageEmpty from "../../components/ui/PageEmpty";
+import EmptyArt from "../../components/ui/EmptyArt";
 import {
   isTauri,
   mediaDeleteGroup,
@@ -1072,22 +1074,19 @@ export default function MediaPage() {
         loading ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
         ) : !active ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-1.5 rounded-panel border border-dashed border-line bg-surface/60 py-16 text-center">
-            <div className="text-[13px] font-medium text-ink">{t("media.hosts.goneTitle")}</div>
-            <div className="max-w-[360px] text-[11.5px] leading-relaxed text-muted">{t("media.hosts.goneBody")}</div>
-            <Button size="sm" variant="secondary" className="mt-2" onClick={backToHosts}>
-              {t("media.hosts.back")}
-            </Button>
-          </div>
+          <PageEmpty
+            className="flex-1"
+            title={t("media.hosts.goneTitle")}
+            description={t("media.hosts.goneBody")}
+            icon={<EmptyArt kind="gone" />}
+          />
         ) : items.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-1.5 rounded-panel border border-dashed border-line bg-surface/60 py-16 text-center">
-            <div className="text-[13px] font-medium text-ink">
-              {fileFiltersActive ? t("media.noMatchTitle") : t("media.emptyTitle")}
-            </div>
-            <div className="max-w-[360px] text-[11.5px] leading-relaxed text-muted">
-              {fileFiltersActive ? t("media.noMatchBody") : t("media.emptyBody")}
-            </div>
-          </div>
+          <PageEmpty
+            className="flex-1"
+            title={fileFiltersActive ? t("media.noMatchTitle") : t("media.emptyTitle")}
+            description={fileFiltersActive ? t("media.noMatchBody") : t("media.emptyBody")}
+            icon={<EmptyArt kind={fileFiltersActive ? "search" : "media"} />}
+          />
         ) : (
           <div className="grid gap-3" style={GRID_STYLE}>
             {groups.map((group) => {
@@ -1283,14 +1282,12 @@ export default function MediaPage() {
       ) : hostLoading ? (
         <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
       ) : hosts.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1.5 rounded-panel border border-dashed border-line bg-surface/60 py-16 text-center">
-          <div className="text-[13px] font-medium text-ink">
-            {hostFiltersActive ? t("media.hosts.noMatchTitle") : t("media.hosts.emptyTitle")}
-          </div>
-          <div className="max-w-[360px] text-[11.5px] leading-relaxed text-muted">
-            {hostFiltersActive ? t("media.hosts.noMatchBody") : t("media.hosts.emptyBody")}
-          </div>
-        </div>
+        <PageEmpty
+          className="flex-1"
+          title={hostFiltersActive ? t("media.hosts.noMatchTitle") : t("media.hosts.emptyTitle")}
+          description={hostFiltersActive ? t("media.hosts.noMatchBody") : t("media.hosts.emptyBody")}
+          icon={<EmptyArt kind={hostFiltersActive ? "search" : "media"} />}
+        />
       ) : (
         <div className="grid gap-3" style={HOST_GRID_STYLE}>
           {hosts.map((host) => (

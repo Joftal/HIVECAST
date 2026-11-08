@@ -100,7 +100,7 @@ impl AppState {
         jobs.mark_interrupted();
         let recovery_jobs = jobs.clone();
         tauri::async_runtime::spawn(async move {
-            let _recovery_job = recovery_jobs.begin("post", "恢复上次录制", None);
+            let _recovery_job = recovery_jobs.begin_silent("post", "恢复上次录制", None);
             let (recovered, recovered_bytes) = crate::recorder::recover_parts(&recovery_db).await;
             if recovered > 0 {
                 tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");

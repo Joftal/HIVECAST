@@ -103,6 +103,7 @@
 | [87-统一顶栏](docs/87-统一顶栏.md) | Windows 去原生标题栏（`set_decorations(false)`）与应用顶栏合并成一条；顶栏右侧自绘最小化/最大化/还原/关闭，补拖拽与窗口控制权限；关闭仍走托盘/退出拦截；macOS 保持 Overlay 红绿灯 | 改窗口外观、标题栏、拖拽或窗口按钮时 |
 | [88-DropdownMenu统一选择菜单](docs/88-DropdownMenu统一选择菜单.md) | 13 处选择菜单统一成 Arc `DropdownMenu`：监控/媒体平台筛选（bare）、媒体排序、监控画质/线路、设置 6 个字段、播放器画质/线路（dark）；新增 `SelectMenu` 包装（勾选 + 计数 hint）与 `variant/size/align/disabled/active` 适配；动作菜单保持自绘 | 改筛选、排序、画质/线路或设置下拉时 |
 | [89-桌面壳守卫](docs/89-桌面壳守卫.md) | 去掉 WebView2 的浏览器默认行为：右键菜单、F12/DevTools、Ctrl+R/F5、Ctrl+P/U、Ctrl±0 与 Ctrl+滚轮缩放；桌面端移除 `:focus-visible` 焦点框，输入框保留边框提示；浏览器预览不受影响 | 排查右键菜单、焦点框、快捷键或缩放时 |
+| [90-空态与Tab切换](docs/90-空态与Tab切换.md) | 参考 Arc empty-states 的版式，4 个主 Tab 的 8 个空态统一为 `EmptyState` + `PageEmpty` 居中，并用本地 `EmptyArt` 为每页绘制 56px 无底板动画插画（扫描线/呼吸格/画勾）；空态不放操作按钮；Tab 内容改为 160ms 纯淡入（去掉位移与等待间隔），顶部下划线用 `layoutId` 弹簧滑动；启动恢复任务改为 silent job，不再写任务历史 | 改空态、空态插画或 Tab 切换动画时 |
 | [84-弹幕录制设置](docs/84-弹幕录制设置.md) | v1.1 已实施并完成 macOS 真机验收：全局录制弹幕总开关 + 礼物/SC/舰长事件开关；设置页独立「弹幕录制」页、`RecordRules` 写入器过滤、开录门禁、0 字节 JSONL 清理与 attach 泄漏修复；247 passed / 17 ignored、597 i18n keys；真实房间验证总开关开/关两场、JSONL/ASS 与 DB 路径；含评审分析、行为矩阵与已知限制 | 改弹幕录制开关、排查 JSONL/ASS 事件缺失或评估验收范围时 |
 | [59-监控录制联动修复四](docs/59-监控录制联动修复四.md) | B1–B9 九条全部修复：未确认收尾只记 finished/stream_ended 但不通知不静默且计入连续失败（3 次冷却 5 分钟）、离线确认去掉 180 秒窗口改纯计数、停录幂等且监控跳过已停会话、续录只丢地址缓存保留共享冷却、设置/房间 2 秒缓存、检测任务 panic 兜底、刷新走 start_checked；4 个新单测 + 真机验收（伪造 ffmpeg 秒退三次进冷却、磁盘红线单次停录、SIGTERM） | 排查误报下播、重复停录或改续录/离线判定时 |
 
