@@ -5,7 +5,10 @@
 
    导入顺序（main.tsx）：foundation.css → styles/index.css → 本文件。 */
 
-:root {
+/* 同时写 :root[data-theme="dark"]：foundation.css 的暗色块选择器权重更高，
+   只写 :root 会让 Arc 组件在深色下退回它自己的中性色，而不是 HIVECAST 的暖黑+琥珀。 */
+:root,
+:root[data-theme="dark"] {
   /* 表面与文字 */
   --background: var(--c-canvas);
   --surface: var(--c-surface);
@@ -32,7 +35,8 @@
   --control-track: var(--c-line-strong);
   --control-track-hover: color-mix(in oklab, var(--c-line-strong) 76%, var(--c-ink));
   --control-thumb: #ffffff;
-  --control-thumb-on: #ffffff;
+  /* 开启态 thumb 用强调色前景：浅色主题为白，深色主题为暖黑，避免白色 thumb 落在琥珀轨道上对比不足。 */
+  --control-thumb-on: var(--c-accent-ink);
   --control-fill: var(--c-accent);
 
   /* 状态色 */

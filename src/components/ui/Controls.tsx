@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Switch as ArcSwitch } from "../arc/switch/switch";
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -122,6 +123,8 @@ export function Chip({
   );
 }
 
+/** 统一使用 Arc (uiarc.dev) 的 Switch：按下时 thumb 拉伸、松开后弹簧归位。
+ *  保留项目原有的 onChange / label 调用方式，label 只作为 aria-label，不再在轨道旁重复显示文字。 */
 export function Switch({
   checked,
   onChange,
@@ -134,26 +137,12 @@ export function Switch({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
+    <ArcSwitch
+      checked={checked}
+      onCheckedChange={onChange}
       aria-label={label}
-      title={label}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={cx(
-        "focus-ring relative h-[18px] w-[30px] shrink-0 rounded-full transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-45",
-        checked ? "bg-accent" : "bg-line-strong",
-      )}
-    >
-      <span
-        className={cx(
-          "absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow-sm transition-transform duration-200 ease-[var(--ease-spring)]",
-          checked ? "translate-x-[14px]" : "translate-x-[2px]",
-        )}
-      />
-    </button>
+    />
   );
 }
 

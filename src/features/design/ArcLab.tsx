@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
+import { Switch } from "@/components/arc/switch/switch";
 import { Button } from "@/components/arc/button/button";
 import { SelectMenu } from "@/components/ui/SelectMenu";
 import { applyTheme } from "@/lib/theme";
@@ -12,6 +13,8 @@ export default function ArcLab() {
   );
   const [quality, setQuality] = useState("10000");
   const [platform, setPlatform] = useState("all");
+  const [switchOn, setSwitchOn] = useState(true);
+  const [switchOff, setSwitchOff] = useState(false);
 
   const changeTheme = (next: Theme, _variant: unknown, trigger: HTMLElement) => {
     const apply = () => {
@@ -67,6 +70,17 @@ export default function ArcLab() {
             <Button variant="primary" size="lg">
               Large
             </Button>
+          </div>
+        </section>
+
+        <section className="card flex flex-col gap-4 p-6">
+          <h2 className="text-[13px] font-semibold">Switch</h2>
+          <div className="flex flex-wrap items-center gap-6">
+            <Switch checked={switchOn} onCheckedChange={setSwitchOn} aria-label="已开启" />
+            <Switch checked={switchOff} onCheckedChange={setSwitchOff} aria-label="已关闭" />
+            <Switch checked onCheckedChange={() => undefined} aria-label="只读开启" />
+            <Switch checked={false} onCheckedChange={() => undefined} disabled aria-label="禁用" />
+            <Switch label="带可见文字" checked={switchOn} onCheckedChange={setSwitchOn} />
           </div>
         </section>
 

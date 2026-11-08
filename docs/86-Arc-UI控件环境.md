@@ -106,3 +106,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 ![深色模式下的顶栏：开关显示月亮，强调色切到琥珀](assets/86-theme-switch-dark.png)
 
 第二个落地控件是 `DropdownMenu`：13 处选择菜单统一成同一套浮层，详见 `88-DropdownMenu统一选择菜单.md`。
+
+第三个落地控件是 `Switch`：应用内全部二元开关（设置 13、添加房间 2、关闭拦截 1）统一使用 Arc 的 42×24 轨道与弹簧 thumb，`Controls.Switch` 作为适配层保留旧 API；预览台新增开/关/只读/禁用四种形态。详见 `91-开关统一为Arc-Switch.md`。

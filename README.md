@@ -104,6 +104,7 @@
 | [88-DropdownMenu统一选择菜单](docs/88-DropdownMenu统一选择菜单.md) | 13 处选择菜单统一成 Arc `DropdownMenu`：监控/媒体平台筛选（bare）、媒体排序、监控画质/线路、设置 6 个字段、播放器画质/线路（dark）；新增 `SelectMenu` 包装（勾选 + 计数 hint）与 `variant/size/align/disabled/active` 适配；动作菜单保持自绘 | 改筛选、排序、画质/线路或设置下拉时 |
 | [89-桌面壳守卫](docs/89-桌面壳守卫.md) | 去掉 WebView2 的浏览器默认行为：右键菜单、F12/DevTools、Ctrl+R/F5、Ctrl+P/U、Ctrl±0 与 Ctrl+滚轮缩放；桌面端移除 `:focus-visible` 焦点框，输入框保留边框提示；浏览器预览不受影响 | 排查右键菜单、焦点框、快捷键或缩放时 |
 | [90-空态与Tab切换](docs/90-空态与Tab切换.md) | 参考 Arc empty-states 的版式，4 个主 Tab 的 8 个空态统一为 `EmptyState` + `PageEmpty` 居中，并用本地 `EmptyArt` 为每页绘制 56px 无底板动画插画（扫描线/呼吸格/画勾）；空态不放操作按钮；Tab 内容改为 160ms 纯淡入（去掉位移与等待间隔），顶部下划线用 `layoutId` 弹簧滑动；启动恢复任务改为 silent job，不再写任务历史 | 改空态、空态插画或 Tab 切换动画时 |
+| [91-开关统一为Arc-Switch](docs/91-开关统一为Arc-Switch.md) | 应用内全部二元开关换成 Arc（uiarc.dev）`Switch`：42×24 轨道 + 18px thumb，按下拉伸、松开弹簧归位，reduced motion 直接到位；`Controls.Switch` 保留原 `checked/onChange/label` API 并映射到 Radix `onCheckedChange`，覆盖设置 13、添加房间 2、关闭拦截 1；新增 `@radix-ui/react-switch` 与 `?arc-lab=1` 预览段 | 改开关尺寸、动效或新增设置项时 |
 | [84-弹幕录制设置](docs/84-弹幕录制设置.md) | v1.1 已实施并完成 macOS 真机验收：全局录制弹幕总开关 + 礼物/SC/舰长事件开关；设置页独立「弹幕录制」页、`RecordRules` 写入器过滤、开录门禁、0 字节 JSONL 清理与 attach 泄漏修复；247 passed / 17 ignored、597 i18n keys；真实房间验证总开关开/关两场、JSONL/ASS 与 DB 路径；含评审分析、行为矩阵与已知限制 | 改弹幕录制开关、排查 JSONL/ASS 事件缺失或评估验收范围时 |
 | [59-监控录制联动修复四](docs/59-监控录制联动修复四.md) | B1–B9 九条全部修复：未确认收尾只记 finished/stream_ended 但不通知不静默且计入连续失败（3 次冷却 5 分钟）、离线确认去掉 180 秒窗口改纯计数、停录幂等且监控跳过已停会话、续录只丢地址缓存保留共享冷却、设置/房间 2 秒缓存、检测任务 panic 兜底、刷新走 start_checked；4 个新单测 + 真机验收（伪造 ffmpeg 秒退三次进冷却、磁盘红线单次停录、SIGTERM） | 排查误报下播、重复停录或改续录/离线判定时 |
 
