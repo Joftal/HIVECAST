@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { IconButton, cx } from "./components/ui/Controls";
+import WindowControls from "./components/WindowControls";
+import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsView, { type PageKey } from "./features/settings/SettingsView";
@@ -234,14 +236,17 @@ export default function App() {
   const dark = theme === "dark";
   // macOS 用 Overlay 标题栏，红绿灯浮在自绘顶栏左侧，需要给它让位。
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  // Windows 由后端关掉原生边框，顶栏右侧自绘最小化/最大化/关闭。
+  const isWin = isTauri() && /Windows/.test(navigator.userAgent);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas text-ink">
+      {isWin ? <ResizeHandles /> : null}
       {tab === "watch" && immersive ? null : (
       <header
         data-tauri-drag-region
-        style={{ paddingLeft: isMac ? 78 : 14 }}
-        className="flex h-12 shrink-0 items-stretch border-b border-line pr-3"
+        style={{ paddingLeft: isMac ? 78 : 14, paddingRight: isWin ? 0 : 12 }}
+        className="flex h-12 shrink-0 items-stretch border-b border-line"
       >
         <div data-tauri-drag-region className="flex items-center gap-2 pr-2">
           <img
@@ -317,6 +322,7 @@ export default function App() {
               <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.09A1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </IconButton>
+          {isWin ? <WindowControls /> : null}
         </div>
       </header>
       )}

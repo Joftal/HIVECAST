@@ -6,7 +6,11 @@
     "errorBody": "可以重新加载继续使用。错误详情已经写入日志，方便排查。",
     "reload": "重新加载",
     "ffmpegMissing": "未找到 ffmpeg，录制、转封装与观看都会受影响。",
-    "ffmpegFix": "去指定路径"
+    "ffmpegFix": "去指定路径",
+    "windowMinimize": "最小化",
+    "windowMaximize": "最大化",
+    "windowRestore": "还原",
+    "windowClose": "关闭"
   },
   "tab": {
     "monitor": "监控",

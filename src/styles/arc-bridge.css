@@ -1,0 +1,70 @@
+/* Arc (uiarc.dev) 组件 token 桥接。
+   Arc 的组件只认 --background / --surface / --foreground / --border / --accent 这一层语义变量，
+   这里把它们映射到 HIVECAST 的 --c-* 面板，让新引入的控件和现有界面同色、同圆角、同阴影。
+   组件自身的尺寸、字号不在这里统一，按引入的控件逐个调。
+
+   导入顺序（main.tsx）：foundation.css → styles/index.css → 本文件。 */
+
+:root {
+  /* 表面与文字 */
+  --background: var(--c-canvas);
+  --surface: var(--c-surface);
+  --surface-raised: var(--c-surface);
+  --surface-muted: var(--c-raised);
+  --foreground: var(--c-ink);
+  --text-secondary: var(--c-muted);
+  --text-muted: var(--c-faint);
+
+  /* 描边 */
+  --border: var(--c-line);
+  --border-subtle: color-mix(in oklab, var(--c-line) 55%, transparent);
+  --border-strong: var(--c-line-strong);
+
+  /* 强调色：浅色蓝 / 深色琥珀，跟随 data-theme 自动切换 */
+  --accent: var(--c-accent);
+  --accent-strong: var(--c-accent-text);
+  --accent-subtle: var(--c-accent-soft);
+  --accent-foreground: var(--c-accent-ink);
+
+  /* 选择类控件（开关、勾选、单选、滑杆） */
+  --control-on: var(--c-accent);
+  --control-glyph: var(--c-accent-ink);
+  --control-track: var(--c-line-strong);
+  --control-track-hover: color-mix(in oklab, var(--c-line-strong) 76%, var(--c-ink));
+  --control-thumb: #ffffff;
+  --control-thumb-on: #ffffff;
+  --control-fill: var(--c-accent);
+
+  /* 状态色 */
+  --success: var(--c-ok);
+  --warning: var(--c-warn);
+  --danger: var(--c-rec);
+  --info: var(--c-accent);
+
+  /* 阴影沿用应用的两档 */
+  --shadow-resting: var(--shadow-card);
+  --shadow-raised: var(--shadow-pop);
+  --shadow-floating: var(--shadow-pop);
+
+  /* 圆角：和 rounded-ctl / rounded-card / rounded-panel 对齐 */
+  --radius-control: 6px;
+  --radius-panel: 10px;
+  --radius-surface: 8px;
+
+  /* 键盘焦点：沿用 .focus-ring 的描边颜色与偏移 */
+  --focus-outline: color-mix(in oklab, var(--c-accent) 75%, transparent);
+  --focus-outline-width: 2px;
+  --focus-outline-offset: 2px;
+
+  /* 字体交给应用统一 */
+  --font-display: var(--font-sans);
+  --font-body: var(--font-sans);
+
+  /* 密度：Arc 默认是 36/44/50 的营销站尺寸，这里对齐应用现有的 28/32/36 与 12px 控件字号 */
+  --control-height-sm: 1.75rem;
+  --control-height-md: 2rem;
+  --control-height-lg: 2.25rem;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-base: 0.8125rem;
+}

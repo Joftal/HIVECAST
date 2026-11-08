@@ -156,6 +156,13 @@ pub fn run() {
                 }
             };
             if let Some(window) = app.get_webview_window("main") {
+                // Windows 没有 macOS 的 Overlay 标题栏：去掉原生边框，由前端顶栏统一画标题、导航与窗口按钮。
+                #[cfg(target_os = "windows")]
+                {
+                    if let Err(err) = window.set_decorations(false) {
+                        tracing::warn!(%err, "关闭原生标题栏失败");
+                    }
+                }
                 #[cfg(target_os = "windows")]
                 {
                     let theme = window.theme().unwrap_or(tauri::Theme::Light);

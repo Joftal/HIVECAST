@@ -6,7 +6,11 @@
     "errorBody": "Reload to keep using HIVECAST. The details were written to the log for troubleshooting.",
     "reload": "Reload",
     "ffmpegMissing": "ffmpeg was not found. Recording, remuxing and watching are affected.",
-    "ffmpegFix": "Set path"
+    "ffmpegFix": "Set path",
+    "windowMinimize": "Minimize",
+    "windowMaximize": "Maximize",
+    "windowRestore": "Restore",
+    "windowClose": "Close"
   },
   "tab": {
     "monitor": "Monitor",
