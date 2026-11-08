@@ -108,3 +108,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 第二个落地控件是 `DropdownMenu`：13 处选择菜单统一成同一套浮层，详见 `88-DropdownMenu统一选择菜单.md`。
 
 第三个落地控件是 `Switch`：应用内全部二元开关（设置 13、添加房间 2、关闭拦截 1）统一使用 Arc 的 42×24 轨道与弹簧 thumb，`Controls.Switch` 作为适配层保留旧 API；预览台新增开/关/只读/禁用四种形态。详见 `91-开关统一为Arc-Switch.md`。
+
+第四个落地控件是 `Checkbox`：监控行与媒体卡的多选改为 Arc 的 18px 方块 + 32px 命中区，勾线/横杠用同一路径 morph；视频封面使用本地 `tone="overlay"` 半透明深底 + 白描边。详见 `93-复选框统一为Arc-Checkbox.md`。

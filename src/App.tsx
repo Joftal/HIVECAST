@@ -399,11 +399,7 @@ export default function App() {
             onImmersiveChange={setImmersive}
           />
         ) : tab === "media" ? (
-          <div className="min-h-0 flex-1 overflow-auto">
-            <div className="flex min-h-full w-full flex-col">
-              <MediaPage />
-            </div>
-          </div>
+          <MediaPage />
         ) : (
           <TasksPage />
         )}

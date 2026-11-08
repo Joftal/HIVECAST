@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Switch } from "@/components/arc/switch/switch";
+import { Checkbox } from "@/components/arc/checkbox/checkbox";
 import { Button } from "@/components/arc/button/button";
 import { SelectMenu } from "@/components/ui/SelectMenu";
 import { applyTheme } from "@/lib/theme";
@@ -15,6 +16,8 @@ export default function ArcLab() {
   const [platform, setPlatform] = useState("all");
   const [switchOn, setSwitchOn] = useState(true);
   const [switchOff, setSwitchOff] = useState(false);
+  const [checkA, setCheckA] = useState(true);
+  const [checkB, setCheckB] = useState(false);
 
   const changeTheme = (next: Theme, _variant: unknown, trigger: HTMLElement) => {
     const apply = () => {
@@ -70,6 +73,26 @@ export default function ArcLab() {
             <Button variant="primary" size="lg">
               Large
             </Button>
+          </div>
+        </section>
+
+        <section className="card flex flex-col gap-4 p-6">
+          <h2 className="text-[13px] font-semibold">Checkbox</h2>
+          <div className="flex flex-wrap items-center gap-6">
+            <Checkbox checked={checkA} onCheckedChange={(next) => setCheckA(next === true)} aria-label="已勾选" />
+            <Checkbox checked={checkB} onCheckedChange={(next) => setCheckB(next === true)} aria-label="未勾选" />
+            <Checkbox checked="indeterminate" onCheckedChange={() => undefined} aria-label="部分选中" />
+            <Checkbox checked={false} onCheckedChange={() => undefined} disabled aria-label="禁用" />
+            <Checkbox
+              label="带标签"
+              description="说明文字与复选框第一行对齐"
+              checked={checkA}
+              onCheckedChange={(next) => setCheckA(next === true)}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-4 rounded-[8px] bg-black/60 p-4">
+            <Checkbox tone="overlay" checked onCheckedChange={() => undefined} aria-label="封面已选中" />
+            <Checkbox tone="overlay" checked={false} onCheckedChange={() => undefined} aria-label="封面未选中" />
           </div>
         </section>
 

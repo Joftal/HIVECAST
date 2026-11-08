@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button, cx } from "../../components/ui/Controls";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
+import { PageBody, PageChip, PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import {
   describeError,
   isTauri,
@@ -69,6 +70,7 @@ export default function TasksPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [filter, setFilter] = useState<"all" | "running" | "history">("all");
 
   const load = useCallback(async () => {
     if (!isTauri()) {
@@ -117,18 +119,31 @@ export default function TasksPage() {
   };
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-3 px-5 pb-3 pt-4">
-        <div className="min-w-0">
-          <h1 className="text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">{t("tasks.title")}</h1>
-          <p className="mt-0.5 text-[11.5px] leading-5 text-muted">{t("tasks.subtitle")}</p>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={() => void load()}>
+    <PageShell>
+      <PageHeader
+        title={t("tasks.title")}
+        subtitle={t("tasks.subtitle")}
+        actions={
+          <Button size="lg" variant="secondary" onClick={() => void load()}>
             {t("tasks.refresh")}
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      <PageToolbar>
+        <PageChip active={filter === "all"} onClick={() => setFilter("all")}>
+          {t("tasks.filterAll")}
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{running.length + history.length}</span>
+        </PageChip>
+        <PageChip active={filter === "running"} onClick={() => setFilter("running")}>
+          {t("tasks.running")}
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{running.length}</span>
+        </PageChip>
+        <PageChip active={filter === "history"} onClick={() => setFilter("history")}>
+          {t("tasks.history")}
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{history.length}</span>
+        </PageChip>
+      </PageToolbar>
 
       {error ? (
         <div className="mx-5 mb-2 rounded-ctl border border-rec/30 bg-rec/8 px-3 py-2 text-[12px] text-rec">
@@ -136,16 +151,17 @@ export default function TasksPage() {
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-auto px-5 pb-8">
+      <PageBody className="pb-8">
         {loaded && running.length === 0 && history.length === 0 ? (
           <PageEmpty
-            className="h-full"
+            className="flex-1"
             title={t("tasks.emptyTitle")}
             description={t("tasks.emptyBody")}
             icon={<EmptyArt kind="tasks" />}
           />
         ) : (
           <>
+        {filter !== "history" ? (
         <section>
           <div className="mb-2 flex items-baseline gap-2">
             <h2 className="text-[13px] font-semibold text-ink">{t("tasks.running")}</h2>
@@ -200,8 +216,10 @@ export default function TasksPage() {
             </div>
           )}
         </section>
+        ) : null}
 
-        <section className="mt-7">
+        {filter !== "running" ? (
+        <section className={filter === "all" ? "mt-7" : ""}>
           <div className="mb-2 flex items-baseline gap-2">
             <h2 className="text-[13px] font-semibold text-ink">{t("tasks.history")}</h2>
             <span className="text-[11px] tabular-nums text-faint">{history.length}</span>
@@ -244,9 +262,10 @@ export default function TasksPage() {
             </div>
           )}
         </section>
+        ) : null}
           </>
         )}
-      </div>
-    </div>
+      </PageBody>
+    </PageShell>
   );
 }

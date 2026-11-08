@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Switch, cx } from "../../components/ui/Controls";
+import { Checkbox } from "../../components/arc/checkbox/checkbox";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
+import { PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
@@ -601,22 +603,14 @@ export default function MonitorPage({
             locale={locale}
           />
           {room.isLive ? (
-            <button
-              type="button"
-              onClick={() => togglePick(view)}
-              aria-label={t("monitor.selectHint")}
-              aria-pressed={isPicked}
-              className={cx(
-                "focus-ring absolute right-1 top-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border transition-colors",
-                isPicked
-                  ? "border-accent bg-accent text-accent-ink"
-                  : "border-white/75 bg-black/40 text-transparent hover:border-white hover:bg-black/65",
-              )}
-            >
-              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                <path d="M2.2 6.3 4.8 8.9 9.8 3.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+            <div className="absolute right-0 top-0">
+              <Checkbox
+                checked={isPicked}
+                onCheckedChange={() => togglePick(view)}
+                aria-label={t("monitor.selectHint")}
+                tone="overlay"
+              />
+            </div>
           ) : null}
         </div>
         <span className={cx("truncate text-[12.5px]", room.isLive && !room.monitorPaused ? "text-ink-soft" : "text-faint")}>
@@ -941,49 +935,28 @@ export default function MonitorPage({
     );
   };
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-3 px-5 pb-3 pt-4">
-        <div className="min-w-0">
-          <h1 className="text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">{t("monitor.title")}</h1>
-
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <div className="relative">
-            <svg
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden
+    <PageShell>
+      <PageHeader
+        title={t("monitor.title")}
+        subtitle={t("monitor.subtitle")}
+        actions={
+          <>
+            <PageSearch value={query} onChange={setQuery} placeholder={t("monitor.searchPlaceholder")} />
+            <Button
+              size="lg"
+              variant="primary"
+              onClick={() => {
+                setAddOpen((open) => !open);
+                setAddMonitor(true);
+                setAddAutoRecord(true);
+              }}
             >
-              <circle cx="7" cy="7" r="4.4" />
-              <path d="m10.4 10.4 3 3" strokeLinecap="round" />
-            </svg>
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t("monitor.searchPlaceholder")}
-              spellCheck={false}
-              className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
-            />
-          </div>
-          <Button
-            size="lg"
-            variant="primary"
-            onClick={() => {
-              setAddOpen((open) => !open);
-              setAddMonitor(true);
-              setAddAutoRecord(true);
-            }}
-          >
-            <span className="text-[15px] leading-none">+</span>
-            {t("monitor.addRoom")}
-          </Button>
-        </div>
-      </div>
+              <span className="text-[15px] leading-none">+</span>
+              {t("monitor.addRoom")}
+            </Button>
+          </>
+        }
+      />
 
       {addOpen ? (
         <div
@@ -1106,22 +1079,16 @@ export default function MonitorPage({
         </div>
       ) : null}
 
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-5 py-2.5">
-        <button
-          type="button"
+      <PageToolbar>
+        <PageChip
+          active={platform === "all"}
           onClick={() => {
             setPlatform("all");
           }}
-          className={cx(
-            "focus-ring rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
-            platform === "all"
-              ? "bg-accent-soft font-medium text-accent-text"
-              : "text-muted hover:bg-raised hover:text-ink-soft",
-          )}
         >
           {t("monitor.filterAll")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{counts.all ?? 0}</span>
-        </button>
+        </PageChip>
         <SelectMenu
           variant="bare"
           align="start"
@@ -1137,19 +1104,10 @@ export default function MonitorPage({
           }))}
         />
         <span className="mx-1.5 h-4 w-px bg-line" />
-        <button
-          type="button"
-          onClick={() => setOnlyRecording((on) => !on)}
-          className={cx(
-            "focus-ring rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
-            onlyRecording
-              ? "bg-accent-soft font-medium text-accent-text"
-              : "text-muted hover:bg-raised hover:text-ink-soft",
-          )}
-        >
+        <PageChip active={onlyRecording} onClick={() => setOnlyRecording((on) => !on)}>
           {t("monitor.onlyRecording")}
-        </button>
-      </div>
+        </PageChip>
+      </PageToolbar>
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -1229,6 +1187,6 @@ export default function MonitorPage({
       ) : null}
 
       {selected ? renderPanel(selected) : null}
-    </div>
+    </PageShell>
   );
 }

@@ -21,6 +21,8 @@
     "tasks": "Tasks"
   },
   "media": {
+    "title": "Library",
+    "subtitle": "Finished recordings are grouped by host, ready to play, remux, merge, or export.",
     "emptyTitle": "The library is empty",
     "emptyBody": "Add a room on Monitor; finished recordings will appear here automatically.",
     "play": "Play",
@@ -123,6 +125,7 @@
   "tasks": {
     "title": "Tasks",
     "subtitle": "Recording, post-processing, merges, and exports queue here; the latest 100 finished tasks are kept.",
+    "filterAll": "All",
     "refresh": "Refresh",
     "running": "Running",
     "history": "Recent",

@@ -6,6 +6,8 @@ import { Button, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
+import { Checkbox } from "../../components/arc/checkbox/checkbox";
+import { PageBody, PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import {
   isTauri,
   mediaDeleteGroup,
@@ -139,27 +141,10 @@ const HOST_GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(250px, 
 // 录像网格：卡片最小 228。
 const GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(228px, 1fr))" };
 
-function IconSearch() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-      <circle cx="7" cy="7" r="4.4" />
-      <path d="m10.4 10.4 3 3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function IconPlay() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M5.2 3.4c0-.5.55-.8.97-.53l6.1 4.1c.4.26.4.84 0 1.1l-6.1 4.1a.62.62 0 0 1-.97-.53V3.4Z" />
-    </svg>
-  );
-}
-
-function IconCheck() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-      <path d="M2.4 6.2 4.7 8.5 9.6 3.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -897,21 +882,6 @@ export default function MediaPage() {
       : t("common.loading")
     : null;
 
-  const searchBox = (placeholder: string) => (
-    <label className="relative">
-      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint">
-        <IconSearch />
-      </span>
-      <input
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder={placeholder}
-        spellCheck={false}
-        className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
-      />
-    </label>
-  );
-
   const platformMenu = (
     <SelectMenu
       variant="bare"
@@ -933,43 +903,47 @@ export default function MediaPage() {
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 px-5 pb-5 pt-4">
+    <PageShell>
       {hostId ? (
-        <div className="flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={backToHosts}
-            className="focus-ring -mb-1 inline-flex w-fit items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11.5px] text-muted transition-colors hover:text-ink"
-          >
-            <IconBack />
-            {t("media.hosts.back")}
-          </button>
-
-          {active ? (
-            <div className="flex items-center gap-3">
-              <span className="overflow-hidden rounded-[10px]">
-                <HostAvatar host={active} size={64} onCover={false} />
+        <PageHeader
+          leading={
+            <button
+              type="button"
+              onClick={backToHosts}
+              className="focus-ring -ml-1 inline-flex w-fit items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11.5px] text-muted transition-colors hover:text-ink"
+            >
+              <IconBack />
+              {t("media.hosts.back")}
+            </button>
+          }
+          prefix={
+            active ? (
+              <span className="block overflow-hidden rounded-[10px]">
+                <HostAvatar host={active} size={36} onCover={false} />
               </span>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[18px] font-semibold leading-tight text-ink">
-                    {active.hostName || active.roomTitle || active.roomId}
-                  </span>
-                  <PlatformChip platform={active.platform} />
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                  <span className="font-mono tabular-nums">{t("media.hosts.count", { n: active.count })}</span>
-                  <span className="text-line">·</span>
-                  <span className="font-mono tabular-nums">{formatSize(active.bytes)}</span>
-                  <span className="text-line">·</span>
-                  <span className="font-mono tabular-nums">
-                    {t("media.hosts.latest", { time: formatDate(active.latestAt) })}
-                  </span>
-                  <span className="text-line">·</span>
-                  <span className="truncate">{active.roomTitle}</span>
-                </div>
-              </div>
-              <div className="ml-auto flex shrink-0 items-center gap-2">
+            ) : undefined
+          }
+          title={active ? active.hostName || active.roomTitle || active.roomId : t("media.title")}
+          subtitle={
+            active ? (
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="font-mono tabular-nums">{t("media.hosts.count", { n: active.count })}</span>
+                <span className="text-line">·</span>
+                <span className="font-mono tabular-nums">{formatSize(active.bytes)}</span>
+                <span className="text-line">·</span>
+                <span className="font-mono tabular-nums">
+                  {t("media.hosts.latest", { time: formatDate(active.latestAt) })}
+                </span>
+                <span className="text-line">·</span>
+                <span className="truncate">{active.roomTitle}</span>
+              </span>
+            ) : (
+              t("media.subtitle")
+            )
+          }
+          actions={
+            active ? (
+              <>
                 <Button
                   size="lg"
                   variant="secondary"
@@ -981,78 +955,78 @@ export default function MediaPage() {
                 <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshAll()}>
                   {t("common.refresh")}
                 </Button>
-              </div>
-            </div>
-          ) : null}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex h-9 items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
-              {rangeItems.map((one) => (
-                <button
-                  key={one.key}
-                  type="button"
-                  onClick={() => setRange(one.key)}
-                  className={cx(
-                    "focus-ring rounded-[5px] px-2.5 py-[5px] text-[12px] font-medium transition-colors",
-                    range === one.key ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
-                  )}
-                >
-                  {one.label}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => setOnlyDanmaku((on) => !on)}
-              className={cx(
-                "focus-ring h-9 rounded-ctl border px-3 text-[12px] transition-colors",
-                onlyDanmaku
-                  ? "border-accent/40 bg-accent-soft text-accent-text"
-                  : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink",
-              )}
-            >
-              {t("media.onlyDanmaku")}
-            </button>
-            <SelectMenu
-              size="md"
-              value={sort}
-              onChange={(next) => setSort(next as SortKey)}
-              options={[
-                { value: "recent", label: t("media.sortRecent") },
-                { value: "duration", label: t("media.sortDuration") },
-                { value: "size", label: t("media.sortSize") },
-              ]}
-              ariaLabel={t("media.sortLabel")}
-              className="ml-auto w-[140px] justify-between"
-            />
-          </div>
-        </div>
+              </>
+            ) : undefined
+          }
+        />
       ) : (
-        <div className="flex flex-wrap items-center gap-2">
-          {searchBox(t("media.hosts.search"))}
-          {platformMenu}
-          <div className="ml-auto flex items-center gap-2">
-            <SelectMenu
-              size="md"
-              value={hostSort}
-              onChange={(next) => setHostSort(next as HostSortKey)}
-              options={[
-                { value: "name", label: t("media.hosts.sortName") },
-                { value: "latest", label: t("media.hosts.sortLatest") },
-                { value: "size", label: t("media.hosts.sortSize") },
-                { value: "count", label: t("media.hosts.sortCount") },
-              ]}
-              ariaLabel={t("media.sortLabel")}
-              className="w-[140px] justify-between"
-            />
-            <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
-              {t("common.refresh")}
-            </Button>
+        <PageHeader
+          title={t("media.title")}
+          subtitle={t("media.subtitle")}
+          actions={
+            <>
+              <PageSearch value={query} onChange={setQuery} placeholder={t("media.hosts.search")} />
+              <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
+                {t("common.refresh")}
+              </Button>
+            </>
+          }
+        />
+      )}
+
+      {hostId ? (
+        <PageToolbar>
+          <div className="flex h-9 items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
+            {rangeItems.map((one) => (
+              <button
+                key={one.key}
+                type="button"
+                onClick={() => setRange(one.key)}
+                className={cx(
+                  "focus-ring rounded-[5px] px-2.5 py-[5px] text-[12px] font-medium transition-colors",
+                  range === one.key ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
+                )}
+              >
+                {one.label}
+              </button>
+            ))}
           </div>
-        </div>
+          <PageChip active={onlyDanmaku} onClick={() => setOnlyDanmaku((on) => !on)}>
+            {t("media.onlyDanmaku")}
+          </PageChip>
+          <SelectMenu
+            size="md"
+            value={sort}
+            onChange={(next) => setSort(next as SortKey)}
+            options={[
+              { value: "recent", label: t("media.sortRecent") },
+              { value: "duration", label: t("media.sortDuration") },
+              { value: "size", label: t("media.sortSize") },
+            ]}
+            ariaLabel={t("media.sortLabel")}
+            className="ml-auto w-[140px] justify-between"
+          />
+        </PageToolbar>
+      ) : (
+        <PageToolbar>
+          {platformMenu}
+          <SelectMenu
+            size="md"
+            value={hostSort}
+            onChange={(next) => setHostSort(next as HostSortKey)}
+            options={[
+              { value: "name", label: t("media.hosts.sortName") },
+              { value: "latest", label: t("media.hosts.sortLatest") },
+              { value: "size", label: t("media.hosts.sortSize") },
+              { value: "count", label: t("media.hosts.sortCount") },
+            ]}
+            ariaLabel={t("media.sortLabel")}
+            className="ml-auto w-[140px] justify-between"
+          />
+        </PageToolbar>
       )}
       {error ? (
-        <div className="flex items-center justify-between rounded-ctl border border-rec/30 bg-rec/10 px-3 py-2 text-[11.5px] text-rec">
+        <div className="mx-5 mb-2 flex items-center justify-between rounded-ctl border border-rec/30 bg-rec/10 px-3 py-2 text-[11.5px] text-rec">
           <span className="truncate">{error}</span>
           <button type="button" onClick={() => setError(null)} className="focus-ring shrink-0 px-1 text-[11px]">
             {t("media.cancel")}
@@ -1060,7 +1034,7 @@ export default function MediaPage() {
         </div>
       ) : null}
       {notice || statusLine ? (
-        <div className="flex items-center justify-between rounded-ctl border border-line bg-raised px-3 py-2 text-[11.5px] text-ink-soft">
+        <div className="mx-5 mb-2 flex items-center justify-between rounded-ctl border border-line bg-raised px-3 py-2 text-[11.5px] text-ink-soft">
           <span className="truncate">{statusLine ?? notice}</span>
           {notice && !statusLine ? (
             <button type="button" onClick={() => setNotice(null)} className="focus-ring shrink-0 px-1 text-[11px] text-faint">
@@ -1070,6 +1044,7 @@ export default function MediaPage() {
         </div>
       ) : null}
 
+      <PageBody className="pb-5">
       {hostId ? (
         loading ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
@@ -1174,20 +1149,14 @@ export default function MediaPage() {
                       </span>
                     )}
 
-                    <button
-                      type="button"
-                      onClick={() => toggleGroup(group)}
-                      aria-label={t("media.selectSession")}
-                      aria-pressed={isSelected}
-                      className={cx(
-                        "focus-ring absolute right-2 top-2 z-10 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border transition-colors",
-                        isSelected
-                          ? "border-accent bg-accent text-accent-ink"
-                          : "border-white/45 bg-black/35 text-transparent hover:border-white/80 hover:text-white/70",
-                      )}
-                    >
-                      <IconCheck />
-                    </button>
+                    <div className="absolute right-0 top-0 z-10">
+                      <Checkbox
+                        checked={isSelected}
+                        onCheckedChange={() => toggleGroup(group)}
+                        aria-label={t("media.selectSession")}
+                        tone="overlay"
+                      />
+                    </div>
 
                     <span className="pointer-events-none absolute bottom-2 left-2 rounded-[4px] bg-black/60 px-1.5 py-[3px] font-mono text-[10px] tabular-nums leading-none text-white/90">
                       {formatDuration(group.durationMs)}
@@ -1354,6 +1323,7 @@ export default function MediaPage() {
           </Button>
         </div>
       ) : null}
+      </PageBody>
 
       {selected.length > 0
         ? createPortal(
@@ -1616,6 +1586,6 @@ export default function MediaPage() {
             document.body,
           )
         : null}
-    </div>
+    </PageShell>
   );
 }

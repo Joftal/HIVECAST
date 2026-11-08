@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
+import { PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
@@ -660,96 +661,106 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
             { kind: "alt", label: t("watch.layout.twoV"), glyph: "col" },
           ];
 
+  const toolbar = (
+    <>
+      <span className="font-mono text-[11px] tabular-nums text-muted">
+        {count} <span className="text-faint">/ 4</span>
+      </span>
+
+      {count >= 2 ? (
+        <div className="flex items-center rounded-[6px] border border-line p-0.5">
+          {layoutOptions.map((option) => {
+            const active = option.kind === "portrait" ? portrait : !portrait && variant === option.kind;
+            return (
+              <button
+                key={option.kind}
+                type="button"
+                onClick={() => applyLayout(option.kind)}
+                className={[
+                  "focus-ring inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors",
+                  active ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
+                ].join(" ")}
+              >
+                <LayoutGlyph kind={option.glyph} />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <div className="ml-auto flex items-center gap-1">
+        <Button
+          size="sm"
+          variant={compact ? "secondary" : "ghost"}
+          title={t("watch.compactHint")}
+          onClick={() => setCompact(!compact)}
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+            {compact ? (
+              <>
+                <rect x="2.2" y="2.2" width="5" height="5" />
+                <rect x="8.8" y="2.2" width="5" height="5" />
+                <rect x="2.2" y="8.8" width="5" height="5" />
+                <rect x="8.8" y="8.8" width="5" height="5" />
+              </>
+            ) : (
+              <>
+                <rect x="1.6" y="1.6" width="12.8" height="12.8" rx="1.4" />
+                <path d="M8 1.6v12.8M1.6 8h12.8" />
+              </>
+            )}
+          </svg>
+          {t("watch.compact")}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          title={t("watch.fullscreenHint")}
+          onClick={() => void toggleFullscreen()}
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+            {fullscreen ? (
+              <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" strokeLinecap="round" strokeLinejoin="round" />
+            ) : (
+              <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
+            )}
+          </svg>
+          {fullscreen ? t("watch.exitFullscreen") : t("watch.fullscreen")}
+        </Button>
+        {count > 0 ? (
+          <Button size="sm" variant="ghost" onClick={() => setDanmakuOpen((open) => !open)}>
+            {t("watch.danmakuSettings")}
+          </Button>
+        ) : null}
+        {sounding > 0 ? (
+          <Button size="sm" variant="ghost" onClick={muteAll}>
+            {t("watch.muteAll")}
+          </Button>
+        ) : null}
+      </div>
+    </>
+  );
+
   return (
     <div className="relative flex h-full min-h-0 bg-canvas text-ink">
-      <div className="relative flex min-w-0 flex-1 flex-col">
-        <div
-          onPointerEnter={() => hoverChrome("top", true)}
-          onPointerLeave={() => hoverChrome("top", false)}
-          className={cx(
-            "flex h-14 shrink-0 items-center gap-2 border-b border-line px-5",
-            fullscreen &&
-              "absolute inset-x-0 top-0 z-30 bg-surface/92 backdrop-blur-md transition-[transform,opacity] duration-200",
-            fullscreen && !hoverTop && "-translate-y-full opacity-0",
-          )}
-        >
-          <span className="font-mono text-[11px] tabular-nums text-muted">
-            {count} <span className="text-faint">/ 4</span>
-          </span>
+      <PageShell className="relative min-w-0">
+        {!fullscreen ? <PageHeader title={t("watch.title")} subtitle={t("watch.subtitle")} /> : null}
 
-          {count >= 2 ? (
-            <div className="flex items-center rounded-[6px] border border-line p-0.5">
-              {layoutOptions.map((option) => {
-                const active = option.kind === "portrait" ? portrait : !portrait && variant === option.kind;
-                return (
-                  <button
-                    key={option.kind}
-                    type="button"
-                    onClick={() => applyLayout(option.kind)}
-                    className={[
-                      "focus-ring inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors",
-                      active ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
-                    ].join(" ")}
-                  >
-                    <LayoutGlyph kind={option.glyph} />
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-
-          <div className="ml-auto flex items-center gap-1">
-            <Button
-              size="sm"
-              variant={compact ? "secondary" : "ghost"}
-              title={t("watch.compactHint")}
-              onClick={() => setCompact(!compact)}
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                {compact ? (
-                  <>
-                    <rect x="2.2" y="2.2" width="5" height="5" />
-                    <rect x="8.8" y="2.2" width="5" height="5" />
-                    <rect x="2.2" y="8.8" width="5" height="5" />
-                    <rect x="8.8" y="8.8" width="5" height="5" />
-                  </>
-                ) : (
-                  <>
-                    <rect x="1.6" y="1.6" width="12.8" height="12.8" rx="1.4" />
-                    <path d="M8 1.6v12.8M1.6 8h12.8" />
-                  </>
-                )}
-              </svg>
-              {t("watch.compact")}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              title={t("watch.fullscreenHint")}
-              onClick={() => void toggleFullscreen()}
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                {fullscreen ? (
-                  <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" strokeLinecap="round" strokeLinejoin="round" />
-                ) : (
-                  <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
-                )}
-              </svg>
-              {fullscreen ? t("watch.exitFullscreen") : t("watch.fullscreen")}
-            </Button>
-            {count > 0 ? (
-              <Button size="sm" variant="ghost" onClick={() => setDanmakuOpen((open) => !open)}>
-                {t("watch.danmakuSettings")}
-              </Button>
-            ) : null}
-            {sounding > 0 ? (
-              <Button size="sm" variant="ghost" onClick={muteAll}>
-                {t("watch.muteAll")}
-              </Button>
-            ) : null}
+        {fullscreen ? (
+          <div
+            onPointerEnter={() => hoverChrome("top", true)}
+            onPointerLeave={() => hoverChrome("top", false)}
+            className={cx(
+              "absolute inset-x-0 top-0 z-30 flex h-12 items-center gap-2 border-b border-line bg-surface/92 px-5 backdrop-blur-md transition-[transform,opacity] duration-200",
+              !hoverTop && "-translate-y-full opacity-0",
+            )}
+          >
+            {toolbar}
           </div>
-        </div>
+        ) : (
+          <PageToolbar>{toolbar}</PageToolbar>
+        )}
 
         {error ? (
           <div className="mx-3 mt-2 flex shrink-0 items-center gap-2 rounded-[6px] border border-rec/35 bg-rec/12 px-2.5 py-1.5 text-[11px] text-rec">
@@ -989,7 +1000,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
             </div>
           ) : null}
         </div>
-      </div>
+      </PageShell>
 
       {picker && candidates.some((view) => view.room.id === picker.roomId)
         ? createPortal(
