@@ -35,6 +35,12 @@ function formatBytes(bytes: number): string {
   return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
 }
 
+const POST_MODES: Array<{ value: "source" | "convert" | "custom"; labelKey: string; descKey: string }> = [
+  { value: "source", labelKey: "settings.postModeSource", descKey: "settings.postModeSourceDesc" },
+  { value: "convert", labelKey: "settings.postModeConvert", descKey: "settings.postModeConvertDesc" },
+  { value: "custom", labelKey: "settings.postModeCustom", descKey: "settings.postModeCustomDesc" },
+];
+
 const QN_OPTIONS = [
   { value: 0, key: "qnAuto" },
   { value: 40000, key: "qnHighest" },
@@ -787,26 +793,57 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
           </Section>
 
           <Section title={t("settings.sectionPost")}>
-            <Row
+            <div
               id="set-post-mode"
-              focus={focusId === "set-post-mode"}
-              title={t("settings.postMode")}
-              desc={t("settings.postModeHint")}
+              className={cx(
+                "px-5 py-4 transition-colors",
+                focusId === "set-post-mode" ? "bg-accent-soft" : "",
+              )}
             >
-              <StringSelectField
-                value={settings.postMode}
-                onChange={(next) =>
-                  patch({
-                    postMode: next,
-                    ...(next === "convert" ? {} : { postDeleteSource: false }),
-                  })
-                }
-              >
-                <option value="source">{t("settings.postModeSource")}</option>
-                <option value="convert">{t("settings.postModeConvert")}</option>
-                <option value="custom">{t("settings.postModeCustom")}</option>
-              </StringSelectField>
-            </Row>
+              <div className="text-[12.5px] font-medium text-ink">{t("settings.postMode")}</div>
+              <p className={HINT}>{t("settings.postModeHint")}</p>
+              <div role="radiogroup" aria-label={t("settings.postMode")} className="mt-3 grid gap-2 sm:grid-cols-3">
+                {POST_MODES.map((mode) => {
+                  const active = settings.postMode === mode.value;
+                  return (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() =>
+                        patch({
+                          postMode: mode.value,
+                          ...(mode.value === "convert" ? {} : { postDeleteSource: false }),
+                        })
+                      }
+                      className={cx(
+                        "focus-ring rounded-[9px] border px-3 py-2.5 text-left transition-colors",
+                        active
+                          ? "border-accent bg-accent-soft text-ink shadow-[0_0_0_1px_var(--accent)]"
+                          : "border-line bg-surface text-ink-soft hover:border-line-strong hover:bg-raised/50",
+                      )}
+                    >
+                      <span className="flex items-center gap-2 text-[12px] font-medium">
+                        <span
+                          aria-hidden
+                          className={cx(
+                            "flex h-[13px] w-[13px] shrink-0 items-center justify-center rounded-full border",
+                            active ? "border-accent bg-accent" : "border-line-strong bg-surface",
+                          )}
+                        >
+                          {active ? <span className="h-[5px] w-[5px] rounded-full bg-accent-ink" /> : null}
+                        </span>
+                        {t(mode.labelKey)}
+                      </span>
+                      <span className="mt-1.5 block pl-[21px] text-[10.5px] leading-[15px] text-faint">
+                        {t(mode.descKey)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <Row
               id="set-post-convert-format"
               focus={focusId === "set-post-convert-format"}

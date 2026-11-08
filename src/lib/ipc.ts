@@ -337,6 +337,10 @@ export async function mediaReveal(sessionId: string): Promise<void> {
   return invoke("media_reveal", { sessionId });
 }
 
+export async function mediaRevealSource(sessionId: string): Promise<void> {
+  return invoke("media_reveal_source", { sessionId });
+}
+
 export async function mediaDelete(sessionId: string, deleteFile: boolean): Promise<void> {
   return invoke("media_delete", { sessionId, deleteFile });
 }

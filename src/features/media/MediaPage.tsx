@@ -11,6 +11,7 @@ import {
   mediaList,
   mediaPlay,
   mediaReveal,
+  mediaRevealSource,
   mediaStop,
   onMediaChanged,
   onMediaThumb,
@@ -42,6 +43,11 @@ type MediaGroup = {
   hasFile: boolean;
   clipCount: number;
 };
+
+function baseName(path: string): string {
+  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return index >= 0 ? path.slice(index + 1) : path;
+}
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return "—";
@@ -544,6 +550,14 @@ export default function MediaPage() {
     }
   };
 
+  const revealSource = async (item: MediaItem) => {
+    try {
+      await mediaRevealSource(item.id);
+    } catch (err) {
+      setError(describeError(err));
+    }
+  };
+
   // 拖到当前窗口外：后端换一个窗口重开，播放器从新窗口的偏移起播。
   const seekTo = async (item: MediaItem, positionMs: number) => {
     try {
@@ -656,6 +670,18 @@ export default function MediaPage() {
     try {
       if (kind === "remux") {
         const result = await sessionRemux(item.id);
+        const updated: MediaItem = {
+          ...item,
+          path: result.path,
+          size: result.size,
+          sourcePath: item.sourcePath ?? item.path,
+          hasSource: true,
+          postMode: "convert",
+          postState: "done",
+          sourceDeleted: false,
+        };
+        setItems((prev) => prev.map((current) => (current.id === item.id ? updated : current)));
+        setPlaying((prev) => (prev && prev.item.id === item.id ? { ...prev, item: updated } : prev));
         setNotice(t("media.remuxOne", { size: formatSize(result.size) }));
       } else {
         await sessionExportDanmaku(item.id);
@@ -1036,6 +1062,31 @@ export default function MediaPage() {
                     <h3 className="line-clamp-2 text-[12.5px] font-medium leading-[1.45] text-ink">
                       {item.title || item.hostName || item.id}
                     </h3>
+                    {item.sourcePath ? (
+                      <div className="mt-0.5 space-y-0.5 rounded-[5px] bg-raised/60 px-1.5 py-1 text-[10px] leading-4">
+                        <div className="flex min-w-0 items-center gap-1">
+                          <span className="shrink-0 text-faint">{t("media.mainFile")}</span>
+                          <span className="truncate font-mono text-muted" title={item.path}>
+                            {baseName(item.path)}
+                          </span>
+                        </div>
+                        <div className="flex min-w-0 items-center gap-1">
+                          <span className="shrink-0 text-faint">{t("media.sourceFile")}</span>
+                          {item.hasSource ? (
+                            <button
+                              type="button"
+                              onClick={() => void revealSource(item)}
+                              title={item.sourcePath ?? undefined}
+                              className="focus-ring truncate text-left font-mono text-accent-text hover:underline"
+                            >
+                              {baseName(item.sourcePath)}
+                            </button>
+                          ) : (
+                            <span className="truncate text-faint">{t("media.sourceDeleted")}</span>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
                     {group.clipCount > 1 ? (
                       <div className="flex flex-wrap items-center gap-1">
                         {group.clips.map((clip) => (
@@ -1276,6 +1327,37 @@ export default function MediaPage() {
                         </div>
                       </div>
                     </div>
+
+                    {playing.item.sourcePath ? (
+                      <div className="mt-4 rounded-[7px] border border-line bg-raised/40 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
+                          {t("media.files")}
+                        </div>
+                        <div className="mt-1.5 space-y-1 font-mono text-[10.5px] leading-4">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="w-[52px] shrink-0 font-sans text-faint">{t("media.mainFile")}</span>
+                            <span className="truncate text-ink-soft" title={playing.item.path}>
+                              {baseName(playing.item.path)}
+                            </span>
+                          </div>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="w-[52px] shrink-0 font-sans text-faint">{t("media.sourceFile")}</span>
+                            {playing.item.hasSource ? (
+                              <button
+                                type="button"
+                                onClick={() => void revealSource(playing.item)}
+                                title={playing.item.sourcePath ?? undefined}
+                                className="focus-ring truncate text-left text-accent-text hover:underline"
+                              >
+                                {baseName(playing.item.sourcePath)}
+                              </button>
+                            ) : (
+                              <span className="truncate text-faint">{t("media.sourceDeleted")}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line pt-3">
                       <Button

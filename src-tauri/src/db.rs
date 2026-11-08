@@ -1084,6 +1084,41 @@ impl Db {
         Ok(())
     }
 
+    /// 手动转封装成功后把主文件切到派生文件，同时保留源封装母带。
+    ///
+    /// 只改后处理相关列，不动状态、时长和弹幕：转封装不改录制本身。
+    pub fn update_session_post_file(
+        &self,
+        id: &str,
+        file_path: &str,
+        file_size: i64,
+        source_path: Option<&str>,
+        post_mode: &str,
+        post_state: &str,
+        source_deleted: bool,
+        post_error: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session SET
+                    file_path = ?2, file_size = ?3, source_path = ?4,
+                    post_mode = ?5, post_state = ?6, source_deleted = ?7, post_error = ?8
+                  WHERE id = ?1",
+                params![
+                    id,
+                    file_path,
+                    file_size,
+                    source_path,
+                    post_mode,
+                    post_state,
+                    source_deleted as i64,
+                    post_error
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// 保留策略用：已收尾且有文件的会话，按开始时间倒序。
     pub fn retention_rows(&self) -> Result<Vec<(String, String, i64, i64)>, AppError> {
         let conn = self.lock();
@@ -1750,6 +1785,36 @@ mod tests {
         assert_eq!(loaded.post_mode, "convert");
         assert_eq!(loaded.post_state, "done");
         assert!(!loaded.source_deleted);
+
+        // 手动转封装：主文件切到派生文件，源封装保留且不标记删除。
+        db.update_session_post_file(
+            "s-post",
+            &derived.display().to_string(),
+            13,
+            Some(&source.display().to_string()),
+            "convert",
+            "done",
+            false,
+            None,
+        )
+        .expect("写入手动转封装结果失败");
+        let switched = db
+            .get_session("s-post")
+            .expect("读手动转封装结果失败")
+            .expect("手动转封装结果存在");
+        assert_eq!(
+            switched.file_path.as_deref(),
+            Some(derived.to_str().unwrap())
+        );
+        assert_eq!(
+            switched.source_path.as_deref(),
+            Some(source.to_str().unwrap())
+        );
+        assert_eq!(switched.file_size, 13);
+        assert_eq!(switched.post_mode, "convert");
+        assert_eq!(switched.post_state, "done");
+        assert!(!switched.source_deleted);
+        assert_eq!(switched.post_error, None);
 
         let items = db.media_group_items("s-post").expect("整组查询失败");
         assert_eq!(items.len(), 1);

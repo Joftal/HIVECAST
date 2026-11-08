@@ -243,6 +243,7 @@ pub fn run() {
             commands::media_delete,
             commands::media_delete_group,
             commands::media_reveal,
+            commands::media_reveal_source,
             commands::media_play,
             commands::media_stop,
             commands::active_tasks,

@@ -539,7 +539,29 @@ pub async fn session_remux(
         task: &session_id,
         total_ms: session.duration_ms,
     };
-    postprocess::remux(&path, Some(&progress)).await
+    let result = postprocess::remux(&path, Some(&progress)).await?;
+    // 手动转封装保留源：第一次转封装时把原文件登记为母带，主文件切到新 mp4。
+    // 这样媒体库既能继续播派生文件，也能定位/回放原始封装。
+    let source_path = session.source_path.clone().or(session.file_path.clone());
+    state.db.update_session_post_file(
+        &session_id,
+        &result.path,
+        result.size,
+        source_path.as_deref(),
+        "convert",
+        "done",
+        false,
+        None,
+    )?;
+    tracing::info!(
+        target: "hivecast_lib::commands",
+        session_id = %session_id,
+        out = %result.path,
+        source = ?source_path,
+        "手动转封装完成并切换主文件"
+    );
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(result)
 }
 
 /// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
@@ -1222,6 +1244,24 @@ pub async fn media_reveal(state: State<'_, AppState>, session_id: String) -> Res
         .filter(|p| std::path::Path::new(p).is_file())
         .ok_or_else(|| AppError::User("录像文件已不存在".into()))?;
     tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, file = %path, "在文件管理器中定位录像");
+    reveal_in_file_manager(std::path::Path::new(&path))
+}
+
+/// 在文件管理器里定位源封装母带（转封装后主文件已经是派生文件）。
+#[tauri::command]
+pub async fn media_reveal_source(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| AppError::User("录像不存在".into()))?;
+    let path = session
+        .source_path
+        .filter(|p| std::path::Path::new(p).is_file())
+        .ok_or_else(|| AppError::User("源封装文件已不存在".into()))?;
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, file = %path, "在文件管理器中定位源封装");
     reveal_in_file_manager(std::path::Path::new(&path))
 }
 
