@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Button } from "@/components/arc/button/button";
+import { SelectMenu } from "@/components/ui/SelectMenu";
 import { applyTheme } from "@/lib/theme";
 
 /** 开发期控件预览台：一次只放当前在迭代的 Arc 组件，随用随删。
@@ -9,6 +10,8 @@ export default function ArcLab() {
   const [theme, setTheme] = useState<Theme>(() =>
     document.documentElement.dataset.theme === "dark" ? "dark" : "light",
   );
+  const [quality, setQuality] = useState("10000");
+  const [platform, setPlatform] = useState("all");
 
   const changeTheme = (next: Theme, _variant: unknown, trigger: HTMLElement) => {
     const apply = () => {
@@ -64,6 +67,47 @@ export default function ArcLab() {
             <Button variant="primary" size="lg">
               Large
             </Button>
+          </div>
+        </section>
+
+        <section className="card flex flex-col gap-3 p-6">
+          <h2 className="text-[13px] font-semibold">Select menu</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <SelectMenu
+              size="md"
+              value={quality}
+              onChange={setQuality}
+              options={[
+                { value: "0", label: "自动" },
+                { value: "40000", label: "最高" },
+                { value: "10000", label: "原画" },
+                { value: "400", label: "蓝光 1080P 60帧 高码率（大会员）" },
+              ]}
+              className="w-[208px] justify-between"
+            />
+            <SelectMenu
+              variant="bare"
+              value={platform}
+              onChange={setPlatform}
+              placeholder="平台"
+              active={platform !== "all"}
+              options={[
+                { value: "all", label: "全部", hint: "12" },
+                { value: "bilibili", label: "哔哩哔哩", hint: "7" },
+                { value: "douyu", label: "斗鱼", hint: "5" },
+              ]}
+            />
+            <span className="rounded-ctl bg-black px-3 py-2">
+              <SelectMenu
+                variant="dark"
+                value="1080"
+                onChange={() => undefined}
+                options={[
+                  { value: "1080", label: "原画" },
+                  { value: "720", label: "高清" },
+                ]}
+              />
+            </span>
           </div>
         </section>
 

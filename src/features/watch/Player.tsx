@@ -1,6 +1,8 @@
 import Hls from "hls.js";
+import { Check } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { DropdownMenu, type DropdownItem } from "../../components/arc/dropdown-menu/dropdown-menu";
 
 type Props = {
   url: string;
@@ -96,8 +98,7 @@ export default function Player({
   const vod = durationMs !== undefined && durationMs > 0;
   const [positionMs, setPositionMs] = useState(startMs);
   const [scrubMs, setScrubMs] = useState<number | null>(null);
-  // 控制条：画质浮层、音量滑杆展开、观看时长（对齐 B 站直播控制条的信息位）。
-  const [menuOpen, setMenuOpen] = useState(false);
+  // 控制条：音量滑杆展开、观看时长（对齐 B 站直播控制条的信息位）。
   const [volOpen, setVolOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const startAtRef = useRef(startAtSec ?? 0);
@@ -327,10 +328,6 @@ export default function Player({
     return () => window.clearInterval(timer);
   }, [url, reloadKey]);
 
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [url]);
-
   const reload = () => {
     if (onReload) onReload();
     else setReloadKey((value) => value + 1);
@@ -345,6 +342,41 @@ export default function Player({
 
   const qualityLabel = quality?.options.find((option) => option.value === quality.value)?.label;
   const playbackPct = durationMs && durationMs > 0 ? Math.min(100, ((scrubMs ?? positionMs) / durationMs) * 100) : 0;
+
+  // 线路与画质合成一个菜单：线路在前，画质在后，自动档单独放最后。
+  const qualityMenu: DropdownItem[] = [];
+  const hasLines = Boolean(lines && lines.options.length > 0);
+  if (lines && hasLines) {
+    for (const option of lines.options) {
+      qualityMenu.push({
+        key: "line:" + (option.value ?? "auto"),
+        label: `${t("watch.line")} · ${option.label}`,
+        icon: (lines.value ?? null) === option.value ? <Check size={14} /> : <span />,
+        onSelect: () => lines.onChange(option.value),
+      });
+    }
+  }
+  let firstQuality = true;
+  if (quality) {
+    for (const option of quality.options) {
+      if (option.value === 0) continue;
+      qualityMenu.push({
+        key: "qn:" + option.value,
+        label: option.label,
+        separatorBefore: firstQuality && hasLines,
+        icon: quality.value === option.value ? <Check size={14} /> : <span />,
+        onSelect: () => quality.onChange(option.value),
+      });
+      firstQuality = false;
+    }
+    qualityMenu.push({
+      key: "qn:auto",
+      label: quality.actual ? t("watch.autoQuality", { q: quality.actual }) : t("watch.qn.auto"),
+      separatorBefore: !firstQuality,
+      icon: quality.value === 0 ? <Check size={14} /> : <span />,
+      onSelect: () => quality.onChange(0),
+    });
+  }
 
   return (
     <div ref={shellRef} className="group relative h-full w-full overflow-hidden bg-black">
@@ -503,24 +535,18 @@ export default function Player({
 
             <div className="ml-auto flex items-center gap-0.5">
               {quality ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen((open) => !open);
-                    onMenuOpen?.();
+                <DropdownMenu
+                  variant="dark"
+                  align="end"
+                  label={qualityLabel ?? t("watch.qn.auto")}
+                  ariaLabel={t("watch.quality")}
+                  items={qualityMenu}
+                  morphLabel={false}
+                  className="max-w-[110px]"
+                  onOpenChange={(open) => {
+                    if (open) onMenuOpen?.();
                   }}
-                  aria-label={t("watch.quality")}
-                  aria-expanded={menuOpen}
-                  className={[
-                    "focus-ring flex h-7 items-center gap-1 rounded-[6px] px-1.5 text-[11px] transition-colors hover:bg-white/15 hover:text-white",
-                    menuOpen ? "bg-white/15 text-white" : "text-white/85",
-                  ].join(" ")}
-                >
-                  <span className="max-w-[76px] truncate">{qualityLabel ?? t("watch.qn.auto")}</span>
-                  <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-                    <path d="M2 4l3 3 3-3" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
+                />
               ) : null}
 
               <button
@@ -587,99 +613,6 @@ export default function Player({
         </div>
       </div>
 
-      {menuOpen && quality ? (
-        <button
-          type="button"
-          aria-label={t("watch.close")}
-          onClick={() => setMenuOpen(false)}
-          className="absolute inset-0 z-30 cursor-default"
-        />
-      ) : null}
-
-      {menuOpen && quality ? (
-        <div className="absolute bottom-14 right-2 z-40 w-[208px] overflow-hidden rounded-[10px] border border-white/10 bg-[#111114]/95 p-1.5 text-white shadow-[0_18px_44px_-14px_rgba(0,0,0,0.9)] backdrop-blur-xl">
-          {lines && lines.options.length > 0 ? (
-            <>
-              <div className="px-2 pb-1 pt-1 text-[9.5px] uppercase tracking-[0.12em] text-white/40">
-                {t("watch.line")}
-              </div>
-              <div className="flex flex-wrap gap-1 px-1.5 pb-1">
-                {lines.options.map((option) => (
-                  <button
-                    key={option.value ?? "__auto"}
-                    type="button"
-                    title={option.hint ?? option.label}
-                    onClick={() => lines.onChange(option.value)}
-                    className={[
-                      "rounded-full border px-2 py-[3px] text-[10px] transition-colors",
-                      (lines.value ?? null) === option.value
-                        ? "border-white/25 bg-white/18 text-white"
-                        : "border-white/10 text-white/65 hover:bg-white/10 hover:text-white",
-                    ].join(" ")}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <div className="mx-1 my-1 h-px bg-white/10" />
-            </>
-          ) : null}
-
-          <div className="px-2 pb-1 pt-1 text-[9.5px] uppercase tracking-[0.12em] text-white/40">
-            {t("watch.quality")}
-          </div>
-          {quality.options
-            .filter((option) => option.value !== 0)
-            .map((option) => {
-              const active = quality.value === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => {
-                    quality.onChange(option.value);
-                    setMenuOpen(false);
-                  }}
-                  className={[
-                    "flex w-full items-center justify-between rounded-[6px] px-2 py-[6px] text-left text-[11.5px] transition-colors",
-                    active ? "text-accent" : "text-white/80 hover:bg-white/10 hover:text-white",
-                  ].join(" ")}
-                >
-                  <span>{option.label}</span>
-                  {active ? (
-                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                      <path d="M2.2 6.3 4.8 8.9l5-5.4" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  ) : null}
-                </button>
-              );
-            })}
-
-          <div className="mx-1 my-1 h-px bg-white/10" />
-          <button
-            type="button"
-            onClick={() => {
-              quality.onChange(0);
-              setMenuOpen(false);
-            }}
-            className={[
-              "flex w-full items-center justify-between rounded-[6px] px-2 py-[6px] text-left text-[11.5px] transition-colors",
-              quality.value === 0 ? "text-accent" : "text-white/80 hover:bg-white/10 hover:text-white",
-            ].join(" ")}
-          >
-            <span>
-              {quality.actual
-                ? t("watch.autoQuality", { q: quality.actual })
-                : t("watch.qn.auto")}
-            </span>
-            {quality.value === 0 ? (
-              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                <path d="M2.2 6.3 4.8 8.9l5-5.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            ) : null}
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 }

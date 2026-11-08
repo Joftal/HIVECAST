@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Button, Select, Switch, cx } from "../../components/ui/Controls";
+import { Button, Switch, cx } from "../../components/ui/Controls";
+import { SelectMenu } from "../../components/ui/SelectMenu";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   describeError,
@@ -250,7 +251,6 @@ export default function MonitorPage({
 
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
-  const [platformOpen, setPlatformOpen] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -858,25 +858,24 @@ export default function MonitorPage({
             <div className="mt-2 space-y-2.5">
               <div className="flex items-center gap-2">
                 <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.quality")}</span>
-                <Select
+                <SelectMenu
                   value={String(room.recordQn)}
                   size="md"
                   disabled={busy}
                   onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
                   options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
-                  className="flex-1"
+                  className="flex-1 justify-between"
                 />
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.line")}</span>
-                <Select
+                <SelectMenu
                   value={room.recordLine ?? ""}
                   size="md"
                   disabled={lineBusy || busy}
-                  title={t("monitor.lineHint")}
                   onChange={(next) => void run(room.id, () => roomSetLine(room.id, next || null))}
                   options={lineOptions}
-                  className="flex-1"
+                  className="flex-1 justify-between"
                 />
               </div>
               {lines === null ? (
@@ -1110,7 +1109,6 @@ export default function MonitorPage({
           type="button"
           onClick={() => {
             setPlatform("all");
-            setPlatformOpen(false);
           }}
           className={cx(
             "focus-ring rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
@@ -1122,66 +1120,20 @@ export default function MonitorPage({
           {t("monitor.filterAll")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{counts.all ?? 0}</span>
         </button>
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setPlatformOpen((open) => !open)}
-            aria-haspopup="menu"
-            aria-expanded={platformOpen}
-            className={cx(
-              "focus-ring inline-flex items-center gap-1.5 rounded-ctl px-2.5 py-1.5 text-[12.5px] transition-colors",
-              platform !== "all"
-                ? "bg-accent-soft font-medium text-accent-text"
-                : "text-muted hover:bg-raised hover:text-ink-soft",
-            )}
-          >
-            {platformLabel}
-            {platform !== "all" ? (
-              <span className="tnum text-[11.5px] opacity-60">{counts[platform] ?? 0}</span>
-            ) : null}
-            <svg
-              width="9"
-              height="9"
-              viewBox="0 0 12 12"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              aria-hidden
-              className={cx("transition-transform", platformOpen ? "rotate-180" : "")}
-            >
-              <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-          {platformOpen ? (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setPlatformOpen(false)} />
-              <div
-                role="menu"
-                className="absolute left-0 top-[calc(100%+5px)] z-40 w-[168px] overflow-hidden rounded-[8px] border border-line bg-surface py-1 shadow-pop animate-pop"
-              >
-                {platformOptions.map((item) => (
-                  <button
-                    key={item.key}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={platform === item.key}
-                    onClick={() => {
-                      setPlatform(item.key);
-                      setPlatformOpen(false);
-                    }}
-                    className={cx(
-                      "flex h-8 w-full items-center gap-2 px-3 text-left text-[12.5px] transition-colors hover:bg-raised",
-                      platform === item.key ? "font-medium text-accent-text" : "text-ink-soft",
-                    )}
-                  >
-                    <span className="flex-1 truncate">{item.label}</span>
-                    <span className="tnum text-[11px] text-faint">{item.count}</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : null}
-        </div>
+        <SelectMenu
+          variant="bare"
+          align="start"
+          active={platform !== "all"}
+          value={platform}
+          onChange={setPlatform}
+          placeholder={platformLabel}
+          disabled={platformOptions.length === 0}
+          options={platformOptions.map((item) => ({
+            value: item.key,
+            label: item.label,
+            hint: String(item.count),
+          }))}
+        />
         <span className="mx-1.5 h-4 w-px bg-line" />
         <button
           type="button"

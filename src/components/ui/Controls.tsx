@@ -200,58 +200,6 @@ export function Segmented<T extends string>({
   );
 }
 
-export function Select({
-  value,
-  onChange,
-  options,
-  title,
-  disabled,
-  size = "sm",
-  className,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-  options: Array<{ value: string; label: string }>;
-  title?: string;
-  disabled?: boolean;
-  /** sm 用于表格/工具栏，md 用于详情面板与设置里的独立字段。 */
-  size?: "sm" | "md";
-  className?: string;
-}) {
-  return (
-    <div className={cx("relative inline-flex", className)}>
-      <select
-        value={value}
-        title={title}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        className={cx(
-          "focus-ring w-full cursor-pointer appearance-none rounded-ctl border border-line bg-surface text-ink-soft transition-colors hover:border-line-strong disabled:pointer-events-none disabled:opacity-45",
-          size === "md" ? "h-9 pl-3 pr-8 text-[13px]" : "h-7 pl-2 pr-6 text-[11.5px]",
-        )}
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <svg
-        width="10"
-        height="10"
-        viewBox="0 0 12 12"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        className={cx("pointer-events-none absolute top-1/2 -translate-y-1/2 text-faint", size === "md" ? "right-2.5" : "right-2")}
-        aria-hidden
-      >
-        <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </div>
-  );
-}
-
 export function TextField({
   value,
   onChange,

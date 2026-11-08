@@ -33,6 +33,8 @@ dist-ssr/
 pnpm-store/
 .eslintcache
 coverage/
+# 项目统一用 pnpm；npm 误生成的锁文件不入库
+package-lock.json
 
 # ---- 环境与密钥 ----
 .env

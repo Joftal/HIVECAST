@@ -104,3 +104,5 @@ pnpm run check:docs       # 文档表格 / 链接 / 代码围栏
 ![明暗切换的圆形扩散：新主题从顶栏开关位置展开](assets/86-theme-switch-reveal.png)
 
 ![深色模式下的顶栏：开关显示月亮，强调色切到琥珀](assets/86-theme-switch-dark.png)
+
+第二个落地控件是 `DropdownMenu`：13 处选择菜单统一成同一套浮层，详见 `88-DropdownMenu统一选择菜单.md`。

@@ -20,6 +20,7 @@ import {
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
+import { SelectMenu } from "../../components/ui/SelectMenu";
 import AccountSection from "./AccountSection";
 
 function describeError(err: unknown): string {
@@ -209,68 +210,47 @@ const FIELD =
 const GROUP = "text-[10px] font-semibold uppercase tracking-[0.12em] text-faint";
 const HINT = "mt-1 block max-w-[520px] text-[11.5px] leading-[18px] text-faint";
 
-const CHEVRON = (
-  <svg
-    width="10"
-    height="10"
-    viewBox="0 0 12 12"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.4"
-    aria-hidden
-    className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-faint"
-  >
-    <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
 function SelectField({
   value,
   onChange,
-  children,
+  options,
   className,
 }: {
   value: number;
   onChange: (next: number) => void;
-  children: ReactNode;
+  options: Array<{ value: number; label: string }>;
   className?: string;
 }) {
   return (
-    <div className={cx("relative", className ?? "w-[208px]")}>
-      <select
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        className={FIELD + " cursor-pointer appearance-none pr-7"}
-      >
-        {children}
-      </select>
-      {CHEVRON}
-    </div>
+    <SelectMenu
+      size="md"
+      value={String(value)}
+      onChange={(next) => onChange(Number(next))}
+      options={options.map((option) => ({ value: String(option.value), label: option.label }))}
+      className={cx("w-[208px] justify-between", className)}
+    />
   );
 }
 
 function StringSelectField({
   value,
   onChange,
-  children,
+  options,
   className,
 }: {
   value: string;
   onChange: (next: string) => void;
-  children: ReactNode;
+  options: Array<{ value: string; label: string }>;
   className?: string;
 }) {
   return (
-    <div className={cx("relative", className ?? "w-[208px]")}>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className={FIELD + " cursor-pointer appearance-none pr-7"}
-      >
-        {children}
-      </select>
-      {CHEVRON}
-    </div>
+    <SelectMenu
+      size="md"
+      value={value}
+      onChange={onChange}
+      options={options}
+      className={cx("w-[208px] justify-between", className)}
+    />
   );
 }
 
@@ -713,13 +693,8 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               <SelectField
                 value={settings.defaultRecordQn}
                 onChange={(next) => patch({ defaultRecordQn: next })}
-              >
-                {QN_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {t("settings." + option.key)}
-                  </option>
-                ))}
-              </SelectField>
+                options={QN_OPTIONS.map((option) => ({ value: option.value, label: t("settings." + option.key) }))}
+              />
             </Row>
             <Row
               id="set-source-format"
@@ -730,12 +705,13 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               <StringSelectField
                 value={settings.recordSourceFormat}
                 onChange={(next) => patch({ recordSourceFormat: next })}
-              >
-                <option value="auto">{t("settings.formatAuto")}</option>
-                <option value="flv">{t("settings.formatFlv")}</option>
-                <option value="hls">{t("settings.formatHls")}</option>
-                <option value="ts">{t("settings.formatTs")}</option>
-              </StringSelectField>
+                options={[
+                  { value: "auto", label: t("settings.formatAuto") },
+                  { value: "flv", label: t("settings.formatFlv") },
+                  { value: "hls", label: t("settings.formatHls") },
+                  { value: "ts", label: t("settings.formatTs") },
+                ]}
+              />
             </Row>
             <Row
               id="set-record-codec"
@@ -746,11 +722,12 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               <StringSelectField
                 value={settings.recordCodec}
                 onChange={(next) => patch({ recordCodec: next })}
-              >
-                <option value="auto">{t("settings.codecAuto")}</option>
-                <option value="h264">{t("settings.codecH264")}</option>
-                <option value="h265">{t("settings.codecH265")}</option>
-              </StringSelectField>
+                options={[
+                  { value: "auto", label: t("settings.codecAuto") },
+                  { value: "h264", label: t("settings.codecH264") },
+                  { value: "h265", label: t("settings.codecH265") },
+                ]}
+              />
             </Row>
           </Section>
 
@@ -764,13 +741,8 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               <SelectField
                 value={settings.defaultViewQn}
                 onChange={(next) => patch({ defaultViewQn: next })}
-              >
-                {QN_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {t("settings." + option.key)}
-                  </option>
-                ))}
-              </SelectField>
+                options={QN_OPTIONS.map((option) => ({ value: option.value, label: t("settings." + option.key) }))}
+              />
             </Row>
           </Section>
 
@@ -840,16 +812,17 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                     className={FIELD + " font-mono tabular-nums"}
                   />
                 </div>
-                <div className="relative w-[76px]">
-                  <select
+                <div className="w-[92px]">
+                  <SelectMenu
+                    size="md"
                     value={sizeUnit}
-                    onChange={(event) => setSizeUnit(event.target.value as "MB" | "GB")}
-                    className={FIELD + " cursor-pointer appearance-none pr-7"}
-                  >
-                    <option value="MB">{t("settings.unitMB")}</option>
-                    <option value="GB">{t("settings.unitGB")}</option>
-                  </select>
-                  {CHEVRON}
+                    onChange={(next) => setSizeUnit(next as "MB" | "GB")}
+                    options={[
+                      { value: "MB", label: t("settings.unitMB") },
+                      { value: "GB", label: t("settings.unitGB") },
+                    ]}
+                    className="w-full justify-between"
+                  />
                 </div>
               </div>
             </Row>
@@ -996,11 +969,12 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               <StringSelectField
                 value={settings.postConvertFormat}
                 onChange={(next) => patch({ postConvertFormat: next })}
-              >
-                <option value="mp4">MP4</option>
-                <option value="mkv">MKV</option>
-                <option value="ts">TS</option>
-              </StringSelectField>
+                options={[
+                  { value: "mp4", label: "MP4" },
+                  { value: "mkv", label: "MKV" },
+                  { value: "ts", label: "TS" },
+                ]}
+              />
             </Row>
             <Row
               id="set-post-delete-source"

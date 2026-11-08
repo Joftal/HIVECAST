@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
-import { Button, Select, cx } from "../../components/ui/Controls";
+import { Button, cx } from "../../components/ui/Controls";
+import { SelectMenu } from "../../components/ui/SelectMenu";
 import {
   isTauri,
   mediaDeleteGroup,
@@ -250,7 +251,6 @@ export default function MediaPage() {
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
   const [platform, setPlatform] = useState("all");
-  const [platformOpen, setPlatformOpen] = useState(false);
   const [range, setRange] = useState<Range>(0);
   const [onlyDanmaku, setOnlyDanmaku] = useState(false);
   const [sort, setSort] = useState<SortKey>("recent");
@@ -911,51 +911,23 @@ export default function MediaPage() {
   );
 
   const platformMenu = (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setPlatformOpen((open) => !open)}
-        className={cx(
-          "focus-ring inline-flex h-9 items-center gap-1.5 rounded-ctl border px-2.5 text-[12.5px] transition-colors",
-          platform === "all"
-            ? "border-line bg-surface text-ink-soft hover:border-line-strong"
-            : "border-accent/40 bg-accent-soft text-accent-text",
-        )}
-      >
-        {platform === "all"
+    <SelectMenu
+      variant="bare"
+      align="start"
+      active={platform !== "all"}
+      value={platform}
+      onChange={setPlatform}
+      placeholder={
+        platform === "all"
           ? t("media.platformFilter")
-          : t("platformName." + platform, { defaultValue: platform })}
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-          <path d="M3 4.5 6 7.5 9 4.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {platformOpen ? (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setPlatformOpen(false)} />
-          <div className="absolute left-0 top-9 z-40 w-[168px] animate-pop rounded-[8px] border border-line bg-surface py-1 shadow-pop">
-            {platforms.map((one) => (
-              <button
-                key={one}
-                type="button"
-                role="menuitemradio"
-                aria-checked={platform === one}
-                onClick={() => {
-                  setPlatform(one);
-                  setPlatformOpen(false);
-                }}
-                className={cx(
-                  "flex w-full items-center justify-between px-3 py-1.5 text-left text-[11.5px] transition-colors",
-                  platform === one ? "bg-accent-soft text-accent-text" : "text-ink-soft hover:bg-raised",
-                )}
-              >
-                <span>{one === "all" ? t("media.filterAll") : t("platformName." + one, { defaultValue: one })}</span>
-                <span className="font-mono text-[10px] tabular-nums text-faint">{countOf(one)}</span>
-              </button>
-            ))}
-          </div>
-        </>
-      ) : null}
-    </div>
+          : t("platformName." + platform, { defaultValue: platform })
+      }
+      options={platforms.map((one) => ({
+        value: one,
+        label: one === "all" ? t("media.filterAll") : t("platformName." + one, { defaultValue: one }),
+        hint: String(countOf(one)),
+      }))}
+    />
   );
 
   return (
@@ -1039,7 +1011,7 @@ export default function MediaPage() {
             >
               {t("media.onlyDanmaku")}
             </button>
-            <Select
+            <SelectMenu
               size="md"
               value={sort}
               onChange={(next) => setSort(next as SortKey)}
@@ -1048,8 +1020,8 @@ export default function MediaPage() {
                 { value: "duration", label: t("media.sortDuration") },
                 { value: "size", label: t("media.sortSize") },
               ]}
-              title={t("media.sortLabel")}
-              className="ml-auto w-[140px]"
+              ariaLabel={t("media.sortLabel")}
+              className="ml-auto w-[140px] justify-between"
             />
           </div>
         </div>
@@ -1058,7 +1030,7 @@ export default function MediaPage() {
           {searchBox(t("media.hosts.search"))}
           {platformMenu}
           <div className="ml-auto flex items-center gap-2">
-            <Select
+            <SelectMenu
               size="md"
               value={hostSort}
               onChange={(next) => setHostSort(next as HostSortKey)}
@@ -1068,8 +1040,8 @@ export default function MediaPage() {
                 { value: "size", label: t("media.hosts.sortSize") },
                 { value: "count", label: t("media.hosts.sortCount") },
               ]}
-              title={t("media.sortLabel")}
-              className="w-[140px]"
+              ariaLabel={t("media.sortLabel")}
+              className="w-[140px] justify-between"
             />
             <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void loadHosts(0)}>
               {t("common.refresh")}
