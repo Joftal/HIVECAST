@@ -31,4 +31,28 @@ clipCount: number,
 /**
  * 为什么从这里切开：title / duration / size；未分割为 null
  */
-splitReason: string | null, };
+splitReason: string | null,
+/**
+ * 源封装母带路径；源被删除后仍保留
+ */
+sourcePath: string | null,
+/**
+ * 后处理模式：source | convert | custom
+ */
+postMode: string,
+/**
+ * 后处理状态：recording | sealed | posting | validating | committing | done | failed
+ */
+postState: string,
+/**
+ * 源封装母带是否已移入回收站
+ */
+sourceDeleted: boolean,
+/**
+ * 后处理失败原因
+ */
+postError: string | null,
+/**
+ * 磁盘上是否还有源封装母带
+ */
+hasSource: boolean, };

@@ -1,4 +1,5 @@
-//! 录制引擎：一个房间一个 ffmpeg 进程，分段 mpegts 直录，收尾合成 mp4。
+//! 录制引擎：一个房间一个 ffmpeg 进程，分段 mpegts 直录，收尾合成源封装母带，
+//! 再按设置做派生后处理（source / convert / custom）。
 //!
 //! 为什么分段（M7.1）：进程被强杀 / 断电时，单文件 FLV 的索引与尾部会丢，
 //! 整场录像可能直接不可播；segment muxer 每 5 分钟落一个独立 ts，
@@ -219,6 +220,8 @@ struct Active {
     title_checked: Instant,
     /// ffmpeg 最近几十行 stderr：默认只进 debug，异常收尾时把尾部打进 WARN。
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    /// 开录时快照的后处理配置：中途改设置只影响新会话。
+    post: crate::post::PostConfig,
 }
 
 /// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
@@ -924,6 +927,7 @@ impl Recorder {
             crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn);
         let prefs = StreamPrefs::from_settings(&settings, record_qn);
         let split = SplitPolicy::from_settings(&settings);
+        let post = crate::post::PostConfig::from_settings(&settings);
 
         let groups = broker
             .groups(
@@ -969,7 +973,8 @@ impl Recorder {
                 qn: if actual_qn > 0 { actual_qn } else { record_qn },
             },
             started_at,
-            "mp4",
+            // 母带容器按实际拿到的源流格式与编码决定，后处理只产出派生文件。
+            crate::post::source_extension(candidate.format, candidate.codec),
             &self.naming(),
         );
         if let Some(parent) = path.parent() {
@@ -1041,6 +1046,11 @@ impl Recorder {
             error: None,
             danmaku_path: danmaku.as_ref().map(|_| danmaku_path.display().to_string()),
             danmaku_count: 0,
+            source_path: Some(path.display().to_string()),
+            post_mode: post.mode.clone(),
+            post_state: crate::post::STATE_RECORDING.to_string(),
+            source_deleted: false,
+            post_error: None,
         });
         if let Err(err) = created {
             tracing::error!(
@@ -1102,6 +1112,7 @@ impl Recorder {
             title_changes: Vec::new(),
             title_checked: Instant::now(),
             stderr_tail,
+            post,
         };
         let mut entry = Some(entry);
         let over_limit = {
@@ -1830,19 +1841,18 @@ impl Recorder {
         };
 
         let elapsed = active.started.elapsed();
-        // 收尾产物：分片 → mp4；合成失败退化为字节拼接的 .ts；再不行只能报分片总量。
+        // 收尾产物：分片 → 源封装母带 → 后处理派生文件；合并失败退化为 .ts。
         let source_path = PathBuf::from(&active.recording.file_path);
         // 进程已经不在了，pid 文件没有保留价值；漏删会让下次启动误杀无关进程。
         remove_pid_file(&source_path);
-        let auto_remux = crate::settings::load(&self.db).auto_remux;
-        // 收尾里的转封装同样会写文件：登记成任务，退出时才会等它写完再走。
+        let post_cfg = active.post.clone();
+        // 收尾里的合并与后处理同样会写文件：登记成任务，退出时才会等它写完再走。
         let jobs = app.state::<crate::state::AppState>().jobs.clone();
-        let remux_label = source_path
+        let post_label = source_path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| active.recording.session_id.clone());
-        let _remux_job = auto_remux
-            .then(|| jobs.begin("remux", remux_label, Some(active.recording.quality.clone())));
+        let _post_job = jobs.begin("post", post_label, Some(active.recording.quality.clone()));
         // 状态先算出来：分割清单要把最终状态写进去，崩溃恢复才能还原。
         let (final_status, reason, error) = match stop_reason.as_deref() {
             Some("stopped") => ("finished", "stopped", None),
@@ -1892,6 +1902,9 @@ impl Recorder {
                     id,
                     output: output.display().to_string(),
                     path: output.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: plan.start,
                     end: plan.end,
                     reason: plan.reason.clone(),
@@ -1900,7 +1913,7 @@ impl Recorder {
                 });
             }
             let manifest = SplitManifest {
-                version: 1,
+                version: 2,
                 session_id: active.recording.session_id.clone(),
                 room_id: active.recording.room_id.clone(),
                 source: source_path.display().to_string(),
@@ -1909,7 +1922,7 @@ impl Recorder {
                 error: error.clone(),
                 quality: Some(active.recording.quality.clone()),
                 line: Some(active.recording.line.clone()),
-                remux: auto_remux,
+                post: post_cfg.clone(),
                 clips,
                 rendered: 0,
                 completed: false,
@@ -1933,20 +1946,68 @@ impl Recorder {
             } else {
                 source_path.clone()
             };
-            let (path, size) = if !plans.is_empty() {
-                finish_range(&source_path, &output, plan.start, plan.end, auto_remux).await
+            let (source_clip, source_size) = if !plans.is_empty() {
+                finish_range(&source_path, &output, plan.start, plan.end).await
             } else {
-                finish_file(&source_path, auto_remux).await
+                finish_file(&source_path).await
             };
+            if source_size <= 0 {
+                tracing::warn!(
+                    room_id,
+                    clip = index,
+                    file = %source_clip.display(),
+                    "源封装母带缺失，跳过该片段的后处理"
+                );
+                rendered.push(RenderedClip {
+                    source_path: source_clip.clone(),
+                    path: source_clip.clone(),
+                    size: 0,
+                    post_state: crate::post::STATE_FAILED.to_string(),
+                    post_error: Some("分片合并失败，保留现场等待恢复".into()),
+                    delete_source: None,
+                    reason: plan.reason.clone(),
+                    started_at: plan.started_at,
+                    ended_at: plan.ended_at,
+                });
+                if let Some(manifest) = manifest.as_mut() {
+                    manifest.clips[index].path = source_clip.display().to_string();
+                    manifest.rendered = index + 1;
+                    let file = manifest_path(&source_path);
+                    if let Err(err) = write_manifest(&file, manifest) {
+                        tracing::warn!(%err, file = %file.display(), "更新分割清单失败");
+                    }
+                }
+                continue;
+            }
+            let outcome = crate::post::run(&source_clip, &post_cfg).await;
+            let clip_state = outcome.state.clone();
+            let clip_error = outcome.error.clone();
+            if let Some(err) = outcome.error.as_deref() {
+                tracing::warn!(
+                    room_id,
+                    clip = index,
+                    source = %source_clip.display(),
+                    state = %outcome.state,
+                    error = %err,
+                    "片段后处理失败，保留源封装母带"
+                );
+            }
             rendered.push(RenderedClip {
-                path: path.clone(),
-                size,
+                source_path: outcome.source_path,
+                path: outcome.path.clone(),
+                size: outcome.size,
+                post_state: outcome.state,
+                post_error: outcome.error,
+                delete_source: outcome.delete_source,
                 reason: plan.reason.clone(),
                 started_at: plan.started_at,
                 ended_at: plan.ended_at,
             });
             if let Some(manifest) = manifest.as_mut() {
-                manifest.clips[index].path = path.display().to_string();
+                manifest.clips[index].path = source_clip.display().to_string();
+                manifest.clips[index].final_path = Some(outcome.path.display().to_string());
+                manifest.clips[index].post_state = Some(clip_state);
+                manifest.clips[index].post_error = clip_error;
                 manifest.rendered = index + 1;
                 let file = manifest_path(&source_path);
                 if let Err(err) = write_manifest(&file, manifest) {
@@ -1954,10 +2015,14 @@ impl Recorder {
                 }
             }
         }
-        drop(_remux_job);
+        drop(_post_job);
         let first = rendered.first().cloned().unwrap_or(RenderedClip {
+            source_path: source_path.clone(),
             path: source_path.clone(),
             size: 0,
+            post_state: crate::post::STATE_FAILED.to_string(),
+            post_error: Some("没有生成任何片段".into()),
+            delete_source: None,
             reason: None,
             started_at: active.recording.started_at,
             ended_at: crate::db::now_ts(),
@@ -1973,17 +2038,6 @@ impl Recorder {
                 "首片段成品缺失，保留分割清单以便恢复"
             );
         }
-        if stored_path != source_path {
-            if let Err(err) = self.db.update_session_file(
-                &active.recording.session_id,
-                &stored_path.display().to_string(),
-                file_size,
-            ) {
-                history_ok = false;
-                tracing::warn!(%err, "改写录像路径失败");
-            }
-        }
-
         if final_status == "failed" {
             let tail = tail_text(&active.stderr_tail);
             if !tail.is_empty() {
@@ -2028,18 +2082,34 @@ impl Recorder {
             _ => (active.danmaku_path.clone(), 0),
         };
 
-        if let Err(err) = self.db.finish_session_at(
+        match self.db.finish_session_with_post(
             &active.recording.session_id,
             final_status,
             reason,
             first.ended_at,
+            &stored_path.display().to_string(),
             file_size,
+            Some(&first.source_path.display().to_string()),
+            &post_cfg.mode,
+            &first.post_state,
+            false,
+            first.post_error.as_deref(),
             danmaku_path.as_deref(),
             danmaku_count,
             error.as_deref(),
         ) {
-            history_ok = false;
-            tracing::warn!(%err, "写入录制历史失败");
+            Ok(()) => {
+                delete_source_after_commit(
+                    &self.db,
+                    &active.recording.session_id,
+                    first.delete_source.as_deref(),
+                )
+                .await;
+            }
+            Err(err) => {
+                history_ok = false;
+                tracing::warn!(%err, "写入录制历史失败");
+            }
         }
 
         // 同一场直播的后续片段：共享首片段 id 作为 group_id，媒体库按 group 聚合。
@@ -2080,12 +2150,23 @@ impl Recorder {
                     error: error.clone(),
                     danmaku_path: None,
                     danmaku_count: 0,
+                    source_path: Some(clip.source_path.display().to_string()),
+                    post_mode: post_cfg.mode.clone(),
+                    post_state: clip.post_state.clone(),
+                    source_deleted: false,
+                    post_error: clip.post_error.clone(),
                 };
                 match self
                     .db
                     .create_clip(&session, &group_id, index as i64, clip.reason.as_deref())
                 {
                     Ok(()) => {
+                        delete_source_after_commit(
+                            &self.db,
+                            &clip_id,
+                            clip.delete_source.as_deref(),
+                        )
+                        .await;
                         if final_status == "finished" {
                             self.queue_thumb(app, &clip_id);
                         }
@@ -2624,8 +2705,9 @@ struct SplitManifest {
     error: Option<String>,
     quality: Option<String>,
     line: Option<String>,
-    /// 收尾时是否尝试合成 mp4；关闭后处理时直接字节拼接成 .ts。
-    remux: bool,
+    /// 开录时快照的后处理配置；v1 清单没有这个字段，反序列化时用 source 模式兜底。
+    #[serde(default)]
+    post: crate::post::PostConfig,
     clips: Vec<ManifestClip>,
     /// 已完成渲染的片段数（前 rendered 个的 path 已可播放）。
     rendered: usize,
@@ -2637,8 +2719,17 @@ struct ManifestClip {
     id: String,
     /// 计划输出路径；恢复时按它重跑合并。
     output: String,
-    /// 实际产物路径（合并失败会降级成 .ts，与 output 不同）。
+    /// 源封装母带的实际路径（合并失败会降级成 .ts，与 output 不同）。
     path: String,
+    /// 后处理产物的最终路径；后处理失败时与 path 相同。
+    #[serde(default)]
+    final_path: Option<String>,
+    /// 后处理结果状态；旧清单没有该字段时按 done 处理。
+    #[serde(default)]
+    post_state: Option<String>,
+    /// 后处理失败原因，恢复后写入数据库。
+    #[serde(default)]
+    post_error: Option<String>,
     start: u32,
     end: Option<u32>,
     reason: Option<String>,
@@ -2659,8 +2750,15 @@ struct ClipPlan {
 /// 收尾后真正落盘的片段。
 #[derive(Debug, Clone)]
 struct RenderedClip {
+    /// 源封装母带（后处理删除源之前必须保留）。
+    source_path: PathBuf,
+    /// 媒体库实际展示/播放的最终文件。
     path: PathBuf,
     size: i64,
+    post_state: String,
+    post_error: Option<String>,
+    /// 数据库提交成功后才执行的源文件回收。
+    delete_source: Option<PathBuf>,
     reason: Option<String>,
     started_at: i64,
     ended_at: i64,
@@ -2817,7 +2915,12 @@ fn clip_output_path(source: &Path, index: usize) -> PathBuf {
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".into());
     let parent = source.parent().unwrap_or_else(|| Path::new("."));
-    let candidate = parent.join(format!("{stem}.clip{index:02}.mp4"));
+    // 后续片段与母带同容器：源是 FLV 就切出 FLV，是 TS 就切出 TS。
+    let ext = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("ts");
+    let candidate = parent.join(format!("{stem}.clip{index:02}.{ext}"));
     crate::filename::reserve_unique_path(&candidate).unwrap_or(candidate)
 }
 
@@ -2846,14 +2949,104 @@ fn read_manifest(path: &Path) -> Result<SplitManifest, String> {
     serde_json::from_str(&body).map_err(|err| format!("解析 {}: {err}", path.display()))
 }
 
-/// 按范围收尾：remux 走 concat 合并，关闭后处理则字节拼接。
-async fn finish_range(
-    base: &Path,
-    output: &Path,
-    start: u32,
-    end: Option<u32>,
-    remux: bool,
+/// 普通崩溃恢复：把刚合并出来的源封装补跑后处理，并把结果写回数据库。
+async fn post_recovered_file(
+    db: &Db,
+    id: &str,
+    target: PathBuf,
+    size: i64,
+    cfg: &crate::post::PostConfig,
 ) -> (PathBuf, i64) {
+    if size <= 0 {
+        return (target, size);
+    }
+    let existing = db.get_session(id).ok().flatten();
+    if let Some(existing) = existing.as_ref() {
+        // 上次已经完成后处理、只是没来得及删分片：直接沿用最终文件。
+        if existing.post_state == crate::post::STATE_DONE {
+            if let Some(path) = existing.file_path.as_deref().map(PathBuf::from) {
+                if path.is_file() {
+                    let actual = std::fs::metadata(&path)
+                        .map(|meta| meta.len() as i64)
+                        .unwrap_or(size);
+                    if actual > 0 && existing.file_size != actual {
+                        let _ = db.finish_session_with_post(
+                            id,
+                            &existing.status,
+                            existing.reason.as_deref().unwrap_or(""),
+                            existing.ended_at.unwrap_or_else(crate::db::now_ts),
+                            &path.display().to_string(),
+                            actual,
+                            existing.source_path.as_deref(),
+                            &existing.post_mode,
+                            &existing.post_state,
+                            existing.source_deleted,
+                            existing.post_error.as_deref(),
+                            existing.danmaku_path.as_deref(),
+                            existing.danmaku_count,
+                            existing.error.as_deref(),
+                        );
+                    }
+                    return (path, actual.max(size));
+                }
+            }
+        }
+    }
+    let outcome = crate::post::run(&target, cfg).await;
+    if let Some(existing) = existing.as_ref() {
+        let result = db.finish_session_with_post(
+            id,
+            &existing.status,
+            existing.reason.as_deref().unwrap_or(""),
+            existing.ended_at.unwrap_or_else(crate::db::now_ts),
+            &outcome.path.display().to_string(),
+            outcome.size,
+            Some(&target.display().to_string()),
+            &cfg.mode,
+            &outcome.state,
+            false,
+            outcome.error.as_deref(),
+            existing.danmaku_path.as_deref(),
+            existing.danmaku_count,
+            existing.error.as_deref(),
+        );
+        match result {
+            Ok(()) => {
+                delete_source_after_commit(db, id, outcome.delete_source.as_deref()).await;
+            }
+            Err(err) => tracing::warn!(%err, id, "恢复后处理结果写库失败"),
+        }
+    } else {
+        let _ = db.update_session_file(id, &outcome.path.display().to_string(), outcome.size);
+    }
+    (outcome.path, outcome.size)
+}
+
+/// 只有数据库提交成功后才允许删除源封装母带；删除失败保留源，不能丢录像。
+async fn delete_source_after_commit(db: &Db, id: &str, source: Option<&Path>) {
+    let Some(source) = source else { return };
+    if !source.is_file() {
+        // 用户/清理工具已经拿走了源：DB 标记为已删即可，别再报错。
+        let _ = db.set_source_deleted(id, true);
+        return;
+    }
+    match crate::post::trash(source) {
+        Ok(()) => {
+            if let Err(err) = db.set_source_deleted(id, true) {
+                tracing::warn!(%err, id, file = %source.display(), "源已移入回收站但更新数据库失败");
+            }
+        }
+        Err(err) => tracing::warn!(
+            id,
+            file = %source.display(),
+            %err,
+            "源封装母带移入回收站失败，保留文件"
+        ),
+    }
+}
+
+/// 按范围收尾：先 concat 合成源封装母带，失败才退化为字节拼接的 .ts。
+async fn finish_range(base: &Path, output: &Path, start: u32, end: Option<u32>) -> (PathBuf, i64) {
     // 成品已完整时直接复用。恢复路径通常已经提前判断，这里再兜一层，
     // 避免 merge 因「目标已存在」失败后又走兜底把完整 mp4 删掉换成 .ts。
     if let Ok(meta) = tokio::fs::metadata(output).await {
@@ -2861,15 +3054,11 @@ async fn finish_range(
             return (output.to_path_buf(), meta.len() as i64);
         }
     }
-    if remux {
-        match segment::merge_range(base, output, start, end).await {
-            Ok(size) => return (output.to_path_buf(), size as i64),
-            Err(err) => {
-                tracing::warn!(%err, path = %output.display(), "片段合成 mp4 失败，改用字节拼接")
-            }
+    match segment::merge_range(base, output, start, end).await {
+        Ok(size) => return (output.to_path_buf(), size as i64),
+        Err(err) => {
+            tracing::warn!(%err, path = %output.display(), "片段合成源封装失败，改用字节拼接")
         }
-    } else {
-        tracing::info!(path = %output.display(), "文件后处理已关闭，保留 .ts 拼接结果");
     }
     match segment::fallback_concat_range(base, output, start, end).await {
         Ok((target, size)) => {
@@ -2899,14 +3088,10 @@ async fn finish_range(
 }
 
 /// 收尾产物落定，返回（最终路径, 字节数）。
-async fn finish_file(path: &Path, remux: bool) -> (PathBuf, i64) {
-    if remux {
-        match segment::merge(path).await {
-            Ok(size) => return (path.to_path_buf(), size as i64),
-            Err(err) => tracing::warn!(%err, "分片合成 mp4 失败，改用字节拼接"),
-        }
-    } else {
-        tracing::info!("文件后处理已关闭，保留 .ts 拼接结果");
+async fn finish_file(path: &Path) -> (PathBuf, i64) {
+    match segment::merge(path).await {
+        Ok(size) => return (path.to_path_buf(), size as i64),
+        Err(err) => tracing::warn!(%err, "分片合成源封装失败，改用字节拼接"),
     }
     match segment::fallback_concat(path).await {
         Ok((target, size)) => {
@@ -2956,59 +3141,101 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
     for index in 0..manifest.clips.len() {
         let clip = manifest.clips[index].clone();
         let planned = PathBuf::from(&clip.output);
-        let mut path = PathBuf::from(&clip.path);
-        let mut size = 0i64;
-        if index < manifest.rendered && path.is_file() {
-            if let Ok(meta) = tokio::fs::metadata(&path).await {
-                size = meta.len() as i64;
-            }
-        }
-        if size <= 0 {
-            // 先看成品文件，别管分片还剩多少。合并是「先写临时文件、再改名、
-            // 最后删分片」；任何一步崩溃都可能留下「成品完整 + 分片还在」。
-            // 这时重合并会覆盖完整成品，甚至把首段重录成残缺内容。
-            for candidate in [path.clone(), planned.clone(), planned.with_extension("ts")] {
-                if let Ok(meta) = tokio::fs::metadata(&candidate).await {
-                    if meta.len() > 0 {
-                        tracing::warn!(
-                            session = %manifest.session_id,
-                            clip = index,
-                            file = %candidate.display(),
-                            "发现已生成的片段成品，直接沿用"
-                        );
-                        path = candidate;
-                        size = meta.len() as i64;
-                        // 成品已完整，范围分片就是垃圾；不删会占双份空间，
-                        // 也会让下一次普通恢复误以为还没合并。
-                        for part in segment::collect_parts_range(&source, clip.start, clip.end) {
-                            let _ = tokio::fs::remove_file(part).await;
-                        }
-                        break;
-                    }
+        // 先找源封装母带。清单里 path 记录的就是源封装（v1 清单则是旧的 mp4 成品）。
+        let mut source_path: Option<PathBuf> = None;
+        let mut source_size = 0i64;
+        for candidate in [
+            PathBuf::from(&clip.path),
+            planned.clone(),
+            planned.with_extension("ts"),
+        ] {
+            if let Ok(meta) = tokio::fs::metadata(&candidate).await {
+                if meta.len() > 0 {
+                    tracing::warn!(
+                        session = %manifest.session_id,
+                        clip = index,
+                        file = %candidate.display(),
+                        "发现已生成的片段源封装，直接沿用"
+                    );
+                    source_path = Some(candidate);
+                    source_size = meta.len() as i64;
+                    break;
                 }
             }
         }
-        if size <= 0 {
-            let (target, got) =
-                finish_range(&source, &planned, clip.start, clip.end, manifest.remux).await;
-            path = target;
-            size = got;
+
+        let mut final_path = clip
+            .final_path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file());
+        // 清单里已有 final_path 时，保留上次后处理结果；失败也要保留 failed，
+        // 不能在恢复时被误标成 done。
+        let mut post_state = clip
+            .post_state
+            .clone()
+            .unwrap_or_else(|| crate::post::STATE_DONE.to_string());
+        let mut post_error = clip.post_error.clone();
+        let mut delete_source: Option<PathBuf> = None;
+
+        if source_size <= 0 && final_path.is_none() {
+            let (target, got) = finish_range(&source, &planned, clip.start, clip.end).await;
+            if got > 0 {
+                source_path = Some(target);
+            }
         }
+        if final_path.is_none() {
+            let Some(src) = source_path.as_deref() else {
+                tracing::warn!(
+                    session = %manifest.session_id,
+                    clip = index,
+                    file = %planned.display(),
+                    "分割恢复失败：没有可用分片，继续尝试后续片段"
+                );
+                db_ok = false;
+                let _ = write_manifest(file, &manifest);
+                continue;
+            };
+            // 崩溃可能发生在「母带已合并、后处理还没跑完」之间：从源重新执行。
+            let outcome = crate::post::run(src, &manifest.post).await;
+            post_state = outcome.state;
+            post_error = outcome.error;
+            delete_source = outcome.delete_source;
+            final_path = Some(outcome.path);
+        }
+        let Some(final_path) = final_path else {
+            db_ok = false;
+            continue;
+        };
+        let size = tokio::fs::metadata(&final_path)
+            .await
+            .map(|meta| meta.len() as i64)
+            .unwrap_or(0);
         if size <= 0 {
             tracing::warn!(
                 session = %manifest.session_id,
                 clip = index,
-                file = %planned.display(),
-                "分割恢复失败：没有可用分片，继续尝试后续片段"
+                file = %final_path.display(),
+                "分割恢复失败：最终成品为空，继续尝试后续片段"
             );
             db_ok = false;
             let _ = write_manifest(file, &manifest);
-            // 不能在这里整体退出：后面片段的分片可能仍然完好，先恢复它们，
-            // 清单保留到所有片段都补齐为止。
             continue;
         }
 
-        manifest.clips[index].path = path.display().to_string();
+        // 成品已完整，范围分片就是垃圾；不删会占双份空间，
+        // 也会让下一次普通恢复误以为还没合并。
+        for part in segment::collect_parts_range(&source, clip.start, clip.end) {
+            let _ = tokio::fs::remove_file(part).await;
+        }
+
+        manifest.clips[index].path = source_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| clip.path.clone());
+        manifest.clips[index].final_path = Some(final_path.display().to_string());
+        manifest.clips[index].post_state = Some(post_state.clone());
+        manifest.clips[index].post_error = post_error.clone();
         manifest.rendered = index + 1;
         if let Err(err) = write_manifest(file, &manifest) {
             tracing::warn!(%err, file = %file.display(), "更新分割恢复清单失败");
@@ -3022,7 +3249,8 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 continue;
             }
         };
-        if let Some(existing) = existing {
+        let source_text = source_path.as_ref().map(|path| path.display().to_string());
+        let db_result = if let Some(existing) = existing.as_ref() {
             // 每个片段都要补分组：旧库/早期版本可能只有首片段写了 group_id，
             // 后续片段缺 group_id 时媒体库会把它们拆成单独一场。
             if let Err(err) = db.set_session_group(
@@ -3034,27 +3262,22 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 tracing::warn!(%err, id = %clip.id, clip = index, "恢复片段分组失败");
                 db_ok = false;
             }
-            if existing.file_path.as_deref() != Some(path.to_string_lossy().as_ref()) {
-                if let Err(err) =
-                    db.update_session_file(&clip.id, &path.display().to_string(), size)
-                {
-                    db_ok = false;
-                    tracing::warn!(%err, id = %clip.id, "恢复片段路径失败");
-                }
-            }
-            if let Err(err) = db.finish_session_at(
+            db.finish_session_with_post(
                 &clip.id,
                 &manifest.status,
                 &manifest.reason,
                 clip.ended_at,
+                &final_path.display().to_string(),
                 size,
+                source_text.as_deref().or(existing.source_path.as_deref()),
+                &manifest.post.mode,
+                &post_state,
+                existing.source_deleted,
+                post_error.as_deref(),
                 existing.danmaku_path.as_deref(),
                 existing.danmaku_count,
                 manifest.error.as_deref(),
-            ) {
-                db_ok = false;
-                tracing::warn!(%err, id = %clip.id, "恢复片段状态失败");
-            }
+            )
         } else {
             let session = RecordSession {
                 id: clip.id.clone(),
@@ -3063,7 +3286,7 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 ended_at: Some(clip.ended_at),
                 status: manifest.status.clone(),
                 reason: Some(manifest.reason.clone()),
-                file_path: Some(path.display().to_string()),
+                file_path: Some(final_path.display().to_string()),
                 file_size: size,
                 duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
                 quality: manifest.quality.clone(),
@@ -3071,17 +3294,32 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 error: manifest.error.clone(),
                 danmaku_path: None,
                 danmaku_count: 0,
+                source_path: source_text.clone(),
+                post_mode: manifest.post.mode.clone(),
+                post_state: post_state.clone(),
+                source_deleted: false,
+                post_error: post_error.clone(),
             };
             // 首片段行不存在通常意味着数据库被重建过；create_clip 会补上
-            // group_id/clip_index，finish_session_at 对不存在的行是静默 0 行更新。
-            if let Err(err) = db.create_clip(
+            // group_id/clip_index，finish_session_with_post 对不存在的行是静默 0 行更新。
+            db.create_clip(
                 &session,
                 &manifest.session_id,
                 index as i64,
                 clip.reason.as_deref(),
-            ) {
+            )
+        };
+        match db_result {
+            Ok(()) => {
+                if source_text.is_none() {
+                    let _ = db.set_source_deleted(&clip.id, true);
+                }
+                delete_source_after_commit(db, &clip.id, delete_source.as_deref()).await;
+            }
+            Err(err) => {
                 db_ok = false;
                 tracing::warn!(%err, clip = index, "恢复片段历史失败");
+                continue;
             }
         }
         recovered += 1;
@@ -3118,6 +3356,7 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
     let mut recovered = 0usize;
     let mut bytes = 0u64;
     let mut handled: HashSet<String> = HashSet::new();
+    let post_cfg = crate::post::PostConfig::from_settings(&crate::settings::load(db));
     // 分割收尾的清单优先：里面记着每段的分片范围，先按它补齐，
     // 否则普通恢复会把剩余分片重新合并进首片段，覆盖已完成的片段文件。
     match db.manifest_sessions() {
@@ -3157,10 +3396,11 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
                 for part in segment::collect_parts(&path) {
                     let _ = tokio::fs::remove_file(part).await;
                 }
-                let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
-                tracing::info!(id = %id, file = %file_path, size = meta.len(), "沿用已完成的录像成品");
+                let (target, size) =
+                    post_recovered_file(db, &id, path.clone(), meta.len() as i64, &post_cfg).await;
+                tracing::info!(id = %id, file = %target.display(), size, "沿用已完成的录像成品");
                 recovered += 1;
-                bytes += meta.len();
+                bytes += size as u64;
                 continue;
             }
         }
@@ -3168,11 +3408,11 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
         if !has_parts {
             continue;
         }
-        let (target, size) = finish_file(&path, true).await;
+        let (target, size) = finish_file(&path).await;
         if size <= 0 {
             continue;
         }
-        let _ = db.update_session_file(&id, &target.display().to_string(), size);
+        let (target, size) = post_recovered_file(db, &id, target, size, &post_cfg).await;
         tracing::info!(id = %id, file = %target.display(), size, "恢复崩溃遗留的录像");
         recovered += 1;
         bytes += size as u64;
@@ -3192,28 +3432,41 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
                         let parts = segment::collect_parts(&path);
                         // 正常退出的历史会话也会命中这里：成品已完整、分片也已
                         // 清理干净时没有可恢复的东西，不要每次启动都报「已恢复」
-                        // 并触发一次媒体库刷新。
-                        if parts.is_empty() {
+                        // 并触发一次媒体库刷新。后处理未完成的除外。
+                        let post_pending = db
+                            .get_session(&id)
+                            .ok()
+                            .flatten()
+                            .map(|session| session.post_state != crate::post::STATE_DONE)
+                            .unwrap_or(false);
+                        if parts.is_empty() && !post_pending {
                             continue;
                         }
                         for part in parts {
                             let _ = tokio::fs::remove_file(part).await;
                         }
-                        let _ = db.update_session_file(&id, &file_path, meta.len() as i64);
-                        tracing::info!(id = %id, file = %file_path, size = meta.len(), "沿用失败会话已完成的成品");
+                        let (target, size) = post_recovered_file(
+                            db,
+                            &id,
+                            path.clone(),
+                            meta.len() as i64,
+                            &post_cfg,
+                        )
+                        .await;
+                        tracing::info!(id = %id, file = %target.display(), size, "沿用失败会话已完成的成品");
                         recovered += 1;
-                        bytes += meta.len();
+                        bytes += size as u64;
                         continue;
                     }
                 }
                 if segment::collect_parts(&path).is_empty() {
                     continue;
                 }
-                let (target, size) = finish_file(&path, true).await;
+                let (target, size) = finish_file(&path).await;
                 if size <= 0 {
                     continue;
                 }
-                let _ = db.update_session_file(&id, &target.display().to_string(), size);
+                let (target, size) = post_recovered_file(db, &id, target, size, &post_cfg).await;
                 tracing::info!(
                     id = %id,
                     file = %target.display(),
@@ -4190,7 +4443,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("临时目录");
         let file = dir.join("2026-01-01.split.json");
         let manifest = SplitManifest {
-            version: 1,
+            version: 2,
             session_id: "s1".into(),
             room_id: "r1".into(),
             source: dir.join("2026-01-01.mp4").display().to_string(),
@@ -4199,12 +4452,15 @@ mod tests {
             error: None,
             quality: Some("原画".into()),
             line: Some("线路1".into()),
-            remux: false,
+            post: Default::default(),
             clips: vec![
                 ManifestClip {
                     id: "s1".into(),
                     output: dir.join("2026-01-01.mp4").display().to_string(),
                     path: dir.join("2026-01-01.mp4").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 0,
                     end: Some(2),
                     reason: None,
@@ -4215,6 +4471,9 @@ mod tests {
                     id: "s2".into(),
                     output: dir.join("2026-01-01.clip01.mp4").display().to_string(),
                     path: dir.join("2026-01-01.clip01.ts").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 2,
                     end: None,
                     reason: Some("duration".into()),
@@ -4297,6 +4556,11 @@ mod tests {
             error: None,
             danmaku_path: None,
             danmaku_count: 0,
+            source_path: None,
+            post_mode: "source".into(),
+            post_state: "done".into(),
+            source_deleted: false,
+            post_error: None,
         };
         db.create_session(&first).expect("建会话");
 
@@ -4307,7 +4571,7 @@ mod tests {
         }
         let file = manifest_path(&source);
         let manifest = SplitManifest {
-            version: 1,
+            version: 2,
             session_id: "s1".into(),
             room_id: "r1".into(),
             source: source.display().to_string(),
@@ -4316,12 +4580,15 @@ mod tests {
             error: None,
             quality: Some("原画".into()),
             line: Some("线路1".into()),
-            remux: false,
+            post: Default::default(),
             clips: vec![
                 ManifestClip {
                     id: "s1".into(),
                     output: source.display().to_string(),
                     path: source.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 0,
                     end: Some(2),
                     reason: None,
@@ -4332,6 +4599,9 @@ mod tests {
                     id: "s2".into(),
                     output: dir.join("live.clip01.mp4").display().to_string(),
                     path: dir.join("live.clip01.mp4").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 2,
                     end: None,
                     reason: Some("duration".into()),
@@ -4419,6 +4689,11 @@ mod tests {
             error: None,
             danmaku_path: None,
             danmaku_count: 0,
+            source_path: None,
+            post_mode: "source".into(),
+            post_state: "done".into(),
+            source_deleted: false,
+            post_error: None,
         })
         .expect("建会话");
     }
@@ -4438,7 +4713,7 @@ mod tests {
         }
         let file = manifest_path(&source);
         let manifest = SplitManifest {
-            version: 1,
+            version: 2,
             session_id: "s1".into(),
             room_id: "r1".into(),
             source: source.display().to_string(),
@@ -4447,12 +4722,15 @@ mod tests {
             error: None,
             quality: Some("原画".into()),
             line: Some("线路1".into()),
-            remux: false,
+            post: Default::default(),
             clips: vec![
                 ManifestClip {
                     id: "s1".into(),
                     output: source.display().to_string(),
                     path: source.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 0,
                     end: Some(2),
                     reason: None,
@@ -4463,6 +4741,9 @@ mod tests {
                     id: "s2".into(),
                     output: dir.join("live.clip01.mp4").display().to_string(),
                     path: dir.join("live.clip01.mp4").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 2,
                     end: None,
                     reason: Some("duration".into()),
@@ -4510,7 +4791,7 @@ mod tests {
         }
         let file = manifest_path(&source);
         let manifest = SplitManifest {
-            version: 1,
+            version: 2,
             session_id: "s1".into(),
             room_id: "r1".into(),
             source: source.display().to_string(),
@@ -4519,12 +4800,15 @@ mod tests {
             error: None,
             quality: Some("原画".into()),
             line: Some("线路1".into()),
-            remux: false,
+            post: Default::default(),
             clips: vec![
                 ManifestClip {
                     id: "s1".into(),
                     output: source.display().to_string(),
                     path: source.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 0,
                     end: Some(2),
                     reason: None,
@@ -4535,6 +4819,9 @@ mod tests {
                     id: "s2".into(),
                     output: second.display().to_string(),
                     path: second.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 2,
                     end: None,
                     reason: Some("duration".into()),
@@ -4608,7 +4895,7 @@ mod tests {
         }
         let file = manifest_path(&source);
         let manifest = SplitManifest {
-            version: 1,
+            version: 2,
             session_id: "s1".into(),
             room_id: "r1".into(),
             source: source.display().to_string(),
@@ -4617,12 +4904,15 @@ mod tests {
             error: None,
             quality: Some("原画".into()),
             line: Some("线路1".into()),
-            remux: false,
+            post: Default::default(),
             clips: vec![
                 ManifestClip {
                     id: "s1".into(),
                     output: source.display().to_string(),
                     path: source.display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 0,
                     end: Some(2),
                     reason: None,
@@ -4633,6 +4923,9 @@ mod tests {
                     id: "s2".into(),
                     output: dir.join("live.clip01.mp4").display().to_string(),
                     path: dir.join("live.clip01.mp4").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 2,
                     end: Some(4),
                     reason: Some("duration".into()),
@@ -4643,6 +4936,9 @@ mod tests {
                     id: "s3".into(),
                     output: dir.join("live.clip02.mp4").display().to_string(),
                     path: dir.join("live.clip02.mp4").display().to_string(),
+                    final_path: None,
+                    post_state: None,
+                    post_error: None,
                     start: 4,
                     end: None,
                     reason: Some("duration".into()),
@@ -4733,10 +5029,10 @@ mod tests {
 
         let first = dir.join("live.clip00.mp4");
         let second = dir.join("live.clip01.mp4");
-        let (path, size) = finish_range(&source, &first, 0, Some(2), true).await;
+        let (path, size) = finish_range(&source, &first, 0, Some(2)).await;
         assert_eq!(path, first);
         assert!(size > 1000, "第一段太小：{size}");
-        let (path, size) = finish_range(&source, &second, 2, None, true).await;
+        let (path, size) = finish_range(&source, &second, 2, None).await;
         assert_eq!(path, second);
         assert!(size > 1000, "第二段太小：{size}");
         assert!(first.is_file() && second.is_file());

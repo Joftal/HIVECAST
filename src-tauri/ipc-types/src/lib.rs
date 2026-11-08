@@ -139,6 +139,16 @@ pub struct RecordSession {
     /// 本场落盘的弹幕条数
     #[ts(type = "number")]
     pub danmaku_count: i64,
+    /// 源封装母带路径；后处理删源后仍保留，便于追溯
+    pub source_path: Option<String>,
+    /// 后处理模式：source | convert | custom
+    pub post_mode: String,
+    /// 后处理状态：recording | sealed | posting | validating | committing | done | failed
+    pub post_state: String,
+    /// 源封装母带是否已移入回收站
+    pub source_deleted: bool,
+    /// 后处理失败原因；失败时 file_path 仍指向可播放的源文件
+    pub post_error: Option<String>,
 }
 
 /// 本地后处理的产物：转封装 / 截图 / 弹幕 ASS / 合并。
@@ -288,8 +298,18 @@ pub struct Settings {
     pub retention_days: u32,
     /// 媒体库总容量上限 GB（0 = 不限）
     pub max_total_gb: u32,
-    /// 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
-    pub auto_remux: bool,
+    /// 后处理模式：source（只保留源封装）| convert（转成指定封装）| custom（自定义 ffmpeg 参数）
+    pub post_mode: String,
+    /// convert 模式的目标封装：mp4 | mkv | ts
+    pub post_convert_format: String,
+    /// convert 成功后是否把源封装移入系统回收站
+    pub post_delete_source: bool,
+    /// custom 模式的完整 ffmpeg 参数模板，必须包含 {input} 与 {output}
+    pub post_custom_command: String,
+    /// custom 模式的输出扩展名（不含点）
+    pub post_custom_output_ext: String,
+    /// custom 模式的超时时间（秒）
+    pub post_custom_timeout_sec: u32,
     /// 关闭主窗口时的行为：tray = 最小化到托盘，quit = 退出程序
     pub close_action: String,
     /// 阻止系统空闲休眠（录制/观看期间保持唤醒）
@@ -404,6 +424,18 @@ pub struct MediaItem {
     pub clip_count: i64,
     /// 为什么从这里切开：title / duration / size；未分割为 null
     pub split_reason: Option<String>,
+    /// 源封装母带路径；源被删除后仍保留
+    pub source_path: Option<String>,
+    /// 后处理模式：source | convert | custom
+    pub post_mode: String,
+    /// 后处理状态：recording | sealed | posting | validating | committing | done | failed
+    pub post_state: String,
+    /// 源封装母带是否已移入回收站
+    pub source_deleted: bool,
+    /// 后处理失败原因
+    pub post_error: Option<String>,
+    /// 磁盘上是否还有源封装母带
+    pub has_source: bool,
 }
 
 /// 媒体库一页数据：items 是本页，total 是当前筛选条件下的总条数。
@@ -488,7 +520,6 @@ pub struct Playback {
     #[ts(type = "number")]
     pub offset_ms: i64,
 }
-
 
 /// 已保存的平台账号（v1 单账号，account_id 预留）。
 ///

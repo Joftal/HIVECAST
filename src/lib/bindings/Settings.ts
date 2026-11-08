@@ -72,9 +72,29 @@ retentionDays: number,
  */
 maxTotalGb: number,
 /**
- * 录制结束后是否把分片合成 mp4（关闭时保留 .ts 拼接，便于手动救援/剪辑）
+ * 后处理模式：source（只保留源封装）| convert（转成指定封装）| custom（自定义 ffmpeg 参数）
  */
-autoRemux: boolean,
+postMode: string,
+/**
+ * convert 模式的目标封装：mp4 | mkv | ts
+ */
+postConvertFormat: string,
+/**
+ * convert 成功后是否把源封装移入系统回收站
+ */
+postDeleteSource: boolean,
+/**
+ * custom 模式的完整 ffmpeg 参数模板，必须包含 {input} 与 {output}
+ */
+postCustomCommand: string,
+/**
+ * custom 模式的输出扩展名（不含点）
+ */
+postCustomOutputExt: string,
+/**
+ * custom 模式的超时时间（秒）
+ */
+postCustomTimeoutSec: number,
 /**
  * 关闭主窗口时的行为：tray = 最小化到托盘，quit = 退出程序
  */

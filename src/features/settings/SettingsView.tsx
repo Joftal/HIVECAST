@@ -151,7 +151,12 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "record", id: "set-split-size", titleKey: "settings.splitMaxSize", descKey: "settings.splitMaxSizeHint", extra: "分割 大小 体积 size split" },
   { page: "record", id: "set-view-quality", titleKey: "settings.viewQuality", descKey: "settings.viewQualityHint", extra: "观看 画质 quality qn view" },
   { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
-  { page: "record", id: "set-auto-remux", titleKey: "settings.autoRemux", descKey: "settings.autoRemuxHint", extra: "mp4 转码 remux 后处理" },
+  { page: "record", id: "set-post-mode", titleKey: "settings.postMode", descKey: "settings.postModeHint", extra: "后处理 源封装 转换 自定义 source convert custom" },
+    { page: "record", id: "set-post-convert-format", titleKey: "settings.postConvertFormat", descKey: "settings.postConvertFormatHint", extra: "转封装 mp4 mkv ts 容器" },
+    { page: "record", id: "set-post-delete-source", titleKey: "settings.postDeleteSource", descKey: "settings.postDeleteSourceHint", extra: "删除源 回收站 source trash" },
+    { page: "record", id: "set-post-custom-command", titleKey: "settings.postCustomCommand", descKey: "settings.postCustomCommandHint", extra: "自定义 ffmpeg 命令 custom command" },
+    { page: "record", id: "set-post-custom-ext", titleKey: "settings.postCustomOutputExt", descKey: "settings.postCustomOutputExtHint", extra: "自定义 输出 扩展名 extension" },
+    { page: "record", id: "set-post-custom-timeout", titleKey: "settings.postCustomTimeout", descKey: "settings.postCustomTimeoutHint", extra: "自定义 超时 timeout" },
   { page: "storage", id: "set-media-root", titleKey: "settings.mediaRoot", descKey: "settings.mediaRootHint", extra: "目录 路径 folder path" },
   { page: "storage", id: "set-log-dir", titleKey: "settings.logDir", descKey: "settings.logDirHint", extra: "日志 log 目录 folder path" },
   { page: "storage", id: "set-log-retention", titleKey: "settings.logRetention", descKey: "settings.logRetentionHint", extra: "日志 log 保留 清理 retention" },
@@ -783,16 +788,107 @@ export default function SettingsView({ open, onClose, onSaved }: Props) {
 
           <Section title={t("settings.sectionPost")}>
             <Row
-              id="set-auto-remux"
-              focus={focusId === "set-auto-remux"}
-              title={t("settings.autoRemux")}
-              desc={t("settings.autoRemuxHint")}
+              id="set-post-mode"
+              focus={focusId === "set-post-mode"}
+              title={t("settings.postMode")}
+              desc={t("settings.postModeHint")}
+            >
+              <StringSelectField
+                value={settings.postMode}
+                onChange={(next) =>
+                  patch({
+                    postMode: next,
+                    ...(next === "convert" ? {} : { postDeleteSource: false }),
+                  })
+                }
+              >
+                <option value="source">{t("settings.postModeSource")}</option>
+                <option value="convert">{t("settings.postModeConvert")}</option>
+                <option value="custom">{t("settings.postModeCustom")}</option>
+              </StringSelectField>
+            </Row>
+            <Row
+              id="set-post-convert-format"
+              focus={focusId === "set-post-convert-format"}
+              title={t("settings.postConvertFormat")}
+              desc={t("settings.postConvertFormatHint")}
+            >
+              <StringSelectField
+                value={settings.postConvertFormat}
+                onChange={(next) => patch({ postConvertFormat: next })}
+              >
+                <option value="mp4">MP4</option>
+                <option value="mkv">MKV</option>
+                <option value="ts">TS</option>
+              </StringSelectField>
+            </Row>
+            <Row
+              id="set-post-delete-source"
+              focus={focusId === "set-post-delete-source"}
+              title={t("settings.postDeleteSource")}
+              desc={t("settings.postDeleteSourceHint")}
             >
               <Switch
-                checked={settings.autoRemux}
-                onChange={(next) => patch({ autoRemux: next })}
-                label={t("settings.autoRemux")}
+                checked={settings.postDeleteSource}
+                onChange={(next) => patch({ postDeleteSource: next })}
+                disabled={settings.postMode !== "convert"}
+                label={t("settings.postDeleteSource")}
               />
+            </Row>
+            <Row
+              id="set-post-custom-command"
+              focus={focusId === "set-post-custom-command"}
+              title={t("settings.postCustomCommand")}
+              desc={t("settings.postCustomCommandHint")}
+            >
+              <input
+                value={settings.postCustomCommand}
+                onChange={(event) => patch({ postCustomCommand: event.target.value })}
+                disabled={settings.postMode !== "custom"}
+                placeholder="-i {input} -c copy {output}"
+                spellCheck={false}
+                className={FIELD + " w-[420px] font-mono text-[11px] disabled:cursor-not-allowed disabled:opacity-50"}
+              />
+            </Row>
+            <Row
+              id="set-post-custom-ext"
+              focus={focusId === "set-post-custom-ext"}
+              title={t("settings.postCustomOutputExt")}
+              desc={t("settings.postCustomOutputExtHint")}
+            >
+              <input
+                value={settings.postCustomOutputExt}
+                onChange={(event) => patch({ postCustomOutputExt: event.target.value })}
+                disabled={settings.postMode !== "custom"}
+                placeholder="mp4"
+                spellCheck={false}
+                className={FIELD + " w-[88px] font-mono text-[11px] disabled:cursor-not-allowed disabled:opacity-50"}
+              />
+            </Row>
+            <Row
+              id="set-post-custom-timeout"
+              focus={focusId === "set-post-custom-timeout"}
+              title={t("settings.postCustomTimeout")}
+              desc={t("settings.postCustomTimeoutHint")}
+            >
+              <div className="flex items-center gap-1.5">
+                <div className="w-[88px]">
+                  <input
+                    type="number"
+                    min={10}
+                    max={86400}
+                    disabled={settings.postMode !== "custom"}
+                    value={settings.postCustomTimeoutSec}
+                    onChange={(event) =>
+                      patch({ postCustomTimeoutSec: Number(event.target.value) })
+                    }
+                    className={FIELD + " font-mono tabular-nums disabled:cursor-not-allowed disabled:opacity-50"}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-[11px] text-muted">
+                  {t("settings.unitSeconds")}
+                </span>
+              </div>
             </Row>
           </Section>
         </div>

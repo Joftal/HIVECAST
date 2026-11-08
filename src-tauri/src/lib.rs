@@ -17,6 +17,7 @@ mod local;
 mod logging;
 mod monitor;
 mod platform;
+mod post;
 mod postprocess;
 mod power;
 mod process;

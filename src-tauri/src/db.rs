@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -518,8 +518,10 @@ impl Db {
                 "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
-                    danmaku_path, danmaku_count
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    danmaku_path, danmaku_count, source_path, post_mode, post_state,
+                    source_deleted, post_error
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                          ?15, ?16, ?17, ?18, ?19)",
                 params![
                     session.id,
                     session.room_id,
@@ -535,6 +537,11 @@ impl Db {
                     session.error,
                     session.danmaku_path,
                     session.danmaku_count,
+                    session.source_path,
+                    session.post_mode,
+                    session.post_state,
+                    session.source_deleted as i64,
+                    session.post_error,
                 ],
             )
             .map_err(db_err)?;
@@ -554,8 +561,10 @@ impl Db {
                 "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
-                    danmaku_path, danmaku_count, group_id, clip_index, split_reason
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    danmaku_path, danmaku_count, group_id, clip_index, split_reason,
+                    source_path, post_mode, post_state, source_deleted, post_error
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     session.id,
                     session.room_id,
@@ -574,21 +583,32 @@ impl Db {
                     group_id,
                     clip_index,
                     split_reason,
+                    session.source_path,
+                    session.post_mode,
+                    session.post_state,
+                    session.source_deleted as i64,
+                    session.post_error,
                 ],
             )
             .map_err(db_err)?;
         Ok(())
     }
 
-    /// 指定结束时刻：分割录制时首片段在边界就结束了，不能按收尾时刻算时长。
+    /// 收尾并提交后处理结果：路径可能从源封装变成派生文件，所以一并更新。
     #[allow(clippy::too_many_arguments)]
-    pub fn finish_session_at(
+    pub fn finish_session_with_post(
         &self,
         id: &str,
         status: &str,
         reason: &str,
         ended_at: i64,
+        file_path: &str,
         file_size: i64,
+        source_path: Option<&str>,
+        post_mode: &str,
+        post_state: &str,
+        source_deleted: bool,
+        post_error: Option<&str>,
         danmaku_path: Option<&str>,
         danmaku_count: i64,
         error: Option<&str>,
@@ -596,20 +616,39 @@ impl Db {
         self.lock()
             .execute(
                 "UPDATE record_session SET
-                    status = ?2, reason = ?3, ended_at = ?4, file_size = ?5,
-                    duration_ms = MAX(0, (?4 - started_at) * 1000), error = ?6,
-                    danmaku_path = ?7, danmaku_count = ?8
+                    status = ?2, reason = ?3, ended_at = ?4, file_path = ?5,
+                    file_size = ?6, duration_ms = MAX(0, (?4 - started_at) * 1000),
+                    source_path = ?7, post_mode = ?8, post_state = ?9,
+                    source_deleted = ?10, post_error = ?11,
+                    danmaku_path = ?12, danmaku_count = ?13, error = ?14
                   WHERE id = ?1",
                 params![
                     id,
                     status,
                     reason,
                     ended_at,
+                    file_path,
                     file_size,
-                    error,
+                    source_path,
+                    post_mode,
+                    post_state,
+                    source_deleted as i64,
+                    post_error,
                     danmaku_path,
-                    danmaku_count
+                    danmaku_count,
+                    error
                 ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 源已经移进回收站后单独打标；失败只影响展示，不影响播放。
+    pub fn set_source_deleted(&self, id: &str, deleted: bool) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session SET source_deleted = ?2 WHERE id = ?1",
+                params![id, deleted as i64],
             )
             .map_err(db_err)?;
         Ok(())
@@ -711,6 +750,16 @@ impl Db {
             clip_index: row.get(12)?,
             split_reason: row.get(13)?,
             clip_count: row.get(14)?,
+            source_path: row.get(15)?,
+            post_mode: row.get(16)?,
+            post_state: row.get(17)?,
+            source_deleted: row.get::<_, i64>(18)? != 0,
+            post_error: row.get(19)?,
+            has_source: row
+                .get::<_, Option<String>>(15)?
+                .map(|path| std::path::Path::new(&path).is_file())
+                .unwrap_or(false)
+                && row.get::<_, i64>(18)? == 0,
         })
     }
 
@@ -740,7 +789,8 @@ impl Db {
                     s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
                     COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
                     (SELECT COUNT(*) FROM record_session x
-                      WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id))
+                      WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id)),
+                    s.source_path, s.post_mode, s.post_state, s.source_deleted, s.post_error
                FROM record_session s
                JOIN room r ON r.id = s.room_id{where_sql}
               ORDER BY {}
@@ -768,7 +818,8 @@ impl Db {
                         s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
                         COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
                         (SELECT COUNT(*) FROM record_session x
-                          WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id))
+                          WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id)),
+                        s.source_path, s.post_mode, s.post_state, s.source_deleted, s.post_error
                    FROM record_session s
                    JOIN room r ON r.id = s.room_id
                   WHERE COALESCE(s.group_id, s.id) = ?1
@@ -1246,6 +1297,26 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             "split_manifest",
             "ALTER TABLE record_session ADD COLUMN split_manifest TEXT",
         ),
+        (
+            "source_path",
+            "ALTER TABLE record_session ADD COLUMN source_path TEXT",
+        ),
+        (
+            "post_mode",
+            "ALTER TABLE record_session ADD COLUMN post_mode TEXT NOT NULL DEFAULT 'source'",
+        ),
+        (
+            "post_state",
+            "ALTER TABLE record_session ADD COLUMN post_state TEXT NOT NULL DEFAULT 'done'",
+        ),
+        (
+            "source_deleted",
+            "ALTER TABLE record_session ADD COLUMN source_deleted INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "post_error",
+            "ALTER TABLE record_session ADD COLUMN post_error TEXT",
+        ),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute(ddl, []).map_err(db_err)?;
@@ -1307,7 +1378,8 @@ const ROOM_SELECT: &str = "SELECT
 
 const SESSION_SELECT: &str = "SELECT
     id, room_id, started_at, ended_at, status, reason, file_path, file_size,
-    duration_ms, quality, line, error, danmaku_path, danmaku_count
+    duration_ms, quality, line, error, danmaku_path, danmaku_count,
+    source_path, post_mode, post_state, source_deleted, post_error
   FROM record_session";
 
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
@@ -1358,6 +1430,11 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
         error: row.get(11)?,
         danmaku_path: row.get(12)?,
         danmaku_count: row.get(13)?,
+        source_path: row.get(14)?,
+        post_mode: row.get(15)?,
+        post_state: row.get(16)?,
+        source_deleted: row.get::<_, i64>(17)? != 0,
+        post_error: row.get(18)?,
     })
 }
 
@@ -1636,6 +1713,75 @@ mod tests {
             .expect("主播乙");
         assert_eq!(room_b.count, 1);
         assert_eq!(room_b.bytes, 100);
+    }
+
+    #[test]
+    fn post_fields_roundtrip_and_source_flag_reaches_media_library() {
+        let (db, db_path) = temp_db("post");
+        seed_media(&db);
+        let dir = db_path.parent().expect("库目录").join("media");
+        std::fs::create_dir_all(&dir).expect("建媒体目录失败");
+        let source = dir.join("live.flv");
+        let derived = dir.join("live.mp4");
+        std::fs::write(&source, b"source-bytes").expect("写源文件失败");
+        std::fs::write(&derived, b"derived-bytes").expect("写派生文件失败");
+
+        let mut session = db
+            .get_session("s-a1")
+            .expect("读会话失败")
+            .expect("会话存在");
+        session.id = "s-post".into();
+        session.file_path = Some(derived.display().to_string());
+        session.file_size = 13;
+        session.source_path = Some(source.display().to_string());
+        session.post_mode = "convert".into();
+        session.post_state = "done".into();
+        session.source_deleted = false;
+        db.create_session(&session).expect("写入后处理会话失败");
+
+        let loaded = db
+            .get_session("s-post")
+            .expect("读后处理会话失败")
+            .expect("后处理会话存在");
+        assert_eq!(
+            loaded.source_path.as_deref(),
+            Some(source.to_str().unwrap())
+        );
+        assert_eq!(loaded.post_mode, "convert");
+        assert_eq!(loaded.post_state, "done");
+        assert!(!loaded.source_deleted);
+
+        let items = db.media_group_items("s-post").expect("整组查询失败");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].has_source, "源文件存在且未标记删除时应可见");
+        assert_eq!(items[0].post_mode, "convert");
+
+        db.finish_session_with_post(
+            "s-post",
+            "finished",
+            "stream_ended",
+            1_100,
+            &derived.display().to_string(),
+            13,
+            Some(&source.display().to_string()),
+            "convert",
+            "done",
+            true,
+            None,
+            None,
+            0,
+            None,
+        )
+        .expect("提交后处理结果失败");
+        let committed = db
+            .get_session("s-post")
+            .expect("读提交结果失败")
+            .expect("提交结果存在");
+        assert!(committed.source_deleted, "移入回收站后应标记源已删");
+        assert_eq!(committed.status, "finished");
+        assert_eq!(committed.duration_ms, 100_000);
+        let items = db.media_group_items("s-post").expect("整组查询失败");
+        assert!(!items[0].has_source, "源已删标记要同步到媒体库");
     }
 
     #[test]

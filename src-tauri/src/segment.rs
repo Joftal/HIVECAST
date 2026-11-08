@@ -163,7 +163,8 @@ pub async fn merge_range(
     // 完好的成品。临时文件用 .merging 保留原扩展名，让 ffmpeg 选对封装器。
     let staging = staging_path(output);
     let _ = tokio::fs::remove_file(&staging).await;
-    let run = tokio::process::Command::new(ffmpeg::binary())
+    let mut command = tokio::process::Command::new(ffmpeg::binary());
+    command
         .arg("-hide_banner")
         .arg("-nostdin")
         .arg("-loglevel")
@@ -176,9 +177,15 @@ pub async fn merge_range(
         .arg("-i")
         .arg(&list)
         .arg("-c")
-        .arg("copy")
-        .arg("-movflags")
-        .arg("+faststart")
+        .arg("copy");
+    // faststart 只对 MP4 系容器有意义；给 FLV/TS/MKV 传会被 ffmpeg 拒绝。
+    if matches!(
+        staging.extension().and_then(|ext| ext.to_str()),
+        Some("mp4" | "mov" | "m4v")
+    ) {
+        command.arg("-movflags").arg("+faststart");
+    }
+    let run = command
         .arg(&staging)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

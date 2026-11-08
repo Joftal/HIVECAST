@@ -987,6 +987,23 @@ export default function MediaPage() {
                       {t("platformName." + item.platform, { defaultValue: item.platform })}
                     </span>
 
+                    <span
+                      title={item.postState === "failed" ? item.postError ?? undefined : undefined}
+                      className={cx(
+                        "pointer-events-none absolute left-2 top-[26px] rounded-[4px] bg-black/55 px-1.5 py-[3px] text-[10px] leading-none backdrop-blur-[2px]",
+                        item.postState === "failed" ? "text-red-200" : "text-white/85",
+                      )}
+                    >
+                      {item.postState === "failed"
+                        ? t("media.postFailed")
+                        : item.postMode === "convert"
+                          ? t("media.postConverted")
+                          : item.postMode === "custom"
+                            ? t("media.postCustom")
+                            : t("media.postSource")}
+                      {item.sourceDeleted ? " · " + t("media.sourceDeleted") : ""}
+                    </span>
+
                     <button
                       type="button"
                       onClick={() => toggleGroup(group)}

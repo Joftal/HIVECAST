@@ -3,24 +3,44 @@
 /**
  * 一次录制记录（历史页数据源）。
  */
-export type RecordSession = { id: string, roomId: string, startedAt: number, endedAt: number, 
+export type RecordSession = { id: string, roomId: string, startedAt: number, endedAt: number,
 /**
  * recording | finished | failed | aborted
  */
-status: string, 
+status: string,
 /**
  * stream_ended | stopped | error | app_exit
  */
-reason: string | null, filePath: string | null, fileSize: number, durationMs: number, quality: string | null, 
+reason: string | null, filePath: string | null, fileSize: number, durationMs: number, quality: string | null,
 /**
  * 实际使用的线路组名
  */
-line: string | null, error: string | null, 
+line: string | null, error: string | null,
 /**
  * 与视频同名的弹幕存档（JSONL），未开启弹幕时为空
  */
-danmakuPath: string | null, 
+danmakuPath: string | null,
 /**
  * 本场落盘的弹幕条数
  */
-danmakuCount: number, };
+danmakuCount: number,
+/**
+ * 源封装母带路径；后处理删源后仍保留，便于追溯
+ */
+sourcePath: string | null,
+/**
+ * 后处理模式：source | convert | custom
+ */
+postMode: string,
+/**
+ * 后处理状态：recording | sealed | posting | validating | committing | done | failed
+ */
+postState: string,
+/**
+ * 源封装母带是否已移入回收站
+ */
+sourceDeleted: boolean,
+/**
+ * 后处理失败原因；失败时 file_path 仍指向可播放的源文件
+ */
+postError: string | null, };

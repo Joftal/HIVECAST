@@ -32,8 +32,25 @@ const KEY_THEME: &str = "ui.theme";
 pub const KEY_RETENTION_DAYS: &str = "media.retention_days";
 /// 保留策略：媒体库总容量上限（GB）；0 表示不按容量删。
 pub const KEY_MAX_TOTAL_GB: &str = "media.max_total_gb";
-/// 文件后处理：录制结束后是否自动合成 mp4。
-pub const KEY_POST_AUTO_REMUX: &str = "post.auto_remux";
+/// 文件后处理模式：source | convert | custom。
+pub const KEY_POST_MODE: &str = "post.mode";
+/// convert 的目标封装。
+pub const KEY_POST_CONVERT_FORMAT: &str = "post.convert_format";
+/// convert 成功后是否把源封装移入回收站。
+pub const KEY_POST_DELETE_SOURCE: &str = "post.delete_source";
+/// custom 模式的 ffmpeg 参数模板。
+pub const KEY_POST_CUSTOM_COMMAND: &str = "post.custom_command";
+/// custom 模式的输出扩展名。
+pub const KEY_POST_CUSTOM_OUTPUT_EXT: &str = "post.custom_output_ext";
+/// custom 模式的超时秒数。
+pub const KEY_POST_CUSTOM_TIMEOUT: &str = "post.custom_timeout_sec";
+
+pub const POST_MODE_SOURCE: &str = "source";
+pub const POST_MODE_CONVERT: &str = "convert";
+pub const POST_MODE_CUSTOM: &str = "custom";
+pub const POST_CONVERT_FORMATS: [&str; 3] = ["mp4", "mkv", "ts"];
+pub const POST_CUSTOM_TIMEOUT_MIN: u32 = 10;
+pub const POST_CUSTOM_TIMEOUT_MAX: u32 = 86_400;
 /// 关闭主窗口的行为：tray（最小化到托盘）| quit（退出程序）。
 pub const KEY_CLOSE_ACTION: &str = "app.close_action";
 /// 阻止系统空闲休眠。
@@ -95,7 +112,12 @@ pub fn defaults() -> Settings {
         theme: "light".into(),
         retention_days: 0,
         max_total_gb: 0,
-        auto_remux: true,
+        post_mode: POST_MODE_SOURCE.into(),
+        post_convert_format: "mp4".into(),
+        post_delete_source: false,
+        post_custom_command: "-i {input} -c copy {output}".into(),
+        post_custom_output_ext: "mp4".into(),
+        post_custom_timeout_sec: 600,
         close_action: CLOSE_TRAY.into(),
         prevent_sleep: false,
         monitor_interval_sec: 30,
@@ -179,8 +201,31 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_MAX_TOTAL_GB).and_then(|v| v.parse::<u32>().ok()) {
         settings.max_total_gb = value.min(MAX_TOTAL_GB);
     }
-    if let Some(value) = read(KEY_POST_AUTO_REMUX).and_then(|v| parse_bool(&v)) {
-        settings.auto_remux = value;
+    if let Some(value) = read(KEY_POST_MODE).filter(|v| {
+        matches!(
+            v.as_str(),
+            POST_MODE_SOURCE | POST_MODE_CONVERT | POST_MODE_CUSTOM
+        )
+    }) {
+        settings.post_mode = value;
+    }
+    if let Some(value) =
+        read(KEY_POST_CONVERT_FORMAT).filter(|v| POST_CONVERT_FORMATS.contains(&v.as_str()))
+    {
+        settings.post_convert_format = value;
+    }
+    if let Some(value) = read(KEY_POST_DELETE_SOURCE).and_then(|v| parse_bool(&v)) {
+        settings.post_delete_source = value;
+    }
+    if let Some(value) = read(KEY_POST_CUSTOM_COMMAND).filter(|v| !v.trim().is_empty()) {
+        settings.post_custom_command = value;
+    }
+    if let Some(value) = read(KEY_POST_CUSTOM_OUTPUT_EXT) {
+        settings.post_custom_output_ext = sanitize_output_ext(&value);
+    }
+    if let Some(value) = read(KEY_POST_CUSTOM_TIMEOUT).and_then(|v| v.parse::<u32>().ok()) {
+        settings.post_custom_timeout_sec =
+            value.clamp(POST_CUSTOM_TIMEOUT_MIN, POST_CUSTOM_TIMEOUT_MAX);
     }
     if let Some(value) = read(KEY_CLOSE_ACTION).filter(|v| v == CLOSE_TRAY || v == CLOSE_QUIT) {
         settings.close_action = value;
@@ -255,6 +300,24 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     }
     settings.retention_days = settings.retention_days.min(MAX_RETENTION_DAYS);
     settings.max_total_gb = settings.max_total_gb.min(MAX_TOTAL_GB);
+    if !matches!(
+        settings.post_mode.as_str(),
+        POST_MODE_SOURCE | POST_MODE_CONVERT | POST_MODE_CUSTOM
+    ) {
+        settings.post_mode = POST_MODE_SOURCE.into();
+    }
+    if !POST_CONVERT_FORMATS.contains(&settings.post_convert_format.as_str()) {
+        settings.post_convert_format = "mp4".into();
+    }
+    settings.post_custom_command = settings.post_custom_command.trim().to_string();
+    settings.post_custom_output_ext = sanitize_output_ext(&settings.post_custom_output_ext);
+    settings.post_custom_timeout_sec = settings
+        .post_custom_timeout_sec
+        .clamp(POST_CUSTOM_TIMEOUT_MIN, POST_CUSTOM_TIMEOUT_MAX);
+    if settings.post_mode == POST_MODE_CUSTOM {
+        crate::post::validate_custom_command(&settings.post_custom_command)
+            .map_err(|reason| AppError::User(format!("自定义后处理命令不可用：{reason}")))?;
+    }
     settings.monitor_interval_sec = settings.monitor_interval_sec.min(MAX_MONITOR_INTERVAL);
     settings.monitor_backoff_cap_sec = settings
         .monitor_backoff_cap_sec
@@ -305,7 +368,18 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_THEME, &settings.theme)?;
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
     db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
-    db.set_setting(KEY_POST_AUTO_REMUX, &settings.auto_remux.to_string())?;
+    db.set_setting(KEY_POST_MODE, &settings.post_mode)?;
+    db.set_setting(KEY_POST_CONVERT_FORMAT, &settings.post_convert_format)?;
+    db.set_setting(
+        KEY_POST_DELETE_SOURCE,
+        &settings.post_delete_source.to_string(),
+    )?;
+    db.set_setting(KEY_POST_CUSTOM_COMMAND, &settings.post_custom_command)?;
+    db.set_setting(KEY_POST_CUSTOM_OUTPUT_EXT, &settings.post_custom_output_ext)?;
+    db.set_setting(
+        KEY_POST_CUSTOM_TIMEOUT,
+        &settings.post_custom_timeout_sec.to_string(),
+    )?;
     db.set_setting(
         KEY_MONITOR_INTERVAL,
         &settings.monitor_interval_sec.to_string(),
@@ -419,6 +493,23 @@ fn sanitize_split_duration(value: u32) -> u32 {
         0
     } else {
         value.clamp(MIN_SPLIT_DURATION_SEC, MAX_SPLIT_DURATION_SEC)
+    }
+}
+
+/// 自定义后处理的输出扩展名：只留字母数字，避免写出路径或奇怪后缀。
+pub fn sanitize_output_ext(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .trim_start_matches('.')
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if cleaned.is_empty() {
+        "mp4".into()
+    } else {
+        cleaned
     }
 }
 
@@ -551,7 +642,10 @@ mod tests {
                 theme: "neon".into(),
                 retention_days: 9_999,
                 max_total_gb: 500_000,
-                auto_remux: false,
+                post_mode: POST_MODE_CONVERT.into(),
+                post_convert_format: "mkv".into(),
+                post_delete_source: true,
+                post_custom_output_ext: ".MKV".into(),
                 close_action: "tray".into(),
                 prevent_sleep: false,
                 ..defaults()
@@ -573,7 +667,10 @@ mod tests {
             "保留天数被夹到上限"
         );
         assert_eq!(saved.max_total_gb, MAX_TOTAL_GB, "容量上限被夹到上限");
-        assert!(!saved.auto_remux, "文件后处理开关应原样保存");
+        assert_eq!(saved.post_mode, POST_MODE_CONVERT);
+        assert_eq!(saved.post_convert_format, "mkv");
+        assert!(saved.post_delete_source, "删除源开关应原样保存");
+        assert_eq!(saved.post_custom_output_ext, "mkv", "扩展名点号应被清掉");
         assert!(media.is_dir(), "保存时应把媒体目录建出来");
 
         let loaded = load(&db);
@@ -591,7 +688,10 @@ mod tests {
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.retention_days, MAX_RETENTION_DAYS);
         assert_eq!(loaded.max_total_gb, MAX_TOTAL_GB);
-        assert!(!loaded.auto_remux);
+        assert_eq!(loaded.post_mode, POST_MODE_CONVERT);
+        assert_eq!(loaded.post_convert_format, "mkv");
+        assert!(loaded.post_delete_source);
+        assert_eq!(loaded.post_custom_output_ext, "mkv");
         assert_eq!(loaded.close_action, CLOSE_TRAY, "未知关闭行为回落到托盘");
         assert!(!loaded.prevent_sleep);
 
@@ -615,9 +715,24 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let db = Db::open(&dir.join("test.db")).expect("open db");
         db.set_setting(KEY_SPLIT_ON_TITLE, "1").expect("设置");
-        db.set_setting(KEY_POST_AUTO_REMUX, "0").expect("设置");
+        db.set_setting(KEY_POST_DELETE_SOURCE, "0").expect("设置");
         let loaded = load(&db);
         assert!(loaded.split_on_title);
-        assert!(!loaded.auto_remux);
+        assert!(!loaded.post_delete_source);
+    }
+
+    #[test]
+    fn custom_mode_rejects_shell_syntax() {
+        let dir = std::env::temp_dir().join(format!("hivecast-post-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).expect("open db");
+        let mut input = defaults();
+        input.media_root = dir.join("media").display().to_string();
+        input.post_mode = POST_MODE_CUSTOM.into();
+        input.post_custom_command = "-i {input} | cat > {output}".into();
+        assert!(save(&db, &input).is_err(), "管道必须被拒绝");
+        input.post_custom_command = "-i {input} -c copy {output}".into();
+        assert!(save(&db, &input).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

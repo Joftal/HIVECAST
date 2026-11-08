@@ -638,6 +638,11 @@ mod tests {
             error: None,
             danmaku_path: None,
             danmaku_count: 0,
+            source_path: None,
+            post_mode: "source".into(),
+            post_state: "done".into(),
+            source_deleted: false,
+            post_error: None,
         }
     }
 

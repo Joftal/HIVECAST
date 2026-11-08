@@ -19,6 +19,18 @@ pub fn resolve() -> Option<PathBuf> {
         .find(|candidate| is_runnable(candidate))
 }
 
+/// ffprobe 通常与 ffmpeg 同目录；找不到时后处理会退回 ffmpeg 校验。
+pub fn probe_binary() -> Option<String> {
+    let ffmpeg = resolve()?;
+    let name = if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+    let probe = ffmpeg.with_file_name(name);
+    is_runnable(&probe).then(|| probe.display().to_string())
+}
+
 /// 供前端展示的绝对路径。
 pub fn path_string() -> Option<String> {
     resolve().map(|path| path.display().to_string())
