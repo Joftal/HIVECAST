@@ -27,6 +27,8 @@ import type { PostResult } from "./bindings/PostResult";
 import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
 import type { SessionSummary } from "./bindings/SessionSummary";
+import type { MonitorStatus } from "./bindings/MonitorStatus";
+import type { RecordingUsage } from "./bindings/RecordingUsage";
 import type { RoomView } from "./bindings/RoomView";
 import type { StreamDescriptor } from "./bindings/StreamDescriptor";
 import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
@@ -59,6 +61,8 @@ export type {
   RecordSession,
   RoomView,
   SessionSummary,
+  MonitorStatus,
+  RecordingUsage,
   Settings,
   StreamDescriptor,
   ViewSlotInfo,
@@ -116,6 +120,21 @@ export async function roomSetAutoRecord(id: string, enabled: boolean): Promise<v
   return invoke("room_set_auto_record", { id, enabled });
 }
 
+export type RoomRulesInput = {
+  note: string;
+  tags: string;
+  titleInclude: string | null;
+  titleExclude: string | null;
+  splitMaxDurationSec: number | null;
+  splitMaxSizeMb: number | null;
+  notifyLive: boolean | null;
+  notifyError: boolean | null;
+};
+
+export async function roomSetRules(id: string, rules: RoomRulesInput): Promise<void> {
+  return invoke("room_set_rules", { id, ...rules });
+}
+
 /** 暂停/恢复直播状态监控（暂停只停轮询，不影响已有录制）。 */
 export async function roomSetMonitor(id: string, paused: boolean): Promise<void> {
   return invoke("room_set_monitor", { id, paused });
@@ -149,6 +168,14 @@ export async function sessionsList(roomId?: string, limit = 50, offset = 0): Pro
 
 export async function sessionSummary(roomId: string): Promise<SessionSummary> {
   return invoke<SessionSummary>("session_summary", { roomId });
+}
+
+export async function recordingUsage(sessionId: string): Promise<RecordingUsage> {
+  return invoke<RecordingUsage>("recording_usage", { sessionId });
+}
+
+export async function monitorStatus(roomId: string): Promise<MonitorStatus | null> {
+  return invoke<MonitorStatus | null>("monitor_status", { roomId });
 }
 
 // ---- M5 本地后处理 ----
@@ -370,6 +397,10 @@ export async function mediaStop(sessionId: string): Promise<void> {
 
 export async function mediaReveal(sessionId: string): Promise<void> {
   return invoke("media_reveal", { sessionId });
+}
+
+export async function openUrl(url: string): Promise<void> {
+  return invoke("open_url", { url });
 }
 
 export async function mediaRevealSource(sessionId: string): Promise<void> {

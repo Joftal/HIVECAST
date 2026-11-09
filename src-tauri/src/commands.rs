@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
-    MediaFile, MediaHostPage, MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket,
-    RecordSession, RoomRecord, RoomView, SessionSummary, Settings, StreamDescriptor, TaskBoard,
-    TaskRecord, TrashInfo, ViewSlotInfo,
+    MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult, QrPoll,
+    QrTicket, RecordSession, RecordingUsage, RoomRecord, RoomView, SessionSummary, Settings,
+    StreamDescriptor, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -64,6 +64,19 @@ pub async fn rooms_list(state: State<'_, AppState>) -> Result<Vec<RoomView>, App
         .collect())
 }
 
+#[tauri::command]
+pub async fn monitor_status(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<Option<MonitorStatus>, AppError> {
+    Ok(state
+        .monitor_status
+        .lock()
+        .map_err(|_| AppError::Internal("监控状态锁被污染".into()))?
+        .get(&room_id)
+        .cloned())
+}
+
 /// 添加房间：纯本地解析 + 拉一次房间信息；同平台同房间号已存在时直接返回已有记录。
 #[tauri::command]
 pub async fn room_add(
@@ -120,6 +133,17 @@ pub async fn room_add(
         last_session_id: None,
         last_session_started_at: None,
         last_session_duration_ms: 0,
+        last_session_status: None,
+        last_session_reason: None,
+        last_session_file_size: 0,
+        note: String::new(),
+        tags: String::new(),
+        title_include: None,
+        title_exclude: None,
+        split_max_duration_sec: None,
+        split_max_size_mb: None,
+        notify_live: None,
+        notify_error: None,
         created_at: timestamp,
         updated_at: timestamp,
     };
@@ -253,7 +277,11 @@ pub async fn room_set_auto_record(
     if enabled {
         state.recorder.resume_auto(&id);
     }
-    if enabled && room.is_live && !state.recorder.is_recording(&id) {
+    if enabled
+        && room.is_live
+        && !state.recorder.is_recording(&id)
+        && crate::monitor::auto_record_allowed(&room, &room.title)
+    {
         if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
             tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "开启自动录制后开录失败");
             state.recorder.set_error(&id, err.to_string());
@@ -291,6 +319,41 @@ pub async fn room_set_quality(
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", room_id = %id, record_qn, view_qn, "设置房间画质");
     state.db.set_quality(&id, record_qn, view_qn)?;
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(())
+}
+
+/// 单房间规则/备注：一次写回，前端保存按钮触发。
+#[tauri::command]
+pub async fn room_set_rules(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    note: String,
+    tags: String,
+    title_include: Option<String>,
+    title_exclude: Option<String>,
+    split_max_duration_sec: Option<i64>,
+    split_max_size_mb: Option<i64>,
+    notify_live: Option<bool>,
+    notify_error: Option<bool>,
+) -> Result<(), AppError> {
+    let clean = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    state.db.set_room_rules(
+        &id,
+        note.trim(),
+        tags.trim(),
+        clean(title_include).as_deref(),
+        clean(title_exclude).as_deref(),
+        split_max_duration_sec.map(|value| value.clamp(0, 86_400)),
+        split_max_size_mb.map(|value| value.clamp(0, 1_048_576)),
+        notify_live,
+        notify_error,
+    )?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
 }
@@ -403,6 +466,31 @@ pub async fn session_summary(
     room_id: String,
 ) -> Result<SessionSummary, AppError> {
     state.db.session_summary(&room_id)
+}
+
+/// 录制中的文件增长与磁盘剩余；详情抽屉打开时按 3 秒轮询。
+#[tauri::command]
+pub async fn recording_usage(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<RecordingUsage, AppError> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| AppError::User("录像不存在".into()))?;
+    let path = session.file_path.map(std::path::PathBuf::from);
+    let bytes = path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len() as i64)
+        .unwrap_or(0);
+    let dir = path
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| state.recorder.media_root());
+    let disk_free = available_space(&dir).unwrap_or(0) as i64;
+    Ok(RecordingUsage { bytes, disk_free })
 }
 
 #[tauri::command]
@@ -1058,6 +1146,70 @@ pub fn ui_log(level: String, message: String, context: Option<String>) -> Result
         }
     }
     Ok(())
+}
+
+/// 打开直播间网页：只允许 http/https，避免把任意协议交给系统。
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), AppError> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AppError::User("只支持 http/https 链接".into()));
+    }
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .status()
+        .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn available_space(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            dir: *const u16,
+            free_to_caller: *mut u64,
+            total: *mut u64,
+            total_free: *mut u64,
+        ) -> i32;
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(unix)]
+fn available_space(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::statvfs(path.as_ptr(), &mut stat) };
+    (ok == 0).then_some(stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
 #[cfg(target_os = "macos")]

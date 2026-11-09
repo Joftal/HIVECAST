@@ -812,22 +812,72 @@ impl Db {
     /// 单房间录制历史汇总：不随分页变化，详情抽屉的合计和可合并数用它。
     pub fn session_summary(&self, room_id: &str) -> Result<SessionSummary, AppError> {
         let conn = self.lock();
+        let since = now_ts() - 7 * 86_400;
         conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(file_size), 0),
-                    COALESCE(SUM(CASE WHEN status != 'recording' AND file_path IS NOT NULL THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN status != 'recording' AND file_path IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(duration_ms), 0),
+                    COALESCE(SUM(CASE WHEN started_at >= ?2 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN started_at >= ?2 THEN duration_ms ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN started_at >= ?2 THEN file_size ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status IN ('failed', 'aborted') THEN 1 ELSE 0 END), 0)
                FROM record_session
               WHERE room_id = ?1",
-            params![room_id],
+            params![room_id, since],
             |row| {
                 Ok(SessionSummary {
                     total: row.get(0)?,
                     total_bytes: row.get(1)?,
                     mergeable: row.get(2)?,
+                    total_duration_ms: row.get(3)?,
+                    recent_count: row.get(4)?,
+                    recent_duration_ms: row.get(5)?,
+                    recent_bytes: row.get(6)?,
+                    failed_count: row.get(7)?,
                 })
             },
         )
         .map_err(db_err)
+    }
+
+    /// 单房间规则/备注：一次写回，避免每个字段拆成单独命令。
+    pub fn set_room_rules(
+        &self,
+        id: &str,
+        note: &str,
+        tags: &str,
+        title_include: Option<&str>,
+        title_exclude: Option<&str>,
+        split_max_duration_sec: Option<i64>,
+        split_max_size_mb: Option<i64>,
+        notify_live: Option<bool>,
+        notify_error: Option<bool>,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE room SET
+                    note = ?2, tags = ?3,
+                    title_include = ?4, title_exclude = ?5,
+                    split_max_duration_sec = ?6, split_max_size_mb = ?7,
+                    notify_live = ?8, notify_error = ?9,
+                    updated_at = ?10
+                  WHERE id = ?1",
+                params![
+                    id,
+                    note,
+                    tags,
+                    title_include,
+                    title_exclude,
+                    split_max_duration_sec,
+                    split_max_size_mb,
+                    notify_live.map(|value| value as i64),
+                    notify_error.map(|value| value as i64),
+                    now_ts(),
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
     }
 
     // ---- 设置（v1 单一作用域，key 用点分命名，例如 record.default_qn） ----
@@ -1816,6 +1866,50 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             "last_session_duration_ms",
             "ALTER TABLE room ADD COLUMN last_session_duration_ms INTEGER NOT NULL DEFAULT 0",
         ),
+        (
+            "last_session_status",
+            "ALTER TABLE room ADD COLUMN last_session_status TEXT",
+        ),
+        (
+            "last_session_reason",
+            "ALTER TABLE room ADD COLUMN last_session_reason TEXT",
+        ),
+        (
+            "last_session_file_size",
+            "ALTER TABLE room ADD COLUMN last_session_file_size INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "note",
+            "ALTER TABLE room ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "tags",
+            "ALTER TABLE room ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "title_include",
+            "ALTER TABLE room ADD COLUMN title_include TEXT",
+        ),
+        (
+            "title_exclude",
+            "ALTER TABLE room ADD COLUMN title_exclude TEXT",
+        ),
+        (
+            "split_max_duration_sec",
+            "ALTER TABLE room ADD COLUMN split_max_duration_sec INTEGER",
+        ),
+        (
+            "split_max_size_mb",
+            "ALTER TABLE room ADD COLUMN split_max_size_mb INTEGER",
+        ),
+        (
+            "notify_live",
+            "ALTER TABLE room ADD COLUMN notify_live INTEGER",
+        ),
+        (
+            "notify_error",
+            "ALTER TABLE room ADD COLUMN notify_error INTEGER",
+        ),
     ] {
         if !room_columns.iter().any(|column| column == name) {
             conn.execute(ddl, []).map_err(db_err)?;
@@ -1840,6 +1934,21 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
                 ),
                 last_session_duration_ms = COALESCE((
                     SELECT duration_ms FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ), 0),
+                last_session_status = (
+                    SELECT status FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_reason = (
+                    SELECT reason FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_file_size = COALESCE((
+                    SELECT file_size FROM record_session
                     WHERE room_id = room.id
                     ORDER BY started_at DESC, id DESC LIMIT 1
                 ), 0)",
@@ -1873,6 +1982,21 @@ fn refresh_room_last_session(conn: &Connection, room_id: &str) -> rusqlite::Resu
                 SELECT duration_ms FROM record_session
                 WHERE room_id = ?1
                 ORDER BY started_at DESC, id DESC LIMIT 1
+            ), 0),
+            last_session_status = (
+                SELECT status FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            ),
+            last_session_reason = (
+                SELECT reason FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            ),
+            last_session_file_size = COALESCE((
+                SELECT file_size FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
             ), 0)
           WHERE id = ?1",
         params![room_id],
@@ -1889,6 +2013,9 @@ const ROOM_SELECT: &str = "SELECT
     area_name, is_live, started_at, online, auto_record, monitor_paused,
     record_qn, view_qn, record_line, last_checked_at,
     last_session_id, last_session_started_at, last_session_duration_ms,
+    last_session_status, last_session_reason, last_session_file_size,
+    note, tags, title_include, title_exclude,
+    split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
     created_at, updated_at
   FROM room";
 
@@ -1923,8 +2050,19 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         last_session_id: row.get(18)?,
         last_session_started_at: row.get(19)?,
         last_session_duration_ms: row.get(20)?,
-        created_at: row.get(21)?,
-        updated_at: row.get(22)?,
+        last_session_status: row.get(21)?,
+        last_session_reason: row.get(22)?,
+        last_session_file_size: row.get(23)?,
+        note: row.get(24)?,
+        tags: row.get(25)?,
+        title_include: row.get(26)?,
+        title_exclude: row.get(27)?,
+        split_max_duration_sec: row.get(28)?,
+        split_max_size_mb: row.get(29)?,
+        notify_live: row.get::<_, Option<i64>>(30)?.map(|value| value != 0),
+        notify_error: row.get::<_, Option<i64>>(31)?.map(|value| value != 0),
+        created_at: row.get(32)?,
+        updated_at: row.get(33)?,
     })
 }
 

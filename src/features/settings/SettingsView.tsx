@@ -23,6 +23,7 @@ import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/C
 import { useNotify } from "../../lib/notify";
 import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { SelectMenu } from "../../components/ui/SelectMenu";
+import InfoTip from "../../components/ui/InfoTip";
 import AccountSection from "./AccountSection";
 
 function formatBytes(bytes: number): string {
@@ -249,12 +250,14 @@ function Row({
   id,
   title,
   desc,
+  tip,
   children,
   focus,
 }: {
   id: string;
   title: string;
   desc?: string;
+  tip?: string;
   children: ReactNode;
   focus: boolean;
 }) {
@@ -267,7 +270,10 @@ function Row({
       )}
     >
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-ink">{title}</div>
+        <div className="flex items-center gap-1.5">
+          <div className="text-[12.5px] font-medium text-ink">{title}</div>
+          {tip ? <InfoTip content={tip} /> : null}
+        </div>
         {desc ? <p className={HINT}>{desc}</p> : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">{children}</div>
@@ -678,6 +684,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-record-quality"}
               title={t("settings.recordQuality")}
               desc={t("settings.recordQualityHint")}
+              tip={t("settings.recordQualityHint")}
             >
               <SelectField
                 value={settings.defaultRecordQn}
@@ -690,6 +697,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-source-format"}
               title={t("settings.sourceFormat")}
               desc={t("settings.sourceFormatHint")}
+              tip={t("settings.sourceFormatHint")}
             >
               <StringSelectField
                 value={settings.recordSourceFormat}
@@ -707,6 +715,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-record-codec"}
               title={t("settings.recordCodec")}
               desc={t("settings.recordCodecHint")}
+              tip={t("settings.recordCodecHint")}
             >
               <StringSelectField
                 value={settings.recordCodec}
@@ -726,6 +735,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-view-quality"}
               title={t("settings.viewQuality")}
               desc={t("settings.viewQualityHint")}
+              tip={t("settings.viewQualityHint")}
             >
               <SelectField
                 value={settings.defaultViewQn}
@@ -741,6 +751,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-split-title"}
               title={t("settings.splitOnTitle")}
               desc={t("settings.splitOnTitleHint")}
+              tip={t("settings.splitOnTitleHint")}
             >
               <Switch
                 checked={settings.splitOnTitle}
@@ -753,6 +764,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-split-duration"}
               title={t("settings.splitMaxDuration")}
               desc={t("settings.splitMaxDurationHint")}
+              tip={t("settings.splitMaxDurationHint")}
             >
               <div className="flex items-center gap-1.5">
                 <div className="w-[100px]">
@@ -777,6 +789,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-split-size"}
               title={t("settings.splitMaxSize")}
               desc={t("settings.splitMaxSizeHint")}
+              tip={t("settings.splitMaxSizeHint")}
             >
               <div className="flex items-center gap-1.5">
                 <div className="w-[100px]">
@@ -823,6 +836,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-max-concurrent"}
               title={t("settings.maxConcurrent")}
               desc={t("settings.maxConcurrentHint")}
+              tip={t("settings.maxConcurrentHint")}
             >
               <div className="w-[120px]">
               <input
@@ -843,6 +857,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-monitor-interval"}
               title={t("settings.monitorInterval")}
               desc={t("settings.monitorIntervalHint")}
+              tip={t("settings.monitorIntervalHint")}
             >
               <div className="flex items-center gap-1.5">
                 <div className="w-[88px]">
@@ -865,6 +880,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-monitor-backoff"}
               title={t("settings.monitorBackoff")}
               desc={t("settings.monitorBackoffHint")}
+              tip={t("settings.monitorBackoffHint")}
             >
               <Switch
                 checked={settings.monitorBackoffEnabled}
@@ -905,7 +921,10 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                 focusId === "set-post-mode" ? "bg-accent-soft" : "",
               )}
             >
-              <div className="text-[12.5px] font-medium text-ink">{t("settings.postMode")}</div>
+              <div className="flex items-center gap-1.5">
+                <div className="text-[12.5px] font-medium text-ink">{t("settings.postMode")}</div>
+                <InfoTip content={t("settings.postModeHint")} />
+              </div>
               <p className={HINT}>{t("settings.postModeHint")}</p>
               <div role="radiogroup" aria-label={t("settings.postMode")} className="mt-3 grid gap-2 sm:grid-cols-3">
                 {POST_MODES.map((mode) => {
@@ -983,6 +1002,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-post-custom-command"}
               title={t("settings.postCustomCommand")}
               desc={t("settings.postCustomCommandHint")}
+              tip={t("settings.postCustomCommandHint")}
             >
               <input
                 value={settings.postCustomCommand}
@@ -1289,6 +1309,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
               focus={focusId === "set-retention"}
               title={t("settings.retention")}
               desc={t("settings.retentionHint")}
+              tip={t("settings.retentionHint")}
             >
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 whitespace-nowrap text-[11px] text-muted">

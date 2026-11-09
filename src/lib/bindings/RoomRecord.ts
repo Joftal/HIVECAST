@@ -30,4 +30,24 @@ recordLine: string | null, lastCheckedAt: number,
 /**
  * 最近一场录制的摘要；由 session 写入/收尾时刷新，监控列表不再单独查 sessions。
  */
-lastSessionId: string | null, lastSessionStartedAt: number, lastSessionDurationMs: number, createdAt: number, updatedAt: number, };
+lastSessionId: string | null, lastSessionStartedAt: number, lastSessionDurationMs: number,
+/**
+ * 最近一场录制的最终状态、原因与文件大小；详情抽屉用来显示结果。
+ */
+lastSessionStatus: string | null, lastSessionReason: string | null, lastSessionFileSize: number,
+/**
+ * 主播本地备注（可当成本地 ID）与标签（逗号分隔）。
+ */
+note: string, tags: string,
+/**
+ * 单房间自动录制规则：标题必须包含 / 不能包含的关键词（逗号分隔）。
+ */
+titleInclude: string | null, titleExclude: string | null,
+/**
+ * 单房间分片覆盖；None = 跟随全局设置，0 = 关闭该项。
+ */
+splitMaxDurationSec: number, splitMaxSizeMb: number,
+/**
+ * 单房间通知覆盖；None = 跟随全局设置。
+ */
+notifyLive: boolean | null, notifyError: boolean | null, createdAt: number, updatedAt: number, };

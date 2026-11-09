@@ -3,4 +3,12 @@
 /**
  * 单个房间的录制历史汇总；详情抽屉的合计/可合并数不依赖分页结果。
  */
-export type SessionSummary = { total: number, totalBytes: number, mergeable: number, };
+export type SessionSummary = { total: number, totalBytes: number, mergeable: number, totalDurationMs: number,
+/**
+ * 最近 7 天的场次、时长与体积。
+ */
+recentCount: number, recentDurationMs: number, recentBytes: number,
+/**
+ * 失败/中断场次，用于成功率。
+ */
+failedCount: number, };

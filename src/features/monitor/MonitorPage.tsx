@@ -11,14 +11,22 @@ import { HoldToConfirm } from "../../components/arc/hold-to-confirm/hold-to-conf
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
+import InfoTip from "../../components/ui/InfoTip";
 import { PageChip, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
+import RoomRules from "./RoomRules";
+import InlineNote from "./InlineNote";
+import InlineTags from "./InlineTags";
+import { parseTags } from "./roomRuleInput";
 import {
   isTauri,
   mediaReveal,
+  monitorStatus,
   onRoomsChanged,
+  openUrl,
   recordStart,
   recordStop,
+  recordingUsage,
   roomAdd,
   roomLines,
   roomRefresh,
@@ -31,6 +39,8 @@ import {
   sessionSummary,
   viewOpen,
   type LineInfo,
+  type MonitorStatus,
+  type RecordingUsage,
   type RoomView,
   type SessionSummary,
 } from "../../lib/ipc";
@@ -44,8 +54,8 @@ const PLATFORM_DOT: Record<string, string> = {
   douyin: "#ff2d6f",
 };
 
-/** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。 */
-const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 76px 138px 148px";
+/** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。*/
+const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 120px 140px 76px 138px 148px";
 // 行内动作组比 Arc 默认 sm 再紧一档：英文 Watch/Record 也能放进 148px 操作列。
 const ROW_ACTION_GROUP_STYLE = {
   "--fbg-h": "28px",
@@ -75,7 +85,7 @@ function clockMs(ms: number): string {
   return clock(ms / 1000);
 }
 
-/* 录制时钟共享一个 1s tick：只有挂载中的 LiveDuration 重渲染，页面本身不 tick。 */
+/* 录制时钟共享一个 1s tick：只有挂载中的 LiveDuration 重渲染，页面本身不 tick。*/
 let liveTick = Date.now();
 let liveTimer: number | null = null;
 const liveListeners = new Set<() => void>();
@@ -104,6 +114,164 @@ function LiveDuration({ startedAt }: { startedAt: number }) {
   return <>{clock(now / 1000 - startedAt)}</>;
 }
 
+/** 当前录制占用：独立轮询，避免每秒触发整页/整表重渲染。*/
+function RecordingUsageRows({ sessionId }: { sessionId: string }) {
+  const { t } = useTranslation();
+  const [usage, setUsage] = useState<RecordingUsage | null>(null);
+  const [estimatedSecs, setEstimatedSecs] = useState<number | null>(null);
+
+  useEffect(() => {
+    setUsage(null);
+    setEstimatedSecs(null);
+    if (!isTauri()) return;
+    let alive = true;
+    let previous: { bytes: number; at: number } | null = null;
+    const load = () => {
+      void recordingUsage(sessionId)
+        .then((next) => {
+          if (!alive) return;
+          const now = Date.now();
+          if (previous && next.bytes > previous.bytes) {
+            const elapsed = Math.max(1, (now - previous.at) / 1000);
+            const rate = (next.bytes - previous.bytes) / elapsed;
+            if (rate > 0 && next.diskFree > 0) setEstimatedSecs(next.diskFree / rate);
+          }
+          previous = { bytes: next.bytes, at: now };
+          setUsage(next);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [sessionId]);
+
+  return (
+    <>
+      <div className="flex items-center gap-2 border-t border-rec/15 px-3 py-2 text-[11px]">
+        <span className="shrink-0 text-faint">{t("monitor.written")}</span>
+        <span className="tnum text-ink-soft">{usage ? size(usage.bytes) : "—"}</span>
+        <span className="ml-auto shrink-0 text-faint">{t("monitor.diskFree")}</span>
+        <span className="tnum text-ink-soft">{usage ? size(usage.diskFree) : "—"}</span>
+      </div>
+      {estimatedSecs !== null ? (
+        <div className="flex items-center gap-2 border-t border-rec/15 px-3 py-2 text-[11px]">
+          <span className="shrink-0 text-faint">{t("monitor.estimatedTime")}</span>
+          <span className="tnum ml-auto text-ink-soft">{clock(estimatedSecs)}</span>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** 监控排期：独立轮询，避免 1s 一次的状态更新带动整个监控表。*/
+function MonitorDiagnostics({
+  roomId,
+  roomLabel,
+  lastCheckedAt,
+  error,
+  onCopy,
+}: {
+  roomId: string;
+  roomLabel: string;
+  lastCheckedAt: number | null;
+  error: string | null;
+  onCopy: (text: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<MonitorStatus | null>(null);
+
+  useEffect(() => {
+    setStatus(null);
+    if (!isTauri()) return;
+    let alive = true;
+    const load = () => {
+      void monitorStatus(roomId)
+        .then((next) => {
+          if (alive) setStatus(next);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 1000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [roomId]);
+
+  const nextCheck = status
+    ? status.inflight
+      ? t("monitor.checking")
+      : t("monitor.inSeconds", { n: Math.max(0, status.nextCheckInSecs) })
+    : "—";
+  const outcome = status?.lastOutcome
+    ? t("monitor.outcome." + status.lastOutcome, { defaultValue: status.lastOutcome })
+    : "—";
+  const diagnosis = [
+    roomLabel,
+    `${t("monitor.lastChecked")}: ${lastCheckedAt ? new Date(lastCheckedAt * 1000).toLocaleString() : "—"}`,
+    `${t("monitor.nextCheck")}: ${nextCheck}`,
+    `${t("monitor.failures")}: ${status?.errorCount ?? 0}`,
+    `${t("monitor.lastError")}: ${error ?? "—"}`,
+  ].join("\n");
+
+  return (
+    <>
+      <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+        <span className="shrink-0 text-[11.5px] text-faint">{t("monitor.nextCheck")}</span>
+        <span className="min-w-0 flex-1 truncate text-right text-[12px] text-ink-soft">{nextCheck}</span>
+      </div>
+      <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+        <span className="shrink-0 text-[11.5px] text-faint">{t("monitor.failures")}</span>
+        <span className="min-w-0 flex-1 truncate text-right text-[12px] text-ink-soft">
+          {status ? status.errorCount : "—"}
+          {status?.backoff ? <span className="text-warn"> · {t("monitor.backoff")}</span> : null}
+        </span>
+      </div>
+      <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+        <span className="shrink-0 text-[11.5px] text-faint">{t("monitor.lastOutcome")}</span>
+        <span className="min-w-0 flex-1 truncate text-right text-[12px] text-ink-soft">{outcome}</span>
+      </div>
+      {error ? (
+        <div className="flex items-start gap-2 border-t border-line px-3 py-2">
+          <span className="shrink-0 pt-0.5 text-[11.5px] text-faint">{t("monitor.lastError")}</span>
+          <span
+            className="line-clamp-2 min-w-0 flex-1 break-words text-right text-[11.5px] leading-4 text-warn"
+            title={error}
+          >
+            {error}
+          </span>
+          <button
+            type="button"
+            onClick={() => onCopy(error)}
+            aria-label={t("common.copy")}
+            title={t("common.copy")}
+            className="focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              <rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1.4" />
+              <path d="M10.8 5.2V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.6a1.4 1.4 0 0 0 1.4 1.4h1.4" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
+      <div className="flex justify-end border-t border-line px-3 py-2">
+        <button
+          type="button"
+          onClick={() => onCopy(diagnosis)}
+          className="focus-ring rounded-ctl px-1.5 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft"
+        >
+          {t("monitor.copyDiagnostics")}
+        </button>
+      </div>
+    </>
+  );
+}
+
 function size(bytes: number): string {
   if (!bytes) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -122,7 +290,7 @@ function hhmm(seconds: number): string {
   return pad(date.getHours()) + ":" + pad(date.getMinutes());
 }
 
-/** 上次录制开始时间统一用完整时间戳：2026-11-06 00:02:28。 */
+/** 上次录制开始时间统一用完整时间戳：2026-11-06 00:02:28。*/
 function datetime(seconds: number): string {
   if (!seconds) return "—";
   const date = new Date(seconds * 1000);
@@ -143,7 +311,7 @@ function datetime(seconds: number): string {
 
 type SortKey = "live" | "record";
 
-/** 最近录制列只放得下 5 个字：今天给时分，更早给月日。 */
+/** 最近录制列只放得下 5 个字：今天给时分，更早给月日。*/
 function recent(seconds: number): string {
   if (!seconds) return "—";
   const date = new Date(seconds * 1000);
@@ -155,6 +323,21 @@ function recent(seconds: number): string {
   return sameDay ? hhmm(seconds) : pad(date.getMonth() + 1) + "-" + pad(date.getDate());
 }
 
+/** 最近检查时间用相对时间；Intl 自带「刚刚 / 12 秒前」等本地化。*/
+function timeAgo(seconds: number, locale: string): string {
+  if (!seconds) return "—";
+  const formatter = new Intl.RelativeTimeFormat(locale === "en-US" ? "en-US" : "zh-CN", {
+    numeric: "auto",
+  });
+  const diff = Math.round(seconds - Date.now() / 1000);
+  const abs = Math.abs(diff);
+  if (abs < 60) return formatter.format(diff, "second");
+  if (abs < 3600) return formatter.format(Math.round(diff / 60), "minute");
+  if (abs < 86400) return formatter.format(Math.round(diff / 3600), "hour");
+  return formatter.format(Math.round(diff / 86400), "day");
+}
+
+/** 逗号分隔的本地标签；列表筛选与抽屉共用同一套解析。*/
 function compactNumber(value: number, locale: string): string {
   if (!value) return "—";
   return new Intl.NumberFormat(locale === "en-US" ? "en-US" : "zh-CN", {
@@ -163,7 +346,7 @@ function compactNumber(value: number, locale: string): string {
   }).format(value);
 }
 
-/** 头像：没有 avatarUrl 时用平台色 + 首字母占位。 */
+/** 头像：没有 avatarUrl 时用平台色 + 首字母占位。*/
 function Avatar({ room, size: px }: { room: RoomView["room"]; size: number }) {
   const src = room.avatarUrl;
   return src ? (
@@ -243,7 +426,7 @@ function Thumb({
     </div>
   );
 }
-/** 可排序表头：一次升序、再点降序、第三次取消。 */
+/** 可排序表头：一次升序、再点降序、第三次取消。*/
 function SortHead({
   label,
   active,
@@ -287,8 +470,12 @@ function SortHead({
 
 export default function MonitorPage({
   onOpenWatch,
+  onOpenMedia,
+  onOpenTasks,
 }: {
   onOpenWatch?: (roomIds?: string[], kind?: LayoutKind) => void;
+  onOpenMedia?: (roomId: string) => void;
+  onOpenTasks?: (roomId: string) => void;
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
@@ -304,6 +491,7 @@ export default function MonitorPage({
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
+  const [tag, setTag] = useState("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -370,7 +558,7 @@ export default function MonitorPage({
     }
   }, [notify]);
 
-  // 单飞：同一时刻只有一个 rooms_list 在路上；期间的刷新请求合并成一次尾随刷新。
+  // 单飞：同一时刻只有一条 rooms_list 在路上；期间的刷新请求合并成一次尾随刷新。
   const load = useCallback(async () => {
     if (!isTauri()) {
       setLoaded(true);
@@ -470,6 +658,19 @@ export default function MonitorPage({
   }, [views]);
   const recordingCount = useMemo(() => views.filter((view) => view.recording).length, [views]);
 
+  // 标签筛选：按出现次数倒序，同次数按名称；选项里保留计数。
+  const tagOptions = useMemo(() => {
+    const countsByTag = new Map<string, number>();
+    for (const view of views) {
+      for (const value of parseTags(view.room.tags)) {
+        countsByTag.set(value, (countsByTag.get(value) ?? 0) + 1);
+      }
+    }
+    return [...countsByTag.entries()]
+      .sort((a, b) => b[1] - a[1] || collator.compare(a[0], b[0]))
+      .map(([value, count]) => ({ value, label: value, count }));
+  }, [views, collator]);
+
   const lastByRoom = useMemo(() => {
     const map = new Map<string, { id: string; startedAt: number; durationMs: number }>();
     for (const view of views) {
@@ -489,9 +690,12 @@ export default function MonitorPage({
     const needle = query.trim().toLowerCase();
     const list = views.filter((view) => {
       if (platform !== "all" && view.room.platform !== platform) return false;
+      if (tag !== "all" && !parseTags(view.room.tags).includes(tag)) return false;
       if (onlyRecording && !view.recording) return false;
       if (!needle) return true;
-      return (view.room.title + " " + view.room.hostName + " " + view.room.roomKey).toLowerCase().includes(needle);
+      return (view.room.title + " " + view.room.hostName + " " + view.room.roomKey + " " + view.room.note + " " + view.room.tags)
+        .toLowerCase()
+        .includes(needle);
     });
     // 默认按主播名称（中文按拼音、数字按数值）；点表头再叠加状态排序。
     const label = (view: RoomView) => view.room.hostName || view.room.title || view.room.roomKey;
@@ -503,7 +707,7 @@ export default function MonitorPage({
       const diff = rank(b) - rank(a);
       return (sort.dir === "asc" ? diff : -diff) || byName(a, b);
     });
-  }, [views, query, platform, onlyRecording, sort, collator]);
+  }, [views, query, platform, tag, onlyRecording, sort, collator]);
 
   // 分屏入口：顺序沿用当前表格顺序（筛选 + 排序），余下的按房间列表补齐。
   const pickedIds = useMemo(() => {
@@ -530,14 +734,17 @@ export default function MonitorPage({
             ]
           : [{ kind: "quad", label: t("monitor.modeQuad") }];
 
-  /** 点一次升序（在线/录制中优先），再点降序，第三次取消。 */
+  /** 点一次升序（在线/录制中优先），再点降序，第三次取消。*/
   const toggleSort = (key: SortKey) =>
     setSort((prev) =>
       prev?.key !== key ? { key, dir: "asc" } : prev.dir === "asc" ? { key, dir: "desc" } : null,
     );
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
-  const recorded = drawerSummary?.totalBytes ?? 0;
+  const recordedLabel =
+    drawerSummary && drawerSummary.total > 0
+      ? `${size(drawerSummary.totalBytes)} · ${t("monitor.sessionCount", { n: drawerSummary.total })}`
+      : "—";
 
   const run = useCallback(
     async (id: string, action: () => Promise<unknown>, kind: "record" | null = null) => {
@@ -595,11 +802,37 @@ export default function MonitorPage({
     }
   };
 
+  const revealSession = async (sessionId: string) => {
+    try {
+      await mediaReveal(sessionId);
+    } catch (err) {
+      notify.error(err);
+    }
+  };
+
   const reveal = async (roomId: string) => {
     const last = lastByRoom.get(roomId);
-    if (!last) return;
+    if (last) await revealSession(last.id);
+  };
+
+  const refreshRoom = (roomId: string) =>
+    void run(roomId, async () => {
+      await roomRefresh(roomId);
+      notify.success(t("monitor.refreshed"));
+    });
+
+  const copyText = async (text: string) => {
     try {
-      await mediaReveal(last.id);
+      await navigator.clipboard.writeText(text);
+      notify.success(t("common.copied"));
+    } catch (err) {
+      notify.error(err);
+    }
+  };
+
+  const openRoomUrl = async (url: string) => {
+    try {
+      await openUrl(url);
     } catch (err) {
       notify.error(err);
     }
@@ -635,6 +868,7 @@ export default function MonitorPage({
   })).filter((item) => item.count > 0);
 
   const platformLabel = platform === "all" ? t("monitor.filterPlatform") : t("platformName." + platform);
+  const tagLabel = tag === "all" ? t("monitor.filterTag") : tag;
 
   const statusText = (view: RoomView) =>
     view.recording
@@ -653,6 +887,30 @@ export default function MonitorPage({
       "record",
     );
   };
+
+  // 抽屉打开时的快捷键：W 观看、R 开录/停录、F 刷新；输入框里不抢键。
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      const view = views.find((item) => item.room.id === selectedId);
+      if (!view) return;
+      if (event.key === "w" || event.key === "W") {
+        event.preventDefault();
+        if (view.room.isLive || view.recording) void openWatch(view.room.id);
+      } else if (event.key === "r" || event.key === "R") {
+        event.preventDefault();
+        if (view.room.isLive || view.recording) toggleRecording(view);
+      } else if (event.key === "f" || event.key === "F") {
+        event.preventDefault();
+        refreshRoom(view.room.id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId, views, openWatch, refreshRoom]);
 
   const togglePick = (view: RoomView) => {
     const room = view.room;
@@ -734,6 +992,12 @@ export default function MonitorPage({
               {room.title || room.roomKey}
             </span>
           </span>
+        </span>
+        <span className="min-w-0">
+          <InlineNote room={room} />
+        </span>
+        <span className="min-w-0">
+          <InlineTags room={room} />
         </span>
         <span className="truncate text-[12.5px] text-muted">
           {t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
@@ -829,11 +1093,7 @@ export default function MonitorPage({
               {
                 key: "refresh",
                 label: t("monitor.refreshInfo"),
-                onSelect: () =>
-                  void run(room.id, async () => {
-                    await roomRefresh(room.id);
-                    notify.success(t("monitor.refreshed"));
-                  }),
+                onSelect: () => refreshRoom(room.id),
               },
               {
                 key: "settings",
@@ -873,7 +1133,24 @@ export default function MonitorPage({
     const room = view.room;
     const busy = busyId === room.id;
     const last = lastByRoom.get(room.id);
-    const isRecording = Boolean(view.recording);
+    const recording = view.recording;
+    const isRecording = Boolean(recording);
+    const recordingFile = recording?.filePath.split(/[\\/]/).pop() ?? "";
+    const lastLabel = last
+      ? `${datetime(last.startedAt)} · ${last.durationMs ? clockMs(last.durationMs) : "—"}`
+      : "—";
+    const lastResultLabel = room.lastSessionStatus
+      ? [
+          t("monitor.status." + room.lastSessionStatus, { defaultValue: room.lastSessionStatus }),
+          room.lastSessionReason
+            ? t("monitor.reason." + room.lastSessionReason, { defaultValue: room.lastSessionReason })
+            : null,
+          room.lastSessionFileSize > 0 ? size(room.lastSessionFileSize) : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "—";
+    const roomTags = parseTags(room.tags);
     return createPortal(
       <div className="fixed inset-0 z-50 flex justify-end">
         <button
@@ -887,19 +1164,21 @@ export default function MonitorPage({
             <div className="min-w-0">
               <h2 className="text-[14px] font-semibold text-ink">{t("monitor.recordDetail")}</h2>
               <p className="mt-0.5 truncate text-[11.5px] leading-4 text-muted">
-                {t("platformName." + room.platform)}
+                {t("platformName." + room.platform)} · {room.roomKey}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setSelectedId(null)}
-              aria-label={t("monitor.closeDetail")}
-              className="focus-ring -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
-            >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-                <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
-              </svg>
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setSelectedId(null)}
+                aria-label={t("monitor.closeDetail")}
+                className="focus-ring -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                  <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
           </div>
           <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
             <button
@@ -960,17 +1239,218 @@ export default function MonitorPage({
               <Avatar room={room} size={20} />
               <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">{room.hostName || "—"}</span>
             </div>
-            <p className="mt-1.5 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
-              {room.canonicalUrl}
-            </p>
+            <div className="mt-1.5 flex items-center gap-2">
+              <p className="min-w-0 flex-1 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
+                {room.canonicalUrl}
+              </p>
+              <button
+                type="button"
+                onClick={() => void copyText(room.canonicalUrl)}
+                aria-label={t("common.copy")}
+                title={t("common.copy")}
+                className="focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                  <rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1.4" />
+                  <path d="M10.8 5.2V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.6a1.4 1.4 0 0 0 1.4 1.4h1.4" />
+                </svg>
+              </button>
+            </div>
+            {roomTags.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {roomTags.map((tag) => (
+                  <span key={tag} className="rounded-[4px] bg-raised px-1.5 py-0.5 text-[10.5px] text-muted">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {room.note ? (
+              <p className="mt-2 whitespace-pre-wrap rounded-[6px] bg-raised/60 px-2 py-1.5 text-[11.5px] leading-4 text-muted">
+                {room.note}
+              </p>
+            ) : null}
+
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2">
+              <Button
+                size="md"
+                variant="primary"
+                className="w-full"
+                disabled={busy || (!room.isLive && !isRecording)}
+                loading={busy && busyAction === "watch"}
+                onClick={() => void openWatch(room.id)}
+              >
+                {t("monitor.watch")}
+              </Button>
+              <Button
+                size="md"
+                variant={isRecording ? "recording" : "secondary"}
+                className="w-full"
+                disabled={busy || (!room.isLive && !isRecording)}
+                loading={busy && busyAction === "record"}
+                onClick={() => toggleRecording(view)}
+              >
+                {isRecording ? t("monitor.stopRecord") : t("monitor.startRecord")}
+              </Button>
+              <Button
+                size="md"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => refreshRoom(room.id)}
+              >
+                {t("common.refresh")}
+              </Button>
+              <DropdownMenu
+                label={t("monitor.more")}
+                ariaLabel={t("monitor.more")}
+                icon={
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                    <circle cx="3" cy="8" r="1.3" />
+                    <circle cx="8" cy="8" r="1.3" />
+                    <circle cx="13" cy="8" r="1.3" />
+                  </svg>
+                }
+                iconOnly
+                variant="bare"
+                size="sm"
+                align="end"
+                items={[
+                  {
+                    key: "copy-key",
+                    label: t("monitor.copyRoomKey"),
+                    onSelect: () => void copyText(room.roomKey),
+                  },
+                  {
+                    key: "browser",
+                    label: t("monitor.openBrowser"),
+                    onSelect: () => void openRoomUrl(room.canonicalUrl),
+                  },
+                  {
+                    key: "media",
+                    label: t("monitor.openMedia"),
+                    disabled: !onOpenMedia,
+                    separatorBefore: true,
+                    onSelect: () => onOpenMedia?.(room.id),
+                  },
+                  {
+                    key: "tasks",
+                    label: t("monitor.openTasks"),
+                    disabled: !onOpenTasks,
+                    onSelect: () => onOpenTasks?.(room.id),
+                  },
+                ]}
+              />
+            </div>
+
+            {recording ? (
+              <>
+                <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
+                  {t("monitor.currentRecording")}
+                  <InfoTip content={t("monitor.tip.currentRecording")} />
+                </h3>
+                <div className="sticky top-0 z-10 mt-2 animate-fade-rise overflow-hidden rounded-[8px] border border-rec/20 bg-surface/95 backdrop-blur">
+                  <div className="flex items-center gap-3 px-3 py-2.5">
+                    <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-rec" />
+                    <div className="min-w-0 flex-1">
+                      <div className="tnum text-[13px] font-medium text-ink">
+                        <LiveDuration startedAt={recording.startedAt} />
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] text-faint">
+                        {recording.quality || "—"} · {recording.line || t("monitor.lineAuto")}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 border-t border-rec/15 px-3 py-2">
+                    <span className="shrink-0 text-[11.5px] text-faint">{t("monitor.recordingFile")}</span>
+                    <span
+                      className="min-w-0 flex-1 truncate text-right text-[11.5px] text-ink-soft"
+                      title={recording.filePath}
+                    >
+                      {recordingFile || "—"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void revealSession(recording.sessionId)}
+                      aria-label={t("monitor.reveal")}
+                      title={t("monitor.reveal")}
+                      className="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                        <path
+                          d="M1.8 4.6a1 1 0 0 1 1-1h3l1.4 1.5h5a1 1 0 0 1 1 1v5.7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4.6Z"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                  <RecordingUsageRows sessionId={recording.sessionId} />
+                </div>
+              </>
+            ) : null}
+
+            <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
+              {t("monitor.monitoring")}
+              <InfoTip content={t("monitor.tip.monitoring")} />
+            </h3>
+            <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-ink-soft">{t("monitor.autoRecord")}</div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-faint">{t("monitor.addAutoRecordHint")}</p>
+                </div>
+                <Switch
+                  checked={room.autoRecord}
+                  disabled={busy}
+                  onChange={(next) =>
+                    void run(room.id, async () => {
+                      await roomSetAutoRecord(room.id, next);
+                      notify.success(
+                        next ? t("monitor.autoRecordEnabled") : t("monitor.autoRecordDisabled"),
+                      );
+                    })
+                  }
+                  label={t("monitor.autoRecord")}
+                />
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-ink-soft">{t("monitor.addMonitor")}</div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-faint">
+                    {room.monitorPaused ? t("monitor.statusPaused") : t("monitor.addMonitorHint")}
+                  </p>
+                </div>
+                <Switch
+                  checked={!room.monitorPaused}
+                  disabled={busy}
+                  onChange={(next) => void run(room.id, () => roomSetMonitor(room.id, !next))}
+                  label={t("monitor.addMonitor")}
+                />
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="shrink-0 text-[11.5px] text-faint">{t("monitor.lastChecked")}</span>
+                <span
+                  className="min-w-0 flex-1 truncate text-right text-[12px] text-ink-soft"
+                  title={room.lastCheckedAt ? datetime(room.lastCheckedAt) : undefined}
+                >
+                  {room.lastCheckedAt ? timeAgo(room.lastCheckedAt, locale) : "—"}
+                </span>
+              </div>
+              <MonitorDiagnostics
+                roomId={room.id}
+                roomLabel={`${room.hostName || room.roomKey} · ${room.title || room.roomKey}`}
+                lastCheckedAt={room.lastCheckedAt}
+                error={view.error}
+                onCopy={(text) => void copyText(text)}
+              />
+            </div>
 
             <h3 className="mt-5 text-[11.5px] font-medium text-muted">{t("monitor.roomInfo")}</h3>
             <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
               {[
                 { label: t("monitor.colArea"), value: room.areaName ?? "—" },
+                { label: t("monitor.statOnline"), value: room.online ? compactNumber(room.online, locale) : "—" },
                 { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
-                { label: t("monitor.detailRecorded"), value: size(recorded) },
-                { label: t("monitor.lastRecorded"), value: last ? datetime(last.startedAt) : "—" },
+                { label: t("monitor.detailRecorded"), value: recordedLabel },
               ].map((item, index) => (
                 <div
                   key={item.label}
@@ -980,9 +1460,73 @@ export default function MonitorPage({
                   <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">{item.value}</span>
                 </div>
               ))}
+              <div className="flex items-center gap-2 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.lastRecorded")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">{lastLabel}</span>
+                {last ? (
+                  <button
+                    type="button"
+                    onClick={() => void revealSession(last.id)}
+                    aria-label={t("monitor.reveal")}
+                    title={t("monitor.reveal")}
+                    className="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                      <path
+                        d="M1.8 4.6a1 1 0 0 1 1-1h3l1.4 1.5h5a1 1 0 0 1 1 1v5.7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4.6Z"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                ) : null}
+              </div>
             </div>
 
-            <h3 className="mt-5 text-[11.5px] font-medium text-muted">{t("monitor.panelSettings")}</h3>
+            <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
+              {t("monitor.recordingStats")}
+              <InfoTip content={t("monitor.tip.recordingStats")} />
+            </h3>
+            <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
+              <div className="flex items-center gap-3 px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.totalDuration")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">
+                  {drawerSummary ? clockMs(drawerSummary.totalDurationMs) : "—"}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.averageDuration")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">
+                  {drawerSummary && drawerSummary.total > 0
+                    ? clockMs(Math.round(drawerSummary.totalDurationMs / drawerSummary.total))
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.successRate")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">
+                  {drawerSummary && drawerSummary.total > 0
+                    ? `${Math.round(((drawerSummary.total - drawerSummary.failedCount) / drawerSummary.total) * 100)}%`
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.recent7d")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">
+                  {drawerSummary
+                    ? `${t("monitor.sessionCount", { n: drawerSummary.recentCount })} · ${clockMs(drawerSummary.recentDurationMs)} · ${size(drawerSummary.recentBytes)}`
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.lastResult")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">{lastResultLabel}</span>
+              </div>
+            </div>
+
+            <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
+              {t("monitor.panelSettings")}
+              <InfoTip content={t("monitor.tip.panelSettings")} />
+            </h3>
             <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
               <div className="flex items-center gap-3 px-3 py-2">
                 <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.quality")}</span>
@@ -991,6 +1535,17 @@ export default function MonitorPage({
                   size="md"
                   disabled={busy}
                   onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
+                  options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
+                  className="min-w-0 flex-1 justify-between"
+                />
+              </div>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.viewQuality")}</span>
+                <SelectMenu
+                  value={String(room.viewQn)}
+                  size="md"
+                  disabled={busy}
+                  onChange={(next) => void run(room.id, () => roomSetQuality(room.id, room.recordQn, Number(next)))}
                   options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
                   className="min-w-0 flex-1 justify-between"
                 />
@@ -1005,23 +1560,30 @@ export default function MonitorPage({
                   options={lineOptions}
                   className="min-w-0 flex-1 justify-between"
                 />
+                <button
+                  type="button"
+                  onClick={() => void loadLines(room.id, room.recordQn)}
+                  disabled={lineBusy || busy}
+                  aria-label={t("monitor.lineLoad")}
+                  title={lineBusy ? t("common.loading") : t("monitor.lineLoad")}
+                  className="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink disabled:opacity-40"
+                >
+                  {lineBusy ? (
+                    <span className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-line-strong border-t-accent" />
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                      <path d="M13.2 8a5.2 5.2 0 1 1-1.5-3.7" strokeLinecap="round" />
+                      <path d="M13.5 2.8v3.2h-3.2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </button>
               </div>
             </div>
-            {lines === null ? (
-              <button
-                type="button"
-                onClick={() => void loadLines(room.id, room.recordQn)}
-                className="focus-ring mt-2 inline-flex items-center gap-1.5 rounded-ctl px-1 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft"
-              >
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-                  <path d="M13.2 8a5.2 5.2 0 1 1-1.5-3.7" strokeLinecap="round" />
-                  <path d="M13.5 2.8v3.2h-3.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                {lineBusy ? t("common.loading") : t("monitor.lineLoad")}
-              </button>
-            ) : lines.length === 0 ? (
+            {lines?.length === 0 ? (
               <span className="mt-2 block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
             ) : null}
+
+            <RoomRules key={room.id} room={room} busy={busy} />
           </div>
         </aside>
       </div>,
@@ -1112,9 +1674,10 @@ export default function MonitorPage({
 
       <PageToolbar className="pt-4">
         <PageChip
-          active={platform === "all" && !onlyRecording}
+          active={platform === "all" && tag === "all" && !onlyRecording}
           onClick={() => {
             setPlatform("all");
+            setTag("all");
             setOnlyRecording(false);
           }}
         >
@@ -1134,6 +1697,23 @@ export default function MonitorPage({
             label: item.label,
             hint: String(item.count),
           }))}
+        />
+        <SelectMenu
+          variant="chip"
+          align="start"
+          active={tag !== "all"}
+          value={tag}
+          onChange={setTag}
+          placeholder={tagLabel}
+          disabled={tagOptions.length === 0}
+          options={[
+            { value: "all", label: t("monitor.allTags"), hint: String(views.length) },
+            ...tagOptions.map((item) => ({
+              value: item.value,
+              label: item.label,
+              hint: String(item.count),
+            })),
+          ]}
         />
         <PageChip active={onlyRecording} onClick={() => setOnlyRecording((on) => !on)}>
           {t("monitor.onlyRecording")}
@@ -1183,6 +1763,8 @@ export default function MonitorPage({
               />
               <span>{t("monitor.colPlatform")}</span>
               <span>{t("monitor.colHost")}</span>
+              <span>{t("monitor.colNote")}</span>
+              <span>{t("monitor.colTags")}</span>
               <span>{t("monitor.colQuality")}</span>
               <span className="text-right">{t("monitor.colDuration")}</span>
               <span className="text-right">{t("monitor.colActions")}</span>

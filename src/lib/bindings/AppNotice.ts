@@ -8,4 +8,8 @@
  * credential_expired（登录态复验失败）。
  * 非录制类的 room_id 为空串，host_name 放房间名或账号名。
  */
-export type AppNotice = { kind: string, roomId: string, hostName: string, detail: string | null, };
+export type AppNotice = { kind: string, roomId: string, hostName: string, detail: string | null,
+/**
+ * 单房间通知关闭时为 true；前端据此静默本条通知。
+ */
+suppress: boolean, };

@@ -52,6 +52,9 @@ export default function App() {
   const themeTimer = useRef<number | null>(null);
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
+  // 监控详情跳到媒体库/任务页时带的房间筛选；nonce 让重复跳转也生效。
+  const [mediaSeed, setMediaSeed] = useState<{ roomId: string; nonce: number } | null>(null);
+  const [taskSeed, setTaskSeed] = useState<{ roomId: string; nonce: number } | null>(null);
   // 通知开关按事件分三类：录制、异常、登录失效。
   const notifyRef = useRef<Settings | null>(null);
   // 退出被任务拦下：null = 没有提示；[] = 任务已清空，可以安全退出。
@@ -252,6 +255,7 @@ export default function App() {
         if (!granted) granted = (await requestPermission()) === "granted";
 
         const off = await onAppNotice((notice) => {
+          if (notice.suppress) return;
           const current = notifyRef.current;
           if (!current) return;
           const allowed =
@@ -410,6 +414,14 @@ export default function App() {
               if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now(), kind });
               setTab("watch");
             }}
+            onOpenMedia={(roomId) => {
+              setMediaSeed({ roomId, nonce: Date.now() });
+              setTab("media");
+            }}
+            onOpenTasks={(roomId) => {
+              setTaskSeed({ roomId, nonce: Date.now() });
+              setTab("tasks");
+            }}
           />
         ) : tab === "watch" ? (
           <WatchPage
@@ -418,9 +430,9 @@ export default function App() {
             onImmersiveChange={setImmersive}
           />
         ) : tab === "media" ? (
-          <MediaPage />
+          <MediaPage seed={mediaSeed} onSeedApplied={() => setMediaSeed(null)} />
         ) : (
-          <TasksPage />
+          <TasksPage seed={taskSeed} onSeedApplied={() => setTaskSeed(null)} />
         )}
       </motion.main>
 

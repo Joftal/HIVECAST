@@ -457,6 +457,7 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                         room_id: String::new(),
                         host_name: account_name,
                         detail: Some("bilibili".into()),
+                        suppress: false,
                     };
                     if let Err(err) = app.emit(crate::recorder::EVENT_APP_NOTICE, notice) {
                         tracing::warn!(platform = "bilibili", error = %err, "账号过期通知发送失败");

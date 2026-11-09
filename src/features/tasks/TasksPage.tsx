@@ -58,15 +58,31 @@ function canCancel(task: TaskRecord): boolean {
   );
 }
 
-export default function TasksPage() {
+export default function TasksPage({
+  seed,
+  onSeedApplied,
+}: {
+  seed?: { roomId: string; nonce: number } | null;
+  onSeedApplied?: () => void;
+}) {
   const { t } = useTranslation();
   const [board, setBoard] = useState<TaskBoard>({ running: [], history: [] });
   const [busyId, setBusyId] = useState<string | null>(null);
   const notify = useNotify();
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState<"all" | "running" | "history">("all");
+  const [roomFilter, setRoomFilter] = useState<string | null>(null);
   // 2 秒轮询失败时不重复刷错误 toast；恢复成功后重新允许下一次提示。
   const loadErrorShown = useRef(false);
+
+  useEffect(() => {
+    if (!seed) return;
+    setRoomFilter(seed.roomId);
+    setFilter("all");
+    onSeedApplied?.();
+    // 只响应新的跳转请求，避免 onSeedApplied 每次渲染换引用导致循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.nonce]);
 
   const load = useCallback(async () => {
     if (!isTauri()) {
@@ -100,13 +116,21 @@ export default function TasksPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const running = useMemo(
+  const runningAll = useMemo(
     () => [...board.running].sort((a, b) => b.startedAt - a.startedAt),
     [board.running],
   );
-  const history = useMemo(
+  const historyAll = useMemo(
     () => [...board.history].sort((a, b) => b.startedAt - a.startedAt),
     [board.history],
+  );
+  const running = useMemo(
+    () => (roomFilter ? runningAll.filter((task) => task.roomId === roomFilter) : runningAll),
+    [runningAll, roomFilter],
+  );
+  const history = useMemo(
+    () => (roomFilter ? historyAll.filter((task) => task.roomId === roomFilter) : historyAll),
+    [historyAll, roomFilter],
   );
 
   const cancel = async (task: TaskRecord) => {
@@ -138,6 +162,12 @@ export default function TasksPage() {
           {t("tasks.history")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{history.length}</span>
         </PageChip>
+        {roomFilter ? (
+          <PageChip active onClick={() => setRoomFilter(null)}>
+            {t("tasks.filterRoom")}
+            <span className="ml-1.5 opacity-60">×</span>
+          </PageChip>
+        ) : null}
         <div className="ml-auto flex items-center gap-2">
           <Button size="lg" variant="secondary" onClick={() => void refreshTasks()}>
             {t("tasks.refresh")}

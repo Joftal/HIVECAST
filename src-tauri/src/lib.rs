@@ -213,10 +213,12 @@ pub fn run() {
             commands::ffmpeg_status,
             commands::demo_stream,
             commands::rooms_list,
+            commands::monitor_status,
             commands::room_add,
             commands::room_remove,
             commands::room_refresh,
             commands::room_set_auto_record,
+            commands::room_set_rules,
             commands::room_set_quality,
             commands::room_lines,
             commands::room_set_line,
@@ -225,6 +227,7 @@ pub fn run() {
             commands::record_stop,
             commands::sessions_list,
             commands::session_summary,
+            commands::recording_usage,
             commands::view_slots,
             commands::view_open,
             commands::view_close,
@@ -270,6 +273,7 @@ pub fn run() {
             commands::close_cancel_quit,
             commands::logs_status,
             commands::logs_open,
+            commands::open_url,
             commands::ui_log
         ])
         .build(tauri::generate_context!())

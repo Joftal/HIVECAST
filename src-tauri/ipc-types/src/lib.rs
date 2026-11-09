@@ -86,6 +86,25 @@ pub struct RoomRecord {
     pub last_session_started_at: Option<i64>,
     #[ts(type = "number")]
     pub last_session_duration_ms: i64,
+    /// 最近一场录制的最终状态、原因与文件大小；详情抽屉用来显示结果。
+    pub last_session_status: Option<String>,
+    pub last_session_reason: Option<String>,
+    #[ts(type = "number")]
+    pub last_session_file_size: i64,
+    /// 主播本地备注（可当成本地 ID）与标签（逗号分隔）。
+    pub note: String,
+    pub tags: String,
+    /// 单房间自动录制规则：标题必须包含 / 不能包含的关键词（逗号分隔）。
+    pub title_include: Option<String>,
+    pub title_exclude: Option<String>,
+    /// 单房间分片覆盖；None = 跟随全局设置，0 = 关闭该项。
+    #[ts(type = "number")]
+    pub split_max_duration_sec: Option<i64>,
+    #[ts(type = "number")]
+    pub split_max_size_mb: Option<i64>,
+    /// 单房间通知覆盖；None = 跟随全局设置。
+    pub notify_live: Option<bool>,
+    pub notify_error: Option<bool>,
     #[ts(type = "number")]
     pub created_at: i64,
     #[ts(type = "number")]
@@ -117,6 +136,48 @@ pub struct SessionSummary {
     pub total_bytes: i64,
     #[ts(type = "number")]
     pub mergeable: i64,
+    #[ts(type = "number")]
+    pub total_duration_ms: i64,
+    /// 最近 7 天的场次、时长与体积。
+    #[ts(type = "number")]
+    pub recent_count: i64,
+    #[ts(type = "number")]
+    pub recent_duration_ms: i64,
+    #[ts(type = "number")]
+    pub recent_bytes: i64,
+    /// 失败/中断场次，用于成功率。
+    #[ts(type = "number")]
+    pub failed_count: i64,
+}
+
+/// 正在录制的文件大小与所在磁盘剩余空间；详情抽屉轮询显示。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RecordingUsage {
+    #[ts(type = "number")]
+    pub bytes: i64,
+    #[ts(type = "number")]
+    pub disk_free: i64,
+}
+
+/// 监控排期快照：详情抽屉显示下次检查、退避与失败计数。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct MonitorStatus {
+    pub room_id: String,
+    #[ts(type = "number")]
+    pub next_check_in_secs: i64,
+    pub inflight: bool,
+    pub backoff: bool,
+    #[ts(type = "number")]
+    pub throttle_streak: u32,
+    #[ts(type = "number")]
+    pub error_count: u32,
+    #[ts(type = "number")]
+    pub last_checked_at: Option<i64>,
+    pub last_outcome: Option<String>,
 }
 
 /// 监控页列表项 = 房间 + 实时录制状态 + 最近的错误。
@@ -217,6 +278,8 @@ pub struct AppNotice {
     pub room_id: String,
     pub host_name: String,
     pub detail: Option<String>,
+    /// 单房间通知关闭时为 true；前端据此静默本条通知。
+    pub suppress: bool,
 }
 
 /// 观看槽位快照：每个槽位一条独立的转封装管道。

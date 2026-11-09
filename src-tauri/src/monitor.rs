@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
@@ -71,6 +71,9 @@ struct Schedule {
     /// 不能拿 next_at 和 now+interval 直接比：成功排期里带着 +10% 抖动，
     /// 正抖动会让长间隔每次都被误判成「旧排期太远」而被重置（G7）。
     interval_secs: i64,
+    /// 最近一次结果返回的墙钟时间与分类，详情抽屉做诊断展示。
+    last_checked_at: Option<i64>,
+    last_outcome: Option<&'static str>,
 }
 
 impl Default for Schedule {
@@ -83,9 +86,14 @@ impl Default for Schedule {
             inflight: false,
             backoff: false,
             interval_secs: 0,
+            last_checked_at: None,
+            last_outcome: None,
         }
     }
 }
+
+/// 监控排期快照：命令层读取，详情抽屉轮询显示下次检查与退避。
+pub type MonitorStatusMap = Arc<Mutex<HashMap<String, hivecast_ipc::MonitorStatus>>>;
 
 /// 间隔被调小后，旧排期不要继续拖几分钟。只在「变小」时重排：
 /// 调大间隔时让当前这一拍按旧节奏走完即可，下一拍自然按新间隔推进。
@@ -108,7 +116,13 @@ enum Outcome {
     Failed,
 }
 
-pub fn spawn(app: AppHandle, db: Arc<Db>, broker: Arc<StreamBroker>, recorder: Arc<Recorder>) {
+pub fn spawn(
+    app: AppHandle,
+    db: Arc<Db>,
+    broker: Arc<StreamBroker>,
+    recorder: Arc<Recorder>,
+    statuses: MonitorStatusMap,
+) {
     tokio::spawn(async move {
         // 启动后先等 2 秒，避免和窗口首帧抢资源。
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -147,6 +161,7 @@ pub fn spawn(app: AppHandle, db: Arc<Db>, broker: Arc<StreamBroker>, recorder: A
                 &mut rooms_cache,
                 base_secs,
             );
+            snapshot_statuses(&schedule, &statuses);
             tokio::time::sleep(TICK).await;
         }
     });
@@ -158,6 +173,28 @@ pub fn room_ref(room: &hivecast_ipc::RoomRecord) -> RoomRef {
         room_key: room.room_key.clone(),
         canonical_url: room.canonical_url.clone(),
         input: room.canonical_url.clone(),
+    }
+}
+
+/// 每秒把排期快照写给命令层；详情抽屉只读这一份，不直接碰调度内部。
+fn snapshot_statuses(schedule: &HashMap<String, Schedule>, statuses: &MonitorStatusMap) {
+    let now = Instant::now();
+    let mut guard = statuses.lock().expect("监控状态锁被污染");
+    guard.clear();
+    for (id, entry) in schedule {
+        guard.insert(
+            id.clone(),
+            hivecast_ipc::MonitorStatus {
+                room_id: id.clone(),
+                next_check_in_secs: entry.next_at.saturating_duration_since(now).as_secs() as i64,
+                inflight: entry.inflight,
+                backoff: entry.backoff,
+                throttle_streak: entry.throttle_streak,
+                error_count: entry.error_count,
+                last_checked_at: entry.last_checked_at,
+                last_outcome: entry.last_outcome.map(str::to_string),
+            },
+        );
     }
 }
 
@@ -187,6 +224,13 @@ fn apply(
     let now = Instant::now();
     entry.inflight = false;
     entry.interval_secs = base.as_secs() as i64;
+    entry.last_checked_at = Some(crate::db::now_ts());
+    entry.last_outcome = Some(match outcome {
+        Outcome::Ok => "ok",
+        Outcome::Throttled => "throttled",
+        Outcome::Retry(_) => "retry",
+        Outcome::Failed => "failed",
+    });
     match outcome {
         Outcome::Ok => {
             entry.throttle_streak = 0;
@@ -488,6 +532,40 @@ pub(crate) fn should_stop_for_offline(confirmed: bool, flowing: bool) -> bool {
     confirmed && !flowing
 }
 
+/// 单房间自动录制规则：标题包含/排除关键词。
+pub(crate) fn auto_record_allowed(room: &hivecast_ipc::RoomRecord, room_name: &str) -> bool {
+    let title = room_name.to_lowercase();
+    let keywords = |value: &str| {
+        value
+            .split([',', '，'])
+            .map(str::trim)
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    if let Some(include) = room
+        .title_include
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let words = keywords(include);
+        if !words.is_empty() && !words.iter().any(|word| title.contains(word)) {
+            return false;
+        }
+    }
+    if let Some(exclude) = room
+        .title_exclude
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let words = keywords(exclude);
+        if words.iter().any(|word| title.contains(word)) {
+            return false;
+        }
+    }
+    true
+}
+
 /// 这一路录制实际在往哪个目录写（R5）。
 ///
 /// 正常都是录像文件所在目录；只有取不到父目录这种异常路径才退回当前媒体根。
@@ -563,6 +641,7 @@ async fn check_room(
                 // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位；
                 // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
                 if room.auto_record
+                    && auto_record_allowed(&room, &info.room_name)
                     && !recorder.is_recording(&room.id)
                     && !recorder.auto_suppressed(&room.id, info.started_at)
                     && !recorder.auto_blocked(&room.id, info.started_at)

@@ -126,6 +126,7 @@ fn notify_failure(app: &AppHandle, room: &RoomRecord, detail: &str) {
         room_id: room.id.clone(),
         host_name: room.host_name.clone(),
         detail: Some(detail.to_string()),
+        suppress: false,
     };
     tracing::warn!(room_id = %room.id, room = %room.host_name, detail, "观看失败，通知前端");
     if let Err(err) = app.emit(crate::recorder::EVENT_APP_NOTICE, notice) {

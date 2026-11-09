@@ -205,7 +205,13 @@ function PlatformChip({ platform, dark }: { platform: string; dark?: boolean }) 
   );
 }
 
-export default function MediaPage() {
+export default function MediaPage({
+  seed,
+  onSeedApplied,
+}: {
+  seed?: { roomId: string; nonce: number } | null;
+  onSeedApplied?: () => void;
+}) {
   const { t } = useTranslation();
 
   // —— 主播墙 ——
@@ -383,6 +389,18 @@ export default function MediaPage() {
     setConfirmDelete(false);
     void loadFiles(0);
   }, [loadFiles, hostId]);
+
+  // 从监控详情跳进来时直接打开该房间的录像列表。
+  useEffect(() => {
+    if (!seed) return;
+    setQuery("");
+    setKeyword("");
+    setPlatform("all");
+    setHostId(seed.roomId);
+    onSeedApplied?.();
+    // 只响应新的跳转请求，避免 onSeedApplied 每次渲染换引用导致循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.nonce]);
 
   // 启动后的崩溃恢复合并在后台跑完时会改文件路径/大小，重新拉一遍列表（I2）。
   useEffect(() => {

@@ -33,6 +33,8 @@ pub struct AppState {
     pub thumbs: Arc<crate::thumbs::Thumbs>,
     /// 正在跑的后处理任务（转封装、合并、弹幕导出），关闭程序时用来拦退出。
     pub jobs: Arc<crate::jobs::Jobs>,
+    /// 监控排期快照：详情抽屉轮询下次检查/退避/失败计数。
+    pub monitor_status: monitor::MonitorStatusMap,
     /// 演示流只生成一次，之后复用同一份缓存目录（真实会话在 M2 才会按槽位隔离）。
     pub demo: tokio::sync::Mutex<Option<StreamDescriptor>>,
     /// 启动时媒体目录不可用、被迫回落：(设置里的路径, 真正用的路径)。只在启动那一刻有值。
@@ -197,7 +199,14 @@ impl AppState {
         // 录制收尾时自己生成封面，媒体库不用再等 ffmpeg。
         recorder.attach_thumbs(thumbs.clone());
 
-        monitor::spawn(app.clone(), db.clone(), broker.clone(), recorder.clone());
+        let monitor_status = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        monitor::spawn(
+            app.clone(),
+            db.clone(),
+            broker.clone(),
+            recorder.clone(),
+            monitor_status.clone(),
+        );
 
         let info = AppInfo {
             name: "HIVECAST".into(),
@@ -230,6 +239,7 @@ impl AppState {
             danmaku,
             thumbs,
             jobs,
+            monitor_status,
             demo: tokio::sync::Mutex::new(None),
             media_fallback,
             log_fallback,

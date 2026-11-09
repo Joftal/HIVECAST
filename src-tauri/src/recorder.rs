@@ -221,6 +221,9 @@ struct Active {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     /// 开录时快照的后处理配置：中途改设置只影响新会话。
     post: crate::post::PostConfig,
+    /// 单房间通知覆盖，开录时解析成最终布尔值。
+    notify_live: bool,
+    notify_error: bool,
 }
 
 /// 录制命名策略：模板 + 两个开关，设置页保存后立即对新录制生效。
@@ -921,7 +924,14 @@ impl Recorder {
 
         // 开录时现取设置：画质/格式/编码偏好与分割策略只影响新会话，
         // 正在录的这一场不会因为用户中途改设置而换档（A3）。
-        let settings = crate::settings::load(&self.db);
+        let mut settings = crate::settings::load(&self.db);
+        // 单房间分片覆盖：Some 时覆盖全局；0 表示关闭该项。
+        if let Some(value) = room.split_max_duration_sec {
+            settings.split_max_duration_sec = value.clamp(0, u32::MAX as i64) as u32;
+        }
+        if let Some(value) = room.split_max_size_mb {
+            settings.split_max_size_mb = value.clamp(0, u32::MAX as i64) as u32;
+        }
         let record_qn =
             crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn);
         let prefs = StreamPrefs::from_settings(&settings, record_qn);
@@ -1127,6 +1137,8 @@ impl Recorder {
             title_checked: Instant::now(),
             stderr_tail,
             post,
+            notify_live: room.notify_live.unwrap_or(true),
+            notify_error: room.notify_error.unwrap_or(true),
         };
         let mut entry = Some(entry);
         let over_limit = {
@@ -1213,7 +1225,9 @@ impl Recorder {
         );
         self.clear_error(&room.id);
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-        emit_notice(app, "started", &room.id, &room.host_name, None);
+        if room.notify_live.unwrap_or(true) {
+            emit_notice(app, "started", &room.id, &room.host_name, None);
+        }
         if quality_fallback(record_qn, actual_qn) {
             // 显式选了档位却只拿到更低档：通常是 Cookie 失效、账号权限不够或平台限流。
             // 录制照常开始，不能因为画质不达标就放弃；但必须让用户知道实际档位。
@@ -1225,13 +1239,15 @@ impl Recorder {
                 quality = %candidate.name,
                 "实际画质低于所选档位，已按可用画质开录"
             );
-            emit_notice(
-                app,
-                "quality_fallback",
-                &room.id,
-                &room.host_name,
-                Some(format!("{record_qn} → {actual_qn}")),
-            );
+            if room.notify_live.unwrap_or(true) {
+                emit_notice(
+                    app,
+                    "quality_fallback",
+                    &room.id,
+                    &room.host_name,
+                    Some(format!("{record_qn} → {actual_qn}")),
+                );
+            }
         }
         if codec_fallback(prefs.codec, candidate.codec) {
             tracing::warn!(
@@ -2281,7 +2297,9 @@ impl Recorder {
 
         match (final_status, reason) {
             ("finished", "stream_ended") if confirmed_end => {
-                emit_notice(app, "ended", room_id, &active.host_name, None)
+                if active.notify_live {
+                    emit_notice(app, "ended", room_id, &active.host_name, None);
+                }
             }
             ("finished", "stream_ended") => tracing::warn!(
                 room_id,
@@ -2290,14 +2308,20 @@ impl Recorder {
                 "未能确认平台已下播，本次收尾不弹结束通知"
             ),
             ("aborted", "disk_full") => {
-                emit_notice(app, "disk_full", room_id, &active.host_name, None)
+                if active.notify_error {
+                    emit_notice(app, "disk_full", room_id, &active.host_name, None);
+                }
             }
             ("aborted", "disk_lost") => {
-                emit_notice(app, "disk_lost", room_id, &active.host_name, None)
+                if active.notify_error {
+                    emit_notice(app, "disk_lost", room_id, &active.host_name, None);
+                }
             }
             ("failed", _) => {
                 // 只提醒第 1 次与进入长冷却那一次；中间的重试不打扰用户。
-                if failed_streak == 1 || failed_streak == FAILED_STREAK_LIMIT {
+                if active.notify_error
+                    && (failed_streak == 1 || failed_streak == FAILED_STREAK_LIMIT)
+                {
                     emit_notice(app, "failed", room_id, &active.host_name, error.clone());
                 }
             }
@@ -3528,6 +3552,7 @@ fn emit_notice(
         room_id: room_id.to_string(),
         host_name: host_name.to_string(),
         detail,
+        suppress: false,
     };
     let _ = app.emit(EVENT_APP_NOTICE, notice);
 }
@@ -4562,6 +4587,17 @@ mod tests {
                 last_session_id: None,
                 last_session_started_at: None,
                 last_session_duration_ms: 0,
+                last_session_status: None,
+                last_session_reason: None,
+                last_session_file_size: 0,
+                note: String::new(),
+                tags: String::new(),
+                title_include: None,
+                title_exclude: None,
+                split_max_duration_sec: None,
+                split_max_size_mb: None,
+                notify_live: None,
+                notify_error: None,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -4698,6 +4734,17 @@ mod tests {
                 last_session_id: None,
                 last_session_started_at: None,
                 last_session_duration_ms: 0,
+                last_session_status: None,
+                last_session_reason: None,
+                last_session_file_size: 0,
+                note: String::new(),
+                tags: String::new(),
+                title_include: None,
+                title_exclude: None,
+                split_max_duration_sec: None,
+                split_max_size_mb: None,
+                notify_live: None,
+                notify_error: None,
                 created_at: 0,
                 updated_at: 0,
             },
