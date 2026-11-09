@@ -14,6 +14,10 @@ export type DanmakuPrefs = {
   speed: number;
   /** 弹幕占画面高度的比例 0.3 – 1 */
   area: number;
+  /** 密度倍率：1 正常 / 1.35 较多 / 1.8 重叠 */
+  density: number;
+  /** 字号是否随播放器尺寸缩放 */
+  scaleWithScreen: boolean;
 };
 
 export const DEFAULT_PREFS: DanmakuPrefs = {
@@ -21,6 +25,8 @@ export const DEFAULT_PREFS: DanmakuPrefs = {
   fontScale: 1,
   speed: 1,
   area: 0.72,
+  density: 1,
+  scaleWithScreen: true,
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -35,6 +41,8 @@ export function sanitizePrefs(input: Partial<DanmakuPrefs>): Partial<DanmakuPref
   if (input.fontScale !== undefined) out.fontScale = clamp(input.fontScale, 0.75, 1.6);
   if (input.speed !== undefined) out.speed = clamp(input.speed, 0.5, 2);
   if (input.area !== undefined) out.area = clamp(input.area, 0.3, 1);
+  if (input.density !== undefined) out.density = clamp(input.density, 0.75, 2);
+  if (input.scaleWithScreen !== undefined) out.scaleWithScreen = Boolean(input.scaleWithScreen);
   return out;
 }
 

@@ -59,6 +59,8 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
   const fontScale = useDanmakuPrefs((state) => state.fontScale);
   const speedScale = useDanmakuPrefs((state) => state.speed);
   const area = useDanmakuPrefs((state) => state.area);
+  const density = useDanmakuPrefs((state) => state.density);
+  const scaleWithScreen = useDanmakuPrefs((state) => state.scaleWithScreen);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -74,8 +76,10 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     let laneReadyAt: number[] = [];
     let raf = 0;
     let disposed = false;
-    // 用户改字号/速度/区域时整体重建绘制循环：参数少、重建便宜，比在循环里读 ref 更不容易出错。
-    const font = fontOf(fontScale);
+    // 用户改字号/速度/区域/密度时整体重建绘制循环：参数少、重建便宜，比在循环里读 ref 更不容易出错。
+    let font = fontOf(fontScale);
+    const perFrame = Math.max(2, Math.min(6, Math.round(3 * density)));
+    const maxItems = Math.round(MAX_ITEMS * Math.min(density, 1.6));
     const duration = DURATION / speedScale;
 
     const resize = () => {
@@ -86,6 +90,9 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // B 站式「弹幕随屏幕缩放」：以大画面 1280px 为 1x，小窗不缩得太小。
+      const screen = scaleWithScreen ? Math.max(0.8, Math.min(1.45, width / 1280)) : 1;
+      font = fontOf(fontScale * screen);
       lanes = Math.max(1, Math.min(MAX_LANES, Math.floor((height * area) / LANE_HEIGHT)));
       laneReadyAt = new Array(lanes).fill(0);
       // 尺寸变了就把在飞的清掉，避免坐标错位。
@@ -97,9 +104,9 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     resize();
 
     const spawn = (now: number) => {
-      // 一帧最多放 3 条，多了会同时涌出来糊成一片。
+      // 密度越高，每帧最多放出的条数越多，轨道间隙也越窄。
       let placed = 0;
-      while (queue.length > 0 && placed < 3) {
+      while (queue.length > 0 && placed < perFrame) {
         const message = queue.shift();
         if (!message) break;
         const text = labelOf(message);
@@ -118,12 +125,12 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
         }
         if (lane < 0) {
           // 轨道全满就丢掉这条：宁可少一条，也不让画面叠字。
-          if (queue.length > MAX_ITEMS) queue.length = 0;
+          if (queue.length > maxItems) queue.length = 0;
           continue;
         }
 
         const speed = (width + textWidth) / duration;
-        laneReadyAt[lane] = now + (textWidth + LANE_GAP) / speed;
+        laneReadyAt[lane] = now + (textWidth + LANE_GAP / density) / speed;
         items.push({
           text,
           color: colorOf(message.color),
@@ -136,7 +143,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
         });
         placed += 1;
       }
-      if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
+      if (items.length > maxItems) items.splice(0, items.length - maxItems);
     };
 
     const draw = (now: number) => {
@@ -191,7 +198,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       items.length = 0;
       queue.length = 0;
     };
-  }, [roomId, fontScale, speedScale, area]);
+  }, [roomId, fontScale, speedScale, area, density, scaleWithScreen]);
 
   return (
     <canvas

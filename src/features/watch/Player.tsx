@@ -1,13 +1,15 @@
 import Hls from "hls.js";
 import { Check } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { DropdownMenu, type DropdownItem } from "../../components/arc/dropdown-menu/dropdown-menu";
+import { cx } from "../../components/ui/Controls";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
+import "./player-controls.css";
 
 type Props = {
   url: string;
-  /** 0..1；0 表示静音。音量由外层持有，方便「一键全部静音」。 */
+  /** 0..1；0 表示静音。音量由外层持有，每个格子独立。 */
   volume: number;
   onVolumeChange: (volume: number) => void;
   onFatal?: (detail: string) => void;
@@ -46,6 +48,8 @@ type Props = {
   onMenuOpen?: () => void;
   /** 画面适配：contain 保留完整画面（默认），cover 铺满格子但会裁切。 */
   fit?: "contain" | "cover";
+  /** 切换画面填充/适应；不传就不显示对应按钮。 */
+  onToggleFit?: () => void;
 };
 
 type Stats = {
@@ -56,6 +60,150 @@ type Stats = {
 };
 
 const EMPTY_STATS: Stats = { width: 0, height: 0, kbps: 0, dropped: 0 };
+
+type PlayerButtonProps = {
+  children: ReactNode;
+  label: string;
+  title?: string;
+  active?: boolean;
+  disabled?: boolean;
+  size?: "sm" | "md";
+  tone?: "default" | "danger";
+  onClick?: () => void;
+  className?: string;
+};
+
+/** B 站式播放器图标按钮：30px 命中区、白色图标、浅色 hover 底。 */
+export function PlayerButton({
+  children,
+  label,
+  title,
+  active,
+  disabled,
+  size = "sm",
+  tone = "default",
+  onClick,
+  className,
+}: PlayerButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={title ?? label}
+      aria-pressed={active}
+      disabled={disabled}
+      className={cx(
+        "focus-ring pointer-events-auto relative flex shrink-0 items-center justify-center rounded-[6px] transition-colors duration-150",
+        size === "md" ? "h-9 w-9" : "h-[30px] w-[30px]",
+        tone === "danger"
+          ? "text-white/90 hover:bg-rec/15 hover:text-rec"
+          : "text-white/90 hover:bg-white/10 hover:text-white",
+        active && "bg-accent/20 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]",
+        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-white/90",
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+type PlayerRangeProps = {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+  ariaLabel: string;
+  ticks?: boolean;
+};
+
+/** B 站式水平滑杆：细轨道、圆形白色滑块、可选刻度。 */
+function PlayerRange({ value, min, max, step, onChange, ariaLabel, ticks }: PlayerRangeProps) {
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  return (
+    <div className="hv-range flex-1">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        aria-label={ariaLabel}
+        className="hv-range__input"
+        style={{ "--progress": `${pct}%` } as CSSProperties}
+      />
+      {ticks ? (
+        <div className="hv-range__ticks" aria-hidden>
+          {Array.from({ length: 5 }, (_, index) => (
+            <span key={index} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type VolumeSliderProps = {
+  volume: number;
+  onChange: (volume: number) => void;
+  label: string;
+};
+
+/** B 站式竖向音量滑杆：2px 轨道、4px 已填充段、12px 圆形滑块。 */
+function VolumeSlider({ volume, onChange, label }: VolumeSliderProps) {
+  const value = Math.min(1, Math.max(0, volume));
+  const setFrom = (element: HTMLElement, clientY: number) => {
+    const rect = element.getBoundingClientRect();
+    if (!rect.height) return;
+    onChange(Math.min(1, Math.max(0, 1 - (clientY - rect.top) / rect.height)));
+  };
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const jumps: Record<string, number> = {
+      ArrowUp: value + 0.05,
+      ArrowRight: value + 0.05,
+      ArrowDown: value - 0.05,
+      ArrowLeft: value - 0.05,
+      PageUp: value + 0.2,
+      PageDown: value - 0.2,
+      Home: 0,
+      End: 1,
+    };
+    if (!(event.key in jumps)) return;
+    event.preventDefault();
+    onChange(Math.min(1, Math.max(0, jumps[event.key])));
+  };
+  return (
+    <div
+      className="hv-volume"
+      role="slider"
+      tabIndex={0}
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(value * 100)}
+      aria-valuetext={`${Math.round(value * 100)}%`}
+      style={{ "--level": `${value * 100}%` } as CSSProperties}
+      onPointerDown={(event) => {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setFrom(event.currentTarget, event.clientY);
+      }}
+      onPointerMove={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) setFrom(event.currentTarget, event.clientY);
+      }}
+      onPointerUp={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      }}
+      onKeyDown={onKeyDown}
+    >
+      <div className="hv-volume__rail" />
+      <div className="hv-volume__fill" />
+      <div className="hv-volume__thumb" />
+    </div>
+  );
+}
 
 export default function Player({
   url,
@@ -76,6 +224,7 @@ export default function Player({
   onReload,
   onMenuOpen,
   fit = "contain",
+  onToggleFit,
 }: Props) {
   const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -100,7 +249,23 @@ export default function Player({
   const [volOpen, setVolOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [dmAdvanced, setDmAdvanced] = useState(false);
+  // B 站式自动隐藏：移动时出现，静止约 2.8s 后收起；面板/菜单打开时保持显示。
+  const [chromeVisible, setChromeVisible] = useState(false);
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const chromeTimer = useRef<number | undefined>(undefined);
+  const wakeChrome = () => {
+    setChromeVisible(true);
+    window.clearTimeout(chromeTimer.current);
+    chromeTimer.current = window.setTimeout(() => setChromeVisible(false), 2800);
+  };
+  const hideChrome = () => {
+    window.clearTimeout(chromeTimer.current);
+    setChromeVisible(false);
+  };
+  useEffect(() => () => window.clearTimeout(chromeTimer.current), []);
   const prefs = useDanmakuPrefs();
+  const chromeShown = chromeVisible || volOpen || prefsOpen || qualityOpen;
   const startAtRef = useRef(startAtSec ?? 0);
   startAtRef.current = startAtSec ?? 0;
 
@@ -351,7 +516,7 @@ export default function Player({
       qualityMenu.push({
         key: "line:" + (option.value ?? "auto"),
         label: `${t("watch.line")} · ${option.label}`,
-        icon: (lines.value ?? null) === option.value ? <Check size={14} /> : <span />,
+        icon: (lines.value ?? null) === option.value ? <Check size={14} className="text-accent-text" /> : <span />,
         onSelect: () => lines.onChange(option.value),
       });
     }
@@ -364,7 +529,7 @@ export default function Player({
         key: "qn:" + option.value,
         label: option.label,
         separatorBefore: firstQuality && hasLines,
-        icon: quality.value === option.value ? <Check size={14} /> : <span />,
+        icon: quality.value === option.value ? <Check size={14} className="text-accent-text" /> : <span />,
         onSelect: () => quality.onChange(option.value),
       });
       firstQuality = false;
@@ -373,13 +538,13 @@ export default function Player({
       key: "qn:auto",
       label: quality.actual ? t("watch.autoQuality", { q: quality.actual }) : t("watch.qn.auto"),
       separatorBefore: !firstQuality,
-      icon: quality.value === 0 ? <Check size={14} /> : <span />,
+      icon: quality.value === 0 ? <Check size={14} className="text-accent-text" /> : <span />,
       onSelect: () => quality.onChange(0),
     });
   }
 
   return (
-    <div ref={shellRef} className="group relative h-full w-full overflow-hidden bg-black">
+    <div ref={shellRef} onPointerEnter={wakeChrome} onPointerMove={wakeChrome} onPointerLeave={hideChrome} className="relative h-full w-full overflow-hidden bg-black">
       <video
         ref={videoRef}
         muted={muted}
@@ -415,7 +580,11 @@ export default function Player({
         <div
           className={[
             "pointer-events-none absolute z-10 rounded-[5px] bg-black/40 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/55 backdrop-blur-[2px]",
-            statsCorner === "bottom-left" ? "bottom-11 left-2" : "right-2 top-2",
+            statsCorner === "bottom-left"
+              ? vod
+                ? "bottom-[62px] left-2.5"
+                : "bottom-[46px] left-2.5"
+              : "right-2 top-2",
           ].join(" ")}
         >
           {stats.width + "x" + stats.height}
@@ -429,249 +598,341 @@ export default function Player({
         </div>
       )}
 
-      {/* 弹幕观感设置收在播放器内部：每个格子用自己的设置按钮打开，不再占用页面工具栏。 */}
+      {/* 弹幕设置：对齐 B 站官方面板（深色、粉色选中态、298px、底部主面板 + 高级设置）。 */}
       {prefsOpen ? (
-        <div className="absolute bottom-12 right-2 z-30 w-[236px] max-w-[calc(100%-1rem)] rounded-[10px] border border-white/12 bg-[#17171a]/98 p-3 text-white shadow-2xl backdrop-blur-md">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[11px] font-medium text-white/75">{t("watch.danmakuSettings")}</span>
-            <button
-              type="button"
-              onClick={() => setPrefsOpen(false)}
-              aria-label={t("watch.close")}
-              className="focus-ring flex h-5 w-5 items-center justify-center rounded-[4px] text-white/45 transition-colors hover:bg-white/12 hover:text-white"
-            >
-              <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-                <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-          <div className="grid gap-2.5">
-            {(
-              [
-                ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
-                ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
-                ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
-                ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
-              ] as const
-            ).map(([key, label, min, max, step, digits]) => (
-              <label key={key} className="grid gap-1">
-                <span className="flex items-baseline justify-between text-[10.5px] text-white/55">
-                  {label}
-                  <span className="font-mono text-[9.5px] tabular-nums text-white/35">
-                    {(prefs[key] as number).toFixed(digits)}
+        <div className="player-glass absolute bottom-[38px] right-3 z-30 w-[298px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-[4px] text-ink">
+          {dmAdvanced ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setDmAdvanced(false)}
+                className="flex h-8 w-full items-center gap-2 px-5 text-left text-[12px] text-ink transition-colors hover:bg-raised"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                  <path d="m10 3-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                {t("watch.danmakuAdvancedTitle")}
+              </button>
+              <div className="flex h-10 items-center border-t border-line px-5">
+                <button
+                  type="button"
+                  onClick={() => prefs.reset()}
+                  className="focus-ring text-[12px] text-muted transition-colors hover:text-ink"
+                >
+                  {t("watch.danmakuReset")}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="px-5 py-3">
+                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
+                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuArea")}</span>
+                  <PlayerRange
+                    value={prefs.area}
+                    min={0.3}
+                    max={1}
+                    step={0.05}
+                    onChange={(next) => prefs.set({ area: next })}
+                    ariaLabel={t("watch.danmakuArea")}
+                    ticks
+                  />
+                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
+                    {Math.round(prefs.area * 100)}%
                   </span>
-                </span>
-                <input
-                  type="range"
-                  min={min}
-                  max={max}
-                  step={step}
-                  value={prefs[key] as number}
-                  onChange={(event) => prefs.set({ [key]: Number(event.target.value) })}
-                  className="h-1 w-full cursor-pointer accent-accent"
-                />
-              </label>
-            ))}
-          </div>
-          <div className="mt-2 flex justify-end">
-            <button
-              type="button"
-              onClick={() => prefs.reset()}
-              className="focus-ring rounded-[5px] px-1.5 py-0.5 text-[10.5px] text-white/50 transition-colors hover:bg-white/10 hover:text-white"
-            >
-              {t("watch.danmakuReset")}
-            </button>
-          </div>
+                </div>
+
+                <div className="flex h-[34px] items-center">
+                  <div className="grid h-[30px] w-full grid-cols-3 overflow-hidden rounded-[3px] bg-raised text-[12px]">
+                    {[
+                      [t("watch.danmakuDensityNormal"), 1],
+                      [t("watch.danmakuDensityMore"), 1.35],
+                      [t("watch.danmakuDensityOverlap"), 1.8],
+                    ].map(([label, value], index) => {
+                      const active = Math.abs(prefs.density - (value as number)) < 0.05;
+                      return (
+                        <button
+                          key={label as string}
+                          type="button"
+                          onClick={() => prefs.set({ density: value as number })}
+                          className={[
+                            "focus-ring transition-colors",
+                            index > 0 ? "border-l border-line" : "",
+                            active ? "font-medium text-accent-text" : "text-muted hover:text-ink",
+                          ].join(" ")}
+                        >
+                          {label as string}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
+                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuOpacity")}</span>
+                  <PlayerRange
+                    value={prefs.opacity}
+                    min={0.3}
+                    max={1}
+                    step={0.05}
+                    onChange={(next) => prefs.set({ opacity: next })}
+                    ariaLabel={t("watch.danmakuOpacity")}
+                  />
+                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
+                    {Math.round(prefs.opacity * 100)}%
+                  </span>
+                </div>
+
+                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
+                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuFont")}</span>
+                  <PlayerRange
+                    value={prefs.fontScale}
+                    min={0.75}
+                    max={1.6}
+                    step={0.05}
+                    onChange={(next) => prefs.set({ fontScale: next })}
+                    ariaLabel={t("watch.danmakuFont")}
+                  />
+                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
+                    {Math.round(prefs.fontScale * 100)}%
+                  </span>
+                </div>
+
+                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
+                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuSpeed")}</span>
+                  <PlayerRange
+                    value={prefs.speed}
+                    min={0.5}
+                    max={2}
+                    step={0.1}
+                    onChange={(next) => prefs.set({ speed: next })}
+                    ariaLabel={t("watch.danmakuSpeed")}
+                    ticks
+                  />
+                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
+                    {prefs.speed < 0.85
+                      ? t("watch.danmakuSpeedSlow")
+                      : prefs.speed > 1.15
+                        ? t("watch.danmakuSpeedFast")
+                        : t("watch.danmakuSpeedMedium")}
+                  </span>
+                </div>
+
+                <div className="mt-2 flex">
+                  <button
+                    type="button"
+                    onClick={() => prefs.set({ scaleWithScreen: !prefs.scaleWithScreen })}
+                    aria-pressed={prefs.scaleWithScreen}
+                    className="focus-ring flex items-center gap-1.5 text-[12px]"
+                  >
+                    <span
+                      className={cx(
+                        "flex h-3 w-3 shrink-0 items-center justify-center rounded-[2px]",
+                        prefs.scaleWithScreen
+                          ? "bg-accent text-[var(--c-accent-ink)]"
+                          : "border border-line-strong bg-transparent",
+                      )}
+                    >
+                      {prefs.scaleWithScreen ? <Check size={9} strokeWidth={3} /> : null}
+                    </span>
+                    <span className={prefs.scaleWithScreen ? "text-accent-text" : "text-ink-soft"}>
+                      {t("watch.danmakuScaleWithScreen")}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setDmAdvanced(true)}
+                className="flex h-10 w-full items-center justify-between border-t border-line px-5 text-[12px] text-ink-soft transition-colors hover:bg-raised"
+              >
+                <span>{t("watch.danmakuAdvanced")}</span>
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                  <path d="m6 3 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </>
+          )}
         </div>
       ) : null}
 
-      {/* 控制条：结构对齐 B 站直播——细进度线在上、单行图标在下，悬停才浮出。 */}
-      <div className="absolute inset-x-0 bottom-0 z-20 select-none opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
-        <div className="bg-gradient-to-t from-black/85 via-black/55 to-transparent pb-0.5 pt-10">
-          {vod ? (
-            <div className="relative mx-2.5 flex h-4 items-center">
-              <div className="absolute inset-x-0 h-[3px] overflow-hidden rounded-full bg-white/20">
-                <div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: playbackPct + "%" }} />
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={durationMs ?? 0}
-                step={1000}
-                value={Math.round(Math.min(scrubMs ?? positionMs, durationMs ?? 0))}
-                onChange={(event) => scrub(Number(event.target.value))}
-                onPointerUp={commitScrub}
-                onKeyUp={commitScrub}
-                aria-label={t("media.progress")}
-                className="absolute inset-x-0 h-4 w-full cursor-pointer appearance-none bg-transparent opacity-0"
-              />
+      {/* 控制条：对齐 B 站网页直播：56px 渐变底、30px 图标、左右两组。 */}
+      <div
+        onPointerEnter={() => {
+          window.clearTimeout(chromeTimer.current);
+          setChromeVisible(true);
+        }}
+        onPointerLeave={wakeChrome}
+        onPointerMove={(event) => event.stopPropagation()}
+        className={cx(
+          "absolute inset-x-0 bottom-0 z-20 h-14 select-none bg-gradient-to-t from-black/70 to-transparent transition-[opacity,transform] duration-200",
+          chromeShown ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none translate-y-1 opacity-0",
+        )}
+      >
+        {vod ? (
+          <div className="absolute inset-x-3 top-1.5 flex h-3 items-center">
+            <div className="absolute inset-x-0 h-[3px] overflow-hidden rounded-full bg-white/15">
+              <div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: playbackPct + "%" }} />
             </div>
-          ) : (
-            <div className="mx-2.5 flex h-4 items-center">
-              <div className="relative h-[3px] w-full overflow-hidden rounded-full bg-white/[0.14]">
-                <div className="absolute inset-y-0 right-0 w-1/4 bg-gradient-to-l from-accent/80 via-accent/30 to-transparent" />
-              </div>
-            </div>
-          )}
+            <span
+              className="pointer-events-none absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow-[0_1px_6px_rgba(0,0,0,0.55)]"
+              style={{ left: `${playbackPct}%` }}
+            />
+            <input
+              type="range"
+              min={0}
+              max={durationMs ?? 0}
+              step={1000}
+              value={Math.round(Math.min(scrubMs ?? positionMs, durationMs ?? 0))}
+              onChange={(event) => scrub(Number(event.target.value))}
+              onPointerUp={commitScrub}
+              onKeyUp={commitScrub}
+              aria-label={t("media.progress")}
+              className="absolute inset-x-0 h-3 w-full cursor-pointer appearance-none bg-transparent opacity-0"
+            />
+          </div>
+        ) : null}
 
-          <div className="flex h-9 items-center gap-0.5 px-1.5 pb-1">
-            <button
-              type="button"
-              onClick={toggle}
-              aria-label={playing ? t("watch.paused") : t("watch.playing")}
-              className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white/85 transition-colors hover:bg-white/15 hover:text-white"
-            >
-              {playing ? (
-                <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-                  <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
-                  <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
+        <div className="absolute inset-x-0 bottom-[3px] flex h-9 items-center gap-1 px-3 [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">
+          <PlayerButton
+            label={playing ? t("watch.paused") : t("watch.playing")}
+            onClick={toggle}
+          >
+            {playing ? (
+              <svg width="20" height="20" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
+                <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
+              </svg>
+            )}
+          </PlayerButton>
+
+          <PlayerButton label={t("watch.reload")} onClick={reload}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+              <path d="M20 7.5A8.5 8.5 0 1 0 20.5 15" strokeLinecap="round" />
+              <path d="M20.5 3.8v5.2h-5.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </PlayerButton>
+
+          <div
+            className="relative flex shrink-0 items-center"
+            onMouseEnter={() => setVolOpen(true)}
+            onMouseLeave={() => setVolOpen(false)}
+            onFocusCapture={() => setVolOpen(true)}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setVolOpen(false);
+            }}
+          >
+            <PlayerButton label={muted ? t("watch.muted") : t("watch.audioOn")} onClick={toggleMute}>
+              {muted ? (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                  <path d="M13 5.5 8.5 9H5v6h3.5l4.5 3.5V5.5Z" strokeLinejoin="round" />
+                  <path d="m16.5 9.5 5 5M21.5 9.5l-5 5" strokeLinecap="round" />
                 </svg>
               ) : (
-                <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-                  <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                  <path d="M13 5.5 8.5 9H5v6h3.5l4.5 3.5V5.5Z" strokeLinejoin="round" />
+                  <path d="M16.2 9a4.5 4.5 0 0 1 0 6M18.8 6.6a8 8 0 0 1 0 10.8" strokeLinecap="round" />
                 </svg>
               )}
-            </button>
+            </PlayerButton>
+            {volOpen ? (
+              <div className="absolute bottom-full left-1/2 z-40 -translate-x-1/2 pb-1">
+                <div className="player-glass flex h-[110px] w-8 flex-col items-center rounded-[10px] px-1 py-1.5 text-ink">
+                  <span className="text-[10px] font-medium tabular-nums">{Math.round(volume * 100)}</span>
+                  <VolumeSlider volume={volume} onChange={onVolumeChange} label={t("watch.audioOn")} />
+                </div>
+              </div>
+            ) : null}
+          </div>
 
-            <button
-              type="button"
-              onClick={reload}
-              aria-label={t("watch.reload")}
-              title={t("watch.reload")}
-              className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                <path d="M13.2 6.4A5.4 5.4 0 1 0 13 9.6" strokeLinecap="round" />
-                <path d="M13.4 2.9v3.7H9.7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+          <span className="shrink-0 text-[12px] tabular-nums text-white/90">
+            {vod
+              ? clock(scrubMs ?? positionMs) + " / " + clock(durationMs ?? 0)
+              : clock(elapsed * 1000)}
+          </span>
 
-            <div
-              className="flex shrink-0 items-center"
-              onMouseEnter={() => setVolOpen(true)}
-              onMouseLeave={() => setVolOpen(false)}
-            >
-              <button
-                type="button"
-                onClick={toggleMute}
-                aria-label={muted ? t("watch.muted") : t("watch.audioOn")}
-                className={[
-                  "focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] transition-colors hover:bg-white/15",
-                  muted ? "text-white/55" : "text-white/85 hover:text-white",
-                ].join(" ")}
-              >
-                {muted ? (
-                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-                    <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
-                    <path d="M11.4 6.2 14 8.8M14 6.2l-2.6 2.6" strokeLinecap="round" />
-                  </svg>
-                ) : (
-                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-                    <path d="M8.6 2.9 4.9 5.7H2.4v4.6h2.5l3.7 2.8V2.9Z" strokeLinejoin="round" />
-                    <path d="M11.2 5.4a3.7 3.7 0 0 1 0 5.2M13.2 3.6a6.2 6.2 0 0 1 0 8.8" strokeLinecap="round" />
-                  </svg>
-                )}
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={Math.round(volume * 100)}
-                onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}
-                aria-label={t("watch.audioOn")}
-                className={[
-                  "h-1 cursor-pointer accent-accent transition-all duration-200",
-                  volOpen ? "w-16 opacity-100" : "w-0 opacity-0",
-                ].join(" ")}
+          <div className="ml-auto flex items-center gap-1">
+            {quality ? (
+              <DropdownMenu
+                variant="video"
+                side="top"
+                align="end"
+                label={qualityLabel ?? t("watch.qn.auto")}
+                ariaLabel={t("watch.quality")}
+                items={qualityMenu}
+                morphLabel={false}
+                className="w-[108px]"
+                onOpenChange={(open) => {
+                  setQualityOpen(open);
+                  if (open) onMenuOpen?.();
+                }}
               />
-            </div>
+            ) : null}
 
-            <span className="ml-1.5 shrink-0 font-mono text-[10.5px] tabular-nums text-white/65">
-              {vod
-                ? clock(scrubMs ?? positionMs) + " / " + clock(durationMs ?? 0)
-                : clock(elapsed * 1000)}
-            </span>
+            <PlayerButton label={t("watch.pip")} onClick={togglePip} disabled={!pipSupported}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                <rect x="12" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none" opacity="0.9" />
+              </svg>
+            </PlayerButton>
 
-            <div className="ml-auto flex items-center gap-0.5">
-              {quality ? (
-                <DropdownMenu
-                  variant="dark"
-                  align="end"
-                  label={qualityLabel ?? t("watch.qn.auto")}
-                  ariaLabel={t("watch.quality")}
-                  items={qualityMenu}
-                  morphLabel={false}
-                  className="max-w-[110px]"
-                  onOpenChange={(open) => {
-                    if (open) onMenuOpen?.();
-                  }}
-                />
-              ) : null}
+            <PlayerButton
+              label={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
+              active={danmakuEnabled}
+              disabled={!onToggleDanmaku}
+              onClick={onToggleDanmaku}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                <rect x="3" y="5" width="18" height="12" rx="2.5" />
+                <path d="M6.5 9.5h6M6.5 12.5h10" strokeLinecap="round" opacity="0.75" />
+                <circle cx="17" cy="9.5" r="1" fill="currentColor" stroke="none" />
+                {!danmakuEnabled ? <path d="M4 18.5 20 3.5" strokeLinecap="round" /> : null}
+              </svg>
+            </PlayerButton>
 
-              <button
-                type="button"
-                onClick={togglePip}
-                disabled={!pipSupported}
-                aria-label={t("watch.pip")}
-                title={t("watch.pip")}
-                className="focus-ring flex h-7 w-7 items-center justify-center rounded-[6px] text-white/70 transition-colors hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+            <PlayerButton
+              label={t("watch.danmakuSettings")}
+              active={prefsOpen}
+              onClick={() => {
+                if (!prefsOpen) setDmAdvanced(false);
+                setPrefsOpen(!prefsOpen);
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" opacity="0.65" />
+                <circle cx="8.5" cy="7" r="2" fill="currentColor" stroke="none" />
+                <circle cx="15.5" cy="12" r="2" fill="currentColor" stroke="none" />
+                <circle cx="10.5" cy="17" r="2" fill="currentColor" stroke="none" />
+              </svg>
+            </PlayerButton>
+
+            {onToggleFit ? (
+              <PlayerButton
+                label={fit === "cover" ? t("watch.fitContain") : t("watch.fitCover")}
+                active={fit === "cover"}
+                onClick={onToggleFit}
               >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-                  <rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6" />
-                  <rect x="8.2" y="8.2" width="5.2" height="4.4" rx="0.9" fill="currentColor" stroke="none" opacity="0.85" />
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                  <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                  {fit === "cover" ? (
+                    <rect x="6.5" y="7.5" width="11" height="9" rx="1" fill="currentColor" stroke="none" opacity="0.85" />
+                  ) : (
+                    <rect x="7.5" y="8.5" width="9" height="7" rx="1" opacity="0.75" />
+                  )}
                 </svg>
-              </button>
+              </PlayerButton>
+            ) : null}
 
-              <button
-                type="button"
-                onClick={onToggleDanmaku}
-                disabled={!onToggleDanmaku}
-                title={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
-                aria-pressed={danmakuEnabled}
-                className={[
-                  "focus-ring flex h-7 items-center justify-center rounded-[6px] px-1.5 text-[10px] font-medium leading-none transition-colors",
-                  danmakuEnabled
-                    ? "bg-white/15 text-white hover:bg-white/25"
-                    : "text-white/40 hover:bg-white/10 hover:text-white/70",
-                  onToggleDanmaku ? "" : "cursor-not-allowed opacity-40",
-                ].join(" ")}
-              >
-                {t("watch.danmakuShort")}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setPrefsOpen((open) => !open)}
-                aria-label={t("watch.danmakuSettings")}
-                title={t("watch.danmakuSettings")}
-                aria-pressed={prefsOpen}
-                className={[
-                  "focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] transition-colors",
-                  prefsOpen
-                    ? "bg-white/15 text-white"
-                    : "text-white/70 hover:bg-white/15 hover:text-white",
-                ].join(" ")}
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                  <path d="M2 4.6h12M2 8h12M2 11.4h12" strokeLinecap="round" opacity="0.55" />
-                  <circle cx="5.6" cy="4.6" r="1.5" fill="currentColor" stroke="none" />
-                  <circle cx="10.4" cy="8" r="1.5" fill="currentColor" stroke="none" />
-                  <circle cx="7" cy="11.4" r="1.5" fill="currentColor" stroke="none" />
-                </svg>
-              </button>
-
-              <button
-                type="button"
-                onClick={fullscreen}
-                aria-label={t("watch.fullscreen")}
-                title={t("watch.fullscreen")}
-                className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
-              >
-                <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                  <path d="M1.5 4.2V1.5h2.7M10.5 4.2V1.5H7.8M1.5 7.8v2.7h2.7M10.5 7.8v2.7H7.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </div>
+            <PlayerButton label={t("watch.fullscreen")} onClick={fullscreen}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </PlayerButton>
           </div>
         </div>
       </div>

@@ -9,7 +9,7 @@ import { useNotify } from "../../lib/notify";
 import AddRoomDialog from "../monitor/AddRoomDialog";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useSecondsLeft } from "../../lib/countdown";
-import Player from "./Player";
+import Player, { PlayerButton } from "./Player";
 import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
 import {
   buildTree,
@@ -1238,14 +1238,14 @@ function SlotCell({
         sounding ? "border-accent/50 shadow-[0_0_0_1px_rgba(255,180,58,0.16)]" : "border-white/10",
       ].join(" ")}
     >
-      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex h-8 items-center gap-1.5 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex h-9 items-center gap-2 bg-gradient-to-b from-black/55 via-black/20 to-transparent px-2.5 opacity-0 transition-opacity duration-200 [text-shadow:0_1px_2px_rgba(0,0,0,0.7)] group-hover:opacity-100 group-focus-within:opacity-100">
         <span
           onPointerDown={(event) => {
             if (count > 1) onDragStart(event);
           }}
           title={t("watch.dragHint")}
           className={[
-            "pointer-events-auto flex h-6 w-5 shrink-0 touch-none items-center justify-center rounded-[3px] text-white/45",
+            "pointer-events-auto flex h-7 w-5 shrink-0 touch-none items-center justify-center rounded-[4px] text-white/45 drop-shadow-[0_1px_1.5px_rgba(0,0,0,0.6)] transition-colors",
             count > 1 ? "cursor-grab hover:bg-white/10 hover:text-white active:cursor-grabbing" : "",
           ].join(" ")}
         >
@@ -1266,10 +1266,10 @@ function SlotCell({
             src={room.avatarUrl}
             alt=""
             referrerPolicy="no-referrer"
-            className="h-[18px] w-[18px] shrink-0 rounded-full object-cover ring-1 ring-white/20"
+            className="h-5 w-5 shrink-0 rounded-full object-cover ring-1 ring-white/20"
           />
         ) : (
-          <span className="h-[18px] w-[18px] shrink-0 rounded-full bg-white/15" />
+          <span className="h-5 w-5 shrink-0 rounded-full bg-white/15" />
         )}
         <div className="pointer-events-auto min-w-0 flex-1 leading-tight">
           <div className="truncate text-[11.5px] font-medium text-white/90 [text-shadow:0_1px_2px_rgba(0,0,0,0.5)]">
@@ -1287,14 +1287,13 @@ function SlotCell({
         ) : null}
 
         <span className="pointer-events-auto relative">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((open) => !open)}
-            aria-label={t("watch.cellMenu")}
-            className="focus-ring flex h-6 w-6 items-center justify-center rounded-[5px] text-white/50 transition-colors hover:bg-white/15 hover:text-white"
-          >
-            ⋯
-          </button>
+          <PlayerButton label={t("watch.cellMenu")} active={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+            <svg width="14" height="4" viewBox="0 0 14 4" fill="currentColor" aria-hidden>
+              <circle cx="2" cy="2" r="1.15" />
+              <circle cx="7" cy="2" r="1.15" />
+              <circle cx="12" cy="2" r="1.15" />
+            </svg>
+          </PlayerButton>
           {menuOpen ? (
             <>
               <button
@@ -1303,17 +1302,17 @@ function SlotCell({
                 onClick={() => setMenuOpen(false)}
                 className="fixed inset-0 z-30 cursor-default"
               />
-              <div className="absolute right-0 top-7 z-40 w-[168px] rounded-[6px] border border-white/12 bg-[#17171a]/98 p-1 text-[11px] text-white/80 shadow-2xl backdrop-blur-md">
+              <div className="player-glass absolute right-0 top-8 z-40 w-[172px] rounded-[12px] p-1 text-[11px] text-ink-soft">
                 <button
                   type="button"
                   onClick={() => {
                     setFill((value) => !value);
                     setMenuOpen(false);
                   }}
-                  className="flex w-full items-center justify-between rounded-[4px] px-2 py-1.5 text-left hover:bg-white/8"
+                  className="flex w-full items-center justify-between rounded-[6px] px-2 py-1.5 text-left transition-colors hover:bg-raised"
                 >
                   <span>{t("watch.fill")}</span>
-                  <span className="font-mono text-[10px] text-white/40">{fill ? "ON" : "OFF"}</span>
+                  <span className="text-[10px] text-faint">{fill ? "ON" : "OFF"}</span>
                 </button>
                 {count > 1 ? (
                   <button
@@ -1322,7 +1321,7 @@ function SlotCell({
                       onSwapNext();
                       setMenuOpen(false);
                     }}
-                    className="w-full rounded-[4px] px-2 py-1.5 text-left hover:bg-white/8"
+                    className="w-full rounded-[6px] px-2 py-1.5 text-left transition-colors hover:bg-raised"
                   >
                     {t("watch.swapNext")}
                   </button>
@@ -1333,7 +1332,7 @@ function SlotCell({
                     setMenuOpen(false);
                     onClose();
                   }}
-                  className="w-full rounded-[4px] px-2 py-1.5 text-left text-rec/90 hover:bg-rec/12"
+                  className="w-full rounded-[6px] px-2 py-1.5 text-left text-rec transition-colors hover:bg-rec/12"
                 >
                   {t("watch.remove")}
                 </button>
@@ -1342,16 +1341,11 @@ function SlotCell({
           ) : null}
         </span>
 
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={t("watch.close")}
-          className="pointer-events-auto focus-ring flex h-6 w-6 items-center justify-center rounded-[5px] text-white/50 transition-colors hover:bg-white/15 hover:text-white"
-        >
+        <PlayerButton label={t("watch.close")} tone="danger" onClick={onClose}>
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
             <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" strokeLinecap="round" />
           </svg>
-        </button>
+        </PlayerButton>
       </header>
 
       <div className="relative min-h-0 flex-1 bg-black">
@@ -1363,6 +1357,7 @@ function SlotCell({
             onVolumeChange={onVolume}
             statsCorner="bottom-left"
             fit={fill ? "cover" : "contain"}
+            onToggleFit={() => setFill((value) => !value)}
             onReload={onRetry}
             onMenuOpen={() => void loadLines()}
             quality={{

@@ -1,0 +1,128 @@
+/* Bilibili-style player controls: thin ranges, round thumbs, vertical volume rail. */
+
+.hv-range {
+  position: relative;
+  min-width: 0;
+  height: 14px;
+}
+
+.hv-range__input {
+  display: block;
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.hv-range__input:focus-visible {
+  outline: none;
+}
+
+.hv-range__input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--c-accent) 0 var(--progress),
+    color-mix(in oklab, var(--c-ink) 18%, transparent) var(--progress) 100%
+  );
+}
+.hv-range__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--c-ink) 10%, transparent), 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.hv-range__input:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--c-accent), 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.hv-range__input::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--c-ink) 18%, transparent);
+}
+.hv-range__input::-moz-range-progress {
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--c-accent);
+}
+.hv-range__input::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.hv-range__ticks {
+  position: absolute;
+  right: 1px;
+  bottom: 5px;
+  left: 1px;
+  display: flex;
+  height: 4px;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.hv-range__ticks span {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--c-ink) 35%, transparent);
+}
+.hv-range__ticks span:nth-child(3) {
+  background: transparent;
+}
+
+.hv-volume {
+  position: relative;
+  width: 12px;
+  height: 75px;
+  border-radius: 8px;
+  outline: none;
+  cursor: pointer;
+  touch-action: none;
+}
+.hv-volume:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 4px;
+}
+.hv-volume__rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--c-ink) 20%, transparent);
+}
+.hv-volume__fill {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 4px;
+  height: var(--level);
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: var(--c-accent);
+}
+.hv-volume__thumb {
+  position: absolute;
+  bottom: var(--level);
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, 50%);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}

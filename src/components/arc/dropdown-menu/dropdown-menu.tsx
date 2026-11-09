@@ -13,8 +13,8 @@ export interface DropdownMenuProps {
   label: string;
   items: DropdownItem[];
   icon?: ReactNode;
-  /** default: form field plate; bare: toolbar text button; chip: 与 PageChip 同尺寸的筛选芯片; dark: in-video overlay. */
-  variant?: "default" | "bare" | "chip" | "dark";
+  /** default: form field plate; bare: toolbar text button; chip: 与 PageChip 同尺寸的筛选芯片; dark: in-video overlay; video: in-video trigger with theme-aware menu. */
+  variant?: "default" | "bare" | "chip" | "dark" | "video";
   size?: "sm" | "md";
   align?: "start" | "center" | "end";
   side?: "top" | "right" | "bottom" | "left";
