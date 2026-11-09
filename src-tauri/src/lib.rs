@@ -156,6 +156,36 @@ pub fn run() {
                 }
             };
             if let Some(window) = app.get_webview_window("main") {
+                // 启动尺寸跟随当前显示器工作区，而不是固定 1320×860：
+                // 小屏不越界，大屏不显得空。仍受 tauri.conf 的 minWidth/minHeight 约束。
+                if let Ok(Some(monitor)) = window
+                    .current_monitor()
+                    .or_else(|_| window.primary_monitor())
+                {
+                    let work = monitor.work_area();
+                    let scale = monitor.scale_factor().max(1.0);
+                    let logical_w = work.size.width as f64 / scale;
+                    let logical_h = work.size.height as f64 / scale;
+                    let width = (logical_w * 0.86)
+                        .clamp(1040.0, 1680.0)
+                        .min((logical_w - 32.0).max(1040.0));
+                    let height = (logical_h * 0.88)
+                        .clamp(680.0, 1040.0)
+                        .min((logical_h - 32.0).max(680.0));
+                    if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
+                        tracing::warn!(%err, "设置启动窗口尺寸失败");
+                    }
+                    if let Err(err) = window.center() {
+                        tracing::warn!(%err, "居中启动窗口失败");
+                    }
+                    tracing::info!(
+                        logical_width = width,
+                        logical_height = height,
+                        screen_width = logical_w,
+                        screen_height = logical_h,
+                        "启动窗口已按屏幕工作区缩放"
+                    );
+                }
                 // Windows 没有 macOS 的 Overlay 标题栏：去掉原生边框，由前端顶栏统一画标题、导航与窗口按钮。
                 #[cfg(target_os = "windows")]
                 {
