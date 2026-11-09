@@ -21,7 +21,6 @@ import {
   recordStop,
   roomAdd,
   roomLines,
-  roomMergeSessions,
   roomRefresh,
   roomRemove,
   roomSetAutoRecord,
@@ -30,11 +29,8 @@ import {
   roomSetQuality,
   roomsList,
   sessionSummary,
-  sessionsList,
   viewOpen,
   type LineInfo,
-  type PostResult,
-  type RecordSession,
   type RoomView,
   type SessionSummary,
 } from "../../lib/ipc";
@@ -60,11 +56,8 @@ const ROW_ACTION_GROUP_STYLE = {
   "--fbg-radius": "6px",
 } as CSSProperties;
 const ROW_H = 76;
-const DRAWER_PAGE = 50;
 const THUMB_W = 120;
 const THUMB_H = 68;
-
-type PostKind = "merge";
 
 function pad(value: number): string {
   return value < 10 ? "0" + value : String(value);
@@ -168,10 +161,6 @@ function compactNumber(value: number, locale: string): string {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(value);
-}
-
-function postKey(roomId: string, kind: PostKind, sessionId?: string): string {
-  return roomId + ":" + kind + ":" + (sessionId ?? "");
 }
 
 /** 头像：没有 avatarUrl 时用平台色 + 首字母占位。 */
@@ -305,10 +294,7 @@ export default function MonitorPage({
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
 
   const [views, setViews] = useState<RoomView[]>([]);
-  const [drawerSessions, setDrawerSessions] = useState<RecordSession[]>([]);
   const [drawerSummary, setDrawerSummary] = useState<SessionSummary | null>(null);
-  const [drawerSessionsLoading, setDrawerSessionsLoading] = useState(false);
-  const [drawerLoadingMore, setDrawerLoadingMore] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const reloadTimer = useRef<number | null>(null);
@@ -368,45 +354,21 @@ export default function MonitorPage({
 
   const [lines, setLines] = useState<LineInfo[] | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
-  const [postBusy, setPostBusy] = useState<string | null>(null);
   const [removeDone, setRemoveDone] = useState(false);
 
-  const loadDrawerSessions = useCallback(async (roomId: string, quiet = false) => {
+  // 详情抽屉不再展示录制列表，只为「已录」汇总取一次 totalBytes。
+  const loadDrawerSummary = useCallback(async (roomId: string) => {
     if (!isTauri()) {
-      setDrawerSessions([]);
       setDrawerSummary(null);
       return;
     }
-    if (!quiet) setDrawerSessionsLoading(true);
     try {
-      const [summary, rows] = await Promise.all([
-        sessionSummary(roomId),
-        sessionsList(roomId, DRAWER_PAGE, 0),
-      ]);
-      if (selectedIdRef.current === roomId) {
-        setDrawerSummary(summary);
-        setDrawerSessions(rows);
-      }
+      const summary = await sessionSummary(roomId);
+      if (selectedIdRef.current === roomId) setDrawerSummary(summary);
     } catch (err) {
-      if (!quiet && selectedIdRef.current === roomId) notify.error(err);
-    } finally {
-      if (!quiet && selectedIdRef.current === roomId) setDrawerSessionsLoading(false);
+      if (selectedIdRef.current === roomId) notify.error(err);
     }
   }, [notify]);
-
-  const loadMoreDrawerSessions = async () => {
-    const roomId = selectedId;
-    if (!roomId || drawerLoadingMore) return;
-    setDrawerLoadingMore(true);
-    try {
-      const rows = await sessionsList(roomId, DRAWER_PAGE, drawerSessions.length);
-      if (selectedIdRef.current === roomId) setDrawerSessions((prev) => [...prev, ...rows]);
-    } catch (err) {
-      notify.error(err);
-    } finally {
-      setDrawerLoadingMore(false);
-    }
-  };
 
   // 单飞：同一时刻只有一个 rooms_list 在路上；期间的刷新请求合并成一次尾随刷新。
   const load = useCallback(async () => {
@@ -481,14 +443,10 @@ export default function MonitorPage({
   useEffect(() => {
     setLines(null);
     setRemoveDone(false);
-    setDrawerSessions([]);
     setDrawerSummary(null);
-    if (!selectedId || !isTauri()) {
-      setDrawerSessionsLoading(false);
-      return;
-    }
-    void loadDrawerSessions(selectedId);
-  }, [selectedId, loadDrawerSessions]);
+    if (!selectedId || !isTauri()) return;
+    void loadDrawerSummary(selectedId);
+  }, [selectedId, loadDrawerSummary]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(queryInput.trim()), 120);
@@ -579,9 +537,7 @@ export default function MonitorPage({
     );
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
-  const selectedSessions = drawerSessions;
   const recorded = drawerSummary?.totalBytes ?? 0;
-  const mergeable = drawerSummary?.mergeable ?? 0;
 
   const run = useCallback(
     async (id: string, action: () => Promise<unknown>, kind: "record" | null = null) => {
@@ -590,7 +546,7 @@ export default function MonitorPage({
       try {
         await action();
         await load();
-        if (selectedId === id) await loadDrawerSessions(id, true);
+        if (selectedId === id) await loadDrawerSummary(id);
         return true;
       } catch (err) {
         notify.error(err);
@@ -600,7 +556,7 @@ export default function MonitorPage({
         setBusyAction(null);
       }
     },
-    [load, loadDrawerSessions, notify, selectedId],
+    [load, loadDrawerSummary, notify, selectedId],
   );
 
   const add = async () => {
@@ -668,21 +624,6 @@ export default function MonitorPage({
     }
   };
 
-  const doPost = async (roomId: string, kind: PostKind, sessionId?: string) => {
-    setPostBusy(postKey(roomId, kind, sessionId));
-    try {
-      const result: PostResult = await roomMergeSessions(roomId);
-      const name = result.path.split(/[\\/]/).pop() ?? result.path;
-      notify.success(t("monitor.post.merge"), size(result.size) + " · " + name);
-      await load();
-      if (selectedId === roomId) await loadDrawerSessions(roomId, true);
-    } catch (err) {
-      notify.error(err);
-    } finally {
-      setPostBusy(null);
-    }
-  };
-
   const lineOptions = [{ value: "", label: t("monitor.lineAuto") }].concat(
     (lines ?? []).map((line) => ({ value: line.name, label: line.name + " · " + line.quality })),
   );
@@ -703,13 +644,6 @@ export default function MonitorPage({
         : view.room.isLive
           ? t("monitor.statusLive")
           : t("monitor.statusOffline");
-
-  const sessionStatus = (session: RecordSession) =>
-    session.status === "recording"
-      ? t("monitor.status.recording")
-      : session.reason
-        ? t("monitor.reason." + session.reason)
-        : t("monitor.status." + session.status);
 
   const toggleRecording = (view: RoomView) => {
     const isRecording = Boolean(view.recording);
@@ -952,13 +886,15 @@ export default function MonitorPage({
           <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
             <div className="min-w-0">
               <h2 className="text-[14px] font-semibold text-ink">{t("monitor.recordDetail")}</h2>
-              <p className="mt-0.5 truncate text-[11px] leading-4 text-muted">{room.hostName || room.roomKey}</p>
+              <p className="mt-0.5 truncate text-[11.5px] leading-4 text-muted">
+                {t("platformName." + room.platform)}
+              </p>
             </div>
             <button
               type="button"
               onClick={() => setSelectedId(null)}
               aria-label={t("monitor.closeDetail")}
-              className="focus-ring -mr-1 flex h-7 w-7 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
+              className="focus-ring -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
             >
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
                 <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
@@ -970,8 +906,13 @@ export default function MonitorPage({
               type="button"
               onClick={() => void openWatch(room.id)}
               disabled={!room.isLive && !isRecording}
+              aria-label={t("monitor.watch")}
               title={t("monitor.watch")}
-              className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px] disabled:cursor-not-allowed disabled:opacity-60"
+              className={cx(
+                "focus-ring group relative block w-full cursor-pointer overflow-hidden rounded-[8px] p-0 text-left disabled:cursor-not-allowed disabled:opacity-60",
+                (room.isLive || isRecording) &&
+                  "[&_img]:transition-transform [&_img]:duration-300 [&_img]:ease-out group-hover:[&_img]:scale-[1.02]",
+              )}
             >
               <div className="aspect-video w-full">
                 <Thumb
@@ -984,9 +925,24 @@ export default function MonitorPage({
                   locale={locale}
                 />
               </div>
+              {room.isLive || isRecording ? (
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-opacity duration-150 group-hover:bg-black/25 group-hover:opacity-100 group-focus-visible:bg-black/25 group-focus-visible:opacity-100">
+                  <span className="flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-white shadow-pop ring-1 ring-white/25 backdrop-blur-sm">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                      <path d="M5.6 3.7a.75.75 0 0 1 1.14-.64l5.9 4.3a.75.75 0 0 1 0 1.28l-5.9 4.3a.75.75 0 0 1-1.14-.64V3.7Z" />
+                    </svg>
+                  </span>
+                </span>
+              ) : null}
             </button>
 
-            <div className="mt-3 flex items-center gap-1.5 text-[12.5px]">
+            <div className="mt-3 flex items-center gap-1.5 text-[12px]">
+              <span
+                className={cx(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  isRecording ? "bg-rec" : room.isLive ? "bg-live" : "bg-faint",
+                )}
+              />
               <span
                 className={cx(
                   "font-medium",
@@ -999,30 +955,37 @@ export default function MonitorPage({
                 <span className="tnum text-muted">· {t("monitor.detailStarted")} {hhmm(room.startedAt)}</span>
               ) : null}
             </div>
-            <h2 className="mt-1.5 text-[15px] font-semibold leading-[22px] text-ink">{room.title || room.roomKey}</h2>
-            <p className="mt-1 truncate text-[12.5px] text-muted">{room.hostName || "—"}</p>
-            <p className="mt-1 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
+            <h3 className="mt-1.5 text-[15.5px] font-semibold leading-[22px] text-ink">{room.title || room.roomKey}</h3>
+            <div className="mt-2 flex items-center gap-2">
+              <Avatar room={room} size={20} />
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">{room.hostName || "—"}</span>
+            </div>
+            <p className="mt-1.5 truncate text-[11.5px] text-faint" title={room.canonicalUrl}>
               {room.canonicalUrl}
             </p>
 
-            <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-[7px] bg-raised/60 px-3 py-2.5">
+            <h3 className="mt-5 text-[11.5px] font-medium text-muted">{t("monitor.roomInfo")}</h3>
+            <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
               {[
                 { label: t("monitor.colArea"), value: room.areaName ?? "—" },
-                { label: t("monitor.detailRecorded"), value: size(recorded) },
                 { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
+                { label: t("monitor.detailRecorded"), value: size(recorded) },
                 { label: t("monitor.lastRecorded"), value: last ? datetime(last.startedAt) : "—" },
-              ].map((item) => (
-                <div key={item.label} className="min-w-0">
-                  <div className="text-[11.5px] text-faint">{item.label}</div>
-                  <div className="mt-0.5 truncate text-[12.5px] text-ink-soft">{item.value}</div>
+              ].map((item, index) => (
+                <div
+                  key={item.label}
+                  className={cx("flex items-center gap-3 px-3 py-2", index > 0 && "border-t border-line")}
+                >
+                  <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{item.label}</span>
+                  <span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-ink-soft">{item.value}</span>
                 </div>
               ))}
             </div>
 
-            <div className="mt-4 text-[11.5px] font-medium text-muted">{t("monitor.panelSettings")}</div>
-            <div className="mt-2 space-y-2.5">
-              <div className="flex items-center gap-2">
-                <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.quality")}</span>
+            <h3 className="mt-5 text-[11.5px] font-medium text-muted">{t("monitor.panelSettings")}</h3>
+            <div className="mt-2 overflow-hidden rounded-[8px] border border-line">
+              <div className="flex items-center gap-3 px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.quality")}</span>
                 <SelectMenu
                   value={String(room.recordQn)}
                   size="md"
@@ -1032,8 +995,8 @@ export default function MonitorPage({
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>
-              <div className="flex items-center gap-2">
-                <span className="w-[62px] shrink-0 text-[12.5px] text-muted">{t("monitor.line")}</span>
+              <div className="flex items-center gap-3 border-t border-line px-3 py-2">
+                <span className="w-[72px] shrink-0 text-[11.5px] text-faint">{t("monitor.line")}</span>
                 <SelectMenu
                   value={room.recordLine ?? ""}
                   size="md"
@@ -1043,76 +1006,22 @@ export default function MonitorPage({
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>
-              {lines === null ? (
-                <button
-                  type="button"
-                  onClick={() => void loadLines(room.id, room.recordQn)}
-                  className="focus-ring inline-flex items-center gap-1 rounded-ctl px-1.5 py-0.5 text-[12px] text-accent-text transition-colors hover:bg-accent-soft"
-                >
-                  {lineBusy ? t("common.loading") : t("monitor.lineLoad")}
-                </button>
-              ) : lines.length === 0 ? (
-                <span className="block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
-              ) : null}
             </div>
-
-            <div className="mt-4 flex items-center gap-2 border-t border-line pt-3">
-              <span className="text-[11.5px] font-medium text-muted">{t("monitor.sessions")}</span>
-              {mergeable > 1 ? (
-                <button
-                  type="button"
-                  onClick={() => void doPost(room.id, "merge")}
-                  disabled={postBusy === postKey(room.id, "merge")}
-                  title={t("monitor.post.mergeHint", { n: mergeable })}
-                  className="focus-ring ml-auto rounded-ctl px-1.5 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft disabled:opacity-40"
-                >
-                  {t("monitor.post.merge")}
-                </button>
-              ) : null}
-            </div>
-            {drawerSessionsLoading ? (
-              <p className="py-3 text-[12px] text-faint">{t("common.loading")}</p>
-            ) : selectedSessions.length === 0 ? (
-              <p className="py-3 text-[12px] text-faint">{t("monitor.noHistory")}</p>
-            ) : (
-              <div className="mt-1">
-                {selectedSessions.map((session) => {
-                  return (
-                    <div key={session.id} className="border-t border-line py-2 first:border-t-0">
-                      <div className="flex items-center justify-between text-[12px]">
-                        <span className="tnum text-ink-soft">
-                          {recent(session.startedAt)} ·{" "}
-                          {session.status === "recording" ? (
-                            <LiveDuration startedAt={session.startedAt} />
-                          ) : (
-                            clockMs(session.durationMs)
-                          )}
-                        </span>
-                        <span className="tnum text-muted">{size(session.fileSize)}</span>
-                      </div>
-                      <div className="mt-1 truncate text-[11.5px] text-muted">{sessionStatus(session)}</div>
-                    </div>
-                  );
-                })}
-                {selectedSessions.length < (drawerSummary?.total ?? 0) ? (
-                  <div className="mt-2 flex justify-center">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={drawerLoadingMore}
-                      onClick={() => void loadMoreDrawerSessions()}
-                    >
-                      {drawerLoadingMore ? t("common.loading") : t("monitor.loadMore")}
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-5 py-3">
-            <Button variant="secondary" onClick={() => setSelectedId(null)}>
-              {t("monitor.close")}
-            </Button>
+            {lines === null ? (
+              <button
+                type="button"
+                onClick={() => void loadLines(room.id, room.recordQn)}
+                className="focus-ring mt-2 inline-flex items-center gap-1.5 rounded-ctl px-1 py-0.5 text-[11.5px] text-accent-text transition-colors hover:bg-accent-soft"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                  <path d="M13.2 8a5.2 5.2 0 1 1-1.5-3.7" strokeLinecap="round" />
+                  <path d="M13.5 2.8v3.2h-3.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                {lineBusy ? t("common.loading") : t("monitor.lineLoad")}
+              </button>
+            ) : lines.length === 0 ? (
+              <span className="mt-2 block text-[11.5px] text-faint">{t("monitor.lineEmpty")}</span>
+            ) : null}
           </div>
         </aside>
       </div>,
