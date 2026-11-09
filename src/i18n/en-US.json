@@ -125,7 +125,7 @@
     },
     "searchFiles": "Search this host's recordings",
     "clipCount": "{{n}} clips",
-        "loadClips": "Load {{n}} more clips",
+    "loadClips": "Load {{n}} more clips",
     "clipIndex": "Clip {{n}}",
     "selectSession": "Select session"
   },
@@ -599,17 +599,17 @@
     "title": "Multi-view",
     "subtitle": "Up to 4 live rooms at once, with independent audio, quality, and lines.",
     "addRoom": "Add room",
-    "addAndWatch": "Add & watch",
-    "inputPlaceholder": "Paste a room link or ID",
     "watchNow": "Watch",
     "noCandidates": "Every monitored room is already on screen, or there are no rooms yet.",
     "unknownRoom": "Unknown room",
     "quality": "View quality",
     "close": "Close slot",
-    "muteAll": "Mute all",
-    "multiSound": "3+ streams are audible. HIVECAST never mutes automatically — use Mute all when you need silence.",
+    "multiSound": "3+ streams are audible. Use the volume control at the bottom left of each player to adjust them individually.",
     "emptyTitle": "Nothing on screen yet",
-    "emptyBody": "Pick a room from the monitor list or paste a link. Each tile streams independently, so switching quality never interrupts recording.",
+    "emptyBody": "Click Add room to paste a link, or pick a live room on the right. Each tile streams independently, so switching quality never interrupts recording.",
+    "emptyLiveTitle": "Live now",
+    "emptyNoLive": "No live rooms right now",
+    "emptyViewAll": "View all",
     "hint": "Watching and recording are independent sessions: changing quality or closing a tile never interrupts an active recording.",
     "layout": {
       "single": "Single",
@@ -619,7 +619,8 @@
       "threeCol": "Big left + 2",
       "quad": "Grid",
       "main": "Main + 3",
-      "portrait": "Vertical"
+      "portrait": "Vertical",
+      "title": "Layout"
     },
     "status": {
       "starting": "Starting…",
@@ -677,7 +678,10 @@
     },
     "panel": {
       "title": "Rooms",
+      "subtitle": "Pick a room, then choose a slot",
       "search": "Search rooms",
+      "available": "Available",
+      "addLabel": "Add a room",
       "join": "Add to view",
       "empty": "No rooms available",
       "full": "4 slots in use",

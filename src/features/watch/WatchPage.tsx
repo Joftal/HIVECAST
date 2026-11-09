@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
-import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
-import { PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { ScrollArea } from "../../components/arc/scroll-area/scroll-area";
+import { SearchField } from "../../components/arc/search-field/search-field";
+import { PageShell } from "../../components/ui/PageShell";
 import { useNotify } from "../../lib/notify";
+import AddRoomDialog from "../monitor/AddRoomDialog";
 import DanmakuCanvas from "./DanmakuCanvas";
-import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player from "./Player";
 import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
@@ -27,7 +28,6 @@ import {
   layoutSet,
   onRoomsChanged,
   onViewChanged,
-  roomAdd,
   roomLines,
   roomsList,
   viewClose,
@@ -66,7 +66,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const [volumes, setVolumes] = useState<Record<number, number>>({});
   const [loudHint, setLoudHint] = useState(true);
   const [danmaku, setDanmaku] = useState<Record<number, boolean>>({});
-  const [danmakuOpen, setDanmakuOpen] = useState(false);
   const notify = useNotify();
   const loadErrorShown = useRef(false);
   const [busy, setBusy] = useState(false);
@@ -74,10 +73,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const { compact, setCompact } = useWatchPrefs();
   const [fullscreen, setFullscreen] = useState(false);
   const fullscreenRef = useRef(false);
-  // 全屏时顶栏与候选竖条自动收起，指针进入上/右边缘才滑出；240ms 延迟避免穿出时闪一下。
-  const [hoverTop, setHoverTop] = useState(false);
+  // 全屏时候选竖条自动收起，指针进入右边缘才滑出；240ms 延迟避免穿出时闪一下。
   const [hoverRail, setHoverRail] = useState(false);
-  const hoverTimers = useRef<{ top?: number; rail?: number }>({});
+  const hoverTimers = useRef<{ rail?: number }>({});
   fullscreenRef.current = fullscreen;
   const immersiveRef = useRef(onImmersiveChange);
   immersiveRef.current = onImmersiveChange;
@@ -90,6 +88,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 
 
   const [panelOpen, setPanelOpen] = useState(false);
+  const [layoutOpen, setLayoutOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   // 首帧还不知道上次的布局，先别把空布局写回去覆盖它。
   const [booted, setBooted] = useState(false);
   const [roomsLoaded, setRoomsLoaded] = useState(false);
@@ -104,7 +104,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const [picker, setPicker] = useState<{ roomId: string; x: number; y: number } | null>(null);
   const pickerTimer = useRef<number | undefined>(undefined);
   const [query, setQuery] = useState("");
-  const [input, setInput] = useState("");
 
   const seedRef = useRef(0);
   const latestLayout = useRef("");
@@ -243,22 +242,13 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 
   const setVolume = (slot: number, volume: number) => setVolumes((prev) => ({ ...prev, [slot]: volume }));
   const toggleDanmaku = (slot: number) => setDanmaku((prev) => ({ ...prev, [slot]: !(prev[slot] ?? true) }));
-  const muteAll = useCallback(() => {
-    const next: Record<number, number> = {};
-    for (const session of sessions) next[session.slot] = 0;
-    setVolumes(next);
-  }, [sessions]);
 
-  // 多路同时发声是提示而不是常驻面板：收进顶部 toast，并把静音操作作为 action。
+  // 多路同时发声只提醒一次；音量由各播放器自己调，不再提供全局静音。
   useEffect(() => {
     if (sounding < 3 || !loudHint) return;
     setLoudHint(false);
-    notify.toast({
-      type: "warning",
-      title: t("watch.multiSound"),
-      action: { label: t("watch.muteAll"), onClick: () => muteAll() },
-    });
-  }, [loudHint, muteAll, notify, sounding, t]);
+    notify.toast({ type: "warning", title: t("watch.multiSound") });
+  }, [loudHint, notify, sounding, t]);
 
   /** 版式 kind → 分割树；路数对不上时退回该路数的默认版式。 */
   function treeFor(kind: LayoutKind | undefined, n: number) {
@@ -392,29 +382,10 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     }
   }
 
-  async function addAndWatch() {
-    const value = input.trim();
-    if (!value) return;
-    setBusy(true);
-    try {
-      const view = await roomAdd(value);
-      if (!order.includes(view.room.id)) {
-        if (count >= MAX_SLOTS) {
-          notify.warning(t("watch.slotsFull"));
-          return;
-        }
-        await viewOpen(view.room.id);
-        const next = order.includes(view.room.id) ? order : [...order, view.room.id];
-        setOrder(next);
-        if (leafCount(tree) !== next.length) setTree(buildTree(next.length));
-      }
-      setInput("");
-      await load();
-    } catch (err) {
-      notify.error(err);
-    } finally {
-      setBusy(false);
-    }
+  /** 添加弹窗成功后：房间在播就直接开一格，离线则只刷新列表。 */
+  async function handleRoomAdded(view: RoomView) {
+    await load();
+    if (view.room.isLive) await watchRoom(view.room.id);
   }
 
   async function closeSlot(slot: number) {
@@ -564,23 +535,38 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     setPicker(null);
   }, [panelOpen]);
 
-  const hoverChrome = useCallback((area: "top" | "rail", on: boolean) => {
-    const timer = hoverTimers.current[area];
+  // 路数掉回 1 时隐藏布局菜单，避免下次开多路时凭空弹出来。
+  useEffect(() => {
+    if (count < 2) setLayoutOpen(false);
+  }, [count]);
+
+  // 打开候选面板时收起布局菜单，两个浮层不叠在一起。
+  useEffect(() => {
+    if (panelOpen) setLayoutOpen(false);
+  }, [panelOpen]);
+
+  useEffect(() => {
+    if (!layoutOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setLayoutOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [layoutOpen]);
+
+  const hoverRailChrome = useCallback((on: boolean) => {
+    const timer = hoverTimers.current.rail;
     if (timer) window.clearTimeout(timer);
-    const set = area === "top" ? setHoverTop : setHoverRail;
     if (on) {
-      set(true);
+      setHoverRail(true);
       return;
     }
-    hoverTimers.current[area] = window.setTimeout(() => set(false), 240);
+    hoverTimers.current.rail = window.setTimeout(() => setHoverRail(false), 140);
   }, []);
 
   const applyFullscreen = useCallback((next: boolean) => {
     setFullscreen(next);
-    if (!next) {
-      setHoverTop(false);
-      setHoverRail(false);
-    }
+    if (!next) setHoverRail(false);
     immersiveRef.current?.(next);
   }, []);
 
@@ -654,7 +640,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       (view.room.hostName ?? "").toLowerCase().includes(needle)
     );
   });
-  const prefs = useDanmakuPrefs();
 
   const layoutOptions: Array<{ kind: "default" | "alt" | "portrait"; label: string; glyph: LayoutKind }> =
     count === 4
@@ -673,147 +658,103 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
             { kind: "alt", label: t("watch.layout.twoV"), glyph: "col" },
           ];
 
-  const toolbar = (
-    <>
-      <span className="font-mono text-[11px] tabular-nums text-muted">
-        {count} <span className="text-faint">/ 4</span>
-      </span>
-
-      {count >= 2 ? (
-        <div className="flex items-center rounded-[6px] border border-line p-0.5">
-          {layoutOptions.map((option) => {
-            const active = option.kind === "portrait" ? portrait : !portrait && variant === option.kind;
-            return (
-              <button
-                key={option.kind}
-                type="button"
-                onClick={() => applyLayout(option.kind)}
-                className={[
-                  "focus-ring inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors",
-                  active ? "bg-raised text-ink" : "text-muted hover:text-ink-soft",
-                ].join(" ")}
-              >
-                <LayoutGlyph kind={option.glyph} />
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-
-      <div className="ml-auto flex items-center gap-1">
-        <Button
-          size="sm"
-          variant={compact ? "secondary" : "ghost"}
-          title={t("watch.compactHint")}
-          onClick={() => setCompact(!compact)}
-        >
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-            {compact ? (
-              <>
-                <rect x="2.2" y="2.2" width="5" height="5" />
-                <rect x="8.8" y="2.2" width="5" height="5" />
-                <rect x="2.2" y="8.8" width="5" height="5" />
-                <rect x="8.8" y="8.8" width="5" height="5" />
-              </>
-            ) : (
-              <>
-                <rect x="1.6" y="1.6" width="12.8" height="12.8" rx="1.4" />
-                <path d="M8 1.6v12.8M1.6 8h12.8" />
-              </>
-            )}
-          </svg>
-          {t("watch.compact")}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          title={t("watch.fullscreenHint")}
-          onClick={() => void toggleFullscreen()}
-        >
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-            {fullscreen ? (
-              <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" strokeLinecap="round" strokeLinejoin="round" />
-            ) : (
-              <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
-            )}
-          </svg>
-          {fullscreen ? t("watch.exitFullscreen") : t("watch.fullscreen")}
-        </Button>
-        {count > 0 ? (
-          <Button size="sm" variant="ghost" onClick={() => setDanmakuOpen((open) => !open)}>
-            {t("watch.danmakuSettings")}
-          </Button>
-        ) : null}
-        {sounding > 0 ? (
-          <Button size="sm" variant="ghost" onClick={muteAll}>
-            {t("watch.muteAll")}
-          </Button>
-        ) : null}
-      </div>
-    </>
-  );
+  const currentLayout =
+    layoutOptions.find((option) =>
+      option.kind === "portrait" ? portrait : !portrait && variant === option.kind,
+    ) ?? layoutOptions[0];
 
   return (
-    <div className="relative flex h-full min-h-0 bg-canvas text-ink">
+    <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-canvas text-ink">
       <PageShell className="relative min-w-0">
-        {fullscreen ? (
-          <div
-            onPointerEnter={() => hoverChrome("top", true)}
-            onPointerLeave={() => hoverChrome("top", false)}
-            className={cx(
-              "absolute inset-x-0 top-0 z-30 flex h-12 items-center gap-2 border-b border-line bg-surface/92 px-5 backdrop-blur-md transition-[transform,opacity] duration-200",
-              !hoverTop && "-translate-y-full opacity-0",
-            )}
-          >
-            {toolbar}
-          </div>
-        ) : (
-          <PageToolbar className="pt-4">{toolbar}</PageToolbar>
-        )}
-
-        {danmakuOpen && count > 0 ? (
-          <div className="mx-3 mt-2 grid shrink-0 gap-3 rounded-[8px] border border-line bg-surface p-3 sm:grid-cols-2 lg:grid-cols-4">
-            {(
-              [
-                ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
-                ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
-                ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
-                ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
-              ] as const
-            ).map(([key, label, min, max, step, digits]) => (
-              <label key={key} className="flex flex-col gap-1">
-                <span className="flex items-baseline justify-between text-[11px] text-muted">
-                  {label}
-                  <span className="font-mono text-[10px] tabular-nums text-faint">
-                    {(prefs[key] as number).toFixed(digits)}
-                  </span>
-                </span>
-                <input
-                  type="range"
-                  min={min}
-                  max={max}
-                  step={step}
-                  value={prefs[key] as number}
-                  onChange={(event) => prefs.set({ [key]: Number(event.target.value) })}
-                  className="accent-accent"
-                />
-              </label>
-            ))}
-            <Button size="sm" variant="ghost" className="self-end justify-self-start" onClick={() => prefs.reset()}>
-              {t("watch.danmakuReset")}
-            </Button>
-          </div>
-        ) : null}
-
         <div className="relative min-h-0 flex-1">
           {count === 0 ? (
-            <PageEmpty
-              className="h-full"
-              title={t("watch.emptyTitle")}
-              description={t("watch.emptyBody")}
-              icon={<EmptyArt kind="watch" />}
-            />
+            <div className="h-full overflow-auto bg-canvas">
+              <div className="mx-auto flex min-h-full w-full max-w-[920px] flex-col justify-center px-6 py-8">
+                <section className="grid overflow-hidden rounded-[16px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)] md:grid-cols-[minmax(0,1fr)_320px]">
+                  <div className="flex min-h-[280px] min-w-0 flex-col items-center justify-center px-7 py-8 text-center">
+                    <span className="text-muted">
+                      <EmptyArt kind="watch" size={44} />
+                    </span>
+                    <h2 className="mt-4 text-[15px] font-semibold tracking-[-0.01em] text-ink">
+                      {t("watch.emptyTitle")}
+                    </h2>
+                    <p className="mt-1.5 max-w-[300px] text-[11.5px] leading-5 text-muted">
+                      {t("watch.emptyBody")}
+                    </p>
+                    <div className="mt-4">
+                      <Button size="md" variant="primary" onClick={() => setAddOpen(true)}>
+                        {t("watch.panel.addLabel")}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="flex h-[280px] min-w-0 flex-col border-t border-line md:border-l md:border-t-0">
+                    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-4 py-3">
+                      <h3 className="text-[12px] font-semibold text-ink">{t("watch.emptyLiveTitle")}</h3>
+                      {candidates.length > 4 ? (
+                        <button
+                          type="button"
+                          onClick={() => setPanelOpen(true)}
+                          className="focus-ring rounded-[4px] px-1 py-0.5 text-[10.5px] text-accent-text transition-colors hover:bg-accent-soft"
+                        >
+                          {t("watch.emptyViewAll")}
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {candidates.length === 0 ? (
+                      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-raised text-faint">
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                            <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6" />
+                            <path d="M2.2 6.2h11.6M5.4 3.2v2.2M10.6 3.2v2.2" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                        <p className="text-[11px] leading-4 text-faint">{t("watch.emptyNoLive")}</p>
+                      </div>
+                    ) : (
+                      <ScrollArea className="min-h-0 flex-1" orientation="vertical" fade={16} label={t("watch.emptyLiveTitle")}>
+                        <div className="space-y-0.5 p-2">
+                          {candidates.map((view) => (
+                            <button
+                              key={view.room.id}
+                              type="button"
+                              onClick={() => void watchRoom(view.room.id)}
+                              title={view.room.title || view.room.hostName}
+                              className="focus-ring group flex w-full items-center gap-2.5 rounded-[8px] px-2 py-2 text-left transition-colors hover:bg-raised"
+                            >
+                              {view.room.avatarUrl ? (
+                                <img
+                                  src={view.room.avatarUrl}
+                                  alt=""
+                                  referrerPolicy="no-referrer"
+                                  className="h-7 w-7 shrink-0 rounded-full bg-raised object-cover ring-1 ring-line"
+                                />
+                              ) : (
+                                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-raised text-[10px] font-medium text-muted">
+                                  {(view.room.hostName || view.room.title || "?").slice(0, 1).toUpperCase()}
+                                </span>
+                              )}
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[11.5px] font-medium text-ink">
+                                  {view.room.title || view.room.hostName}
+                                </span>
+                                <span className="mt-0.5 block truncate text-[10.5px] text-faint">
+                                  {view.room.hostName}
+                                </span>
+                              </span>
+                              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 text-faint opacity-60 transition-opacity group-hover:opacity-100" aria-hidden>
+                                <path d="m6 3 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
           ) : (
             <SplitStage
               ref={stageRef}
@@ -872,7 +813,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                     onToggleDanmaku={() => toggleDanmaku(session.slot)}
                     onQuality={(qn) => void changeQuality(session.slot, qn)}
                     onLine={(line) => void changeLine(session.slot, line)}
-                    onDanmakuSettings={() => setDanmakuOpen(true)}
                     onClose={() => void closeSlot(session.slot)}
                     onRetry={() => void retrySlot(session.slot)}
                     onSwapNext={() => swapCells(index, (index + 1) % count)}
@@ -884,108 +824,134 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
           )}
 
           {panelOpen ? (
-            <div className="absolute inset-y-0 right-0 z-30 flex w-[300px] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md">
-              <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
-                <span className="text-[12px] font-medium text-ink">{t("watch.panel.title")}</span>
-                <span className="font-mono text-[10px] tabular-nums text-faint">
-                  {count} / 4
-                </span>
+            <div className="animate-sheet absolute inset-y-0 right-0 z-30 flex w-[320px] flex-col border-l border-line bg-surface shadow-2xl">
+              <header className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-4 py-3.5">
+                <div className="min-w-0">
+                  <h2 className="text-[13px] font-semibold text-ink">{t("watch.panel.title")}</h2>
+                  <p className="mt-0.5 text-[11px] leading-4 text-faint">{t("watch.panel.subtitle")}</p>
+                </div>
                 <button
                   type="button"
                   onClick={() => setPanelOpen(false)}
                   aria-label={t("watch.close")}
-                  className="focus-ring ml-auto flex h-6 w-6 items-center justify-center rounded-[5px] text-faint hover:bg-raised hover:text-ink-soft"
+                  className="focus-ring -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-faint transition-colors hover:bg-raised hover:text-ink-soft"
                 >
-                  ✕
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                    <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
+                  </svg>
                 </button>
-              </div>
+              </header>
 
-              <div className="shrink-0 px-2 pt-2">
-                <input
+              <div className="shrink-0 px-3 pt-3">
+                <SearchField
+                  label={t("watch.panel.search")}
+                  hideLabel
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  onValueChange={setQuery}
                   placeholder={t("watch.panel.search")}
-                  className="focus-ring h-8 w-full rounded-[6px] border border-line bg-raised px-2.5 text-[11.5px] text-ink placeholder:text-faint"
+                  clearLabel={t("common.clear")}
+                  spellCheck={false}
+                  rootClassName="w-full"
                 />
               </div>
-              <p className="shrink-0 px-3 pb-1 pt-1.5 text-[10px] leading-4 text-faint">
+              <p className="shrink-0 px-3 pb-2 pt-1.5 text-[10.5px] leading-4 text-faint">
                 {t("watch.panel.dragHint")}
               </p>
 
-              <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-2">
-                {filtered.length === 0 ? (
-                  <p className="px-2 py-6 text-center text-[11px] text-faint">{t("watch.panel.empty")}</p>
-                ) : (
-                  filtered.map((view) => (
-                    <div
-                      key={view.room.id}
-                      onPointerEnter={(event) => {
-                        window.clearTimeout(pickerTimer.current);
-                        const rect = event.currentTarget.getBoundingClientRect();
-                        setPicker({ roomId: view.room.id, x: rect.left, y: rect.top });
-                      }}
-                      onPointerLeave={() => {
-                        window.clearTimeout(pickerTimer.current);
-                        pickerTimer.current = window.setTimeout(() => setPicker(null), 160);
-                      }}
-                      onClick={() => void watchRoom(view.room.id)}
-                      className="group relative flex cursor-pointer items-center gap-2 rounded-[6px] px-2 py-1.5 transition-colors hover:bg-raised"
-                    >
-                      {view.room.avatarUrl ? (
-                        <img
-                          src={view.room.avatarUrl}
-                          alt=""
-                          referrerPolicy="no-referrer"
-                          className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-line"
-                        />
-                      ) : (
-                        <span className="h-6 w-6 shrink-0 rounded-full bg-raised" />
-                      )}
-                      <div className="min-w-0 flex-1 leading-tight">
-                        <div className="truncate text-[11.5px] text-ink">
-                          {view.room.title || view.room.hostName}
-                        </div>
-                        <div className="truncate text-[10px] text-faint">{view.room.hostName}</div>
-                      </div>
-                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">›</span>
-                    </div>
-                  ))
-                )}
+              <div className="flex shrink-0 items-center justify-between px-3 pb-1.5">
+                <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-faint">
+                  {t("watch.panel.available")}
+                </span>
               </div>
 
-              <div className="shrink-0 space-y-1.5 border-t border-line p-2">
-                <div className="flex gap-1.5">
-                  <input
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void addAndWatch();
-                    }}
-                    placeholder={t("watch.inputPlaceholder")}
-                    className="focus-ring h-8 min-w-0 flex-1 rounded-[6px] border border-line bg-raised px-2.5 text-[11.5px] text-ink placeholder:text-faint"
-                  />
-                  <Button
-                    size="md"
-                    variant="primary"
-                    disabled={busy || input.trim().length === 0}
-                    onClick={() => void addAndWatch()}
-                  >
-                    {t("watch.addAndWatch")}
-                  </Button>
+              {filtered.length === 0 ? (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-raised text-faint">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                      <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6" />
+                      <path d="M2.2 6.2h11.6M5.4 3.2v2.2M10.6 3.2v2.2" strokeLinecap="round" />
+                    </svg>
+                  </span>
+                  <p className="text-[11.5px] text-faint">{t("watch.panel.empty")}</p>
                 </div>
-              </div>
+              ) : (
+                <ScrollArea className="min-h-0 flex-1" orientation="vertical" fade={16} label={t("watch.panel.available")}>
+                  <div className="space-y-0.5 px-2 pb-2">
+                    {filtered.map((view) => (
+                      <div
+                        key={view.room.id}
+                        onPointerEnter={(event) => {
+                          window.clearTimeout(pickerTimer.current);
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          setPicker({ roomId: view.room.id, x: rect.left, y: rect.top });
+                        }}
+                        onPointerLeave={() => {
+                          window.clearTimeout(pickerTimer.current);
+                          pickerTimer.current = window.setTimeout(() => setPicker(null), 160);
+                        }}
+                        onClick={() => void watchRoom(view.room.id)}
+                        title={view.room.title || view.room.hostName}
+                        className="group flex cursor-pointer items-center gap-2.5 rounded-[8px] px-2.5 py-2 transition-colors hover:bg-raised"
+                      >
+                        {view.room.avatarUrl ? (
+                          <img
+                            src={view.room.avatarUrl}
+                            alt=""
+                            referrerPolicy="no-referrer"
+                            className="h-7 w-7 shrink-0 rounded-full bg-raised object-cover ring-1 ring-line"
+                          />
+                        ) : (
+                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-raised text-[10px] font-medium text-muted">
+                            {(view.room.hostName || view.room.title || "?").slice(0, 1).toUpperCase()}
+                          </span>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[12px] font-medium leading-4 text-ink">
+                            {view.room.title || view.room.hostName}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] leading-4 text-faint">
+                            <span className="truncate">{view.room.hostName}</span>
+                          </div>
+                        </div>
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 text-faint opacity-60 transition-opacity group-hover:opacity-100" aria-hidden>
+                          <path d="m6 3 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+
+              <footer className="shrink-0 border-t border-line bg-raised/25 p-3">
+                <Button
+                  size="lg"
+                  variant="primary"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => setAddOpen(true)}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                      <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+                    </svg>
+                    {t("watch.panel.addLabel")}
+                  </span>
+                </Button>
+              </footer>
             </div>
           ) : null}
         </div>
       </PageShell>
 
+      <AddRoomDialog open={addOpen} onOpenChange={setAddOpen} onAdded={handleRoomAdded} />
+
       {picker && candidates.some((view) => view.room.id === picker.roomId)
         ? createPortal(
             <div
-              className="fixed z-[70] w-[208px] rounded-[8px] border border-line bg-surface p-2 shadow-pop animate-pop"
+              className="fixed z-[70] w-[224px] rounded-[10px] border border-line bg-surface p-2.5 shadow-pop animate-pop"
               style={{
-                left: Math.max(8, picker.x - 204),
-                top: Math.min(picker.y, window.innerHeight - 200),
+                left: Math.max(8, picker.x - 220),
+                top: Math.min(picker.y, window.innerHeight - 210),
               }}
               onPointerEnter={() => window.clearTimeout(pickerTimer.current)}
               onPointerLeave={() => {
@@ -993,10 +959,10 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                 pickerTimer.current = window.setTimeout(() => setPicker(null), 160);
               }}
             >
-              <div className="mb-1.5 px-0.5 text-[10px] uppercase tracking-[0.08em] text-faint">
+              <div className="mb-2 px-0.5 text-[11px] font-medium text-muted">
                 {t("watch.panel.place")}
               </div>
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-2 gap-2">
                 {Array.from({ length: count }).map((_, index) => (
                   <button
                     key={index}
@@ -1006,7 +972,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                       setPicker(null);
                       void watchRoom(roomId, index);
                     }}
-                    className="focus-ring flex flex-col items-center gap-1 rounded-[6px] border border-line bg-raised px-1.5 py-2 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
+                    className="focus-ring flex flex-col items-center gap-1 rounded-[8px] border border-line bg-raised px-1.5 py-2.5 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
                   >
                     <MiniLayout tree={tree} target={index} />
                     <span>{t("watch.cellN", { n: index + 1 })}</span>
@@ -1020,7 +986,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                       setPicker(null);
                       void watchRoom(roomId);
                     }}
-                    className="focus-ring flex flex-col items-center gap-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-1.5 py-2 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
+                    className="focus-ring flex flex-col items-center gap-1 rounded-[8px] border border-dashed border-line-strong bg-surface px-1.5 py-2.5 text-[10.5px] text-muted transition-colors hover:border-accent-line hover:bg-accent-soft hover:text-accent-text"
                   >
                     <MiniLayout tree={buildTree(count + 1)} target={count} />
                     <span>{t("watch.panel.placeNew")}</span>
@@ -1033,22 +999,23 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
         : null}
 
       <aside
-        onPointerEnter={() => hoverChrome("rail", true)}
-        onPointerLeave={() => hoverChrome("rail", false)}
+        onPointerEnter={() => hoverRailChrome(true)}
+        onPointerLeave={() => hoverRailChrome(false)}
         className={cx(
-          "flex w-11 shrink-0 flex-col border-l border-line bg-surface",
+          "flex w-12 shrink-0 flex-col border-l border-line bg-surface",
           fullscreen &&
-            "absolute inset-y-0 right-0 z-30 bg-surface/95 backdrop-blur-md transition-transform duration-200",
-          fullscreen && !hoverRail && "translate-x-full",
+            "absolute inset-y-0 right-0 z-30 bg-surface transition-transform duration-150",
+          fullscreen && !hoverRail && !panelOpen && !layoutOpen && "translate-x-full",
         )}
       >
         <button
           type="button"
           onClick={() => setPanelOpen((open) => !open)}
           title={t("watch.panel.title")}
-          className="focus-ring flex h-full w-full flex-col items-center gap-1 py-1.5 text-muted hover:text-ink"
+          aria-label={t("watch.panel.title")}
+          className="focus-ring group flex min-h-0 w-full flex-1 flex-col items-center gap-1 px-1.5 py-2 text-muted hover:text-ink"
         >
-          <span className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-hidden px-1 pt-1">
+          <span className="flex min-h-0 w-full flex-1 flex-col items-center gap-1.5 overflow-hidden pt-0.5">
             {candidates.map((view) =>
               view.room.avatarUrl ? (
                 <img
@@ -1056,35 +1023,139 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                   src={view.room.avatarUrl}
                   alt=""
                   referrerPolicy="no-referrer"
-                  className="h-6 w-6 shrink-0 rounded-full object-cover ring-2 ring-surface"
+                  className="h-7 w-7 shrink-0 rounded-full bg-raised object-cover ring-2 ring-surface"
                 />
               ) : (
-                <span key={view.room.id} className="h-6 w-6 shrink-0 rounded-full bg-raised ring-2 ring-surface" />
+                <span key={view.room.id} className="h-7 w-7 shrink-0 rounded-full bg-raised ring-2 ring-surface" />
               ),
             )}
           </span>
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">{candidates.length}</span>
-          <span className="shrink-0 rounded-[4px] border border-line px-1 text-[10px] leading-4 text-muted">
-            {panelOpen ? "»" : "«"}
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-line text-faint transition-colors group-hover:border-line-strong group-hover:bg-raised group-hover:text-ink">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              {panelOpen ? (
+                <path d="m6 3 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+              ) : (
+                <path d="m10 3-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
+              )}
+            </svg>
           </span>
         </button>
+
+        <div className="flex shrink-0 flex-col items-center gap-1 border-t border-line px-1 py-1.5">
+          {count >= 2 ? (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setLayoutOpen((open) => !open)}
+                title={t("watch.layout.title")}
+                aria-label={t("watch.layout.title")}
+                aria-expanded={layoutOpen}
+                className={cx(
+                  "focus-ring flex h-8 w-8 items-center justify-center rounded-[6px] text-faint transition-colors hover:bg-raised hover:text-ink",
+                  layoutOpen && "bg-raised text-ink",
+                )}
+              >
+                <LayoutGlyph kind={currentLayout.glyph} />
+              </button>
+              {layoutOpen ? (
+                <>
+                  <button
+                    type="button"
+                    aria-label={t("watch.close")}
+                    onClick={() => setLayoutOpen(false)}
+                    className="fixed inset-0 z-30 cursor-default"
+                  />
+                  <div className="absolute bottom-0 right-full z-40 mr-2 w-[168px] rounded-[8px] border border-line bg-surface p-1 shadow-pop">
+                    <div className="px-2 py-1 text-[10.5px] font-medium text-faint">
+                      {t("watch.layout.title")}
+                    </div>
+                    {layoutOptions.map((option) => {
+                      const active =
+                        option.kind === "portrait" ? portrait : !portrait && variant === option.kind;
+                      return (
+                        <button
+                          key={option.kind}
+                          type="button"
+                          onClick={() => {
+                            applyLayout(option.kind);
+                            setLayoutOpen(false);
+                          }}
+                          className={cx(
+                            "flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-left text-[11.5px] transition-colors",
+                            active
+                              ? "bg-accent-soft text-accent-text"
+                              : "text-muted hover:bg-raised hover:text-ink",
+                          )}
+                        >
+                          <LayoutGlyph kind={option.glyph} />
+                          <span className="flex-1">{option.label}</span>
+                          {active ? (
+                            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                              <path d="m3 8.5 3.2 3.2L13 4.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            title={t("watch.compactHint")}
+            aria-label={t("watch.compact")}
+            aria-pressed={compact}
+            onClick={() => setCompact(!compact)}
+            className={cx(
+              "focus-ring flex h-8 w-8 items-center justify-center rounded-[6px] transition-colors",
+              compact ? "bg-raised text-ink" : "text-faint hover:bg-raised hover:text-ink",
+            )}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              {compact ? (
+                <>
+                  <rect x="2.2" y="2.2" width="5" height="5" />
+                  <rect x="8.8" y="2.2" width="5" height="5" />
+                  <rect x="2.2" y="8.8" width="5" height="5" />
+                  <rect x="8.8" y="8.8" width="5" height="5" />
+                </>
+              ) : (
+                <>
+                  <rect x="1.6" y="1.6" width="12.8" height="12.8" rx="1.4" />
+                  <path d="M8 1.6v12.8M1.6 8h12.8" />
+                </>
+              )}
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            title={t("watch.fullscreenHint")}
+            aria-label={fullscreen ? t("watch.exitFullscreen") : t("watch.fullscreen")}
+            onClick={() => void toggleFullscreen()}
+            className="focus-ring flex h-8 w-8 items-center justify-center rounded-[6px] text-faint transition-colors hover:bg-raised hover:text-ink"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              {fullscreen ? (
+                <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" strokeLinecap="round" strokeLinejoin="round" />
+              ) : (
+                <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
+              )}
+            </svg>
+          </button>
+        </div>
       </aside>
 
       {fullscreen ? (
-        <>
-          <div
-            aria-hidden
-            onPointerEnter={() => hoverChrome("top", true)}
-            onPointerLeave={() => hoverChrome("top", false)}
-            className={cx("absolute inset-x-0 top-0 z-40 h-1.5", hoverTop && "pointer-events-none")}
-          />
-          <div
-            aria-hidden
-            onPointerEnter={() => hoverChrome("rail", true)}
-            onPointerLeave={() => hoverChrome("rail", false)}
-            className={cx("absolute inset-y-0 right-0 z-40 w-1.5", hoverRail && "pointer-events-none")}
-          />
-        </>
+        <div
+          aria-hidden
+          onPointerEnter={() => hoverRailChrome(true)}
+          onPointerLeave={() => hoverRailChrome(false)}
+          className={cx("absolute inset-y-0 right-0 z-40 w-12", hoverRail && "pointer-events-none")}
+        />
       ) : null}
 
       {drag ? (
@@ -1111,7 +1182,6 @@ type CellProps = {
   onToggleDanmaku: () => void;
   onQuality: (qn: number) => void;
   onLine: (line: string | null) => void;
-  onDanmakuSettings: () => void;
   onClose: () => void;
   onRetry: () => void;
   onSwapNext: () => void;
@@ -1130,7 +1200,6 @@ function SlotCell({
   onToggleDanmaku,
   onQuality,
   onLine,
-  onDanmakuSettings,
   onClose,
   onRetry,
   onSwapNext,
@@ -1296,7 +1365,6 @@ function SlotCell({
             fit={fill ? "cover" : "contain"}
             onReload={onRetry}
             onMenuOpen={() => void loadLines()}
-            onOpenDanmakuSettings={onDanmakuSettings}
             quality={{
               value: session.requestedQn,
               options: QN_OPTIONS.map((qn) => ({

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cx } from "./Controls";
+import { SearchField } from "../arc/search-field/search-field";
 
 /** 四个主 Tab 共用的页面骨架：固定的标题区 + 可选的工具栏 + 可滚动内容区。 */
 
@@ -139,41 +140,15 @@ export function PageSearch({
   className?: string;
 }) {
   return (
-    <label className={cx("relative block", className)}>
-      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-          <circle cx="7" cy="7" r="4.4" />
-          <path d="m10.4 10.4 3 3" strokeLinecap="round" />
-        </svg>
-      </span>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && value) {
-            event.preventDefault();
-            onChange("");
-          }
-        }}
-        placeholder={placeholder}
-        spellCheck={false}
-        className={cx(
-          "focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong",
-          value ? "pr-8" : "pr-2.5",
-        )}
-      />
-      {value ? (
-        <button
-          type="button"
-          aria-label={clearLabel}
-          onClick={() => onChange("")}
-          className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[4px] text-faint transition-colors hover:bg-raised hover:text-ink"
-        >
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-            <path d="m2.5 2.5 7 7M9.5 2.5l-7 7" strokeLinecap="round" />
-          </svg>
-        </button>
-      ) : null}
-    </label>
+    <SearchField
+      label={placeholder}
+      hideLabel
+      value={value}
+      onValueChange={onChange}
+      placeholder={placeholder}
+      clearLabel={clearLabel}
+      spellCheck={false}
+      rootClassName={cx("w-[228px]", className)}
+    />
   );
 }

@@ -5,7 +5,6 @@ import { Button, Switch, cx } from "../../components/ui/Controls";
 import { Checkbox } from "../../components/arc/checkbox/checkbox";
 import { FloatingButtonGroup } from "../../components/arc/floating-button-group/floating-button-group";
 import { useNotify } from "../../lib/notify";
-import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { DropdownMenu } from "../../components/arc/dropdown-menu/dropdown-menu";
 import { HoldToConfirm } from "../../components/arc/hold-to-confirm/hold-to-confirm";
 import { SelectMenu } from "../../components/ui/SelectMenu";
@@ -15,6 +14,7 @@ import InfoTip from "../../components/ui/InfoTip";
 import TagBadge from "../../components/ui/TagBadge";
 import { PageChip, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
+import AddRoomDialog from "./AddRoomDialog";
 import RoomRules from "./RoomRules";
 import InlineNote from "./InlineNote";
 import InlineTags from "./InlineTags";
@@ -28,7 +28,6 @@ import {
   recordStart,
   recordStop,
   recordingUsage,
-  roomAdd,
   roomLines,
   roomRefresh,
   roomRemove,
@@ -496,11 +495,6 @@ export default function MonitorPage({
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [input, setInput] = useState("");
-  // 添加房间时的两个开关：不监控就没有自动录制，所以关掉监控会顺手关掉它。
-  const [addMonitor, setAddMonitor] = useState(true);
-  const [addAutoRecord, setAddAutoRecord] = useState(true);
-  const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"watch" | "record" | null>(null);
   const notify = useNotify();
@@ -521,17 +515,6 @@ export default function MonitorPage({
   selectedIdRef.current = selectedId;
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
-  useEffect(() => {
-    if (!addOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setAddOpen(false);
-        setInput("");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [addOpen]);
   useEffect(() => {
     if (!selectedId) return;
     const onKey = (event: KeyboardEvent) => {
@@ -766,28 +749,6 @@ export default function MonitorPage({
     },
     [load, loadDrawerSummary, notify, selectedId],
   );
-
-  const add = async () => {
-    const value = input.trim();
-    if (!value || adding) return;
-    setAdding(true);
-    try {
-      const view = await roomAdd(value, addMonitor, addAutoRecord);
-      setInput("");
-      setAddMonitor(true);
-      setAddAutoRecord(true);
-      setAddOpen(false);
-      await load();
-      notify.success(
-        t("monitor.added"),
-        view.room.hostName || view.room.title || view.room.roomKey,
-      );
-    } catch (err) {
-      notify.error(err);
-    } finally {
-      setAdding(false);
-    }
-  };
 
   const openWatch = async (roomId: string) => {
     setBusyId(roomId);
@@ -1588,85 +1549,11 @@ export default function MonitorPage({
   };
   return (
     <PageShell>
-      <Dialog
+      <AddRoomDialog
         open={addOpen}
-        onOpenChange={(next) => {
-          setAddOpen(next);
-          if (!next) setInput("");
-        }}
-      >
-        <DialogContent
-          title={t("monitor.addRoom")}
-          description={t("monitor.inputPlaceholder")}
-          size="md"
-        >
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void add();
-            }}
-          >
-            <input
-              autoFocus
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="https://live.bilibili.com/6"
-              spellCheck={false}
-              className="focus-ring h-10 w-full rounded-ctl border border-line bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
-            />
-            <div className="mt-3 divide-y divide-line overflow-hidden rounded-[8px] border border-line">
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] text-ink">{t("monitor.addMonitor")}</div>
-                  <p className="mt-0.5 text-[11px] leading-4 text-faint">
-                    {t("monitor.addMonitorHint")}
-                  </p>
-                </div>
-                <Switch
-                  checked={addMonitor}
-                  onChange={(next) => {
-                    setAddMonitor(next);
-                    // 不监控就不会自动录，避免留一个看不见的开关。
-                    setAddAutoRecord(next);
-                  }}
-                  label={t("monitor.addMonitor")}
-                />
-              </div>
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] text-ink">{t("monitor.addAutoRecord")}</div>
-                  <p className="mt-0.5 text-[11px] leading-4 text-faint">
-                    {addMonitor
-                      ? t("monitor.addAutoRecordHint")
-                      : t("monitor.addAutoRecordDisabled")}
-                  </p>
-                </div>
-                <Switch
-                  checked={addAutoRecord}
-                  disabled={!addMonitor}
-                  onChange={setAddAutoRecord}
-                  label={t("monitor.addAutoRecord")}
-                />
-              </div>
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <Button
-                size="lg"
-                variant="ghost"
-                onClick={() => {
-                  setAddOpen(false);
-                  setInput("");
-                }}
-              >
-                {t("monitor.cancel")}
-              </Button>
-              <Button size="lg" type="submit" variant="primary" disabled={adding || !input.trim()}>
-                {adding ? t("monitor.adding") : t("monitor.add")}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={setAddOpen}
+        onAdded={() => load()}
+      />
 
       <PageToolbar className="pt-4">
         <PageChip
@@ -1725,11 +1612,7 @@ export default function MonitorPage({
           <Button
             size="lg"
             variant="primary"
-            onClick={() => {
-              setAddOpen((open) => !open);
-              setAddMonitor(true);
-              setAddAutoRecord(true);
-            }}
+            onClick={() => setAddOpen(true)}
           >
             <span className="text-[15px] leading-none">+</span>
             {t("monitor.addRoom")}

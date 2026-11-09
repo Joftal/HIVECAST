@@ -3,6 +3,7 @@ import { Check } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { DropdownMenu, type DropdownItem } from "../../components/arc/dropdown-menu/dropdown-menu";
+import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 
 type Props = {
   url: string;
@@ -41,8 +42,6 @@ type Props = {
   };
   /** 重新解析并重连当前流；不传就只重建播放器。 */
   onReload?: () => void;
-  /** 打开弹幕观感设置（外层抽屉）。 */
-  onOpenDanmakuSettings?: () => void;
   /** 画质浮层展开时回调：外层借此按需拉线路列表。 */
   onMenuOpen?: () => void;
   /** 画面适配：contain 保留完整画面（默认），cover 铺满格子但会裁切。 */
@@ -75,7 +74,6 @@ export default function Player({
   quality,
   lines,
   onReload,
-  onOpenDanmakuSettings,
   onMenuOpen,
   fit = "contain",
 }: Props) {
@@ -101,6 +99,8 @@ export default function Player({
   // 控制条：音量滑杆展开、观看时长（对齐 B 站直播控制条的信息位）。
   const [volOpen, setVolOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const prefs = useDanmakuPrefs();
   const startAtRef = useRef(startAtSec ?? 0);
   startAtRef.current = startAtSec ?? 0;
 
@@ -395,7 +395,10 @@ export default function Player({
           // 窗口放完自动续下一窗：多带一个 lead 的提前量，衔接处不重复。
           if (end < durationMs - 800) onSeek(Math.min(durationMs, end + leadMs));
         }}
-        onClick={toggle}
+        onClick={() => {
+          setPrefsOpen(false);
+          toggle();
+        }}
       />
 
       {/* 弹幕层在视频之上、控件之下：不拦截点击，全屏时也保留；只覆盖画面本身。 */}
@@ -425,6 +428,62 @@ export default function Player({
           <span className="text-[11px] text-white/55">{t("watch.buffering")}</span>
         </div>
       )}
+
+      {/* 弹幕观感设置收在播放器内部：每个格子用自己的设置按钮打开，不再占用页面工具栏。 */}
+      {prefsOpen ? (
+        <div className="absolute bottom-12 right-2 z-30 w-[236px] max-w-[calc(100%-1rem)] rounded-[10px] border border-white/12 bg-[#17171a]/98 p-3 text-white shadow-2xl backdrop-blur-md">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[11px] font-medium text-white/75">{t("watch.danmakuSettings")}</span>
+            <button
+              type="button"
+              onClick={() => setPrefsOpen(false)}
+              aria-label={t("watch.close")}
+              className="focus-ring flex h-5 w-5 items-center justify-center rounded-[4px] text-white/45 transition-colors hover:bg-white/12 hover:text-white"
+            >
+              <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+          <div className="grid gap-2.5">
+            {(
+              [
+                ["opacity", t("watch.danmakuOpacity"), 0.3, 1, 0.05, 2],
+                ["fontScale", t("watch.danmakuFont"), 0.75, 1.6, 0.05, 2],
+                ["speed", t("watch.danmakuSpeed"), 0.5, 2, 0.1, 1],
+                ["area", t("watch.danmakuArea"), 0.3, 1, 0.05, 2],
+              ] as const
+            ).map(([key, label, min, max, step, digits]) => (
+              <label key={key} className="grid gap-1">
+                <span className="flex items-baseline justify-between text-[10.5px] text-white/55">
+                  {label}
+                  <span className="font-mono text-[9.5px] tabular-nums text-white/35">
+                    {(prefs[key] as number).toFixed(digits)}
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={prefs[key] as number}
+                  onChange={(event) => prefs.set({ [key]: Number(event.target.value) })}
+                  className="h-1 w-full cursor-pointer accent-accent"
+                />
+              </label>
+            ))}
+          </div>
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              onClick={() => prefs.reset()}
+              className="focus-ring rounded-[5px] px-1.5 py-0.5 text-[10.5px] text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              {t("watch.danmakuReset")}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* 控制条：结构对齐 B 站直播——细进度线在上、单行图标在下，悬停才浮出。 */}
       <div className="absolute inset-x-0 bottom-0 z-20 select-none opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
@@ -580,22 +639,26 @@ export default function Player({
                 {t("watch.danmakuShort")}
               </button>
 
-              {onOpenDanmakuSettings ? (
-                <button
-                  type="button"
-                  onClick={onOpenDanmakuSettings}
-                  aria-label={t("watch.danmakuSettings")}
-                  title={t("watch.danmakuSettings")}
-                  className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/70 transition-colors hover:bg-white/15 hover:text-white"
-                >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-                    <path d="M2 4.6h12M2 8h12M2 11.4h12" strokeLinecap="round" opacity="0.55" />
-                    <circle cx="5.6" cy="4.6" r="1.5" fill="currentColor" stroke="none" />
-                    <circle cx="10.4" cy="8" r="1.5" fill="currentColor" stroke="none" />
-                    <circle cx="7" cy="11.4" r="1.5" fill="currentColor" stroke="none" />
-                  </svg>
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => setPrefsOpen((open) => !open)}
+                aria-label={t("watch.danmakuSettings")}
+                title={t("watch.danmakuSettings")}
+                aria-pressed={prefsOpen}
+                className={[
+                  "focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] transition-colors",
+                  prefsOpen
+                    ? "bg-white/15 text-white"
+                    : "text-white/70 hover:bg-white/15 hover:text-white",
+                ].join(" ")}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                  <path d="M2 4.6h12M2 8h12M2 11.4h12" strokeLinecap="round" opacity="0.55" />
+                  <circle cx="5.6" cy="4.6" r="1.5" fill="currentColor" stroke="none" />
+                  <circle cx="10.4" cy="8" r="1.5" fill="currentColor" stroke="none" />
+                  <circle cx="7" cy="11.4" r="1.5" fill="currentColor" stroke="none" />
+                </svg>
+              </button>
 
               <button
                 type="button"

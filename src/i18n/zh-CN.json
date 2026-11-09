@@ -125,7 +125,7 @@
     },
     "searchFiles": "搜索这个主播的录像",
     "clipCount": "{{n}} 个片段",
-        "loadClips": "加载剩余 {{n}} 个片段",
+    "loadClips": "加载剩余 {{n}} 个片段",
     "clipIndex": "第 {{n}} 段",
     "selectSession": "选择整场"
   },
@@ -599,17 +599,17 @@
     "title": "多屏观看",
     "subtitle": "最多 4 路同屏，音频、画质与线路互相独立。",
     "addRoom": "添加直播间",
-    "addAndWatch": "添加并观看",
-    "inputPlaceholder": "粘贴直播间链接或房间号",
     "watchNow": "观看",
     "noCandidates": "监控列表里的房间都在观看中，或者还没有添加房间。",
     "unknownRoom": "未知直播间",
     "quality": "观看画质",
     "close": "关闭槽位",
-    "muteAll": "全部静音",
-    "multiSound": "当前有 3 路以上同时发声。HIVECAST 不会自动静音，需要安静时点「全部静音」。",
+    "multiSound": "当前有 3 路以上同时发声。需要安静时，点各播放器左下角的音量按钮单独调节。",
     "emptyTitle": "还没有正在观看的直播间",
-    "emptyBody": "从监控列表选一个直播间，或直接粘贴链接。每一路独立取流，切换画质不影响录制。",
+    "emptyBody": "点「添加直播间」粘贴链接，或从右侧直接选择正在直播的房间。每一路独立取流，切换画质不影响录制。",
+    "emptyLiveTitle": "直播中",
+    "emptyNoLive": "暂无直播中的房间",
+    "emptyViewAll": "查看全部",
     "hint": "观看与录制是两条独立会话：切换画质、关闭槽位都不会打断正在进行的录制。",
     "layout": {
       "single": "单画面",
@@ -619,7 +619,8 @@
       "threeCol": "左大右二",
       "quad": "四宫格",
       "main": "主次",
-      "portrait": "竖排"
+      "portrait": "竖排",
+      "title": "布局"
     },
     "status": {
       "starting": "正在起播…",
@@ -677,7 +678,10 @@
     },
     "panel": {
       "title": "直播间",
+      "subtitle": "选择直播间，悬停后放入格子",
       "search": "搜索直播间",
+      "available": "可添加",
+      "addLabel": "添加直播间",
       "join": "加入观看",
       "empty": "没有可添加的直播间",
       "full": "已满 4 路",

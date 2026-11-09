@@ -1,10 +1,10 @@
 export type EmptyArtKind = "monitor" | "watch" | "media" | "tasks" | "search" | "gone";
 
-/** 各 Tab 的空态插画：24px 线性图标，内部只做 transform/opacity 动画，不参与布局。 */
-export default function EmptyArt({ kind }: { kind: EmptyArtKind }) {
+/** 各 Tab 的空态插画：默认 24px 线性图标，内部只做 transform/opacity 动画，不参与布局。 */
+export default function EmptyArt({ kind, size = 24 }: { kind: EmptyArtKind; size?: number }) {
   const common = {
-    width: 24,
-    height: 24,
+    width: size,
+    height: size,
     viewBox: "0 0 24 24",
     fill: "none",
     stroke: "currentColor",

@@ -22,6 +22,7 @@ import appIcon from "../../assets/app-icon.png";
 import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { useNotify } from "../../lib/notify";
 import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
+import { SearchField } from "../../components/arc/search-field/search-field";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import InfoTip from "../../components/ui/InfoTip";
 import AccountSection from "./AccountSection";
@@ -1531,52 +1532,27 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
         </div>
 
         <div className="shrink-0 px-3 pb-1 pt-1.5">
-          <div className="relative">
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
-            >
-              <circle cx="7" cy="7" r="4.2" />
-              <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
-            </svg>
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape" && query) {
-                  event.stopPropagation();
-                  setQuery("");
-                }
-              }}
-              placeholder={t("settings.searchSettings")}
-              spellCheck={false}
-              aria-label={t("settings.searchSettings")}
-              className="focus-ring h-8 w-full rounded-[7px] border border-line bg-canvas pl-8 pr-11 text-[12px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
-            />
-            {!query ? (
-              <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-[4px] border border-line bg-surface px-1 py-0.5 font-sans text-[9.5px] leading-none text-faint">
+          <SearchField
+            ref={searchRef}
+            label={t("settings.searchSettings")}
+            hideLabel
+            value={query}
+            onValueChange={setQuery}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && query) {
+                event.stopPropagation();
+                setQuery("");
+              }
+            }}
+            placeholder={t("settings.searchSettings")}
+            spellCheck={false}
+            clearLabel={t("settings.searchClear")}
+            hint={
+              <kbd className="rounded-[3px] border border-line bg-surface px-1 py-0.5 font-sans text-[9px] leading-none text-faint">
                 ⌘F
               </kbd>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setQuery("")}
-                aria-label={t("settings.searchClear")}
-                className="focus-ring absolute right-2 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-full bg-raised text-faint hover:text-ink"
-              >
-                <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                  <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
-                </svg>
-              </button>
-            )}
-          </div>
+            }
+          />
         </div>
 
         <nav aria-label={t("settings.title")} className="min-h-0 flex-1 overflow-auto px-3 pb-4">
