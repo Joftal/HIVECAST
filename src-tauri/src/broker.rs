@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::platform::{adapter_for, PlatformError, RoomInfo, RoomRef, StreamGroup};
+use crate::platform::{adapter_for, PlatformError, RoomInfo, RoomRef, StreamPlan};
 
 const GROUPS_TTL: Duration = Duration::from_secs(60);
 const INFO_TTL: Duration = Duration::from_secs(15);
@@ -64,7 +64,7 @@ struct Failure {
 
 #[derive(Default)]
 struct Inner {
-    groups: HashMap<StreamKey, Cached<Vec<StreamGroup>>>,
+    groups: HashMap<StreamKey, Cached<StreamPlan>>,
     infos: HashMap<String, Cached<RoomInfo>>,
     group_inflight: HashMap<StreamKey, Arc<AsyncMutex<()>>>,
     info_inflight: HashMap<String, Arc<AsyncMutex<()>>>,
@@ -82,13 +82,9 @@ impl StreamBroker {
         Self::default()
     }
 
-    /// 取某房间某档位的候选线路。命中缓存时不会触网。
-    pub async fn groups(
-        &self,
-        room: &RoomRef,
-        qn: u32,
-    ) -> Result<Arc<Vec<StreamGroup>>, PlatformError> {
-        self.groups_inner(room, qn, false).await
+    /// 取某房间某档位的线路组与真实画质清单。命中缓存时不会触网。
+    pub async fn plan(&self, room: &RoomRef, qn: u32) -> Result<Arc<StreamPlan>, PlatformError> {
+        self.plan_inner(room, qn, false).await
     }
 
     /// 断流续录专用：丢掉旧地址重新解析，但保留共享的失败冷却（B3）。
@@ -96,38 +92,38 @@ impl StreamBroker {
     /// 录制重启走 invalidate 会把监控侧的限流退避一起清掉：限流风暴时每续录
     /// 一次就等于放行一轮请求。这里只丢地址缓存；本次解析允许在冷却期内出门
     /// （用户已经在等这一路恢复），失败则照常累计退避。
-    pub async fn groups_for_respawn(
+    pub async fn plan_for_respawn(
         &self,
         room: &RoomRef,
         qn: u32,
-    ) -> Result<Arc<Vec<StreamGroup>>, PlatformError> {
+    ) -> Result<Arc<StreamPlan>, PlatformError> {
         {
             let mut inner = self.inner.lock().expect("broker 状态被污染");
             drop_address_cache(&mut inner, room);
         }
-        self.groups_inner(room, qn, true).await
+        self.plan_inner(room, qn, true).await
     }
 
-    async fn groups_inner(
+    async fn plan_inner(
         &self,
         room: &RoomRef,
         qn: u32,
         bypass_cooldown: bool,
-    ) -> Result<Arc<Vec<StreamGroup>>, PlatformError> {
+    ) -> Result<Arc<StreamPlan>, PlatformError> {
         let key = StreamKey::new(room, qn);
         // 冷却与限速按「房间」算，而不是按「房间+档位」：以前 info 用房间键、
         // groups 用裸 room_key，两套键互不相干，invalidate 也就清不干净（C3）。
         let gate_key = room_gate(room);
-        if let Some(groups) = self.cached_groups(&key) {
+        if let Some(plan) = self.cached_plan(&key) {
             tracing::debug!(platform = room.platform, room = %room.room_key, qn, "取流命中缓存");
-            return Ok(groups);
+            return Ok(plan);
         }
 
         let gate = self.group_gate(&key);
         let _guard = gate.lock().await;
 
-        if let Some(groups) = self.cached_groups(&key) {
-            return Ok(groups);
+        if let Some(plan) = self.cached_plan(&key) {
+            return Ok(plan);
         }
         if !bypass_cooldown {
             if let Some(err) = self.backoff_error(&gate_key) {
@@ -144,14 +140,15 @@ impl StreamBroker {
 
         let adapter = adapter_for(&room.platform)?;
         let started = Instant::now();
-        let result = adapter.stream_groups(room, qn).await;
+        let result = adapter.stream_plan(room, qn).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &result {
-            Ok(groups) => tracing::debug!(
+            Ok(plan) => tracing::debug!(
                 platform = room.platform,
                 room = %room.room_key,
                 qn,
-                groups = groups.len(),
+                groups = plan.groups.len(),
+                qualities = plan.qualities.len(),
                 elapsed_ms,
                 "取流请求完成"
             ),
@@ -168,17 +165,17 @@ impl StreamBroker {
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         inner.group_inflight.remove(&key);
         match result {
-            Ok(groups) => {
+            Ok(plan) => {
                 inner.failures.remove(&gate_key);
-                let groups = Arc::new(groups);
+                let plan = Arc::new(plan);
                 inner.groups.insert(
                     key,
                     Cached {
                         at: Instant::now(),
-                        value: groups.clone(),
+                        value: plan.clone(),
                     },
                 );
-                Ok(groups)
+                Ok(plan)
             }
             Err(err) => {
                 self.note_failure(&mut inner, &gate_key, &err);
@@ -315,7 +312,7 @@ impl StreamBroker {
         tracing::debug!("账号凭据变更，已清空取流与房间信息缓存");
     }
 
-    fn cached_groups(&self, key: &StreamKey) -> Option<Arc<Vec<StreamGroup>>> {
+    fn cached_plan(&self, key: &StreamKey) -> Option<Arc<StreamPlan>> {
         let inner = self.inner.lock().expect("broker 状态被污染");
         let cached = inner.groups.get(key)?;
         (cached.at.elapsed() <= GROUPS_TTL).then(|| cached.value.clone())

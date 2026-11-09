@@ -12,13 +12,14 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use base64::Engine;
+use hivecast_ipc::QualityInfo;
 use serde_json::Value;
 use url::Url;
 
 use super::http;
 use super::{
     Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
-    StreamFormat, StreamGroup,
+    StreamFormat, StreamGroup, StreamPlan,
 };
 
 const ROOM_HOST: &str = "https://www.huya.com";
@@ -120,11 +121,7 @@ impl PlatformAdapter for HuyaAdapter {
         })
     }
 
-    async fn stream_groups(
-        &self,
-        room: &RoomRef,
-        qn: u32,
-    ) -> Result<Vec<StreamGroup>, PlatformError> {
+    async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError> {
         let referer = format!("{ROOM_HOST}/{}", room.room_key);
         let (body, _) = http::get_text(&referer, REFERER_HOME, &[]).await?;
         if body.contains("虎牙君找不到这个主播") {
@@ -161,9 +158,14 @@ impl PlatformAdapter for HuyaAdapter {
             if let (Some(base), Some(anti)) = (text(entry, "sFlvUrl"), text(entry, "sFlvAntiCode"))
             {
                 let suffix = text(entry, "sFlvUrlSuffix").unwrap_or_else(|| "flv".to_string());
-                if let Some(url) =
-                    build_stream_url(&base, &stream_name, &suffix, &anti, quality.bitrate)
-                {
+                if let Some(url) = build_stream_url(
+                    &base,
+                    &stream_name,
+                    &suffix,
+                    &anti,
+                    quality.bitrate,
+                    quality.codec,
+                ) {
                     candidates.push(candidate(
                         url,
                         StreamFormat::Flv,
@@ -218,7 +220,76 @@ impl PlatformAdapter for HuyaAdapter {
         for (index, group) in groups.iter_mut().enumerate() {
             group.priority = index as u32;
         }
-        Ok(groups)
+
+        // vMultiStreamInfo 是平台真实档位；当前兼容路径只列 H.264（iCodecType=0）。
+        let mut quality_map: BTreeMap<u32, (bool, u32, QualityInfo)> = BTreeMap::new();
+        if let Some(list) = stream.get("vMultiStreamInfo").and_then(Value::as_array) {
+            for item in list {
+                let codec_type = item.get("iCodecType").and_then(Value::as_i64).unwrap_or(0);
+                let bitrate = item.get("iBitRate").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let name = item
+                    .get("sDisplayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let h264 = codec_type == 0;
+                let qn = if h264 {
+                    qn_for_bitrate(bitrate)
+                } else if bitrate >= 20_100 {
+                    30_000 // 4K HDR
+                } else if bitrate >= 20_000 {
+                    20_000 // 4K
+                } else if bitrate >= 14_100 {
+                    15_100 // 2K HDR
+                } else if bitrate >= 14_000 {
+                    15_000 // 2K
+                } else {
+                    continue;
+                };
+                if qn == 0 {
+                    continue;
+                }
+                let rank = if bitrate == 0 { u32::MAX } else { bitrate };
+                let hint = if !h264 {
+                    format!(
+                        "HEVC · {}",
+                        if bitrate == 0 {
+                            "源码率".to_string()
+                        } else {
+                            format!("{bitrate} kbps")
+                        }
+                    )
+                } else if bitrate == 0 {
+                    "源码率".to_string()
+                } else {
+                    format!("{bitrate} kbps")
+                };
+                let info = QualityInfo {
+                    qn,
+                    label: name,
+                    hint: Some(hint),
+                    available: true,
+                    codec: Some(if h264 { "h264" } else { "h265" }.into()),
+                };
+                match quality_map.get(&qn) {
+                    Some((current_available, current_rank, _))
+                        if (*current_available, *current_rank) >= (h264, rank) => {}
+                    _ => {
+                        quality_map.insert(qn, (h264, rank, info));
+                    }
+                }
+            }
+        }
+        let mut qualities: Vec<QualityInfo> = quality_map
+            .into_values()
+            .map(|(_, _, quality)| quality)
+            .collect();
+        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+
+        Ok(StreamPlan { groups, qualities })
     }
 }
 
@@ -228,16 +299,28 @@ struct Quality {
     bitrate: u32,
     name: String,
     qn: u32,
+    codec: Codec,
 }
 
-/// 按期望 qn 从 vMultiStreamInfo 里挑最接近的一档（只考虑 H.264 兼容档）。
+/// HEVC 专用档位的 qn → 精确码率；普通 qn 仍走 H.264 档位表。
+fn hevc_bitrate_for_qn(qn: u32) -> Option<u32> {
+    match qn {
+        15_000 => Some(14_000), // 2K
+        15_100 => Some(14_100), // 2K HDR
+        20_000 => Some(20_000), // 4K
+        30_000 => Some(20_100), // 4K HDR
+        _ => None,
+    }
+}
+
+/// 按期望 qn 从 vMultiStreamInfo 里挑最接近的一档。
+/// HEVC 专用 qn 精确取对应码率；其余 qn 只取 H.264，保证兼容性。
 fn pick_quality(stream: &Value, qn: u32) -> Quality {
-    let mut options: Vec<(u32, String)> = stream
+    let options: Vec<(u32, String, i64)> = stream
         .get("vMultiStreamInfo")
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
-                .filter(|item| item.get("iCodecType").and_then(Value::as_i64).unwrap_or(0) == 0)
                 .filter_map(|item| {
                     let bitrate = item.get("iBitRate").and_then(Value::as_u64).unwrap_or(0) as u32;
                     let name = item
@@ -245,7 +328,8 @@ fn pick_quality(stream: &Value, qn: u32) -> Quality {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    (!name.is_empty()).then_some((bitrate, name))
+                    let codec_type = item.get("iCodecType").and_then(Value::as_i64).unwrap_or(0);
+                    (!name.is_empty()).then_some((bitrate, name, codec_type))
                 })
                 .collect()
         })
@@ -256,50 +340,71 @@ fn pick_quality(stream: &Value, qn: u32) -> Quality {
             bitrate: 0,
             name: "原画".to_string(),
             qn: 10000,
+            codec: Codec::H264,
         };
     }
 
     // 0 表示源码率（最高档），排序时当作最大值。
-    options.sort_by_key(|(bitrate, _)| if *bitrate == 0 { u32::MAX } else { *bitrate });
+    let rank = |bitrate: u32| if bitrate == 0 { u32::MAX } else { bitrate };
 
+    if let Some(target) = hevc_bitrate_for_qn(qn) {
+        let hevc = options.iter().filter(|(_, _, codec)| *codec != 0);
+        let chosen = hevc
+            .clone()
+            .find(|(bitrate, _, _)| *bitrate == target)
+            .or_else(|| hevc.max_by_key(|(bitrate, _, _)| rank(*bitrate)));
+        if let Some((bitrate, name, _)) = chosen {
+            return Quality {
+                bitrate: *bitrate,
+                name: name.clone(),
+                qn,
+                codec: Codec::H265,
+            };
+        }
+    }
+
+    let h264 = options.iter().filter(|(_, _, codec)| *codec == 0);
     let target = target_bitrate(qn);
     let chosen = if target == 0 {
-        options
-            .iter()
-            .find(|(bitrate, _)| *bitrate == 0)
-            .or_else(|| options.last())
+        h264.clone()
+            .find(|(bitrate, _, _)| *bitrate == 0)
+            .or_else(|| h264.max_by_key(|(bitrate, _, _)| rank(*bitrate)))
     } else {
-        options
-            .iter()
-            .filter(|(bitrate, _)| *bitrate != 0 && *bitrate <= target)
-            .max_by_key(|(bitrate, _)| *bitrate)
-            .or_else(|| options.first())
+        h264.clone()
+            .filter(|(bitrate, _, _)| *bitrate != 0 && *bitrate <= target)
+            .max_by_key(|(bitrate, _, _)| *bitrate)
+            .or_else(|| h264.min_by_key(|(bitrate, _, _)| rank(*bitrate)))
     };
+    // 没有 H.264 档时接受 HEVC，避免整路无法起播。
+    let chosen = chosen.or_else(|| options.iter().max_by_key(|(bitrate, _, _)| rank(*bitrate)));
 
     match chosen {
-        Some((bitrate, name)) => {
-            let bitrate = *bitrate;
-            Quality {
-                bitrate,
-                name: name.clone(),
-                qn: qn_for_bitrate(bitrate),
-            }
-        }
+        Some((bitrate, name, codec_type)) => Quality {
+            bitrate: *bitrate,
+            name: name.clone(),
+            qn: qn_for_bitrate(*bitrate),
+            codec: if *codec_type == 0 {
+                Codec::H264
+            } else {
+                Codec::H265
+            },
+        },
         None => Quality {
             bitrate: 0,
             name: "原画".to_string(),
             qn: 10000,
+            codec: Codec::H264,
         },
     }
 }
 
-/// qn → 期望码率（kbps）：10000 原画、400 蓝光 8M、250 蓝光 4M、150 超清、80 流畅。
+/// qn → 期望码率（kbps）：10000 原画、400 蓝光 4M、250 超清 2M、150 高清 ~1M、80 流畅 500K。
 fn target_bitrate(qn: u32) -> u32 {
     match qn {
-        0 | 10000 | 20000 | 30000 => 0,
-        400 => 8000,
-        250 => 4000,
-        150 => 2000,
+        0 | 10000 | 20000 | 30000 | 40000 => 0,
+        400 => 4000,
+        250 => 2000,
+        150 => 1000,
         80 => 500,
         _ => 0,
     }
@@ -307,16 +412,15 @@ fn target_bitrate(qn: u32) -> u32 {
 
 /// 实际码率 → 反推 qn，供 UI 显示「请求 4M，实际 2M」这类降级提示。
 ///
-/// 8M 档是「蓝光」（qn=400），不是「原画」（qn=10000）：把 8000 当成 10000
-/// 会让「指定蓝光」的选择器把这一档当成超高画质而拒绝它，录到更低的 4M。
+/// 只把 0 / ≥10M 当原画；4M 是蓝光、2M 是超清、约 1M 是高清。
 fn qn_for_bitrate(bitrate: u32) -> u32 {
     if bitrate == 0 || bitrate >= 10_000 {
         10000
-    } else if bitrate >= 8000 {
-        400
     } else if bitrate >= 4000 {
-        250
+        400
     } else if bitrate >= 2000 {
+        250
+    } else if bitrate >= 900 {
         150
     } else {
         80
@@ -342,13 +446,18 @@ fn candidate(
     attrs.insert("streamName".to_string(), stream_name.to_string());
     attrs.insert("bitrateKbps".to_string(), quality.bitrate.to_string());
     attrs.insert("qn".to_string(), quality.qn.to_string());
+    attrs.insert("codec".to_string(), quality.codec.as_str().to_string());
 
     StreamCandidate {
-        id: format!("{cdn}-{stream_name}-{}", quality.bitrate),
+        id: format!(
+            "{cdn}-{stream_name}-{}-{}",
+            quality.bitrate,
+            quality.codec.as_str()
+        ),
         name: format!("{} · FLV", quality.name),
         weight,
         format,
-        codec: Some(Codec::H264),
+        codec: Some(quality.codec),
         width: None,
         height: None,
         fps: None,
@@ -366,6 +475,7 @@ fn build_stream_url(
     suffix: &str,
     anti_code: &str,
     ratio: u32,
+    codec: Codec,
 ) -> Option<String> {
     let params: BTreeMap<String, String> = url::form_urlencoded::parse(anti_code.as_bytes())
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -408,7 +518,7 @@ fn build_stream_url(
         .append_pair("t", &SIGN_T.to_string())
         .append_pair("ver", "1")
         .append_pair("sv", CLIENT_VERSION)
-        .append_pair("codec", "264")
+        .append_pair("codec", if codec == Codec::H265 { "265" } else { "264" })
         .finish();
 
     // 统一走 https：http 会 302 到 IP，部分节点在 https 下更稳定。
@@ -624,6 +734,7 @@ mod tests {
             "flv",
             ANTI,
             4000,
+            Codec::H264,
         )
         .expect("签名失败");
         assert!(url.starts_with("https://tx.flv.huya.com/src/78941969-"));
@@ -634,8 +745,27 @@ mod tests {
         assert!(url.contains("codec=264"));
         assert!(url.contains("sv=2401090219"));
         // 同一输入两次签名必须不同：seqid 与 uid 每次重算。
-        let again = build_stream_url("http://tx.flv.huya.com/src", "s", "flv", ANTI, 4000).unwrap();
+        let again = build_stream_url(
+            "http://tx.flv.huya.com/src",
+            "s",
+            "flv",
+            ANTI,
+            4000,
+            Codec::H264,
+        )
+        .unwrap();
         assert_ne!(url, again);
+        let h265 = build_stream_url(
+            "http://tx.flv.huya.com/src",
+            "s",
+            "flv",
+            ANTI,
+            20100,
+            Codec::H265,
+        )
+        .unwrap();
+        assert!(h265.contains("codec=265"));
+        assert!(h265.contains("ratio=20100"));
     }
 
     #[test]
@@ -643,20 +773,47 @@ mod tests {
         let stream = serde_json::json!({
             "vMultiStreamInfo": [
                 { "sDisplayName": "4K HDR", "iBitRate": 20100, "iCodecType": 1 },
+                { "sDisplayName": "4K", "iBitRate": 20000, "iCodecType": 1 },
+                { "sDisplayName": "2K HDR", "iBitRate": 14100, "iCodecType": 1 },
+                { "sDisplayName": "2K", "iBitRate": 14000, "iCodecType": 1 },
                 { "sDisplayName": "蓝光10M", "iBitRate": 0, "iCodecType": 0 },
                 { "sDisplayName": "蓝光4M", "iBitRate": 4000, "iCodecType": 0 },
                 { "sDisplayName": "超清", "iBitRate": 2000, "iCodecType": 0 },
+                { "sDisplayName": "高清", "iBitRate": 900, "iCodecType": 0 },
                 { "sDisplayName": "流畅", "iBitRate": 500, "iCodecType": 0 }
             ]
         });
         assert_eq!(pick_quality(&stream, 10000).bitrate, 0);
         assert_eq!(pick_quality(&stream, 10000).qn, 10000);
         assert_eq!(pick_quality(&stream, 400).bitrate, 4000);
-        assert_eq!(pick_quality(&stream, 400).qn, 250);
-        assert_eq!(pick_quality(&stream, 250).bitrate, 4000);
-        assert_eq!(pick_quality(&stream, 150).bitrate, 2000);
+        assert_eq!(pick_quality(&stream, 400).qn, 400);
+        assert_eq!(pick_quality(&stream, 250).bitrate, 2000);
+        assert_eq!(pick_quality(&stream, 250).qn, 250);
+        assert_eq!(pick_quality(&stream, 150).bitrate, 900);
+        assert_eq!(pick_quality(&stream, 150).qn, 150);
         assert_eq!(pick_quality(&stream, 80).bitrate, 500);
         assert_eq!(pick_quality(&stream, 80).name, "流畅");
+        // HEVC 专用档位必须精确回选，不能退到 H.264 或相邻码率。
+        let hdr4k = pick_quality(&stream, 30_000);
+        assert_eq!(
+            (hdr4k.bitrate, hdr4k.qn, hdr4k.codec),
+            (20_100, 30_000, Codec::H265)
+        );
+        let uhd4k = pick_quality(&stream, 20_000);
+        assert_eq!(
+            (uhd4k.bitrate, uhd4k.qn, uhd4k.codec),
+            (20_000, 20_000, Codec::H265)
+        );
+        let hdr2k = pick_quality(&stream, 15_100);
+        assert_eq!(
+            (hdr2k.bitrate, hdr2k.qn, hdr2k.codec),
+            (14_100, 15_100, Codec::H265)
+        );
+        let uhd2k = pick_quality(&stream, 15_000);
+        assert_eq!(
+            (uhd2k.bitrate, uhd2k.qn, uhd2k.codec),
+            (14_000, 15_000, Codec::H265)
+        );
         // 没有 vMultiStreamInfo 时退回原画。
         assert_eq!(pick_quality(&serde_json::json!({}), 250).bitrate, 0);
     }
@@ -667,8 +824,9 @@ mod tests {
         assert_eq!(qn_for_bitrate(10_000), 10000);
         assert_eq!(qn_for_bitrate(20_100), 10000);
         assert_eq!(qn_for_bitrate(8_000), 400, "8M 是蓝光档，不是原画");
-        assert_eq!(qn_for_bitrate(4_000), 250);
-        assert_eq!(qn_for_bitrate(2_000), 150);
+        assert_eq!(qn_for_bitrate(4_000), 400);
+        assert_eq!(qn_for_bitrate(2_000), 250);
+        assert_eq!(qn_for_bitrate(900), 150);
         assert_eq!(qn_for_bitrate(500), 80);
     }
 

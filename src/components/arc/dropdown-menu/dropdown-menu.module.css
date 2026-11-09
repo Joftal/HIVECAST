@@ -153,7 +153,7 @@
   background: color-mix(in oklab, var(--c-ink) 7%, transparent);
 }
 .menu[data-variant="video"] .hint {
-  max-width: 7em;
+  max-width: 12em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -6,9 +6,10 @@
 //!   所以请求里带 qn=10000 也只是「期望值」，实际档位以返回的 current_qn 为准。
 //! - 候选按 CDN 主机分组（B 站一条流通常给 2 个 host），组内按 qn 排序。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
+use hivecast_ipc::QualityInfo;
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
@@ -16,7 +17,7 @@ use url::Url;
 use super::http;
 use super::{
     Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
-    StreamFormat, StreamGroup,
+    StreamFormat, StreamGroup, StreamPlan,
 };
 
 const API: &str = "https://api.live.bilibili.com";
@@ -274,11 +275,8 @@ impl PlatformAdapter for BilibiliAdapter {
         })
     }
 
-    async fn stream_groups(
-        &self,
-        room: &RoomRef,
-        qn: u32,
-    ) -> Result<Vec<StreamGroup>, PlatformError> {
+    async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError> {
+        let qn = request_qn(qn);
         let url = format!(
             "{API}/xlive/web-room/v2/index/getRoomPlayInfo?room_id={}&protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1",
             room.room_key
@@ -299,6 +297,25 @@ impl PlatformAdapter for BilibiliAdapter {
             .iter()
             .map(|item| (item.qn, item.desc.clone()))
             .collect();
+        let accepted: BTreeSet<i64> = playurl
+            .stream
+            .iter()
+            .flat_map(|stream| stream.format.iter())
+            .flat_map(|format| format.codec.iter())
+            .flat_map(|codec| codec.accept_qn.iter().copied())
+            .collect();
+        // accept_qn 是按编码列出的，用并集反推每档画质实际支持哪些视频编码。
+        let mut qn_codecs: BTreeMap<i64, BTreeSet<&'static str>> = BTreeMap::new();
+        for stream in &playurl.stream {
+            for format in &stream.format {
+                for codec in &format.codec {
+                    let codec_kind = map_codec(&codec.codec_name).as_str();
+                    for qn in &codec.accept_qn {
+                        qn_codecs.entry(*qn).or_default().insert(codec_kind);
+                    }
+                }
+            }
+        }
 
         // key = CDN 主机；保持首次出现顺序作为线路优先级。
         let mut grouped: Vec<(String, Vec<StreamCandidate>)> = Vec::new();
@@ -417,7 +434,65 @@ impl PlatformAdapter for BilibiliAdapter {
         for (index, group) in groups.iter_mut().enumerate() {
             group.priority = index as u32;
         }
-        Ok(groups)
+
+        let codec_for = |qn: &i64| -> Option<String> {
+            qn_codecs
+                .get(qn)
+                .and_then(|set| {
+                    if set.contains("h264") {
+                        Some("h264")
+                    } else if set.contains("h265") {
+                        Some("h265")
+                    } else if set.contains("av1") {
+                        Some("av1")
+                    } else {
+                        None
+                    }
+                })
+                .map(str::to_string)
+        };
+        let mut qualities: Vec<QualityInfo> = qn_desc
+            .iter()
+            .filter(|(qn, _)| **qn > 0)
+            .map(|(qn, desc)| {
+                let codec = codec_for(qn);
+                let hint = if codec.as_deref() == Some("h265") {
+                    Some("HEVC".to_string())
+                } else if codec.as_deref() == Some("av1") {
+                    Some("AV1".to_string())
+                } else if desc.contains("杜比") {
+                    Some("杜比".to_string())
+                } else {
+                    None
+                };
+                QualityInfo {
+                    qn: *qn as u32,
+                    label: desc.clone(),
+                    hint,
+                    available: accepted.contains(qn),
+                    codec,
+                }
+            })
+            .collect();
+        // 平台有时只把新档位放进 accept_qn、不补 g_qn_desc；合并两份数据避免漏档。
+        let known: BTreeSet<u32> = qualities.iter().map(|quality| quality.qn).collect();
+        for qn in accepted.iter().filter(|qn| **qn > 0) {
+            let value = *qn as u32;
+            if known.contains(&value) {
+                continue;
+            }
+            let codec = codec_for(qn);
+            qualities.push(QualityInfo {
+                qn: value,
+                label: format!("qn{qn}"),
+                hint: codec.as_deref().map(|value| value.to_uppercase()),
+                available: true,
+                codec,
+            });
+        }
+        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+
+        Ok(StreamPlan { groups, qualities })
     }
 }
 
@@ -458,6 +533,15 @@ fn host_label(host: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(|value| value.to_string()))
         .unwrap_or_else(|| host.to_string())
+}
+
+/// 应用层用 40000 表示「最高可用」；B 站没有这个 qn，原画 10000 即常规最高档。
+fn request_qn(qn: u32) -> u32 {
+    if qn == 40_000 {
+        QN_ORIGIN
+    } else {
+        qn
+    }
 }
 
 fn map_format(format: &str) -> StreamFormat {
@@ -529,6 +613,14 @@ mod tests {
         assert_eq!(map_format("flv"), StreamFormat::Flv);
         assert_eq!(map_format("fmp4"), StreamFormat::Hls);
         assert_eq!(map_format("ts"), StreamFormat::HttpTs);
+    }
+
+    #[test]
+    fn maps_highest_sentinel_to_origin() {
+        assert_eq!(request_qn(40_000), QN_ORIGIN);
+        assert_eq!(request_qn(QN_ORIGIN), QN_ORIGIN);
+        assert_eq!(request_qn(20_000), 20_000);
+        assert_eq!(request_qn(0), 0);
     }
 
     #[test]

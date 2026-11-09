@@ -10,12 +10,13 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use hivecast_ipc::QualityInfo;
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
 use crate::platform::{http, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef};
-use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup, StreamPlan};
 
 use super::abogus;
 
@@ -207,11 +208,7 @@ impl PlatformAdapter for DouyinAdapter {
         })
     }
 
-    async fn stream_groups(
-        &self,
-        room: &RoomRef,
-        qn: u32,
-    ) -> Result<Vec<StreamGroup>, PlatformError> {
+    async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError> {
         let rid = self.real_room_key(room).await?;
         let entered = self.enter(&rid).await?;
         let (payload, _, _) = unwrap_enter(entered, &rid)?;
@@ -221,11 +218,15 @@ impl PlatformAdapter for DouyinAdapter {
             return Err(PlatformError::NotLive);
         }
 
-        let groups = build_groups(stream, qn);
+        let qualities = collect_qualities(stream);
+        let groups = groups_for_quality(&qualities, qn);
         if groups.is_empty() {
             return Err(PlatformError::NotLive);
         }
-        Ok(groups)
+        Ok(StreamPlan {
+            groups,
+            qualities: quality_infos(&qualities),
+        })
     }
 }
 
@@ -523,15 +524,26 @@ fn allowed_rid(value: &str) -> bool {
 }
 
 /// 抖音档位：sdk_key 与 qn 的对应关系（见 docs/25 §2.4）。
+/// ld/md 都曾映射到 80，这里拆成 80/79，保证标清与极速可以分别选择。
 pub fn qn_for_key(key: &str) -> u32 {
     match key {
         "origin" => 10_000,
         "uhd" => 400,
         "hd" => 250,
         "sd" => 150,
-        "ld" | "md" => 80,
-        _ => 0,
+        "ld" => 80,
+        "md" => 79,
+        "ao" => 0,
+        _ => synthetic_qn(key),
     }
+}
+
+/// 平台新增未知 key 时给一个稳定的 2000..9999 qn，避免直接丢档。
+fn synthetic_qn(key: &str) -> u32 {
+    let hash = key.bytes().fold(2_166_136_261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+    });
+    2000 + hash % 7000
 }
 
 fn name_for_key(key: &str) -> &'static str {
@@ -554,7 +566,7 @@ fn qn_for_legacy(key: &str) -> u32 {
         "SD2" => 150,
         "SD1" => 80,
         "ORIGION" | "ORIGIN" => 10_000,
-        _ => 0,
+        _ => synthetic_qn(key),
     }
 }
 
@@ -667,6 +679,37 @@ fn collect_qualities(stream: &StreamUrl) -> Vec<Quality> {
     qualities
 }
 
+fn quality_infos(qualities: &[Quality]) -> Vec<QualityInfo> {
+    // 同一 qn 可能有 ld/md 等多个平台键，保留码率更高的展示项。
+    let mut map: BTreeMap<u32, (u32, QualityInfo)> = BTreeMap::new();
+    for quality in qualities {
+        if quality.qn == 0 {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if quality.bitrate_kbps > 0 {
+            parts.push(format!("{} kbps", quality.bitrate_kbps));
+        }
+        parts.push(quality.codec.as_str().to_uppercase());
+        let info = QualityInfo {
+            qn: quality.qn,
+            label: quality.name.clone(),
+            hint: (!parts.is_empty()).then(|| parts.join(" · ")),
+            available: quality.flv.is_some() || quality.hls.is_some(),
+            codec: Some(quality.codec.as_str().to_string()),
+        };
+        match map.get(&quality.qn) {
+            Some((current, _)) if *current >= quality.bitrate_kbps => {}
+            _ => {
+                map.insert(quality.qn, (quality.bitrate_kbps, info));
+            }
+        }
+    }
+    let mut infos: Vec<QualityInfo> = map.into_values().map(|(_, info)| info).collect();
+    infos.sort_by(|a, b| b.qn.cmp(&a.qn));
+    infos
+}
+
 fn parse_resolution(text: &str) -> (Option<u32>, Option<u32>) {
     let mut parts = text.split('x');
     let width = parts.next().and_then(|part| part.parse::<u32>().ok());
@@ -714,9 +757,14 @@ fn pick_quality(qualities: &[Quality], qn: u32) -> Option<&Quality> {
     best
 }
 
+#[cfg(test)]
 fn build_groups(stream: &StreamUrl, qn: u32) -> Vec<StreamGroup> {
     let qualities = collect_qualities(stream);
-    let Some(quality) = pick_quality(&qualities, qn) else {
+    groups_for_quality(&qualities, qn)
+}
+
+fn groups_for_quality(qualities: &[Quality], qn: u32) -> Vec<StreamGroup> {
+    let Some(quality) = pick_quality(qualities, qn) else {
         return Vec::new();
     };
 
@@ -834,10 +882,43 @@ mod tests {
         assert_eq!(qn_for_key("hd"), 250);
         assert_eq!(qn_for_key("sd"), 150);
         assert_eq!(qn_for_key("ld"), 80);
+        assert_eq!(qn_for_key("md"), 79);
         assert_eq!(qn_for_key("ao"), 0);
         assert_eq!(qn_for_legacy("FULL_HD1"), 400);
         assert_eq!(qn_for_legacy("SD1"), 80);
         assert_eq!(name_for_key("uhd"), "蓝光");
+    }
+
+    #[test]
+    fn every_quality_key_gets_a_unique_qn() {
+        let keys = ["origin", "uhd", "hd", "sd", "ld", "md", "custom-key"];
+        let mut seen = std::collections::BTreeSet::new();
+        for key in keys {
+            let qn = qn_for_key(key);
+            assert!(qn > 0, "{key} 应该映射到可用 qn");
+            assert!(seen.insert(qn), "{key} 的 qn {qn} 与其它档位冲突");
+        }
+        let quality = |key: &str, name: &str, bitrate: u32| Quality {
+            key: key.to_string(),
+            name: name.to_string(),
+            qn: qn_for_key(key),
+            bitrate_kbps: bitrate,
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            codec: Codec::H264,
+            flv: Some("https://example.com/live.flv".to_string()),
+            hls: None,
+        };
+        let infos = quality_infos(&[
+            quality("ld", "标清", 800),
+            quality("md", "极速", 500),
+            quality("custom-key", "自定义", 1200),
+            quality("ao", "纯音频", 0),
+        ]);
+        assert_eq!(infos.len(), 3, "纯音频不应进入画质清单");
+        let qns: std::collections::BTreeSet<u32> = infos.iter().map(|info| info.qn).collect();
+        assert_eq!(qns.len(), 3, "画质清单里 qn 必须唯一");
     }
 
     #[test]

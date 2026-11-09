@@ -22,8 +22,18 @@ export default function PlayerLab() {
           quality={{
             value: quality,
             options: [
-              { value: 40000, label: "1080P 蓝光" },
-              { value: 25000, label: "720P 超清" },
+              { value: 40000, label: "最高可用", hint: "源码率" },
+              { value: 10000, label: "原画", hint: "15100 kbps · H264" },
+              { value: 400, label: "蓝光", hint: "4000 kbps · H264" },
+              { value: 250, label: "超清", hint: "2000 kbps · H264" },
+              { value: 150, label: "高清", hint: "900 kbps · H264" },
+              { value: 80, label: "流畅", hint: "500 kbps · H264" },
+              {
+                value: 20000,
+                label: "4K HDR",
+                hint: "当前播放链路不支持 HEVC",
+                disabled: true,
+              },
             ],
             actual: "1080P 蓝光",
             onChange: setQuality,

@@ -8,8 +8,10 @@ import { PageShell } from "../../components/ui/PageShell";
 import { useNotify } from "../../lib/notify";
 import AddRoomDialog from "../monitor/AddRoomDialog";
 import DanmakuCanvas from "./DanmakuCanvas";
+import { codecLabel, videoCodecSupported } from "../../lib/codecSupport";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player, { PlayerButton, type PlayerStats } from "./Player";
+import { formatDroppedFrames } from "./playerStats";
 import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
 import {
   buildTree,
@@ -28,7 +30,7 @@ import {
   layoutSet,
   onRoomsChanged,
   onViewChanged,
-  roomLines,
+  roomStreamOptions,
   roomsList,
   viewClose,
   viewOpen,
@@ -38,6 +40,7 @@ import {
   viewSetQuality,
   viewSlots,
   type LineInfo,
+  type QualityInfo,
   type RoomView,
   type ViewSlotInfo,
 } from "../../lib/ipc";
@@ -45,8 +48,8 @@ import { whenViewsIdle } from "../../lib/viewLifecycle";
 import { useWatchPrefs } from "../../lib/watchPrefs";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const QN_OPTIONS = [0, 40000, 10000, 400, 250, 150, 80] as const;
 const MAX_SLOTS = 4;
+const FALLBACK_QUALITY_QNS = [40000, 10000, 400, 250, 150, 80] as const;
 
 export type WatchSeed = { ids: string[]; nonce: number; kind?: LayoutKind };
 
@@ -1202,16 +1205,39 @@ function SlotCell({
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
   const [stats, setStats] = useState<PlayerStats | null>(null);
+  const droppedText = stats ? formatDroppedFrames(stats) : null;
   const [fill, setFill] = useState(false);
-  const [lines, setLines] = useState<LineInfo[] | null>(null);
-  const loadLines = useCallback(async () => {
-    if (lines) return;
+  // 能力清单跟画质档位绑定（同一 qn 下线路可能不同）；切画质后缓存失效，重新取。
+  const [optionsCache, setOptionsCache] = useState<{
+    qn: number;
+    qualities: QualityInfo[];
+    lines: LineInfo[];
+  } | null>(null);
+  const options = optionsCache?.qn === session.requestedQn ? optionsCache : null;
+  const lines = options?.lines ?? null;
+  const qualities = options?.qualities ?? [];
+  const loadOptions = useCallback(async () => {
+    const qn = session.requestedQn;
     try {
-      setLines(await roomLines(session.roomId, session.requestedQn || undefined));
+      setOptionsCache({ qn, ...(await roomStreamOptions(session.roomId, qn)) });
     } catch {
-      setLines([]);
+      // 保留上一次成功结果；没有结果时由菜单的通用档位兜底。
     }
-  }, [lines, session.roomId, session.requestedQn]);
+  }, [session.roomId, session.requestedQn]);
+  useEffect(() => {
+    let cancelled = false;
+    const qn = session.requestedQn;
+    roomStreamOptions(session.roomId, qn)
+      .then((next) => {
+        if (!cancelled) setOptionsCache({ qn, ...next });
+      })
+      .catch(() => {
+        if (!cancelled) setOptionsCache(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.roomId, session.requestedQn]);
   const retryIn = useSecondsLeft(session.retryAt);
   const sounding = volume > 0;
   const degraded =
@@ -1219,6 +1245,62 @@ function SlotCell({
   const actualQuality =
     (session.quality ?? "").split(" · ")[0].trim() ||
     t("watch.qn." + session.actualQn, { defaultValue: String(session.actualQn) });
+  // 画质直接从平台能力清单渲染；清单未到时只补一个当前档位，避免入口空标签。
+  const qualityOptions: Array<{
+    value: number;
+    label: string;
+    hint?: string;
+    disabled?: boolean;
+  }> = qualities.map((quality) => {
+    const supported = videoCodecSupported(quality.codec);
+    return {
+      value: quality.qn,
+      label: quality.label,
+      hint: !quality.available
+        ? (quality.hint ?? t("watch.qualityUnavailable"))
+        : !supported
+          ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
+          : (quality.hint ?? undefined),
+      disabled: !quality.available || !supported,
+    };
+  });
+  if (qualityOptions.length === 0) {
+    for (const qn of FALLBACK_QUALITY_QNS) {
+      qualityOptions.push({ value: qn, label: t("watch.qn." + qn) });
+    }
+  }
+  if (
+    session.requestedQn !== 0 &&
+    !qualityOptions.some((option) => option.value === session.requestedQn)
+  ) {
+    const fallback =
+      session.actualQn === session.requestedQn
+        ? actualQuality
+        : t("watch.qn." + session.requestedQn, { defaultValue: String(session.requestedQn) });
+    qualityOptions.unshift({
+      value: session.requestedQn,
+      label: fallback,
+      disabled: false,
+    });
+  }
+  // 线路列表按当前画质缓存；自动画质也必须把 0 传给能力清单，不能落回录制档位。
+  const knownLines = lines ?? [];
+  const preferredMissing =
+    session.preferredLine != null && lines !== null && !knownLines.some((line) => line.name === session.preferredLine);
+  const actualLineAvailable = session.line != null && knownLines.some((line) => line.name === session.line);
+  // 手选线路消失时改为展示实际线路，避免菜单里挂着一个并不存在的“已选”项。
+  const lineValue = preferredMissing ? (actualLineAvailable ? session.line : null) : (session.preferredLine ?? null);
+  const lineOptions = [
+    { value: null as string | null, label: t("watch.lineAuto") },
+    ...knownLines.map((line) => ({
+      value: line.name,
+      label: line.name,
+      hint: line.quality,
+    })),
+    ...(session.preferredLine != null && lines === null
+      ? [{ value: session.preferredLine, label: session.preferredLine, hint: session.preferredLine }]
+      : []),
+  ];
 
   useEffect(() => {
     setFatal(null);
@@ -1280,7 +1362,7 @@ function SlotCell({
         {stats && stats.width > 0 ? (
           <span className="pointer-events-none shrink-0 rounded-[4px] bg-black/35 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/65">
             {stats.width + "x" + stats.height}
-            {stats.dropped > 0 ? " · " + t("watch.stats.dropped") + " " + stats.dropped : ""}
+            {droppedText ? " · " + t("watch.stats.dropped") + " " + droppedText : ""}
           </span>
         ) : null}
 
@@ -1304,29 +1386,16 @@ function SlotCell({
             fit={fill ? "cover" : "contain"}
             onToggleFit={() => setFill((value) => !value)}
             onReload={onRetry}
-            onMenuOpen={() => void loadLines()}
+            onMenuOpen={() => void loadOptions()}
             quality={{
               value: session.requestedQn,
-              options: QN_OPTIONS.map((qn) => ({
-                value: qn,
-                label: qn === 0 ? t("watch.qn.auto") : t("watch.qn." + qn),
-              })),
+              options: qualityOptions,
               actual: degraded ? actualQuality : undefined,
               onChange: onQuality,
             }}
             lines={{
-              value: session.preferredLine ?? null,
-              options: [
-                { value: null, label: t("watch.lineAuto") },
-                ...(lines ?? []).map((line, lineIndex) => ({
-                  value: line.name,
-                  label: t("watch.lineN", { n: lineIndex + 1 }),
-                  hint: line.name,
-                })),
-                ...(session.preferredLine && !(lines ?? []).some((line) => line.name === session.preferredLine)
-                  ? [{ value: session.preferredLine, label: session.preferredLine, hint: session.preferredLine }]
-                  : []),
-              ],
+              value: lineValue,
+              options: lineOptions,
               onChange: onLine,
             }}
             onFatal={(detail) => setFatal(detail)}

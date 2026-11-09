@@ -603,6 +603,8 @@
     "noCandidates": "Every monitored room is already on screen, or there are no rooms yet.",
     "unknownRoom": "Unknown room",
     "quality": "View quality",
+    "qualityUnavailable": "Unavailable",
+    "qualityCodecUnsupported": "This playback path does not support {{codec}}",
     "close": "Close slot",
     "multiSound": "3+ streams are audible. Use the volume control at the bottom left of each player to adjust them individually.",
     "emptyTitle": "Nothing on screen yet",

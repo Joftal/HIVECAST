@@ -4,7 +4,7 @@ use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
     MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult, QrPoll,
     QrTicket, RecordSession, RecordingUsage, RoomRecord, RoomView, SessionSummary, Settings,
-    StreamDescriptor, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
+    StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -376,9 +376,43 @@ pub async fn room_lines(
         Some(qn) => qn,
         None => crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn),
     };
-    let groups = state.broker.groups(&room_ref(&room), requested_qn).await?;
-    tracing::debug!(target: "hivecast_lib::commands", room_id = %id, groups = groups.len(), "查询房间线路");
-    Ok(groups
+    let plan = state.broker.plan(&room_ref(&room), requested_qn).await?;
+    tracing::debug!(target: "hivecast_lib::commands", room_id = %id, groups = plan.groups.len(), "查询房间线路");
+    Ok(line_infos(&plan.groups))
+}
+
+/// 当前房间的画质与线路能力：线路与画质来自同一次解析，前端不再维护平台映射表。
+#[tauri::command]
+pub async fn room_stream_options(
+    state: State<'_, AppState>,
+    id: String,
+    qn: Option<u32>,
+) -> Result<StreamOptions, AppError> {
+    let room = state
+        .db
+        .get_room(&id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    let settings = crate::settings::load(&state.db);
+    let requested_qn = match qn {
+        Some(qn) => qn,
+        None => crate::settings::effective_record_qn(settings.default_record_qn, room.record_qn),
+    };
+    let plan = state.broker.plan(&room_ref(&room), requested_qn).await?;
+    tracing::debug!(
+        target: "hivecast_lib::commands",
+        room_id = %id,
+        groups = plan.groups.len(),
+        qualities = plan.qualities.len(),
+        "查询房间画质与线路"
+    );
+    Ok(StreamOptions {
+        qualities: plan.qualities.clone(),
+        lines: line_infos(&plan.groups),
+    })
+}
+
+fn line_infos(groups: &[crate::platform::StreamGroup]) -> Vec<LineInfo> {
+    groups
         .iter()
         .map(|group| LineInfo {
             name: group.name.clone(),
@@ -391,7 +425,7 @@ pub async fn room_lines(
                 .unwrap_or_else(|| "—".into()),
             candidates: group.candidates.iter().filter(|c| c.url.is_some()).count(),
         })
-        .collect())
+        .collect()
 }
 
 /// 指定录制线路；传 None 回到自动选择。只影响下一次开录/续录，不打断当前录制。
@@ -579,7 +613,7 @@ pub async fn view_set_quality(
     qn: u32,
 ) -> Result<ViewSlotInfo, AppError> {
     tracing::info!(target: "hivecast_lib::commands", slot, qn, "切换观看画质");
-    state.view.set_quality(&app, slot, qn)
+    state.view.set_quality(&app, state.broker.clone(), slot, qn)
 }
 
 #[tauri::command]

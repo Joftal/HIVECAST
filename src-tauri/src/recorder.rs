@@ -938,8 +938,8 @@ impl Recorder {
         let split = SplitPolicy::from_settings(&settings);
         let post = crate::post::PostConfig::from_settings(&settings);
 
-        let groups = broker
-            .groups(
+        let plan = broker
+            .plan(
                 &crate::platform::RoomRef {
                     platform: room.platform.clone(),
                     room_key: room.room_key.clone(),
@@ -954,17 +954,17 @@ impl Recorder {
                 AppError::from(err)
             })?;
 
-        let (candidate, group) = pick_candidate(&groups, room.record_line.as_deref(), prefs)
+        let (candidate, group) = pick_candidate(&plan.groups, room.record_line.as_deref(), prefs)
             .ok_or_else(|| {
-                tracing::warn!(
-                    room_id = %room.id,
-                    room = %room.host_name,
-                    groups = groups.len(),
-                    line = ?room.record_line,
-                    "开录没有可用线路"
-                );
-                AppError::User("没有可用的线路".into())
-            })?;
+            tracing::warn!(
+                room_id = %room.id,
+                room = %room.host_name,
+                groups = plan.groups.len(),
+                line = ?room.record_line,
+                "开录没有可用线路"
+            );
+            AppError::User("没有可用的线路".into())
+        })?;
 
         let actual_qn = candidate_qn(candidate);
         let started_at = crate::db::now_ts();
@@ -1126,7 +1126,7 @@ impl Recorder {
             last_growth: Instant::now(),
             stalls: 0,
             eof_retries: 0,
-            qn: record_qn,
+            qn: pinned_qn(record_qn, actual_qn),
             line: room.record_line.clone(),
             prefs,
             codec: candidate.codec,
@@ -1746,8 +1746,8 @@ impl Recorder {
         // 本次解析允许穿过冷却（续录是用户已经在等的动作），失败了也照常累计退避。
         // 给 CDN 一点时间回收上一条连接的动作放在 broker 调用前，顺序与旧版一致。
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let groups = match broker.groups_for_respawn(&reference, qn).await {
-            Ok(groups) => groups,
+        let plan = match broker.plan_for_respawn(&reference, qn).await {
+            Ok(plan) => plan,
             Err(err) => {
                 tracing::warn!(%err, room_id, "续录解析线路失败");
                 return false;
@@ -1756,7 +1756,7 @@ impl Recorder {
         // 续录钉住首段的编码与源流格式：平台中途换编码时，宁可牺牲一点码率，
         // 也不要让同一场的分片在 H.264/H.265 之间跳变。
         let prefs = respawn_prefs(qn, prefs, codec, format);
-        let Some((candidate, _group)) = pick_candidate(&groups, line.as_deref(), prefs) else {
+        let Some((candidate, _group)) = pick_candidate(&plan.groups, line.as_deref(), prefs) else {
             tracing::warn!(room_id, "续录没有可用线路");
             return false;
         };
@@ -3582,6 +3582,16 @@ fn candidate_qn(candidate: &StreamCandidate) -> u32 {
         .unwrap_or(0)
 }
 
+/// 自动画质在本场开始时落到实际档位后固定下来，避免直播中途出现更高档时跳档。
+/// 显式档位仍保留请求值，允许续录恢复到用户选的档位。
+fn pinned_qn(requested: u32, actual: u32) -> u32 {
+    if requested == 0 && actual > 0 {
+        actual
+    } else {
+        requested
+    }
+}
+
 /// 用户明确选了档位，实际却拿到更低档：需要提示，但绝不能因此拒绝录制。
 ///
 /// `requested == 0`（跟随平台）和 `requested == 40000`（最高可用）本来就会
@@ -4016,6 +4026,15 @@ mod tests {
         assert!(!quality_fallback(0, 250));
         assert!(!quality_fallback(crate::settings::RECORD_QN_HIGHEST, 250));
         assert!(!quality_fallback(400, 0));
+    }
+
+    #[test]
+    fn auto_recording_pins_initial_quality() {
+        assert_eq!(pinned_qn(0, 250), 250);
+        assert_eq!(pinned_qn(0, 10_000), 10_000);
+        assert_eq!(pinned_qn(0, 0), 0);
+        assert_eq!(pinned_qn(400, 250), 400, "显式档位保留请求值");
+        assert_eq!(pinned_qn(400, 400), 400);
     }
 
     #[test]

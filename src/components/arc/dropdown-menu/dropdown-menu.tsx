@@ -8,7 +8,7 @@ import { ChevronDown } from "lucide-react";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./dropdown-menu.module.css";
 
-export interface DropdownItem { key?: string; label: string; onSelect?: () => void; disabled?: boolean; icon?: ReactNode; destructive?: boolean; separatorBefore?: boolean; hint?: string; }
+export interface DropdownItem { key?: string; label: string; onSelect?: () => void; disabled?: boolean; icon?: ReactNode; destructive?: boolean; separatorBefore?: boolean; hint?: string; /** 选择后保持菜单打开，用于画质/线路这类二级切换。 */ keepOpen?: boolean; }
 export interface DropdownMenuProps {
   label: string;
   items: DropdownItem[];
@@ -95,7 +95,7 @@ export function DropdownMenu({ label, items, icon, variant = "default", size = "
     <DropdownPrimitive.Portal><DropdownPrimitive.Content className={styles.menu} data-variant={variant} sideOffset={6} align={align} side={side} collisionPadding={12} loop onFocus={onMenuFocus} onPointerMoveCapture={() => { pointer.current = true; }} onKeyDownCapture={() => { pointer.current = false; }}>
       {/* One highlight glides between items for the pointer and jumps instantly for the keyboard. */}
       <motion.span className={styles.highlight} data-tone={highlight?.danger ? "danger" : undefined} aria-hidden="true" initial={false} animate={highlight ? { y: highlight.top, height: highlight.height, opacity: 1 } : { opacity: 0 }} transition={{ default: highlight?.glide && !reduced ? motionTokens.spring.snappy : { duration: 0 }, opacity: { duration: reduced ? 0 : .08 } }}/>
-      {items.map((item, index) => <Fragment key={item.key ?? item.label}>{item.separatorBefore && <DropdownPrimitive.Separator className={styles.separator}/>}<DropdownPrimitive.Item className={[styles.item, item.destructive ? styles.destructive : ""].filter(Boolean).join(" ")} data-tone={item.destructive ? "danger" : undefined} style={{ "--i": index } as CSSProperties} disabled={item.disabled} onSelect={item.onSelect}>{item.icon && <span className={styles.icon} aria-hidden="true">{item.icon}</span>}<span className={styles.itemLabel}>{item.label}</span>{item.hint && <span className={styles.hint}>{item.hint}</span>}</DropdownPrimitive.Item></Fragment>)}
+      {items.map((item, index) => <Fragment key={item.key ?? item.label}>{item.separatorBefore && <DropdownPrimitive.Separator className={styles.separator}/>}<DropdownPrimitive.Item className={[styles.item, item.destructive ? styles.destructive : ""].filter(Boolean).join(" ")} data-tone={item.destructive ? "danger" : undefined} style={{ "--i": index } as CSSProperties} disabled={item.disabled} onSelect={(event) => { if (item.keepOpen) event.preventDefault(); item.onSelect?.(); }}>{item.icon && <span className={styles.icon} aria-hidden="true">{item.icon}</span>}<span className={styles.itemLabel}>{item.label}</span>{item.hint && <span className={styles.hint}>{item.hint}</span>}</DropdownPrimitive.Item></Fragment>)}
       {footer ? <div className={styles.footer}>{footer}</div> : null}
     </DropdownPrimitive.Content></DropdownPrimitive.Portal>
   </DropdownPrimitive.Root>;

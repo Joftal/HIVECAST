@@ -322,6 +322,30 @@ pub struct LineInfo {
     pub candidates: usize,
 }
 
+/// 一档画质：qn 是应用内请求用的统一值，label/hint 是平台真实名称与补充信息。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct QualityInfo {
+    pub qn: u32,
+    pub label: String,
+    /// 码率、编码或「当前不可用」的原因。
+    pub hint: Option<String>,
+    /// 当前房间 / 账号是否真的可选。
+    pub available: bool,
+    /// h264 / h265 / av1 / unknown
+    pub codec: Option<String>,
+}
+
+/// 当前房间的画质与线路能力清单。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct StreamOptions {
+    pub qualities: Vec<QualityInfo>,
+    pub lines: Vec<LineInfo>,
+}
+
 /// 一条弹幕（已归一化，平台差异在客户端层消化）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

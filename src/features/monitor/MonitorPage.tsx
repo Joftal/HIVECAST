@@ -28,7 +28,7 @@ import {
   recordStart,
   recordStop,
   recordingUsage,
-  roomLines,
+  roomStreamOptions,
   roomRefresh,
   roomRemove,
   roomSetAutoRecord,
@@ -40,10 +40,12 @@ import {
   viewOpen,
   type LineInfo,
   type MonitorStatus,
+  type QualityInfo,
   type RecordingUsage,
   type RoomView,
   type SessionSummary,
 } from "../../lib/ipc";
+import { codecLabel, videoCodecSupported } from "../../lib/codecSupport";
 
 const QUALITIES = [0, 40000, 10000, 400, 250, 150, 80];
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
@@ -525,6 +527,8 @@ export default function MonitorPage({
   }, [selectedId]);
 
   const [lines, setLines] = useState<LineInfo[] | null>(null);
+  const [qualities, setQualities] = useState<QualityInfo[] | null>(null);
+  const [optionsKey, setOptionsKey] = useState<{ roomId: string; qn: number } | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
   const [removeDone, setRemoveDone] = useState(false);
 
@@ -614,6 +618,8 @@ export default function MonitorPage({
 
   useEffect(() => {
     setLines(null);
+    setQualities(null);
+    setOptionsKey(null);
     setRemoveDone(false);
     setDrawerSummary(null);
     if (!selectedId || !isTauri()) return;
@@ -807,11 +813,17 @@ export default function MonitorPage({
     return ok;
   };
 
-  const loadLines = async (roomId: string, qn: number) => {
+  const loadOptions = async (roomId: string, qn: number, force = false) => {
+    if (!force && optionsKey?.roomId === roomId && optionsKey.qn === qn && qualities) return;
     setLineBusy(true);
     try {
-      setLines(await roomLines(roomId, qn));
+      const next = await roomStreamOptions(roomId, qn);
+      if (selectedIdRef.current !== roomId) return;
+      setQualities(next.qualities);
+      setLines(next.lines);
+      setOptionsKey({ roomId, qn });
     } catch (err) {
+      setQualities(null);
       setLines([]);
       notify.error(err);
     } finally {
@@ -819,8 +831,37 @@ export default function MonitorPage({
     }
   };
 
+  const qualityOptionsFor = (roomId: string, qn: number, gateCodec: boolean) => {
+    const auto = { value: "0", label: t("monitor.qn.0") };
+    if (!qualities || optionsKey?.roomId !== roomId) {
+      return QUALITIES.map((value) => ({ value: String(value), label: t("monitor.qn." + value) }));
+    }
+    const options = qualities.map((quality) => {
+      const supported = !gateCodec || videoCodecSupported(quality.codec);
+      return {
+        value: String(quality.qn),
+        label: quality.label,
+        hint: !quality.available
+          ? (quality.hint ?? t("watch.qualityUnavailable"))
+          : !supported
+            ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
+            : (quality.hint ?? undefined),
+        disabled: !quality.available || !supported,
+      };
+    });
+    if (qn !== 0 && !options.some((option) => option.value === String(qn))) {
+      options.unshift({
+        value: String(qn),
+        label: t("monitor.qn." + qn, { defaultValue: String(qn) }),
+        hint: undefined,
+        disabled: false,
+      });
+    }
+    return [auto, ...options];
+  };
+
   const lineOptions = [{ value: "", label: t("monitor.lineAuto") }].concat(
-    (lines ?? []).map((line) => ({ value: line.name, label: line.name + " · " + line.quality })),
+    (lines ?? []).map((line) => ({ value: line.name, label: line.name, hint: line.quality })),
   );
 
   const platformOptions = PLATFORMS.map((key) => ({
@@ -1492,7 +1533,10 @@ export default function MonitorPage({
                   size="md"
                   disabled={busy}
                   onChange={(next) => void run(room.id, () => roomSetQuality(room.id, Number(next), room.viewQn))}
-                  options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
+                  onOpenChange={(open) => {
+                    if (open) void loadOptions(room.id, room.recordQn, true);
+                  }}
+                  options={qualityOptionsFor(room.id, room.recordQn, false)}
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>
@@ -1503,7 +1547,10 @@ export default function MonitorPage({
                   size="md"
                   disabled={busy}
                   onChange={(next) => void run(room.id, () => roomSetQuality(room.id, room.recordQn, Number(next)))}
-                  options={QUALITIES.map((qn) => ({ value: String(qn), label: t("monitor.qn." + qn) }))}
+                  onOpenChange={(open) => {
+                    if (open) void loadOptions(room.id, room.recordQn, true);
+                  }}
+                  options={qualityOptionsFor(room.id, room.viewQn, true)}
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>
@@ -1514,12 +1561,15 @@ export default function MonitorPage({
                   size="md"
                   disabled={lineBusy || busy}
                   onChange={(next) => void run(room.id, () => roomSetLine(room.id, next || null))}
+                  onOpenChange={(open) => {
+                    if (open) void loadOptions(room.id, room.recordQn, true);
+                  }}
                   options={lineOptions}
                   className="min-w-0 flex-1 justify-between"
                 />
                 <button
                   type="button"
-                  onClick={() => void loadLines(room.id, room.recordQn)}
+                  onClick={() => void loadOptions(room.id, room.recordQn, true)}
                   disabled={lineBusy || busy}
                   aria-label={t("monitor.lineLoad")}
                   title={lineBusy ? t("common.loading") : t("monitor.lineLoad")}

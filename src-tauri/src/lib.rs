@@ -251,6 +251,7 @@ pub fn run() {
             commands::room_set_rules,
             commands::room_set_quality,
             commands::room_lines,
+            commands::room_stream_options,
             commands::room_set_line,
             commands::room_set_monitor,
             commands::record_start,

@@ -70,9 +70,34 @@ pub fn platform_for_host(host: &str) -> Option<&'static str> {
     }
 }
 
+/// 兼容用户从整理文件里直接复制的「哔哩哔哩：SESSDATA=…」格式。
+fn strip_platform_prefix(text: &str) -> &str {
+    for label in [
+        "哔哩哔哩",
+        "斗鱼",
+        "虎牙",
+        "抖音",
+        "bilibili",
+        "douyu",
+        "huya",
+        "douyin",
+    ] {
+        if let Some(rest) = text.strip_prefix(label) {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) {
+                let rest = rest.trim_start();
+                if !rest.is_empty() {
+                    return rest;
+                }
+            }
+        }
+    }
+    text
+}
+
 /// 把用户粘贴的内容收敛成 a=1; b=2 形态。
 ///
-/// 兼容三种来源：浏览器 DevTools 复制的一整行、只复制了 Cookie: 后面的值、
+/// 兼容：浏览器 DevTools 复制的一整行、只复制了 Cookie: 后面的值、
 /// 以及从别处拷来的多行（有的工具按行输出 name=value;）。
 pub fn normalize(raw: &str) -> Result<String, String> {
     let text = raw.trim();
@@ -86,6 +111,7 @@ pub fn normalize(raw: &str) -> Result<String, String> {
         .strip_prefix("Cookie:")
         .or_else(|| text.strip_prefix("cookie:"))
         .unwrap_or(text);
+    let text = strip_platform_prefix(text);
     let mut pairs: Vec<(String, String)> = Vec::new();
     for chunk in text.split(';') {
         for line in chunk.split('\n') {
@@ -174,6 +200,20 @@ mod tests {
     fn strips_prefix_and_multiline() {
         let raw = "Cookie: dy_did=1\n; acf_uid=2;";
         assert_eq!(normalize(raw).unwrap(), "dy_did=1; acf_uid=2");
+    }
+
+    #[test]
+    fn strips_platform_label_prefix() {
+        assert_eq!(
+            normalize("哔哩哔哩：SESSDATA=a; b=2").unwrap(),
+            "SESSDATA=a; b=2"
+        );
+        assert_eq!(
+            normalize("抖音: ttwid=x; uid_tt=y").unwrap(),
+            "ttwid=x; uid_tt=y"
+        );
+        // 普通 Cookie 名里带平台字样不能被误删。
+        assert_eq!(normalize("huya_uid=1; b=2").unwrap(), "huya_uid=1; b=2");
     }
 
     #[test]

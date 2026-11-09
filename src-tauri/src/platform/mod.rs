@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use hivecast_ipc::QualityInfo;
 use serde::Serialize;
 use url::Url;
 
@@ -128,6 +129,13 @@ pub struct StreamGroup {
     pub candidates: Vec<StreamCandidate>,
 }
 
+/// 一次取流解析的结果：线路组 + 当前房间的真实画质清单。
+#[derive(Debug, Clone)]
+pub struct StreamPlan {
+    pub groups: Vec<StreamGroup>,
+    pub qualities: Vec<QualityInfo>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
     #[error("不支持的平台或输入：{0}")]
@@ -193,12 +201,18 @@ pub trait PlatformAdapter: Send + Sync {
     /// 纯本地解析：观众可零网络把房间加进列表
     fn resolve(&self, input: &str) -> Option<RoomRef>;
     async fn room_info(&self, room: &RoomRef) -> Result<RoomInfo, PlatformError>;
-    /// qn 为期望清晰度，平台可能返回更低的档位（未登录/无权限）
+    /// qn 为期望清晰度，平台可能返回更低的档位（未登录/无权限）。
+    /// 同时返回平台真实画质清单，供前端原样展示。
+    async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError>;
+    /// 只需要线路的调用方（录制、观看管线）继续用这个便捷方法。
+    #[allow(dead_code)] // 集成测试仍直接调用它；生产路径走 broker 的 StreamPlan 缓存。
     async fn stream_groups(
         &self,
         room: &RoomRef,
         qn: u32,
-    ) -> Result<Vec<StreamGroup>, PlatformError>;
+    ) -> Result<Vec<StreamGroup>, PlatformError> {
+        Ok(self.stream_plan(room, qn).await?.groups)
+    }
 }
 
 fn registry() -> &'static Vec<Arc<dyn PlatformAdapter>> {

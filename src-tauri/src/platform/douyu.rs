@@ -11,14 +11,15 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use hivecast_ipc::QualityInfo;
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
 use super::http;
 use super::{
-    PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate, StreamFormat,
-    StreamGroup,
+    Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
+    StreamFormat, StreamGroup, StreamPlan,
 };
 
 const ROOM_HOST: &str = "https://www.douyu.com";
@@ -243,11 +244,7 @@ impl PlatformAdapter for DouyuAdapter {
         })
     }
 
-    async fn stream_groups(
-        &self,
-        room: &RoomRef,
-        qn: u32,
-    ) -> Result<Vec<StreamGroup>, PlatformError> {
+    async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError> {
         let room_key = self.real_room_key(&room.room_key).await?;
         let referer = Self::referer(&room_key);
         let rate = rate_for_qn(qn);
@@ -368,7 +365,7 @@ impl PlatformAdapter for DouyuAdapter {
                 name: format!("{rate_name} · FLV"),
                 weight: bit.max(payload.rate as i64 * 1000) as f64,
                 format: StreamFormat::Flv,
-                codec: None,
+                codec: Some(Codec::H264),
                 width: None,
                 height: None,
                 fps: None,
@@ -388,7 +385,41 @@ impl PlatformAdapter for DouyuAdapter {
         if groups.is_empty() {
             return Err(PlatformError::Parse("斗鱼没有可用线路".into()));
         }
-        Ok(groups)
+
+        // multirates 就是平台当前房间的真实档位表；同一 qn 只保留码率更高的一条。
+        let mut quality_map: BTreeMap<u32, (i64, QualityInfo)> = BTreeMap::new();
+        for item in &data.multirates {
+            let qn = qn_for_rate(item.rate);
+            if qn == 0 {
+                continue;
+            }
+            let label = if item.name.is_empty() {
+                format!("rate{}", item.rate)
+            } else {
+                item.name.clone()
+            };
+            let hint = (item.bit > 0).then(|| format!("{} kbps", item.bit));
+            let info = QualityInfo {
+                qn,
+                label,
+                hint,
+                available: true,
+                codec: Some("h264".into()),
+            };
+            match quality_map.get(&qn) {
+                Some((bit, _)) if *bit >= item.bit => {}
+                _ => {
+                    quality_map.insert(qn, (item.bit, info));
+                }
+            }
+        }
+        let mut qualities: Vec<QualityInfo> = quality_map
+            .into_values()
+            .map(|(_, quality)| quality)
+            .collect();
+        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+
+        Ok(StreamPlan { groups, qualities })
     }
 }
 
@@ -478,25 +509,32 @@ fn md5_hex(value: &str) -> String {
 }
 
 /// qn 是跨平台统一的「期望画质」；斗鱼这里映射到 rate。
+/// rate2=高清、rate3=超清、rate4=蓝光4M、rate8=蓝光8M。
+/// 平台新增的其它 rate 用 1000+rate 作为稳定 qn，保证每个档位都能单独选择。
 pub fn rate_for_qn(qn: u32) -> i64 {
     match qn {
-        0 | 10000 => 0,
-        400 => 8,
-        250 => 4,
-        150 => 3,
-        80 => 2,
+        0 | 10000 | 40000 => 0,
+        400 => 4,
+        401 => 8,
+        250 => 3,
+        150 => 2,
+        80 => 1,
+        1000..=9999 => (qn - 1000) as i64,
         _ => 0,
     }
 }
 
 /// 平台实际返回的 rate 反推成统一 qn，供 UI 显示「已降级」。
+/// rate4/8 分别是蓝光4M/蓝光8M，不能合并。
 pub fn qn_for_rate(rate: i64) -> u32 {
     match rate {
         0 => 10000,
-        8 => 400,
-        4 => 250,
-        3 => 150,
-        2 => 80,
+        1 => 80,
+        2 => 150,
+        3 => 250,
+        4 => 400,
+        8 => 401,
+        value if (1..=8999).contains(&value) => 1000 + value as u32,
         _ => 0,
     }
 }
@@ -654,11 +692,26 @@ mod tests {
     #[test]
     fn maps_qn_and_rate_both_ways() {
         assert_eq!(rate_for_qn(10000), 0);
-        assert_eq!(rate_for_qn(400), 8);
-        assert_eq!(rate_for_qn(250), 4);
+        assert_eq!(rate_for_qn(400), 4);
+        assert_eq!(rate_for_qn(401), 8);
+        assert_eq!(rate_for_qn(250), 3);
+        assert_eq!(rate_for_qn(150), 2);
+        assert_eq!(rate_for_qn(80), 1);
         assert_eq!(rate_for_qn(0), 0);
-        assert_eq!(qn_for_rate(4), 250);
+        assert_eq!(qn_for_rate(8), 401);
+        assert_eq!(qn_for_rate(4), 400);
+        assert_eq!(qn_for_rate(3), 250);
+        assert_eq!(qn_for_rate(2), 150);
+        assert_eq!(qn_for_rate(1), 80);
         assert_eq!(qn_for_rate(0), 10000);
+        // 平台新增档位：rate5 等仍可用 1000+rate 唯一选择。
+        assert_eq!(qn_for_rate(5), 1005);
+        assert_eq!(rate_for_qn(1005), 5);
+        // 关键不变量：任何平台 rate 都能 qn→rate 回到自己，不能两个档位共用一个 qn。
+        for rate in 0..=20 {
+            let qn = qn_for_rate(rate);
+            assert_eq!(rate_for_qn(qn), rate, "rate {rate} 的 qn {qn} 无法回选");
+        }
     }
 
     #[test]

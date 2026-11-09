@@ -603,6 +603,8 @@
     "noCandidates": "监控列表里的房间都在观看中，或者还没有添加房间。",
     "unknownRoom": "未知直播间",
     "quality": "观看画质",
+    "qualityUnavailable": "当前不可用",
+    "qualityCodecUnsupported": "当前播放链路不支持 {{codec}}",
     "close": "关闭槽位",
     "multiSound": "当前有 3 路以上同时发声。需要安静时，点各播放器左下角的音量按钮单独调节。",
     "emptyTitle": "还没有正在观看的直播间",

@@ -18,6 +18,7 @@ import type { MediaItem } from "./bindings/MediaItem";
 import type { MediaPage } from "./bindings/MediaPage";
 import type { PlatformCount } from "./bindings/PlatformCount";
 import type { Playback } from "./bindings/Playback";
+import type { QualityInfo } from "./bindings/QualityInfo";
 import type { Settings } from "./bindings/Settings";
 import type { PostProgress } from "./bindings/PostProgress";
 import type { TaskBoard } from "./bindings/TaskBoard";
@@ -31,6 +32,7 @@ import type { MonitorStatus } from "./bindings/MonitorStatus";
 import type { RecordingUsage } from "./bindings/RecordingUsage";
 import type { RoomView } from "./bindings/RoomView";
 import type { StreamDescriptor } from "./bindings/StreamDescriptor";
+import type { StreamOptions } from "./bindings/StreamOptions";
 import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
 
 export type {
@@ -54,6 +56,7 @@ export type {
   Playback,
   PostProgress,
   PostResult,
+  QualityInfo,
   TaskBoard,
   TaskRecord,
   TrashInfo,
@@ -65,6 +68,7 @@ export type {
   RecordingUsage,
   Settings,
   StreamDescriptor,
+  StreamOptions,
   ViewSlotInfo,
 };
 
@@ -147,6 +151,11 @@ export async function roomSetQuality(id: string, recordQn: number, viewQn: numbe
 /** 列出当前可用线路（需要触网解析，展开选择器时才调）。 */
 export async function roomLines(id: string, qn?: number): Promise<LineInfo[]> {
   return invoke<LineInfo[]>("room_lines", { id, qn: qn ?? null });
+}
+
+/** 当前房间的画质与线路能力：平台真实档位 + 线路，菜单直接渲染。 */
+export async function roomStreamOptions(id: string, qn?: number): Promise<StreamOptions> {
+  return invoke<StreamOptions>("room_stream_options", { id, qn: qn ?? null });
 }
 
 /** 指定录制线路；null 回到自动。 */

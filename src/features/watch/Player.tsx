@@ -1,5 +1,5 @@
 import Hls from "hls.js";
-import { Check, Expand, Maximize2, Minimize2, Scan } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Expand, Maximize2, Minimize2, Scan } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -15,7 +15,10 @@ import {
   ReloadIcon,
   VolumeIcon,
 } from "./PlayerIcons";
+import { formatDroppedFrames, type PlayerStats } from "./playerStats";
 import "./player-controls.css";
+
+export type { PlayerStats } from "./playerStats";
 
 type Props = {
   url: string;
@@ -43,14 +46,14 @@ type Props = {
   showStats?: boolean;
   /** 统计每秒更新一次；外层只用于标题栏展示，不参与播放器渲染。 */
   onStatsChange?: (stats: PlayerStats | null) => void;
-  /** 画质菜单（直播才有）。给了就在控制条右侧显示画质入口。 */
+  /** 画质菜单（直播才有）。选项由平台能力清单提供。 */
   quality?: {
     value: number;
-    options: { value: number; label: string }[];
+    options: { value: number; label: string; hint?: string; disabled?: boolean }[];
     actual?: string;
     onChange: (value: number) => void;
   };
-  /** 线路菜单：与画质放在同一个浮层里，先选线路再选档位。 */
+  /** 线路菜单：默认画质视图，线路作为二级视图。 */
   lines?: {
     value: string | null;
     options: { value: string | null; label: string; hint?: string }[];
@@ -66,14 +69,14 @@ type Props = {
   onToggleFit?: () => void;
 };
 
-export type PlayerStats = {
-  width: number;
-  height: number;
-  kbps: number;
-  dropped: number;
+const EMPTY_STATS: PlayerStats = {
+  width: 0,
+  height: 0,
+  kbps: 0,
+  dropped: 0,
+  dropRate: 0,
+  dropRatio: 0,
 };
-
-const EMPTY_STATS: PlayerStats = { width: 0, height: 0, kbps: 0, dropped: 0 };
 
 type PlayerButtonProps = {
   children: ReactNode;
@@ -226,6 +229,8 @@ export default function Player({
   const [stats, setStats] = useState<PlayerStats>(EMPTY_STATS);
   const statsChangeRef = useRef(onStatsChange);
   statsChangeRef.current = onStatsChange;
+  // 丢帧数与总帧数都是累计值；保存上一秒采样，换算成每秒增量与窗口占比。
+  const lastQualityRef = useRef<{ dropped: number; total: number; at: number } | null>(null);
   useEffect(() => () => statsChangeRef.current?.(null), []);
   // 视频按 object-contain 居中，黑边不属于画面；弹幕要贴着画面走，不能画在黑边上。
   const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -240,6 +245,8 @@ export default function Player({
   // B 站式自动隐藏：移动时出现，静止约 2.8s 后收起；面板/菜单打开时保持显示。
   const [chromeVisible, setChromeVisible] = useState(false);
   const [qualityOpen, setQualityOpen] = useState(false);
+  // 画质菜单默认展示画质列表，线路作为二级视图单独展开。
+  const [lineMode, setLineMode] = useState(false);
   const [fullscreenActive, setFullscreenActive] = useState(false);
   const chromeTimer = useRef<number | undefined>(undefined);
   const wakeChrome = () => {
@@ -414,11 +421,28 @@ export default function Player({
       if (!video) return;
       const quality = video.getVideoPlaybackQuality();
       const level = hlsRef.current?.levels[hlsRef.current.currentLevel];
+      const dropped = quality?.droppedVideoFrames ?? 0;
+      const total = quality?.totalVideoFrames ?? 0;
+      const at = performance.now();
+      const prev = lastQualityRef.current;
+      let dropRate = 0;
+      let dropRatio = 0;
+      // 换源或重新加载后计数器会归零，此时只重建基线，不产生负增量。
+      if (prev && dropped >= prev.dropped && total >= prev.total) {
+        const seconds = Math.max(0.001, (at - prev.at) / 1000);
+        const droppedDelta = dropped - prev.dropped;
+        const totalDelta = total - prev.total;
+        dropRate = droppedDelta / seconds;
+        dropRatio = totalDelta > 0 ? (droppedDelta / totalDelta) * 100 : 0;
+      }
+      lastQualityRef.current = { dropped, total, at };
       const next = {
         width: video.videoWidth,
         height: video.videoHeight,
         kbps: Math.round((level?.bitrate ?? 0) / 1000),
-        dropped: quality?.droppedVideoFrames ?? 0,
+        dropped,
+        dropRate,
+        dropRatio,
       };
       setStats(next);
       statsChangeRef.current?.(next);
@@ -503,50 +527,78 @@ export default function Player({
   };
 
   const playbackPct = durationMs && durationMs > 0 ? Math.min(100, ((scrubMs ?? positionMs) / durationMs) * 100) : 0;
+  const droppedText = formatDroppedFrames(stats);
 
   const qualityLabel =
     quality?.options.find((option) => option.value === quality.value)?.label ?? t("watch.qn.auto");
   const autoLabel = quality?.actual
     ? t("watch.autoQuality", { q: quality.actual })
     : t("watch.qn.auto");
+  const lineLabel =
+    lines?.options.find((option) => (option.value ?? null) === (lines.value ?? null))?.label ??
+    t("watch.lineAuto");
   const qualityItems: DropdownItem[] = [];
   if (quality) {
-    if (lines && lines.options.length > 0) {
+    if (lineMode && lines) {
+      qualityItems.push({
+        key: "quality:back",
+        label: t("watch.quality"),
+        icon: <ChevronLeft size={15} strokeWidth={1.8} />,
+        keepOpen: true,
+        onSelect: () => setLineMode(false),
+      });
       for (const option of lines.options) {
         const selected = (lines.value ?? null) === option.value;
         qualityItems.push({
           key: "line:" + (option.value ?? "auto"),
-          label: `${t("watch.line")} · ${option.label}`,
+          label: option.label,
           hint: option.hint,
+          separatorBefore: qualityItems.length === 1,
           icon: selected ? <Check size={15} className="text-accent-text" /> : <span />,
-          onSelect: () => lines.onChange(option.value),
+          onSelect: () => {
+            lines.onChange(option.value);
+            setLineMode(false);
+          },
+        });
+      }
+    } else {
+      let firstQuality = true;
+      for (const option of quality.options) {
+        if (option.value === 0) continue;
+        qualityItems.push({
+          key: "qn:" + option.value,
+          label: option.label,
+          hint: option.hint,
+          disabled: option.disabled,
+          separatorBefore: firstQuality && qualityItems.length > 0,
+          icon:
+            quality.value === option.value ? (
+              <Check size={15} className="text-accent-text" />
+            ) : (
+              <span />
+            ),
+          onSelect: () => quality.onChange(option.value),
+        });
+        firstQuality = false;
+      }
+      qualityItems.push({
+        key: "qn:auto",
+        label: autoLabel,
+        separatorBefore: true,
+        icon: quality.value === 0 ? <Check size={15} className="text-accent-text" /> : <span />,
+        onSelect: () => quality.onChange(0),
+      });
+      if (lines && lines.options.length > 0) {
+        qualityItems.push({
+          key: "line",
+          label: `${t("watch.line")} · ${lineLabel}`,
+          separatorBefore: true,
+          icon: <ChevronRight size={15} strokeWidth={1.8} />,
+          keepOpen: true,
+          onSelect: () => setLineMode(true),
         });
       }
     }
-    let firstQuality = true;
-    for (const option of quality.options) {
-      if (option.value === 0) continue;
-      qualityItems.push({
-        key: "qn:" + option.value,
-        label: option.label,
-        separatorBefore: firstQuality && qualityItems.length > 0,
-        icon:
-          quality.value === option.value ? (
-            <Check size={15} className="text-accent-text" />
-          ) : (
-            <span />
-          ),
-        onSelect: () => quality.onChange(option.value),
-      });
-      firstQuality = false;
-    }
-    qualityItems.push({
-      key: "qn:auto",
-      label: autoLabel,
-      separatorBefore: true,
-      icon: quality.value === 0 ? <Check size={15} className="text-accent-text" /> : <span />,
-      onSelect: () => quality.onChange(0),
-    });
   }
 
   return (
@@ -596,7 +648,7 @@ export default function Player({
         >
           {stats.width + "x" + stats.height}
           {stats.kbps > 0 ? " · " + stats.kbps + " kbps" : ""}
-          {stats.dropped > 0 ? " · " + t("watch.stats.dropped") + " " + stats.dropped : ""}
+          {droppedText ? " · " + t("watch.stats.dropped") + " " + droppedText : ""}
         </div>
       ) : null}
 
@@ -727,6 +779,7 @@ export default function Player({
                 className="mx-0.5 w-[108px]"
                 onOpenChange={(open) => {
                   setQualityOpen(open);
+                  setLineMode(false);
                   if (open) {
                     setPrefsOpen(false);
                     onMenuOpen?.();

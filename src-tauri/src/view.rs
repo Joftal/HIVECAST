@@ -313,24 +313,37 @@ impl ViewManager {
 
     /// 切换某槽位的画质。只影响这个槽位的租约，录制侧完全不受影响。
     pub fn set_quality(
-        &self,
+        self: &Arc<Self>,
         app: &AppHandle,
+        broker: Arc<StreamBroker>,
         slot: u8,
         qn: u32,
     ) -> Result<ViewSlotInfo, AppError> {
         let handle = self.handle(slot)?;
-        {
+        let needs_spawn = {
             let mut state = handle.lock();
             if state.requested_qn == qn {
-                return Ok(state.info(slot, &handle.room.id));
+                // 监督循环已经退出时允许用同一个档位重新拉起，不再静默返回错误态。
+                if state.alive || state.closed {
+                    return Ok(state.info(slot, &handle.room.id));
+                }
+                state.generation += 1;
+                state.status = "starting".into();
+                state.error = None;
+                true
+            } else {
+                tracing::info!(slot, room_id = %handle.room.id, from = state.requested_qn, to = qn, "切换观看画质");
+                state.requested_qn = qn;
+                state.generation += 1;
+                state.status = "starting".into();
+                state.error = None;
+                !state.alive
             }
-            tracing::info!(slot, room_id = %handle.room.id, from = state.requested_qn, to = qn, "切换观看画质");
-            state.requested_qn = qn;
-            state.generation += 1;
-            state.status = "starting".into();
-            state.error = None;
-        }
+        };
         self.emit(app);
+        if needs_spawn {
+            self.restart_supervisor(app, broker, slot, handle.clone(), handle.room.clone());
+        }
         Ok(handle.info(slot))
     }
 
@@ -684,13 +697,13 @@ impl ViewManager {
             return Err(AppError::FfmpegMissing);
         }
 
-        let groups = broker.groups(&room_ref(room), qn).await.map_err(|err| {
+        let plan = broker.plan(&room_ref(room), qn).await.map_err(|err| {
             tracing::warn!(room_id = %room.id, qn, error = %err, "观看解析线路失败");
             AppError::from(err)
         })?;
         let (candidate, group) =
-            pick_view_candidate(&groups, preferred.as_deref()).ok_or_else(|| {
-                tracing::warn!(room_id = %room.id, qn, groups = groups.len(), "观看没有可用线路");
+            pick_view_candidate(&plan.groups, preferred.as_deref()).ok_or_else(|| {
+                tracing::warn!(room_id = %room.id, qn, groups = plan.groups.len(), "观看没有可用线路");
                 AppError::User("没有可用的线路".into())
             })?;
 
