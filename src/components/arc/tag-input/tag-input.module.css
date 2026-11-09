@@ -1,10 +1,10 @@
 .field { display: grid; width: 100%; min-width: 0; }
 /* HIVECAST: 表格内联编辑的紧凑版本；隐藏可见 label，压缩标签和输入行高度。 */
 .compact label { display: none; }
-.compact .content { min-height: 28px; padding: 3px; gap: 4px; }
-.compact .tag { min-height: 22px; font-size: var(--text-xs); padding: 0 2px 0 7px; }
+.compact .content { min-height: 28px; padding: 3px; gap: 4px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.compact .tag { min-height: 22px; flex: none; font-size: var(--text-xs); padding: 0 2px 0 7px; }
 .compact .tag button { width: 18px; height: 18px; }
-.compact .content input { min-height: 22px; min-width: 56px; padding: 0 3px; font-size: var(--text-xs); }
+.compact .content input { min-height: 22px; min-width: 56px; flex: 1 0 56px; padding: 0 3px; font-size: var(--text-xs); }
 .compact .placeholder { padding: 0 8px; font-size: var(--text-xs); }
 .field label { margin-bottom: var(--space-2); font-size: var(--text-sm); font-weight: 500; }
 /* The shell animates its height to .content, which carries the wrapping rows. The ring contracts onto the border on focus. */

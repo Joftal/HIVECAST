@@ -236,6 +236,31 @@ input[type="number"]::-webkit-outer-spin-button {
   contain-intrinsic-size: 76px;
 }
 
+/* 标签徽章：色相由标签文本决定，同一标签在各处颜色一致。 */
+.tag-badge {
+  --tag-h: 220;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid hsl(var(--tag-h) 65% 50% / 0.28);
+  border-radius: 4px;
+  background: hsl(var(--tag-h) 65% 50% / 0.1);
+  padding: 1px 5px;
+  color: hsl(var(--tag-h) 55% 35%);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+:root[data-theme="dark"] .tag-badge {
+  border-color: hsl(var(--tag-h) 70% 62% / 0.3);
+  background: hsl(var(--tag-h) 70% 62% / 0.16);
+  color: hsl(var(--tag-h) 75% 78%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in, .animate-fade-rise, .animate-pop, .animate-sheet { animation: none; }
   * { transition-duration: 1ms !important; animation-duration: 1ms !important; }

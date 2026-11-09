@@ -74,6 +74,7 @@ export default function InlineNote({ room }: { room: RoomRecord }) {
         setEditing(true);
       }}
       aria-label={t("monitor.editNote")}
+      title={room.note || t("monitor.editNote")}
       className="group flex h-8 w-full min-w-0 items-center gap-1 rounded-ctl px-1.5 text-left transition-colors hover:bg-raised"
     >
       <span className={room.note ? "min-w-0 truncate text-[12px] text-ink-soft" : "min-w-0 truncate text-[11.5px] text-faint"}>

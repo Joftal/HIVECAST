@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FocusEvent, KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { TagInput } from "../../components/arc/tag-input/tag-input";
+import TagBadge from "../../components/ui/TagBadge";
 import { roomSetRules } from "../../lib/ipc";
 import type { RoomRecord } from "../../lib/bindings/RoomRecord";
 import { useNotify } from "../../lib/notify";
@@ -78,6 +79,7 @@ export default function InlineTags({ room }: { room: RoomRecord }) {
       type="button"
       onClick={() => setEditing(true)}
       aria-label={t("monitor.editTags")}
+      title={tags.length > 0 ? tags.join(", ") : t("monitor.addTag")}
       className="group flex min-h-8 w-full min-w-0 items-center gap-1 overflow-hidden rounded-ctl px-1.5 text-left transition-colors hover:bg-raised"
     >
       {tags.length === 0 ? (
@@ -85,12 +87,7 @@ export default function InlineTags({ room }: { room: RoomRecord }) {
       ) : (
         <>
           {tags.slice(0, 2).map((tag) => (
-            <span
-              key={tag}
-              className="max-w-[64px] shrink-0 truncate rounded-[3px] bg-raised px-1 py-[1px] text-[9.5px] leading-none text-muted"
-            >
-              {tag}
-            </span>
+            <TagBadge key={tag} tag={tag} className="max-w-[64px] shrink-0" />
           ))}
           {tags.length > 2 ? (
             <span className="shrink-0 text-[9.5px] text-faint">+{tags.length - 2}</span>

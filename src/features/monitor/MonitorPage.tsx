@@ -12,6 +12,7 @@ import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
 import InfoTip from "../../components/ui/InfoTip";
+import TagBadge from "../../components/ui/TagBadge";
 import { PageChip, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import RoomRules from "./RoomRules";
@@ -1259,9 +1260,7 @@ export default function MonitorPage({
             {roomTags.length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {roomTags.map((tag) => (
-                  <span key={tag} className="rounded-[4px] bg-raised px-1.5 py-0.5 text-[10.5px] text-muted">
-                    {tag}
-                  </span>
+                  <TagBadge key={tag} tag={tag} className="text-[10.5px] leading-4" />
                 ))}
               </div>
             ) : null}
