@@ -136,8 +136,12 @@
 
 /* HIVECAST: 视频内画质菜单与播放器浮层共用玻璃材质，同时保留浅/深色主题。 */
 .menu[data-variant="video"] {
+  max-width: min(17rem, calc(100vw - 24px));
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-color: color-mix(in oklab, var(--c-line) 55%, transparent);
-  background: color-mix(in oklab, var(--c-surface) 62%, transparent);
+  background: color-mix(in oklab, var(--c-surface) 78%, transparent);
   backdrop-filter: blur(22px) saturate(1.45);
   -webkit-backdrop-filter: blur(22px) saturate(1.45);
   box-shadow:
@@ -147,6 +151,12 @@
 }
 .menu[data-variant="video"] .highlight {
   background: color-mix(in oklab, var(--c-ink) 7%, transparent);
+}
+.menu[data-variant="video"] .hint {
+  max-width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 :global([data-theme="dark"]) .menu[data-variant="video"] {
   border-color: color-mix(in oklab, #fff 13%, transparent);

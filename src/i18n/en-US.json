@@ -633,7 +633,7 @@
     "retry": "Reconnect",
     "audioOn": "Audio on",
     "muted": "Muted",
-    "danmakuShow": "Show danmaku",
+    "danmakuShow": "Enable danmaku",
     "danmakuHide": "Hide danmaku",
     "stats": {
       "dropped": "Dropped"
@@ -657,7 +657,6 @@
     "danmakuFont": "Font size",
     "danmakuSpeed": "Danmaku speed",
     "danmakuArea": "Area",
-    "danmakuReset": "Reset",
     "line": "Line",
     "lineAuto": "Auto",
     "lineHint": "Pick a line manually; Auto chooses the fastest",
@@ -668,10 +667,7 @@
     "lineN": "Line {{n}}",
     "portrait": "Portrait first",
     "dragHint": "Drag a cell title onto another cell to swap them; drag a divider to resize",
-    "fill": "Fill cell",
-    "swapNext": "Swap with next cell",
     "remove": "Stop watching",
-    "cellMenu": "Cell menu",
     "stage": {
       "empty": "Waiting for video"
     },
@@ -704,6 +700,16 @@
     "danmakuSpeedFast": "Fast",
     "danmakuAdvanced": "Advanced settings",
     "danmakuAdvancedTitle": "More danmaku settings",
+    "danmakuFontFamily": "Danmaku font",
+    "danmakuFontSans": "Sans",
+    "danmakuFontSerif": "Serif",
+    "danmakuFontKai": "Kai",
+    "danmakuBold": "Bold",
+    "danmakuOutline": "Outline",
+    "danmakuOutlineHeavy": "Heavy",
+    "danmakuOutlineOutline": "Outline",
+    "danmakuOutlineShadow": "45° shadow",
+    "danmakuResetDefaults": "Restore defaults",
     "fitCover": "Fill tile",
     "fitContain": "Fit picture"
   },

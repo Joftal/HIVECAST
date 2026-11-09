@@ -27,10 +27,14 @@ const MAX_LANES = 9;
 const MAX_ITEMS = 160;
 const DURATION = 9000;
 const BASE_FONT = 15;
-const FONT_FAMILY = '"PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+const FONT_FAMILIES = {
+  sans: '"PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+  serif: '"Songti SC", SimSun, serif',
+  kai: '"Kaiti SC", KaiTi, STKaiti, serif',
+} as const;
 
-function fontOf(scale: number): string {
-  return "600 " + Math.round(BASE_FONT * scale) + "px " + FONT_FAMILY;
+function fontOf(scale: number, family: keyof typeof FONT_FAMILIES, bold: boolean): string {
+  return `${bold ? 700 : 400} ${Math.round(BASE_FONT * scale)}px ${FONT_FAMILIES[family]}`;
 }
 
 function colorOf(value: number): string {
@@ -61,6 +65,9 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
   const area = useDanmakuPrefs((state) => state.area);
   const density = useDanmakuPrefs((state) => state.density);
   const scaleWithScreen = useDanmakuPrefs((state) => state.scaleWithScreen);
+  const fontFamily = useDanmakuPrefs((state) => state.fontFamily);
+  const bold = useDanmakuPrefs((state) => state.bold);
+  const outline = useDanmakuPrefs((state) => state.outline);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -77,7 +84,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     let raf = 0;
     let disposed = false;
     // 用户改字号/速度/区域/密度时整体重建绘制循环：参数少、重建便宜，比在循环里读 ref 更不容易出错。
-    let font = fontOf(fontScale);
+    let font = fontOf(fontScale, fontFamily, bold);
     const perFrame = Math.max(2, Math.min(6, Math.round(3 * density)));
     const maxItems = Math.round(MAX_ITEMS * Math.min(density, 1.6));
     const duration = DURATION / speedScale;
@@ -92,7 +99,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       // B 站式「弹幕随屏幕缩放」：以大画面 1280px 为 1x，小窗不缩得太小。
       const screen = scaleWithScreen ? Math.max(0.8, Math.min(1.45, width / 1280)) : 1;
-      font = fontOf(fontScale * screen);
+      font = fontOf(fontScale * screen, fontFamily, bold);
       lanes = Math.max(1, Math.min(MAX_LANES, Math.floor((height * area) / LANE_HEIGHT)));
       laneReadyAt = new Array(lanes).fill(0);
       // 尺寸变了就把在飞的清掉，避免坐标错位。
@@ -169,9 +176,20 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
         }
         const y = 8 + item.lane * LANE_HEIGHT;
         ctx.font = font;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = outline === "heavy" ? 4 : outline === "outline" ? 2.5 : 1.5;
         ctx.lineJoin = "round";
         ctx.strokeStyle = "rgba(0, 0, 0, 0.78)";
+        if (outline === "shadow45") {
+          ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+          ctx.shadowOffsetX = 1.5;
+          ctx.shadowOffsetY = 1.5;
+          ctx.shadowBlur = 0;
+        } else {
+          ctx.shadowColor = "transparent";
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
+          ctx.shadowBlur = 0;
+        }
         ctx.strokeText(item.text, x, y + 16);
         ctx.fillStyle = item.color;
         ctx.fillText(item.text, x, y + 16);
@@ -198,7 +216,7 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
       items.length = 0;
       queue.length = 0;
     };
-  }, [roomId, fontScale, speedScale, area, density, scaleWithScreen]);
+  }, [roomId, fontScale, speedScale, area, density, scaleWithScreen, fontFamily, bold, outline]);
 
   return (
     <canvas

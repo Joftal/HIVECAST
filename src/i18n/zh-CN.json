@@ -633,7 +633,7 @@
     "retry": "重新连接",
     "audioOn": "有声",
     "muted": "静音",
-    "danmakuShow": "显示弹幕",
+    "danmakuShow": "开启弹幕",
     "danmakuHide": "隐藏弹幕",
     "stats": {
       "dropped": "丢帧"
@@ -657,7 +657,6 @@
     "danmakuFont": "字体大小",
     "danmakuSpeed": "弹幕速度",
     "danmakuArea": "显示区域",
-    "danmakuReset": "恢复默认",
     "line": "线路",
     "lineAuto": "自动",
     "lineHint": "手选线路；自动由程序挑最快的",
@@ -668,10 +667,7 @@
     "lineN": "线路 {{n}}",
     "portrait": "竖屏优先",
     "dragHint": "拖动格子标题到另一格即可交换位置，拖动分割线可调大小",
-    "fill": "铺满格子",
-    "swapNext": "与下一格交换",
     "remove": "移出观看",
-    "cellMenu": "格子菜单",
     "stage": {
       "empty": "等待画面"
     },
@@ -704,6 +700,16 @@
     "danmakuSpeedFast": "快",
     "danmakuAdvanced": "高级设置",
     "danmakuAdvancedTitle": "更多弹幕设置",
+    "danmakuFontFamily": "弹幕字体",
+    "danmakuFontSans": "黑体",
+    "danmakuFontSerif": "宋体",
+    "danmakuFontKai": "楷体",
+    "danmakuBold": "粗体",
+    "danmakuOutline": "描边类型",
+    "danmakuOutlineHeavy": "重墨",
+    "danmakuOutlineOutline": "描边",
+    "danmakuOutlineShadow": "45°投影",
+    "danmakuResetDefaults": "恢复默认设置",
     "fitCover": "铺满格子",
     "fitContain": "适应画面"
   },

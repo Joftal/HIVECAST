@@ -155,16 +155,21 @@ export function Segmented<T extends string>({
   items,
   value,
   onChange,
+  fullWidth,
 }: {
   items: Array<{ key: T; label: string }>;
   value: T;
   onChange: (next: T) => void;
+  fullWidth?: boolean;
 }) {
   const index = Math.max(0, items.findIndex((item) => item.key === value));
   return (
     <div
       role="tablist"
-      className="relative grid w-fit rounded-[10px] bg-raised p-[3px] text-[11.5px]"
+      className={cx(
+        "relative grid rounded-[10px] bg-raised p-[3px] text-[11.5px]",
+        fullWidth ? "w-full" : "w-fit",
+      )}
       style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}
     >
       <span

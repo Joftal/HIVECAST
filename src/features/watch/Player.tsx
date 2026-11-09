@@ -1,10 +1,20 @@
 import Hls from "hls.js";
-import { Check } from "lucide-react";
+import { Check, Expand, Maximize2, Minimize2, Scan } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { DropdownMenu, type DropdownItem } from "../../components/arc/dropdown-menu/dropdown-menu";
 import { cx } from "../../components/ui/Controls";
-import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
+import DanmakuSettingsPanel from "./DanmakuSettingsPanel";
+import {
+  DanmakuSwitchIcon,
+  DanmakuToggleIcon,
+  PauseIcon,
+  PipIcon,
+  PlayIcon,
+  ReloadIcon,
+  VolumeIcon,
+} from "./PlayerIcons";
 import "./player-controls.css";
 
 type Props = {
@@ -29,6 +39,10 @@ type Props = {
   onSeek?: (positionMs: number) => void;
   /** 状态角标位置。观看页顶部有槽位信息条，角标要挪到左下角，否则会叠字。 */
   statsCorner?: "top-right" | "bottom-left";
+  /** 观看页把播放统计放进格子标题栏，不再覆盖在视频左下角。 */
+  showStats?: boolean;
+  /** 统计每秒更新一次；外层只用于标题栏展示，不参与播放器渲染。 */
+  onStatsChange?: (stats: PlayerStats | null) => void;
   /** 画质菜单（直播才有）。给了就在控制条右侧显示画质入口。 */
   quality?: {
     value: number;
@@ -52,14 +66,14 @@ type Props = {
   onToggleFit?: () => void;
 };
 
-type Stats = {
+export type PlayerStats = {
   width: number;
   height: number;
   kbps: number;
   dropped: number;
 };
 
-const EMPTY_STATS: Stats = { width: 0, height: 0, kbps: 0, dropped: 0 };
+const EMPTY_STATS: PlayerStats = { width: 0, height: 0, kbps: 0, dropped: 0 };
 
 type PlayerButtonProps = {
   children: ReactNode;
@@ -69,6 +83,7 @@ type PlayerButtonProps = {
   disabled?: boolean;
   size?: "sm" | "md";
   tone?: "default" | "danger";
+  activeAppearance?: "plate" | "icon";
   onClick?: () => void;
   className?: string;
 };
@@ -82,6 +97,7 @@ export function PlayerButton({
   disabled,
   size = "sm",
   tone = "default",
+  activeAppearance = "plate",
   onClick,
   className,
 }: PlayerButtonProps) {
@@ -99,50 +115,16 @@ export function PlayerButton({
         tone === "danger"
           ? "text-white/90 hover:bg-rec/15 hover:text-rec"
           : "text-white/90 hover:bg-white/10 hover:text-white",
-        active && "bg-accent/20 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]",
+        active &&
+          (activeAppearance === "plate"
+            ? "bg-accent/20 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
+            : "text-white"),
         disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-white/90",
         className,
       )}
     >
       {children}
     </button>
-  );
-}
-
-type PlayerRangeProps = {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (value: number) => void;
-  ariaLabel: string;
-  ticks?: boolean;
-};
-
-/** B 站式水平滑杆：细轨道、圆形白色滑块、可选刻度。 */
-function PlayerRange({ value, min, max, step, onChange, ariaLabel, ticks }: PlayerRangeProps) {
-  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
-  return (
-    <div className="hv-range flex-1">
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        aria-label={ariaLabel}
-        className="hv-range__input"
-        style={{ "--progress": `${pct}%` } as CSSProperties}
-      />
-      {ticks ? (
-        <div className="hv-range__ticks" aria-hidden>
-          {Array.from({ length: 5 }, (_, index) => (
-            <span key={index} />
-          ))}
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -219,6 +201,8 @@ export default function Player({
   startAtSec,
   onSeek,
   statsCorner = "top-right",
+  showStats = true,
+  onStatsChange,
   quality,
   lines,
   onReload,
@@ -227,6 +211,7 @@ export default function Player({
   onToggleFit,
 }: Props) {
   const { t } = useTranslation();
+  const reducedMotion = useReducedMotion() ?? false;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -238,7 +223,10 @@ export default function Player({
   fatalRef.current = onFatal;
 
   const [playing, setPlaying] = useState(false);
-  const [stats, setStats] = useState<Stats>(EMPTY_STATS);
+  const [stats, setStats] = useState<PlayerStats>(EMPTY_STATS);
+  const statsChangeRef = useRef(onStatsChange);
+  statsChangeRef.current = onStatsChange;
+  useEffect(() => () => statsChangeRef.current?.(null), []);
   // 视频按 object-contain 居中，黑边不属于画面；弹幕要贴着画面走，不能画在黑边上。
   const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   // 点播（回放）才有进度条；拖动时先用 scrubMs 显示预览位置，松手再决定要不要换窗口。
@@ -249,10 +237,10 @@ export default function Player({
   const [volOpen, setVolOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [prefsOpen, setPrefsOpen] = useState(false);
-  const [dmAdvanced, setDmAdvanced] = useState(false);
   // B 站式自动隐藏：移动时出现，静止约 2.8s 后收起；面板/菜单打开时保持显示。
   const [chromeVisible, setChromeVisible] = useState(false);
   const [qualityOpen, setQualityOpen] = useState(false);
+  const [fullscreenActive, setFullscreenActive] = useState(false);
   const chromeTimer = useRef<number | undefined>(undefined);
   const wakeChrome = () => {
     setChromeVisible(true);
@@ -264,7 +252,13 @@ export default function Player({
     setChromeVisible(false);
   };
   useEffect(() => () => window.clearTimeout(chromeTimer.current), []);
-  const prefs = useDanmakuPrefs();
+
+  useEffect(() => {
+    const syncFullscreen = () => setFullscreenActive(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    syncFullscreen();
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
   const chromeShown = chromeVisible || volOpen || prefsOpen || qualityOpen;
   const startAtRef = useRef(startAtSec ?? 0);
   startAtRef.current = startAtSec ?? 0;
@@ -338,6 +332,7 @@ export default function Player({
     if (!video) return;
     setPlaying(false);
     setStats(EMPTY_STATS);
+    statsChangeRef.current?.(null);
 
     if (Hls.isSupported()) {
       const hls = new Hls({
@@ -419,12 +414,14 @@ export default function Player({
       if (!video) return;
       const quality = video.getVideoPlaybackQuality();
       const level = hlsRef.current?.levels[hlsRef.current.currentLevel];
-      setStats({
+      const next = {
         width: video.videoWidth,
         height: video.videoHeight,
         kbps: Math.round((level?.bitrate ?? 0) / 1000),
         dropped: quality?.droppedVideoFrames ?? 0,
-      });
+      };
+      setStats(next);
+      statsChangeRef.current?.(next);
     }, 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -505,40 +502,49 @@ export default function Player({
     else void video.requestPictureInPicture().catch(() => undefined);
   };
 
-  const qualityLabel = quality?.options.find((option) => option.value === quality.value)?.label;
   const playbackPct = durationMs && durationMs > 0 ? Math.min(100, ((scrubMs ?? positionMs) / durationMs) * 100) : 0;
 
-  // 线路与画质合成一个菜单：线路在前，画质在后，自动档单独放最后。
-  const qualityMenu: DropdownItem[] = [];
-  const hasLines = Boolean(lines && lines.options.length > 0);
-  if (lines && hasLines) {
-    for (const option of lines.options) {
-      qualityMenu.push({
-        key: "line:" + (option.value ?? "auto"),
-        label: `${t("watch.line")} · ${option.label}`,
-        icon: (lines.value ?? null) === option.value ? <Check size={14} className="text-accent-text" /> : <span />,
-        onSelect: () => lines.onChange(option.value),
-      });
-    }
-  }
-  let firstQuality = true;
+  const qualityLabel =
+    quality?.options.find((option) => option.value === quality.value)?.label ?? t("watch.qn.auto");
+  const autoLabel = quality?.actual
+    ? t("watch.autoQuality", { q: quality.actual })
+    : t("watch.qn.auto");
+  const qualityItems: DropdownItem[] = [];
   if (quality) {
+    if (lines && lines.options.length > 0) {
+      for (const option of lines.options) {
+        const selected = (lines.value ?? null) === option.value;
+        qualityItems.push({
+          key: "line:" + (option.value ?? "auto"),
+          label: `${t("watch.line")} · ${option.label}`,
+          hint: option.hint,
+          icon: selected ? <Check size={15} className="text-accent-text" /> : <span />,
+          onSelect: () => lines.onChange(option.value),
+        });
+      }
+    }
+    let firstQuality = true;
     for (const option of quality.options) {
       if (option.value === 0) continue;
-      qualityMenu.push({
+      qualityItems.push({
         key: "qn:" + option.value,
         label: option.label,
-        separatorBefore: firstQuality && hasLines,
-        icon: quality.value === option.value ? <Check size={14} className="text-accent-text" /> : <span />,
+        separatorBefore: firstQuality && qualityItems.length > 0,
+        icon:
+          quality.value === option.value ? (
+            <Check size={15} className="text-accent-text" />
+          ) : (
+            <span />
+          ),
         onSelect: () => quality.onChange(option.value),
       });
       firstQuality = false;
     }
-    qualityMenu.push({
+    qualityItems.push({
       key: "qn:auto",
-      label: quality.actual ? t("watch.autoQuality", { q: quality.actual }) : t("watch.qn.auto"),
-      separatorBefore: !firstQuality,
-      icon: quality.value === 0 ? <Check size={14} className="text-accent-text" /> : <span />,
+      label: autoLabel,
+      separatorBefore: true,
+      icon: quality.value === 0 ? <Check size={15} className="text-accent-text" /> : <span />,
       onSelect: () => quality.onChange(0),
     });
   }
@@ -562,6 +568,7 @@ export default function Player({
         }}
         onClick={() => {
           setPrefsOpen(false);
+          setQualityOpen(false);
           toggle();
         }}
       />
@@ -576,7 +583,7 @@ export default function Player({
         </div>
       ) : null}
 
-      {stats.width > 0 ? (
+      {showStats && stats.width > 0 ? (
         <div
           className={[
             "pointer-events-none absolute z-10 rounded-[5px] bg-black/40 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/55 backdrop-blur-[2px]",
@@ -591,171 +598,29 @@ export default function Player({
           {stats.kbps > 0 ? " · " + stats.kbps + " kbps" : ""}
           {stats.dropped > 0 ? " · " + t("watch.stats.dropped") + " " + stats.dropped : ""}
         </div>
-      ) : (
+      ) : null}
+
+      {stats.width === 0 ? (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/30">
           <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-accent" />
           <span className="text-[11px] text-white/55">{t("watch.buffering")}</span>
         </div>
-      )}
-
-      {/* 弹幕设置：对齐 B 站官方面板（深色、粉色选中态、298px、底部主面板 + 高级设置）。 */}
-      {prefsOpen ? (
-        <div className="player-glass absolute bottom-[38px] right-3 z-30 w-[298px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-[4px] text-ink">
-          {dmAdvanced ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setDmAdvanced(false)}
-                className="flex h-8 w-full items-center gap-2 px-5 text-left text-[12px] text-ink transition-colors hover:bg-raised"
-              >
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-                  <path d="m10 3-5 5 5 5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                {t("watch.danmakuAdvancedTitle")}
-              </button>
-              <div className="flex h-10 items-center border-t border-line px-5">
-                <button
-                  type="button"
-                  onClick={() => prefs.reset()}
-                  className="focus-ring text-[12px] text-muted transition-colors hover:text-ink"
-                >
-                  {t("watch.danmakuReset")}
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="px-5 py-3">
-                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
-                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuArea")}</span>
-                  <PlayerRange
-                    value={prefs.area}
-                    min={0.3}
-                    max={1}
-                    step={0.05}
-                    onChange={(next) => prefs.set({ area: next })}
-                    ariaLabel={t("watch.danmakuArea")}
-                    ticks
-                  />
-                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
-                    {Math.round(prefs.area * 100)}%
-                  </span>
-                </div>
-
-                <div className="flex h-[34px] items-center">
-                  <div className="grid h-[30px] w-full grid-cols-3 overflow-hidden rounded-[3px] bg-raised text-[12px]">
-                    {[
-                      [t("watch.danmakuDensityNormal"), 1],
-                      [t("watch.danmakuDensityMore"), 1.35],
-                      [t("watch.danmakuDensityOverlap"), 1.8],
-                    ].map(([label, value], index) => {
-                      const active = Math.abs(prefs.density - (value as number)) < 0.05;
-                      return (
-                        <button
-                          key={label as string}
-                          type="button"
-                          onClick={() => prefs.set({ density: value as number })}
-                          className={[
-                            "focus-ring transition-colors",
-                            index > 0 ? "border-l border-line" : "",
-                            active ? "font-medium text-accent-text" : "text-muted hover:text-ink",
-                          ].join(" ")}
-                        >
-                          {label as string}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
-                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuOpacity")}</span>
-                  <PlayerRange
-                    value={prefs.opacity}
-                    min={0.3}
-                    max={1}
-                    step={0.05}
-                    onChange={(next) => prefs.set({ opacity: next })}
-                    ariaLabel={t("watch.danmakuOpacity")}
-                  />
-                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
-                    {Math.round(prefs.opacity * 100)}%
-                  </span>
-                </div>
-
-                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
-                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuFont")}</span>
-                  <PlayerRange
-                    value={prefs.fontScale}
-                    min={0.75}
-                    max={1.6}
-                    step={0.05}
-                    onChange={(next) => prefs.set({ fontScale: next })}
-                    ariaLabel={t("watch.danmakuFont")}
-                  />
-                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
-                    {Math.round(prefs.fontScale * 100)}%
-                  </span>
-                </div>
-
-                <div className="flex h-[37px] items-center gap-2.5 py-2.5">
-                  <span className="w-12 shrink-0 text-[12px] text-ink-soft">{t("watch.danmakuSpeed")}</span>
-                  <PlayerRange
-                    value={prefs.speed}
-                    min={0.5}
-                    max={2}
-                    step={0.1}
-                    onChange={(next) => prefs.set({ speed: next })}
-                    ariaLabel={t("watch.danmakuSpeed")}
-                    ticks
-                  />
-                  <span className="w-9 shrink-0 text-right text-[12px] text-ink-soft">
-                    {prefs.speed < 0.85
-                      ? t("watch.danmakuSpeedSlow")
-                      : prefs.speed > 1.15
-                        ? t("watch.danmakuSpeedFast")
-                        : t("watch.danmakuSpeedMedium")}
-                  </span>
-                </div>
-
-                <div className="mt-2 flex">
-                  <button
-                    type="button"
-                    onClick={() => prefs.set({ scaleWithScreen: !prefs.scaleWithScreen })}
-                    aria-pressed={prefs.scaleWithScreen}
-                    className="focus-ring flex items-center gap-1.5 text-[12px]"
-                  >
-                    <span
-                      className={cx(
-                        "flex h-3 w-3 shrink-0 items-center justify-center rounded-[2px]",
-                        prefs.scaleWithScreen
-                          ? "bg-accent text-[var(--c-accent-ink)]"
-                          : "border border-line-strong bg-transparent",
-                      )}
-                    >
-                      {prefs.scaleWithScreen ? <Check size={9} strokeWidth={3} /> : null}
-                    </span>
-                    <span className={prefs.scaleWithScreen ? "text-accent-text" : "text-ink-soft"}>
-                      {t("watch.danmakuScaleWithScreen")}
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setDmAdvanced(true)}
-                className="flex h-10 w-full items-center justify-between border-t border-line px-5 text-[12px] text-ink-soft transition-colors hover:bg-raised"
-              >
-                <span>{t("watch.danmakuAdvanced")}</span>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-                  <path d="m6 3 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </>
-          )}
-        </div>
       ) : null}
+
+      {/* 弹幕设置：298px 主题玻璃浮层，主面板与高级设置共用同一锚点。 */}
+      <AnimatePresence>
+        {prefsOpen ? (
+          <motion.div
+            className="dm-settings-anchor absolute bottom-[38px] right-[18px] z-30"
+            initial={reducedMotion ? false : { opacity: 0, y: 5, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 3, scale: 0.985, transition: { duration: 0.16 } }}
+            transition={reducedMotion ? { duration: 0 } : { type: "spring", stiffness: 520, damping: 44 }}
+          >
+            <DanmakuSettingsPanel />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       {/* 控制条：对齐 B 站网页直播：56px 渐变底、30px 图标、左右两组。 */}
       <div
@@ -794,32 +659,21 @@ export default function Player({
           </div>
         ) : null}
 
-        <div className="absolute inset-x-0 bottom-[3px] flex h-9 items-center gap-1 px-3 [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">
+        <div className="player-controls__area">
           <PlayerButton
             label={playing ? t("watch.paused") : t("watch.playing")}
+            className="player-controls__button"
             onClick={toggle}
           >
-            {playing ? (
-              <svg width="20" height="20" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-                <rect x="2" y="1.5" width="3" height="9" rx="0.8" />
-                <rect x="7" y="1.5" width="3" height="9" rx="0.8" />
-              </svg>
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-                <path d="M3 1.6v8.8a.6.6 0 0 0 .92.5l6.2-4.4a.6.6 0 0 0 0-1L3.92 1.1A.6.6 0 0 0 3 1.6Z" />
-              </svg>
-            )}
+            {playing ? <PauseIcon /> : <PlayIcon />}
           </PlayerButton>
 
-          <PlayerButton label={t("watch.reload")} onClick={reload}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-              <path d="M20 7.5A8.5 8.5 0 1 0 20.5 15" strokeLinecap="round" />
-              <path d="M20.5 3.8v5.2h-5.2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+          <PlayerButton label={t("watch.reload")} className="player-controls__button" onClick={reload}>
+            <ReloadIcon />
           </PlayerButton>
 
           <div
-            className="relative flex shrink-0 items-center"
+            className="player-controls__volume"
             onMouseEnter={() => setVolOpen(true)}
             onMouseLeave={() => setVolOpen(false)}
             onFocusCapture={() => setVolOpen(true)}
@@ -827,111 +681,121 @@ export default function Player({
               if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setVolOpen(false);
             }}
           >
-            <PlayerButton label={muted ? t("watch.muted") : t("watch.audioOn")} onClick={toggleMute}>
-              {muted ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                  <path d="M13 5.5 8.5 9H5v6h3.5l4.5 3.5V5.5Z" strokeLinejoin="round" />
-                  <path d="m16.5 9.5 5 5M21.5 9.5l-5 5" strokeLinecap="round" />
-                </svg>
-              ) : (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                  <path d="M13 5.5 8.5 9H5v6h3.5l4.5 3.5V5.5Z" strokeLinejoin="round" />
-                  <path d="M16.2 9a4.5 4.5 0 0 1 0 6M18.8 6.6a8 8 0 0 1 0 10.8" strokeLinecap="round" />
-                </svg>
-              )}
+            <PlayerButton
+              label={muted ? t("watch.muted") : t("watch.audioOn")}
+              className="player-controls__button"
+              onClick={toggleMute}
+            >
+              <VolumeIcon muted={muted} />
             </PlayerButton>
-            {volOpen ? (
-              <div className="absolute bottom-full left-1/2 z-40 -translate-x-1/2 pb-1">
-                <div className="player-glass flex h-[110px] w-8 flex-col items-center rounded-[10px] px-1 py-1.5 text-ink">
-                  <span className="text-[10px] font-medium tabular-nums">{Math.round(volume * 100)}</span>
-                  <VolumeSlider volume={volume} onChange={onVolumeChange} label={t("watch.audioOn")} />
-                </div>
-              </div>
-            ) : null}
+            <AnimatePresence>
+              {volOpen ? (
+                <motion.div
+                  className="absolute bottom-full left-1/2 z-40 pb-1"
+                  style={{ x: "-50%" }}
+                  initial={reducedMotion ? false : { opacity: 0, y: 5, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 3, scale: 0.985, transition: { duration: 0.16 } }}
+                  transition={reducedMotion ? { duration: 0 } : { type: "spring", stiffness: 520, damping: 44 }}
+                >
+                  <div className="player-volume-popover">
+                    <span className="player-volume-popover__value">{Math.round(volume * 100)}</span>
+                    <VolumeSlider volume={volume} onChange={onVolumeChange} label={t("watch.audioOn")} />
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
           </div>
 
-          <span className="shrink-0 text-[12px] tabular-nums text-white/90">
+          <span className="player-controls__time">
             {vod
               ? clock(scrubMs ?? positionMs) + " / " + clock(durationMs ?? 0)
               : clock(elapsed * 1000)}
           </span>
 
-          <div className="ml-auto flex items-center gap-1">
+          <div className="player-controls__right">
             {quality ? (
               <DropdownMenu
                 variant="video"
+                size="sm"
                 side="top"
                 align="end"
-                label={qualityLabel ?? t("watch.qn.auto")}
+                label={qualityLabel}
                 ariaLabel={t("watch.quality")}
-                items={qualityMenu}
+                items={qualityItems}
                 morphLabel={false}
-                className="w-[108px]"
+                className="mx-0.5 w-[108px]"
                 onOpenChange={(open) => {
                   setQualityOpen(open);
-                  if (open) onMenuOpen?.();
+                  if (open) {
+                    setPrefsOpen(false);
+                    onMenuOpen?.();
+                  }
                 }}
               />
             ) : null}
 
-            <PlayerButton label={t("watch.pip")} onClick={togglePip} disabled={!pipSupported}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                <rect x="12" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none" opacity="0.9" />
-              </svg>
+            <PlayerButton
+              label={t("watch.pip")}
+              className="player-controls__button"
+              onClick={togglePip}
+              disabled={!pipSupported}
+            >
+              <PipIcon />
             </PlayerButton>
 
             <PlayerButton
               label={danmakuEnabled ? t("watch.danmakuHide") : t("watch.danmakuShow")}
               active={danmakuEnabled}
+              activeAppearance="icon"
               disabled={!onToggleDanmaku}
+              className="player-controls__button"
               onClick={onToggleDanmaku}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                <rect x="3" y="5" width="18" height="12" rx="2.5" />
-                <path d="M6.5 9.5h6M6.5 12.5h10" strokeLinecap="round" opacity="0.75" />
-                <circle cx="17" cy="9.5" r="1" fill="currentColor" stroke="none" />
-                {!danmakuEnabled ? <path d="M4 18.5 20 3.5" strokeLinecap="round" /> : null}
-              </svg>
+              <DanmakuSwitchIcon enabled={danmakuEnabled} />
             </PlayerButton>
 
             <PlayerButton
               label={t("watch.danmakuSettings")}
               active={prefsOpen}
+              activeAppearance="icon"
+              className="player-controls__button"
               onClick={() => {
-                if (!prefsOpen) setDmAdvanced(false);
+                setQualityOpen(false);
                 setPrefsOpen(!prefsOpen);
               }}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" opacity="0.65" />
-                <circle cx="8.5" cy="7" r="2" fill="currentColor" stroke="none" />
-                <circle cx="15.5" cy="12" r="2" fill="currentColor" stroke="none" />
-                <circle cx="10.5" cy="17" r="2" fill="currentColor" stroke="none" />
-              </svg>
+              <span className={cx("player-danmaku-settings-glyph", prefsOpen && "is-open")}>
+                <DanmakuToggleIcon enabled />
+              </span>
             </PlayerButton>
 
             {onToggleFit ? (
               <PlayerButton
                 label={fit === "cover" ? t("watch.fitContain") : t("watch.fitCover")}
                 active={fit === "cover"}
+                activeAppearance="icon"
+                className={cx("player-controls__button", fit === "cover" && "is-selected")}
                 onClick={onToggleFit}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                  <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                  {fit === "cover" ? (
-                    <rect x="6.5" y="7.5" width="11" height="9" rx="1" fill="currentColor" stroke="none" opacity="0.85" />
-                  ) : (
-                    <rect x="7.5" y="8.5" width="9" height="7" rx="1" opacity="0.75" />
-                  )}
-                </svg>
+                {fit === "cover" ? (
+                  <Expand size={22} strokeWidth={1.8} aria-hidden />
+                ) : (
+                  <Scan size={22} strokeWidth={1.8} aria-hidden />
+                )}
               </PlayerButton>
             ) : null}
 
-            <PlayerButton label={t("watch.fullscreen")} onClick={fullscreen}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
-                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+            <PlayerButton
+              label={fullscreenActive ? t("watch.exitFullscreen") : t("watch.fullscreen")}
+              className="player-controls__button"
+              onClick={fullscreen}
+            >
+              {fullscreenActive ? (
+                <Minimize2 size={22} strokeWidth={1.8} aria-hidden />
+              ) : (
+                <Maximize2 size={22} strokeWidth={1.8} aria-hidden />
+              )}
             </PlayerButton>
           </div>
         </div>

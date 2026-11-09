@@ -9,7 +9,7 @@ import { useNotify } from "../../lib/notify";
 import AddRoomDialog from "../monitor/AddRoomDialog";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useSecondsLeft } from "../../lib/countdown";
-import Player, { PlayerButton } from "./Player";
+import Player, { PlayerButton, type PlayerStats } from "./Player";
 import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
 import {
   buildTree,
@@ -804,7 +804,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                     key={session.roomId}
                     session={session}
                     room={view?.room}
-                    index={index}
                     count={count}
                     compact={compact}
                     volume={volumes[session.slot] ?? 0}
@@ -815,7 +814,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
                     onLine={(line) => void changeLine(session.slot, line)}
                     onClose={() => void closeSlot(session.slot)}
                     onRetry={() => void retrySlot(session.slot)}
-                    onSwapNext={() => swapCells(index, (index + 1) % count)}
                     onDragStart={(event) => startDrag({ kind: "cell", index }, event)}
                   />
                 );
@@ -1173,7 +1171,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
 type CellProps = {
   session: ViewSlotInfo;
   room?: RoomView["room"];
-  index: number;
   count: number;
   compact: boolean;
   volume: number;
@@ -1184,14 +1181,12 @@ type CellProps = {
   onLine: (line: string | null) => void;
   onClose: () => void;
   onRetry: () => void;
-  onSwapNext: () => void;
   onDragStart: (event: ReactPointerEvent) => void;
 };
 
 function SlotCell({
   session,
   room,
-  index,
   count,
   compact,
   volume,
@@ -1202,12 +1197,11 @@ function SlotCell({
   onLine,
   onClose,
   onRetry,
-  onSwapNext,
   onDragStart,
 }: CellProps) {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [stats, setStats] = useState<PlayerStats | null>(null);
   const [fill, setFill] = useState(false);
   const [lines, setLines] = useState<LineInfo[] | null>(null);
   const loadLines = useCallback(async () => {
@@ -1258,9 +1252,6 @@ function SlotCell({
             <circle cx="4.5" cy="10" r="1" />
           </svg>
         </span>
-        <span className="pointer-events-auto shrink-0 rounded-[4px] bg-white/12 px-1 font-mono text-[9.5px] leading-4 text-white/70">
-          {String(index + 1).padStart(2, "0")}
-        </span>
         {room?.avatarUrl ? (
           <img
             src={room.avatarUrl}
@@ -1286,60 +1277,12 @@ function SlotCell({
           </span>
         ) : null}
 
-        <span className="pointer-events-auto relative">
-          <PlayerButton label={t("watch.cellMenu")} active={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
-            <svg width="14" height="4" viewBox="0 0 14 4" fill="currentColor" aria-hidden>
-              <circle cx="2" cy="2" r="1.15" />
-              <circle cx="7" cy="2" r="1.15" />
-              <circle cx="12" cy="2" r="1.15" />
-            </svg>
-          </PlayerButton>
-          {menuOpen ? (
-            <>
-              <button
-                type="button"
-                aria-label={t("watch.close")}
-                onClick={() => setMenuOpen(false)}
-                className="fixed inset-0 z-30 cursor-default"
-              />
-              <div className="player-glass absolute right-0 top-8 z-40 w-[172px] rounded-[12px] p-1 text-[11px] text-ink-soft">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFill((value) => !value);
-                    setMenuOpen(false);
-                  }}
-                  className="flex w-full items-center justify-between rounded-[6px] px-2 py-1.5 text-left transition-colors hover:bg-raised"
-                >
-                  <span>{t("watch.fill")}</span>
-                  <span className="text-[10px] text-faint">{fill ? "ON" : "OFF"}</span>
-                </button>
-                {count > 1 ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSwapNext();
-                      setMenuOpen(false);
-                    }}
-                    className="w-full rounded-[6px] px-2 py-1.5 text-left transition-colors hover:bg-raised"
-                  >
-                    {t("watch.swapNext")}
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onClose();
-                  }}
-                  className="w-full rounded-[6px] px-2 py-1.5 text-left text-rec transition-colors hover:bg-rec/12"
-                >
-                  {t("watch.remove")}
-                </button>
-              </div>
-            </>
-          ) : null}
-        </span>
+        {stats && stats.width > 0 ? (
+          <span className="pointer-events-none shrink-0 rounded-[4px] bg-black/35 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/65">
+            {stats.width + "x" + stats.height}
+            {stats.dropped > 0 ? " · " + t("watch.stats.dropped") + " " + stats.dropped : ""}
+          </span>
+        ) : null}
 
         <PlayerButton label={t("watch.close")} tone="danger" onClick={onClose}>
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
@@ -1356,6 +1299,8 @@ function SlotCell({
             volume={volume}
             onVolumeChange={onVolume}
             statsCorner="bottom-left"
+            showStats={false}
+            onStatsChange={setStats}
             fit={fill ? "cover" : "contain"}
             onToggleFit={() => setFill((value) => !value)}
             onReload={onRetry}

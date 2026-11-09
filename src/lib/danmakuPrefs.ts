@@ -18,15 +18,27 @@ export type DanmakuPrefs = {
   density: number;
   /** 字号是否随播放器尺寸缩放 */
   scaleWithScreen: boolean;
+  /** 高级设置里的字体族；只影响 Canvas 渲染。 */
+  fontFamily: DanmakuFontFamily;
+  /** 是否使用粗体。 */
+  bold: boolean;
+  /** 描边样式，对齐 B 站的重墨 / 描边 / 45°投影三档。 */
+  outline: DanmakuOutline;
 };
+
+export type DanmakuFontFamily = "sans" | "serif" | "kai";
+export type DanmakuOutline = "heavy" | "outline" | "shadow45";
 
 export const DEFAULT_PREFS: DanmakuPrefs = {
   opacity: 1,
   fontScale: 1,
   speed: 1,
-  area: 0.72,
+  area: 1,
   density: 1,
   scaleWithScreen: true,
+  fontFamily: "sans",
+  bold: true,
+  outline: "heavy",
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -43,6 +55,17 @@ export function sanitizePrefs(input: Partial<DanmakuPrefs>): Partial<DanmakuPref
   if (input.area !== undefined) out.area = clamp(input.area, 0.3, 1);
   if (input.density !== undefined) out.density = clamp(input.density, 0.75, 2);
   if (input.scaleWithScreen !== undefined) out.scaleWithScreen = Boolean(input.scaleWithScreen);
+  if (input.fontFamily !== undefined) {
+    out.fontFamily = ["sans", "serif", "kai"].includes(input.fontFamily)
+      ? input.fontFamily
+      : DEFAULT_PREFS.fontFamily;
+  }
+  if (input.bold !== undefined) out.bold = Boolean(input.bold);
+  if (input.outline !== undefined) {
+    out.outline = ["heavy", "outline", "shadow45"].includes(input.outline)
+      ? input.outline
+      : DEFAULT_PREFS.outline;
+  }
   return out;
 }
 

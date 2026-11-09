@@ -21,13 +21,19 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 const lab = import.meta.env.DEV && new URLSearchParams(window.location.search).has("arc-lab");
+const playerLab = import.meta.env.DEV && new URLSearchParams(window.location.search).has("player-lab");
 const ArcLab = React.lazy(() => import("./features/design/ArcLab"));
+const PlayerLab = React.lazy(() => import("./features/design/PlayerLab"));
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ToastStackProvider>
       <ErrorBoundary>
-        {lab ? (
+        {playerLab ? (
+          <React.Suspense fallback={null}>
+            <PlayerLab />
+          </React.Suspense>
+        ) : lab ? (
           <React.Suspense fallback={null}>
             <ArcLab />
           </React.Suspense>
