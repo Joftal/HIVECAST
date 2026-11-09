@@ -471,6 +471,8 @@
     "sessionCount": "{{n}} sessions",
     "detailViewers": "Viewers",
     "watch": "Watch",
+    "watchOffline": "Room is offline; cannot watch",
+    "watchOfflineShort": "Offline",
     "reveal": "Open recording folder",
     "removeRoom": "Remove room",
     "confirmRemove": "Click again",
@@ -497,7 +499,6 @@
       "failed": "Failed"
     },
     "copyDiagnostics": "Copy diagnostics",
-    "copyRoomKey": "Copy room ID",
     "openBrowser": "Open in browser",
     "openMedia": "Media recordings",
     "openTasks": "Related tasks",

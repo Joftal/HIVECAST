@@ -900,7 +900,7 @@ export default function MonitorPage({
       if (!view) return;
       if (event.key === "w" || event.key === "W") {
         event.preventDefault();
-        if (view.room.isLive || view.recording) void openWatch(view.room.id);
+        if (view.room.isLive) void openWatch(view.room.id);
       } else if (event.key === "r" || event.key === "R") {
         event.preventDefault();
         if (view.room.isLive || view.recording) toggleRecording(view);
@@ -1028,9 +1028,10 @@ export default function MonitorPage({
             items={[
               {
                 id: "watch",
-                label: t("monitor.watch"),
+                label: room.isLive ? t("monitor.watch") : t("monitor.watchOfflineShort"),
+                reserveLabels: [t("monitor.watch"), t("monitor.watchOfflineShort")],
                 tone: "accent",
-                disabled: !room.isLive && !isRecording,
+                disabled: !room.isLive,
                 loading: watchBusy,
                 onSelect: () => {
                   if (busy) return;
@@ -1185,12 +1186,12 @@ export default function MonitorPage({
             <button
               type="button"
               onClick={() => void openWatch(room.id)}
-              disabled={!room.isLive && !isRecording}
-              aria-label={t("monitor.watch")}
-              title={t("monitor.watch")}
+              disabled={!room.isLive}
+              aria-label={room.isLive ? t("monitor.watch") : t("monitor.watchOffline")}
+              title={room.isLive ? t("monitor.watch") : t("monitor.watchOffline")}
               className={cx(
                 "focus-ring group relative block w-full cursor-pointer overflow-hidden rounded-[8px] p-0 text-left disabled:cursor-not-allowed disabled:opacity-60",
-                (room.isLive || isRecording) &&
+                room.isLive &&
                   "[&_img]:transition-transform [&_img]:duration-300 [&_img]:ease-out group-hover:[&_img]:scale-[1.02]",
               )}
             >
@@ -1205,7 +1206,7 @@ export default function MonitorPage({
                   locale={locale}
                 />
               </div>
-              {room.isLive || isRecording ? (
+              {room.isLive ? (
                 <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-opacity duration-150 group-hover:bg-black/25 group-hover:opacity-100 group-focus-visible:bg-black/25 group-focus-visible:opacity-100">
                   <span className="flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-white shadow-pop ring-1 ring-white/25 backdrop-blur-sm">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
@@ -1275,11 +1276,12 @@ export default function MonitorPage({
                 size="md"
                 variant="primary"
                 className="w-full"
-                disabled={busy || (!room.isLive && !isRecording)}
+                disabled={busy || !room.isLive}
+                title={room.isLive ? t("monitor.watch") : t("monitor.watchOffline")}
                 loading={busy && busyAction === "watch"}
                 onClick={() => void openWatch(room.id)}
               >
-                {t("monitor.watch")}
+                {room.isLive ? t("monitor.watch") : t("monitor.watchOfflineShort")}
               </Button>
               <Button
                 size="md"
@@ -1314,11 +1316,6 @@ export default function MonitorPage({
                 size="sm"
                 align="end"
                 items={[
-                  {
-                    key: "copy-key",
-                    label: t("monitor.copyRoomKey"),
-                    onSelect: () => void copyText(room.roomKey),
-                  },
                   {
                     key: "browser",
                     label: t("monitor.openBrowser"),

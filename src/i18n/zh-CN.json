@@ -471,6 +471,8 @@
     "sessionCount": "{{n}} 场",
     "detailViewers": "人气",
     "watch": "观看",
+    "watchOffline": "直播间未开播，暂不能观看",
+    "watchOfflineShort": "未开播",
     "reveal": "打开录制文件夹",
     "removeRoom": "移除房间",
     "confirmRemove": "再点一次",
@@ -497,7 +499,6 @@
       "failed": "失败"
     },
     "copyDiagnostics": "复制诊断信息",
-    "copyRoomKey": "复制房间号",
     "openBrowser": "在浏览器打开",
     "openMedia": "媒体库录像",
     "openTasks": "相关任务",

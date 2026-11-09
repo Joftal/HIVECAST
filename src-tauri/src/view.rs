@@ -702,7 +702,11 @@ impl ViewManager {
         })?;
 
         let mut command = tokio::process::Command::new(ffmpeg::binary());
+        // 让 init.mp4 / 分片 / m3u8 都以会话目录为工作目录：
+        // ffmpeg 的 -hls_fmp4_init_filename 是相对 cwd 的，之前会写到应用目录，
+        // 播放器按 m3u8 请求播放会话目录里的 init.mp4 就会 404。
         command
+            .current_dir(&dir)
             .arg("-hide_banner")
             .arg("-nostdin")
             .arg("-loglevel")
@@ -744,8 +748,8 @@ impl ViewManager {
             .arg("-hls_fmp4_init_filename")
             .arg("init.mp4")
             .arg("-hls_segment_filename")
-            .arg(dir.join("seg_%05d.m4s"))
-            .arg(dir.join("index.m3u8"))
+            .arg("seg_%05d.m4s")
+            .arg("index.m3u8")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(ffmpeg_log(&self.root));
@@ -907,7 +911,15 @@ async fn playlist_ready(dir: &PathBuf) -> bool {
     let Ok(text) = tokio::fs::read_to_string(dir.join("index.m3u8")).await else {
         return false;
     };
-    text.contains("#EXTINF")
+    if !text.contains("#EXTINF") {
+        return false;
+    }
+    // fMP4 的 init.mp4 可能比 m3u8 晚一拍落盘；先交给播放器会让 hls.js
+    // 立刻请求 init.mp4 并拿到 404。等它真正可读再起播。
+    tokio::fs::metadata(dir.join("init.mp4"))
+        .await
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
 }
 
 /// 转封装失败时唯一的现场：把 stderr 落到 <cache>/view/ffmpeg.log，随启动清空。
