@@ -21,7 +21,8 @@ export function PageHeader({
   actions,
   className,
 }: {
-  title: ReactNode;
+  /** 主 Tab 可以不传标题，只保留右上角操作。 */
+  title?: ReactNode;
   subtitle?: ReactNode;
   /** 标题上方的返回/面包屑等。 */
   leading?: ReactNode;
@@ -30,20 +31,27 @@ export function PageHeader({
   actions?: ReactNode;
   className?: string;
 }) {
+  const hasHeading = Boolean(leading || prefix || title || subtitle);
+  if (!hasHeading && !actions) return null;
+
   return (
     <header className={cx("flex shrink-0 items-center gap-3 px-5 pb-3 pt-4", className)}>
-      <div className="min-w-0">
-        {leading ? <div className="mb-1">{leading}</div> : null}
-        <div className="flex min-w-0 items-center gap-2.5">
-          {prefix ? <div className="shrink-0">{prefix}</div> : null}
-          <h1 className="truncate text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">
-            {title}
-          </h1>
+      {hasHeading ? (
+        <div className="min-w-0">
+          {leading ? <div className="mb-1">{leading}</div> : null}
+          <div className="flex min-w-0 items-center gap-2.5">
+            {prefix ? <div className="shrink-0">{prefix}</div> : null}
+            {title ? (
+              <h1 className="truncate text-[21px] font-semibold leading-7 tracking-[-0.01em] text-ink">
+                {title}
+              </h1>
+            ) : null}
+          </div>
+          {subtitle ? (
+            <div className="mt-0.5 text-[11.5px] leading-5 text-muted">{subtitle}</div>
+          ) : null}
         </div>
-        {subtitle ? (
-          <div className="mt-0.5 text-[11.5px] leading-5 text-muted">{subtitle}</div>
-        ) : null}
-      </div>
+      ) : null}
       {actions ? <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div> : null}
     </header>
   );
@@ -120,11 +128,14 @@ export function PageSearch({
   value,
   onChange,
   placeholder,
+  clearLabel = "Clear",
   className,
 }: {
   value: string;
   onChange: (next: string) => void;
   placeholder: string;
+  /** 清除按钮的无障碍名称。 */
+  clearLabel?: string;
   className?: string;
 }) {
   return (
@@ -138,10 +149,31 @@ export function PageSearch({
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && value) {
+            event.preventDefault();
+            onChange("");
+          }
+        }}
         placeholder={placeholder}
         spellCheck={false}
-        className="focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 pr-2.5 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
+        className={cx(
+          "focus-ring h-9 w-[228px] rounded-ctl border border-line bg-surface pl-8 text-[13px] text-ink transition-colors placeholder:text-faint hover:border-line-strong",
+          value ? "pr-8" : "pr-2.5",
+        )}
       />
+      {value ? (
+        <button
+          type="button"
+          aria-label={clearLabel}
+          onClick={() => onChange("")}
+          className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[4px] text-faint transition-colors hover:bg-raised hover:text-ink"
+        >
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+            <path d="m2.5 2.5 7 7M9.5 2.5l-7 7" strokeLinecap="round" />
+          </svg>
+        </button>
+      ) : null}
     </label>
   );
 }

@@ -30,6 +30,9 @@
 .highlight { position: absolute; z-index: 1; top: 0; left: 0; border-radius: var(--fbg-radius); background: var(--fbg-highlight); pointer-events: none; transition: background-color var(--duration-fast) var(--ease-standard); }
 .highlight[data-pressing] { background: var(--fbg-highlight-press); transition-duration: var(--duration-instant); }
 
+/* HIVECAST: 托盘内的静态状态文案（如「已选 3 个」），不参与共享高亮、焦点和方向键。 */
+.leading { position: relative; z-index: 2; flex: none; align-self: center; padding: 0 var(--fbg-pad-x); color: var(--text-secondary); font-size: var(--text-xs); font-weight: 500; letter-spacing: var(--tracking-body); white-space: nowrap; }
+
 /* Buttons are not positioned, so the highlight measures them against the tray and stacks above their background. */
 .item { display: inline-flex; min-width: var(--fbg-h); height: var(--fbg-h); flex: none; align-items: center; justify-content: center; margin: 0; padding: 0 var(--fbg-pad-x); border: 0; border-radius: var(--fbg-radius); background: transparent; color: inherit; font: inherit; font-size: var(--text-sm); font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation; transition: color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard), opacity var(--duration-fast) var(--ease-standard); }
 .sm .item { font-size: var(--text-xs); }

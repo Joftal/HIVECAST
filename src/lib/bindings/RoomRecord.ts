@@ -26,4 +26,8 @@ viewQn: number,
 /**
  * 录制线路偏好（线路组名，None = 自动选最优）
  */
-recordLine: string | null, lastCheckedAt: number, createdAt: number, updatedAt: number, };
+recordLine: string | null, lastCheckedAt: number,
+/**
+ * 最近一场录制的摘要；由 session 写入/收尾时刷新，监控列表不再单独查 sessions。
+ */
+lastSessionId: string | null, lastSessionStartedAt: number, lastSessionDurationMs: number, createdAt: number, updatedAt: number, };

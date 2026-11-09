@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Switch, cx } from "../../components/ui/Controls";
@@ -11,7 +11,7 @@ import { HoldToConfirm } from "../../components/arc/hold-to-confirm/hold-to-conf
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
-import { PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { PageChip, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import {
   isTauri,
@@ -29,12 +29,14 @@ import {
   roomSetLine,
   roomSetQuality,
   roomsList,
+  sessionSummary,
   sessionsList,
   viewOpen,
   type LineInfo,
   type PostResult,
   type RecordSession,
   type RoomView,
+  type SessionSummary,
 } from "../../lib/ipc";
 
 const QUALITIES = [0, 40000, 10000, 400, 250, 150, 80];
@@ -58,6 +60,7 @@ const ROW_ACTION_GROUP_STYLE = {
   "--fbg-radius": "6px",
 } as CSSProperties;
 const ROW_H = 76;
+const DRAWER_PAGE = 50;
 const THUMB_W = 120;
 const THUMB_H = 68;
 
@@ -77,6 +80,35 @@ function clock(seconds: number): string {
 
 function clockMs(ms: number): string {
   return clock(ms / 1000);
+}
+
+/* 录制时钟共享一个 1s tick：只有挂载中的 LiveDuration 重渲染，页面本身不 tick。 */
+let liveTick = Date.now();
+let liveTimer: number | null = null;
+const liveListeners = new Set<() => void>();
+function subscribeLiveTick(listener: () => void) {
+  liveTick = Date.now();
+  liveListeners.add(listener);
+  if (liveTimer === null) {
+    liveTimer = window.setInterval(() => {
+      liveTick = Date.now();
+      liveListeners.forEach((notify) => notify());
+    }, 1000);
+  }
+  return () => {
+    liveListeners.delete(listener);
+    if (liveListeners.size === 0 && liveTimer !== null) {
+      window.clearInterval(liveTimer);
+      liveTimer = null;
+    }
+  };
+}
+function getLiveTick() {
+  return liveTick;
+}
+function LiveDuration({ startedAt }: { startedAt: number }) {
+  const now = useSyncExternalStore(subscribeLiveTick, getLiveTick, getLiveTick);
+  return <>{clock(now / 1000 - startedAt)}</>;
 }
 
 function size(bytes: number): string {
@@ -150,6 +182,8 @@ function Avatar({ room, size: px }: { room: RoomView["room"]; size: number }) {
       src={src}
       alt=""
       referrerPolicy="no-referrer"
+      loading="lazy"
+      decoding="async"
       className="shrink-0 rounded-full bg-raised object-cover"
       style={{ width: px, height: px }}
     />
@@ -188,7 +222,14 @@ function Thumb({
       style={fluid ? undefined : { width: w, height: h }}
     >
       {src ? (
-        <img src={src} alt="" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+        <img
+          src={src}
+          alt=""
+          className="h-full w-full object-cover"
+          referrerPolicy="no-referrer"
+          loading="lazy"
+          decoding="async"
+        />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-[15px] font-semibold text-faint">
           {room.hostName.slice(0, 1) || "?"}
@@ -264,8 +305,17 @@ export default function MonitorPage({
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
 
   const [views, setViews] = useState<RoomView[]>([]);
-  const [sessions, setSessions] = useState<RecordSession[]>([]);
+  const [drawerSessions, setDrawerSessions] = useState<RecordSession[]>([]);
+  const [drawerSummary, setDrawerSummary] = useState<SessionSummary | null>(null);
+  const [drawerSessionsLoading, setDrawerSessionsLoading] = useState(false);
+  const [drawerLoadingMore, setDrawerLoadingMore] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const reloadTimer = useRef<number | null>(null);
+  const loadInFlight = useRef(false);
+  const loadQueued = useRef(false);
 
+  const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
@@ -281,7 +331,6 @@ export default function MonitorPage({
   const notify = useNotify();
   // rooms://changed 可能连续触发；后台加载失败只提示一次。
   const loadErrorShown = useRef(false);
-  const [now, setNow] = useState(() => Date.now());
   // 房间下播后把它从多选里摘掉，避免带着离线房间进分屏。
   useEffect(() => {
     setPicked((prev) => {
@@ -293,6 +342,8 @@ export default function MonitorPage({
 
   // 详情是「录制详情」抽屉，默认不展开；点行不再自动打开。
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
   useEffect(() => {
@@ -320,28 +371,100 @@ export default function MonitorPage({
   const [postBusy, setPostBusy] = useState<string | null>(null);
   const [removeDone, setRemoveDone] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!isTauri()) return;
+  const loadDrawerSessions = useCallback(async (roomId: string, quiet = false) => {
+    if (!isTauri()) {
+      setDrawerSessions([]);
+      setDrawerSummary(null);
+      return;
+    }
+    if (!quiet) setDrawerSessionsLoading(true);
     try {
-      const [rooms, history] = await Promise.all([roomsList(), sessionsList(undefined, 200)]);
-      setViews(rooms);
-      setSessions(history);
-      loadErrorShown.current = false;
-    } catch (err) {
-      if (!loadErrorShown.current) {
-        loadErrorShown.current = true;
-        notify.error(err);
+      const [summary, rows] = await Promise.all([
+        sessionSummary(roomId),
+        sessionsList(roomId, DRAWER_PAGE, 0),
+      ]);
+      if (selectedIdRef.current === roomId) {
+        setDrawerSummary(summary);
+        setDrawerSessions(rows);
       }
+    } catch (err) {
+      if (!quiet && selectedIdRef.current === roomId) notify.error(err);
+    } finally {
+      if (!quiet && selectedIdRef.current === roomId) setDrawerSessionsLoading(false);
     }
   }, [notify]);
 
+  const loadMoreDrawerSessions = async () => {
+    const roomId = selectedId;
+    if (!roomId || drawerLoadingMore) return;
+    setDrawerLoadingMore(true);
+    try {
+      const rows = await sessionsList(roomId, DRAWER_PAGE, drawerSessions.length);
+      if (selectedIdRef.current === roomId) setDrawerSessions((prev) => [...prev, ...rows]);
+    } catch (err) {
+      notify.error(err);
+    } finally {
+      setDrawerLoadingMore(false);
+    }
+  };
+
+  // 单飞：同一时刻只有一个 rooms_list 在路上；期间的刷新请求合并成一次尾随刷新。
+  const load = useCallback(async () => {
+    if (!isTauri()) {
+      setLoaded(true);
+      return;
+    }
+    if (loadInFlight.current) {
+      loadQueued.current = true;
+      return;
+    }
+    loadInFlight.current = true;
+    try {
+      do {
+        loadQueued.current = false;
+        try {
+          setViews(await roomsList());
+          loadErrorShown.current = false;
+          setLoadFailed(false);
+        } catch (err) {
+          setLoadFailed(true);
+          if (!loadErrorShown.current) {
+            loadErrorShown.current = true;
+            notify.error(err);
+          }
+        }
+      } while (loadQueued.current);
+    } finally {
+      loadInFlight.current = false;
+      setLoaded(true);
+    }
+  }, [notify]);
+
+  const retryLoad = () => {
+    setLoadFailed(false);
+    setLoaded(false);
+    void load();
+  };
+
+  // rooms://changed 会成串到达：200ms 合并；load 自身负责单飞与尾随刷新。
+  const requestReload = useCallback(() => {
+    if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null;
+      void load();
+    }, 200);
+  }, [load]);
+
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      setLoaded(true);
+      return;
+    }
     void load();
     let unlisten: (() => void) | undefined;
     let alive = true;
     onRoomsChanged(() => {
-      void load();
+      requestReload();
     })
       .then((fn) => {
         if (alive) unlisten = fn;
@@ -350,36 +473,59 @@ export default function MonitorPage({
       .catch(() => undefined);
     return () => {
       alive = false;
+      if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
       if (unlisten) unlisten();
     };
-  }, [load]);
-
-  const recordingActive = useMemo(() => views.some((view) => view.recording), [views]);
-  useEffect(() => {
-    if (!recordingActive) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [recordingActive]);
+  }, [load, requestReload]);
 
   useEffect(() => {
     setLines(null);
     setRemoveDone(false);
-  }, [selectedId]);
+    setDrawerSessions([]);
+    setDrawerSummary(null);
+    if (!selectedId || !isTauri()) {
+      setDrawerSessionsLoading(false);
+      return;
+    }
+    void loadDrawerSessions(selectedId);
+  }, [selectedId, loadDrawerSessions]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(queryInput.trim()), 120);
+    return () => window.clearTimeout(timer);
+  }, [queryInput]);
+
+  const changeQuery = (next: string) => {
+    setQueryInput(next);
+    if (!next) setQuery("");
+  };
+
+  const collator = useMemo(
+    () => new Intl.Collator(locale, { numeric: true }),
+    [locale],
+  );
 
   const counts = useMemo(() => {
     const map: Record<string, number> = { all: views.length };
     for (const view of views) map[view.room.platform] = (map[view.room.platform] ?? 0) + 1;
     return map;
   }, [views]);
+  const recordingCount = useMemo(() => views.filter((view) => view.recording).length, [views]);
 
   const lastByRoom = useMemo(() => {
-    const map = new Map<string, RecordSession>();
-    for (const session of sessions) {
-      const prev = map.get(session.roomId);
-      if (!prev || session.startedAt > prev.startedAt) map.set(session.roomId, session);
+    const map = new Map<string, { id: string; startedAt: number; durationMs: number }>();
+    for (const view of views) {
+      const room = view.room;
+      if (room.lastSessionId !== null && room.lastSessionStartedAt !== null) {
+        map.set(room.id, {
+          id: room.lastSessionId,
+          startedAt: room.lastSessionStartedAt,
+          durationMs: room.lastSessionDurationMs,
+        });
+      }
     }
     return map;
-  }, [sessions]);
+  }, [views]);
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -391,7 +537,7 @@ export default function MonitorPage({
     });
     // 默认按主播名称（中文按拼音、数字按数值）；点表头再叠加状态排序。
     const label = (view: RoomView) => view.room.hostName || view.room.title || view.room.roomKey;
-    const byName = (a: RoomView, b: RoomView) => label(a).localeCompare(label(b), undefined, { numeric: true });
+    const byName = (a: RoomView, b: RoomView) => collator.compare(label(a), label(b));
     if (!sort) return list.sort(byName);
     const rank = (view: RoomView) =>
       sort.key === "live" ? (view.room.isLive ? 1 : 0) : view.recording ? 1 : 0;
@@ -399,7 +545,7 @@ export default function MonitorPage({
       const diff = rank(b) - rank(a);
       return (sort.dir === "asc" ? diff : -diff) || byName(a, b);
     });
-  }, [views, query, platform, onlyRecording, sort]);
+  }, [views, query, platform, onlyRecording, sort, collator]);
 
   // 分屏入口：顺序沿用当前表格顺序（筛选 + 排序），余下的按房间列表补齐。
   const pickedIds = useMemo(() => {
@@ -433,15 +579,9 @@ export default function MonitorPage({
     );
 
   const selected = useMemo(() => views.find((view) => view.room.id === selectedId) ?? null, [views, selectedId]);
-  const selectedSessions = useMemo(
-    () => (selectedId ? sessions.filter((session) => session.roomId === selectedId).slice(0, 4) : []),
-    [sessions, selectedId],
-  );
-  const recorded = useMemo(
-    () => sessions.filter((session) => session.roomId === selectedId).reduce((sum, session) => sum + session.fileSize, 0),
-    [sessions, selectedId],
-  );
-  const mergeable = selectedSessions.filter((session) => session.status !== "recording" && session.filePath).length;
+  const selectedSessions = drawerSessions;
+  const recorded = drawerSummary?.totalBytes ?? 0;
+  const mergeable = drawerSummary?.mergeable ?? 0;
 
   const run = useCallback(
     async (id: string, action: () => Promise<unknown>, kind: "record" | null = null) => {
@@ -450,6 +590,7 @@ export default function MonitorPage({
       try {
         await action();
         await load();
+        if (selectedId === id) await loadDrawerSessions(id, true);
         return true;
       } catch (err) {
         notify.error(err);
@@ -459,7 +600,7 @@ export default function MonitorPage({
         setBusyAction(null);
       }
     },
-    [load, notify],
+    [load, loadDrawerSessions, notify, selectedId],
   );
 
   const add = async () => {
@@ -467,12 +608,16 @@ export default function MonitorPage({
     if (!value || adding) return;
     setAdding(true);
     try {
-      await roomAdd(value, addMonitor, addAutoRecord);
+      const view = await roomAdd(value, addMonitor, addAutoRecord);
       setInput("");
       setAddMonitor(true);
       setAddAutoRecord(true);
       setAddOpen(false);
       await load();
+      notify.success(
+        t("monitor.added"),
+        view.room.hostName || view.room.title || view.room.roomKey,
+      );
     } catch (err) {
       notify.error(err);
     } finally {
@@ -530,6 +675,7 @@ export default function MonitorPage({
       const name = result.path.split(/[\\/]/).pop() ?? result.path;
       notify.success(t("monitor.post.merge"), size(result.size) + " · " + name);
       await load();
+      if (selectedId === roomId) await loadDrawerSessions(roomId, true);
     } catch (err) {
       notify.error(err);
     } finally {
@@ -598,16 +744,15 @@ export default function MonitorPage({
     const busy = busyId === room.id;
     const watchBusy = busy && busyAction === "watch";
     const recordBusy = busy && busyAction === "record";
-    const elapsed = view.recording ? now / 1000 - view.recording.startedAt : 0;
     const last = lastByRoom.get(room.id);
     const startedAt = view.recording ? view.recording.startedAt : last?.startedAt;
-    const durationMs = view.recording ? now - view.recording.startedAt * 1000 : (last?.durationMs ?? 0);
+    const durationMs = last?.durationMs ?? 0;
     return (
       <div
         key={room.id}
         style={{ gridTemplateColumns: COLUMNS, minHeight: ROW_H }}
         className={cx(
-          "grid cursor-default items-center gap-x-3 border-b border-line px-5 text-left transition-colors",
+          "monitor-row grid cursor-default items-center gap-x-3 border-b border-line px-5 text-left transition-colors",
           isPicked ? "bg-accent-soft" : isSelected ? "bg-raised/60" : "hover:bg-raised/70",
         )}
       >
@@ -664,7 +809,11 @@ export default function MonitorPage({
             <>
               <span className="block text-[11px] text-muted">{datetime(startedAt)}</span>
               <span className={cx("block", isRecording ? "text-rec" : "")}>
-                {isRecording ? clock(elapsed) : clockMs(durationMs)}
+                {view.recording ? (
+                  <LiveDuration startedAt={view.recording.startedAt} />
+                ) : (
+                  clockMs(durationMs)
+                )}
               </span>
             </>
           ) : (
@@ -682,6 +831,7 @@ export default function MonitorPage({
                 id: "watch",
                 label: t("monitor.watch"),
                 tone: "accent",
+                disabled: !room.isLive && !isRecording,
                 loading: watchBusy,
                 onSelect: () => {
                   if (busy) return;
@@ -819,8 +969,9 @@ export default function MonitorPage({
             <button
               type="button"
               onClick={() => void openWatch(room.id)}
+              disabled={!room.isLive && !isRecording}
               title={t("monitor.watch")}
-              className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px]"
+              className="focus-ring block w-full cursor-pointer overflow-hidden rounded-[7px] disabled:cursor-not-allowed disabled:opacity-60"
             >
               <div className="aspect-video w-full">
                 <Thumb
@@ -919,7 +1070,9 @@ export default function MonitorPage({
                 </button>
               ) : null}
             </div>
-            {selectedSessions.length === 0 ? (
+            {drawerSessionsLoading ? (
+              <p className="py-3 text-[12px] text-faint">{t("common.loading")}</p>
+            ) : selectedSessions.length === 0 ? (
               <p className="py-3 text-[12px] text-faint">{t("monitor.noHistory")}</p>
             ) : (
               <div className="mt-1">
@@ -929,9 +1082,11 @@ export default function MonitorPage({
                       <div className="flex items-center justify-between text-[12px]">
                         <span className="tnum text-ink-soft">
                           {recent(session.startedAt)} ·{" "}
-                          {session.status === "recording"
-                            ? clock(now / 1000 - session.startedAt)
-                            : clockMs(session.durationMs)}
+                          {session.status === "recording" ? (
+                            <LiveDuration startedAt={session.startedAt} />
+                          ) : (
+                            clockMs(session.durationMs)
+                          )}
                         </span>
                         <span className="tnum text-muted">{size(session.fileSize)}</span>
                       </div>
@@ -939,6 +1094,18 @@ export default function MonitorPage({
                     </div>
                   );
                 })}
+                {selectedSessions.length < (drawerSummary?.total ?? 0) ? (
+                  <div className="mt-2 flex justify-center">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={drawerLoadingMore}
+                      onClick={() => void loadMoreDrawerSessions()}
+                    >
+                      {drawerLoadingMore ? t("common.loading") : t("monitor.loadMore")}
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
@@ -954,28 +1121,6 @@ export default function MonitorPage({
   };
   return (
     <PageShell>
-      <PageHeader
-        title={t("monitor.title")}
-        subtitle={t("monitor.subtitle")}
-        actions={
-          <>
-            <PageSearch value={query} onChange={setQuery} placeholder={t("monitor.searchPlaceholder")} />
-            <Button
-              size="lg"
-              variant="primary"
-              onClick={() => {
-                setAddOpen((open) => !open);
-                setAddMonitor(true);
-                setAddAutoRecord(true);
-              }}
-            >
-              <span className="text-[15px] leading-none">+</span>
-              {t("monitor.addRoom")}
-            </Button>
-          </>
-        }
-      />
-
       <Dialog
         open={addOpen}
         onOpenChange={(next) => {
@@ -1056,18 +1201,19 @@ export default function MonitorPage({
         </DialogContent>
       </Dialog>
 
-      <PageToolbar>
+      <PageToolbar className="pt-4">
         <PageChip
-          active={platform === "all"}
+          active={platform === "all" && !onlyRecording}
           onClick={() => {
             setPlatform("all");
+            setOnlyRecording(false);
           }}
         >
           {t("monitor.filterAll")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{counts.all ?? 0}</span>
         </PageChip>
         <SelectMenu
-          variant="bare"
+          variant="chip"
           align="start"
           active={platform !== "all"}
           value={platform}
@@ -1080,15 +1226,35 @@ export default function MonitorPage({
             hint: String(item.count),
           }))}
         />
-        <span className="mx-1.5 h-4 w-px bg-line" />
         <PageChip active={onlyRecording} onClick={() => setOnlyRecording((on) => !on)}>
           {t("monitor.onlyRecording")}
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{recordingCount}</span>
         </PageChip>
+        <div className="ml-auto flex items-center gap-2">
+          <PageSearch
+            value={queryInput}
+            onChange={changeQuery}
+            placeholder={t("monitor.searchPlaceholder")}
+            clearLabel={t("common.clear")}
+          />
+          <Button
+            size="lg"
+            variant="primary"
+            onClick={() => {
+              setAddOpen((open) => !open);
+              setAddMonitor(true);
+              setAddAutoRecord(true);
+            }}
+          >
+            <span className="text-[15px] leading-none">+</span>
+            {t("monitor.addRoom")}
+          </Button>
+        </div>
       </PageToolbar>
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
-          {views.length > 0 ? (
+          {loaded && views.length > 0 ? (
             <div
               className="grid shrink-0 items-center gap-x-3 border-b border-line px-5 py-2.5 text-[11.5px] font-medium text-muted"
               style={{ gridTemplateColumns: COLUMNS }}
@@ -1114,8 +1280,25 @@ export default function MonitorPage({
             </div>
           ) : null}
 
-          <div className="min-h-0 flex-1 overflow-auto">
-            {views.length === 0 ? (
+          <div className={cx("min-h-0 flex-1 overflow-auto", picked.size > 0 ? "pb-20" : "")}>
+            {!loaded ? (
+              <div className="flex h-full items-center justify-center gap-2 text-[12px] text-faint">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-line-strong border-t-accent" />
+                {t("common.loading")}
+              </div>
+            ) : loadFailed && views.length === 0 ? (
+              <PageEmpty
+                className="h-full"
+                title={t("monitor.loadFailedTitle")}
+                description={t("monitor.loadFailedBody")}
+                icon={<EmptyArt kind="monitor" />}
+                action={
+                  <Button size="sm" variant="secondary" onClick={retryLoad}>
+                    {t("common.retry")}
+                  </Button>
+                }
+              />
+            ) : views.length === 0 ? (
               <PageEmpty
                 className="h-full"
                 title={t("monitor.emptyTitle")}
@@ -1138,28 +1321,32 @@ export default function MonitorPage({
       </div>
 
       {picked.size > 0 ? (
-        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-[10px] border border-line bg-surface/95 py-1.5 pl-3.5 pr-2 shadow-pop backdrop-blur">
-          <span className="whitespace-nowrap text-[12px] text-ink">
-            {t("monitor.selectedCount", { n: picked.size })}
-          </span>
-          <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>
-            {t("monitor.clearSelection")}
-          </Button>
-          <span className="h-4 w-px shrink-0 bg-line" />
-          <span className="whitespace-nowrap text-[11px] text-faint">{t("monitor.splitMode")}</span>
-          {splitModes.map((mode) => (
-            <Button
-              key={mode.kind}
-              size="sm"
-              variant="secondary"
-              onClick={() => onOpenWatch?.(pickedIds, mode.kind)}
-            >
-              <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                <LayoutGlyph kind={mode.kind} />
-                {mode.label}
-              </span>
-            </Button>
-          ))}
+        <div className="absolute bottom-6 left-1/2 z-40 -translate-x-1/2">
+          <FloatingButtonGroup
+            label={t("monitor.selectionActions")}
+            variant="floating"
+            size="sm"
+            leading={
+              <>
+                {t("monitor.selectedCount", { n: picked.size })}
+                <span className="ml-1.5 font-normal text-faint">· {t("monitor.splitMode")}</span>
+              </>
+            }
+            items={[
+              {
+                id: "clear",
+                label: t("monitor.clearSelection"),
+                onSelect: () => setPicked(new Set()),
+              },
+              { type: "separator", id: "selection-sep" },
+              ...splitModes.map((mode) => ({
+                id: mode.kind,
+                label: mode.label,
+                icon: <LayoutGlyph kind={mode.kind} />,
+                onSelect: () => onOpenWatch?.(pickedIds, mode.kind),
+              })),
+            ]}
+          />
         </div>
       ) : null}
 

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
-import { PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { useNotify } from "../../lib/notify";
 import DanmakuCanvas from "./DanmakuCanvas";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
@@ -757,8 +757,6 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   return (
     <div className="relative flex h-full min-h-0 bg-canvas text-ink">
       <PageShell className="relative min-w-0">
-        {!fullscreen ? <PageHeader title={t("watch.title")} subtitle={t("watch.subtitle")} /> : null}
-
         {fullscreen ? (
           <div
             onPointerEnter={() => hoverChrome("top", true)}
@@ -771,7 +769,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
             {toolbar}
           </div>
         ) : (
-          <PageToolbar>{toolbar}</PageToolbar>
+          <PageToolbar className="pt-4">{toolbar}</PageToolbar>
         )}
 
         {danmakuOpen && count > 0 ? (

@@ -949,20 +949,7 @@ export default function MediaPage() {
             ) : undefined
           }
         />
-      ) : (
-        <PageHeader
-          title={t("media.title")}
-          subtitle={t("media.subtitle")}
-          actions={
-            <>
-              <PageSearch value={query} onChange={setQuery} placeholder={t("media.hosts.search")} />
-              <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void refreshView()}>
-                {t("common.refresh")}
-              </Button>
-            </>
-          }
-        />
-      )}
+      ) : null}
 
       {hostId ? (
         <PageToolbar>
@@ -998,7 +985,7 @@ export default function MediaPage() {
           />
         </PageToolbar>
       ) : (
-        <PageToolbar>
+        <PageToolbar className="pt-4">
           {platformMenu}
           <SelectMenu
             size="md"
@@ -1011,8 +998,19 @@ export default function MediaPage() {
               { value: "count", label: t("media.hosts.sortCount") },
             ]}
             ariaLabel={t("media.sortLabel")}
-            className="ml-auto w-[140px] justify-between"
+            className="w-[140px] justify-between"
           />
+          <div className="ml-auto flex items-center gap-2">
+            <PageSearch
+              value={query}
+              onChange={setQuery}
+              placeholder={t("media.hosts.search")}
+              clearLabel={t("common.clear")}
+            />
+            <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void refreshView()}>
+              {t("common.refresh")}
+            </Button>
+          </div>
         </PageToolbar>
       )}
       {statusLine ? (

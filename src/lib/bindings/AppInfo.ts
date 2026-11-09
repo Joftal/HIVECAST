@@ -5,7 +5,7 @@
  */
 export type AppInfo = { name: string, version: string, platform: string, arch: string,
 /**
- * PATH 中探测到的 ffmpeg；未安装时为 None。
+ * 当前实际生效的 ffmpeg（手动配置优先，其次 PATH 与常见目录）；未找到时为 None。
  */
 ffmpegPath: string | null, dataDir: string, cacheDir: string,
 /**

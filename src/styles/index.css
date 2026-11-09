@@ -230,6 +230,12 @@ input[type="number"]::-webkit-outer-spin-button {
   ::view-transition-new(root) { animation: none; clip-path: none; }
 }
 
+/* 监控表格行：固定 76px 行高，离屏行跳过布局/绘制，不改变 DOM 数量。 */
+.monitor-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 76px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in, .animate-fade-rise, .animate-pop, .animate-sheet { animation: none; }
   * { transition-duration: 1ms !important; animation-duration: 1ms !important; }

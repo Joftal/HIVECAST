@@ -26,6 +26,7 @@ import type { TrashInfo } from "./bindings/TrashInfo";
 import type { PostResult } from "./bindings/PostResult";
 import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
+import type { SessionSummary } from "./bindings/SessionSummary";
 import type { RoomView } from "./bindings/RoomView";
 import type { StreamDescriptor } from "./bindings/StreamDescriptor";
 import type { ViewSlotInfo } from "./bindings/ViewSlotInfo";
@@ -57,6 +58,7 @@ export type {
   AppNotice,
   RecordSession,
   RoomView,
+  SessionSummary,
   Settings,
   StreamDescriptor,
   ViewSlotInfo,
@@ -141,8 +143,12 @@ export async function recordStop(id: string): Promise<void> {
   return invoke("record_stop", { id });
 }
 
-export async function sessionsList(roomId?: string, limit = 50): Promise<RecordSession[]> {
-  return invoke<RecordSession[]>("sessions_list", { roomId, limit });
+export async function sessionsList(roomId?: string, limit = 50, offset = 0): Promise<RecordSession[]> {
+  return invoke<RecordSession[]>("sessions_list", { roomId, limit, offset });
+}
+
+export async function sessionSummary(roomId: string): Promise<SessionSummary> {
+  return invoke<SessionSummary>("session_summary", { roomId });
 }
 
 // ---- M5 本地后处理 ----

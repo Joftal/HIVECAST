@@ -67,6 +67,24 @@
 .trigger[data-icon-only] .triggerIcon { color: currentColor; }
 .trigger[data-variant="bare"][data-icon-only] { width: 28px; min-height: 28px; padding: 0; }
 
+/* HIVECAST: 筛选行里和 PageChip 并排的下拉芯片。 */
+.trigger[data-variant="chip"] {
+  min-height: 30px;
+  padding: 0 10px;
+  gap: 6px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .trigger[data-variant="chip"]:hover { border-color: transparent; background: var(--surface-muted); color: var(--foreground); box-shadow: none; }
+}
+.trigger[data-variant="chip"][data-state="open"] { border-color: transparent; background: var(--surface-muted); color: var(--foreground); box-shadow: none; }
+.trigger[data-variant="chip"][data-active] { background: var(--accent-subtle); color: var(--accent-strong); }
+.trigger[data-variant="chip"][data-active] .chevron { color: currentColor; }
+
 .trigger[data-variant="dark"] {
   min-height: 28px;
   padding: 0 6px;

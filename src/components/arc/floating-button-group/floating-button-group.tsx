@@ -57,6 +57,8 @@ export interface FloatingButtonGroupProps {
   tooltipSide?: "top" | "bottom" | "left" | "right";
   /** Called with the item id after the item's own onSelect. */
   onAction?: (id: string) => void;
+  /** HIVECAST: 托盘内的非交互前置内容，例如「已选 3 个」；不参与高亮和方向键。 */
+  leading?: ReactNode;
   className?: string;
   style?: CSSProperties;
 }
@@ -115,7 +117,7 @@ function SideTip({ side, content, children }: { side: "left" | "right"; content:
  * or keyboard focus is on, fades when the pointer leaves the tray, and settles darker in place while a button is pressed.
  * It is the toolbar's only hover and focus indicator. Arrow keys move focus, Home and End jump to the ends, Enter and Space act.
  */
-export function FloatingButtonGroup({ items, label, variant = "muted", size = "md", orientation = "horizontal", iconOnly: groupIconOnly = false, tooltipSide, onAction, className, style }: FloatingButtonGroupProps) {
+export function FloatingButtonGroup({ items, label, variant = "muted", size = "md", orientation = "horizontal", iconOnly: groupIconOnly = false, tooltipSide, onAction, leading, className, style }: FloatingButtonGroupProps) {
   const reduced = useReducedMotion() ?? false;
   const tray = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
@@ -256,6 +258,7 @@ export function FloatingButtonGroup({ items, label, variant = "muted", size = "m
     onBlur={onBlur}
   >
     <motion.span className={styles.highlight} data-pressing={pressing && activeId ? "" : undefined} style={{ x, y, width, height, opacity, scale }} aria-hidden="true" />
+    {leading ? <span className={styles.leading} aria-live="polite">{leading}</span> : null}
     {items.map((item, position) => {
       if (!isAction(item)) return <span key={item.id ?? `separator-${position}`} className={styles.separator} role="separator" aria-orientation={vertical ? "horizontal" : "vertical"} />;
       const { id, label: itemLabel, icon, onSelect, disabled = false, loading = false, tone = "default", pressed, shortcut, reserveLabels = [] } = item;

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button, cx } from "../../components/ui/Controls";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
-import { PageBody, PageChip, PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { PageBody, PageChip, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { isTauri, postCancel, taskBoard, type TaskBoard, type TaskRecord } from "../../lib/ipc";
 import { useNotify } from "../../lib/notify";
 
@@ -125,17 +125,7 @@ export default function TasksPage() {
 
   return (
     <PageShell>
-      <PageHeader
-        title={t("tasks.title")}
-        subtitle={t("tasks.subtitle")}
-        actions={
-          <Button size="lg" variant="secondary" onClick={() => void refreshTasks()}>
-            {t("tasks.refresh")}
-          </Button>
-        }
-      />
-
-      <PageToolbar>
+      <PageToolbar className="pt-4">
         <PageChip active={filter === "all"} onClick={() => setFilter("all")}>
           {t("tasks.filterAll")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{running.length + history.length}</span>
@@ -148,6 +138,11 @@ export default function TasksPage() {
           {t("tasks.history")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{history.length}</span>
         </PageChip>
+        <div className="ml-auto flex items-center gap-2">
+          <Button size="lg" variant="secondary" onClick={() => void refreshTasks()}>
+            {t("tasks.refresh")}
+          </Button>
+        </div>
       </PageToolbar>
 
       <PageBody className="pb-8">

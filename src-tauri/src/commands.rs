@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
     MediaFile, MediaHostPage, MediaItem, MediaPage, Playback, PostResult, QrPoll, QrTicket,
-    RecordSession, RoomRecord, RoomView, Settings, StreamDescriptor, TaskBoard, TaskRecord,
-    TrashInfo, ViewSlotInfo,
+    RecordSession, RoomRecord, RoomView, SessionSummary, Settings, StreamDescriptor, TaskBoard,
+    TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -117,6 +117,9 @@ pub async fn room_add(
         view_qn: settings.default_view_qn,
         record_line: None,
         last_checked_at: Some(timestamp),
+        last_session_id: None,
+        last_session_started_at: None,
+        last_session_duration_ms: 0,
         created_at: timestamp,
         updated_at: timestamp,
     };
@@ -385,10 +388,21 @@ pub async fn sessions_list(
     state: State<'_, AppState>,
     room_id: Option<String>,
     limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<Vec<RecordSession>, AppError> {
-    state
-        .db
-        .list_sessions(room_id.as_deref(), limit.unwrap_or(100) as usize)
+    state.db.list_sessions(
+        room_id.as_deref(),
+        limit.unwrap_or(100) as usize,
+        offset.unwrap_or(0) as usize,
+    )
+}
+
+#[tauri::command]
+pub async fn session_summary(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<SessionSummary, AppError> {
+    state.db.session_summary(&room_id)
 }
 
 #[tauri::command]
@@ -732,9 +746,19 @@ pub async fn room_merge_sessions(
     state: State<'_, AppState>,
     room_id: String,
 ) -> Result<PostResult, AppError> {
-    let mut sessions: Vec<_> = state
-        .db
-        .list_sessions(Some(&room_id), 200)?
+    // 合并要覆盖整个房间的历史，分页读完（list_sessions 单页上限 500）。
+    let mut all_sessions = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = state.db.list_sessions(Some(&room_id), 500, offset)?;
+        let count = page.len();
+        all_sessions.extend(page);
+        if count < 500 {
+            break;
+        }
+        offset += count;
+    }
+    let mut sessions: Vec<_> = all_sessions
         .into_iter()
         .filter(|session| session.status != "recording" && session.file_path.is_some())
         .collect();

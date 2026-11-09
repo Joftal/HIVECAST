@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use hivecast_ipc::{
     MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, RecordSession, RoomRecord,
-    TaskRecord,
+    SessionSummary, TaskRecord,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -303,25 +303,27 @@ impl Db {
     /// 连文件都找不到时才退回 now。
     pub fn close_orphan_sessions(&self) -> Result<usize, AppError> {
         let now = now_ts();
-        let rows: Vec<(String, Option<String>, i64)> = {
+        let rows: Vec<(String, Option<String>, i64, String)> = {
             let conn = self.lock();
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, file_path, started_at FROM record_session
+                    "SELECT id, file_path, started_at, room_id FROM record_session
                       WHERE status = 'recording'",
                 )
                 .map_err(db_err)?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
                 .map_err(db_err)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
         };
         let mut changed = 0;
-        for (id, file_path, started_at) in rows {
+        for (id, file_path, started_at, room_id) in rows {
             let last_data = file_path.as_deref().and_then(crate::segment::last_data_at);
             let ended_at = orphan_ended_at(started_at, last_data, now);
-            changed += self
-                .lock()
+            let conn = self.lock();
+            changed += conn
                 .execute(
                     "UPDATE record_session
                         SET status = 'aborted', reason = 'app_exit',
@@ -330,6 +332,7 @@ impl Db {
                     params![id, ended_at],
                 )
                 .map_err(db_err)?;
+            refresh_room_last_session(&conn, &room_id).map_err(db_err)?;
         }
         Ok(changed)
     }
@@ -601,6 +604,7 @@ impl Db {
             session.source_path.as_deref(),
             session.source_deleted,
         );
+        refresh_room_last_session(&conn, &session.room_id).map_err(db_err)?;
         Ok(())
     }
 
@@ -654,6 +658,7 @@ impl Db {
             session.source_path.as_deref(),
             session.source_deleted,
         );
+        refresh_room_last_session(&conn, &session.room_id).map_err(db_err)?;
         Ok(())
     }
 
@@ -704,6 +709,14 @@ impl Db {
         )
         .map_err(db_err)?;
         sync_media_files_on(&conn, id, Some(file_path), source_path, source_deleted);
+        let room_id: String = conn
+            .query_row(
+                "SELECT room_id FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        refresh_room_last_session(&conn, &room_id).map_err(db_err)?;
         Ok(())
     }
 
@@ -759,19 +772,21 @@ impl Db {
         &self,
         room_id: Option<&str>,
         limit: usize,
+        offset: usize,
     ) -> Result<Vec<RecordSession>, AppError> {
         let conn = self.lock();
         let limit = limit.clamp(1, 500) as i64;
+        let offset = offset as i64;
         let mut sessions = Vec::new();
         match room_id {
             Some(id) => {
                 let mut stmt = conn
                     .prepare(&format!(
-                        "{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC LIMIT ?2"
+                        "{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3"
                     ))
                     .map_err(db_err)?;
                 let rows = stmt
-                    .query_map(params![id, limit], map_session)
+                    .query_map(params![id, limit, offset], map_session)
                     .map_err(db_err)?;
                 for row in rows {
                     sessions.push(row.map_err(db_err)?);
@@ -780,11 +795,11 @@ impl Db {
             None => {
                 let mut stmt = conn
                     .prepare(&format!(
-                        "{SESSION_SELECT} ORDER BY started_at DESC LIMIT ?1"
+                        "{SESSION_SELECT} ORDER BY started_at DESC LIMIT ?1 OFFSET ?2"
                     ))
                     .map_err(db_err)?;
                 let rows = stmt
-                    .query_map(params![limit], map_session)
+                    .query_map(params![limit, offset], map_session)
                     .map_err(db_err)?;
                 for row in rows {
                     sessions.push(row.map_err(db_err)?);
@@ -792,6 +807,27 @@ impl Db {
             }
         }
         Ok(sessions)
+    }
+
+    /// 单房间录制历史汇总：不随分页变化，详情抽屉的合计和可合并数用它。
+    pub fn session_summary(&self, room_id: &str) -> Result<SessionSummary, AppError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(file_size), 0),
+                    COALESCE(SUM(CASE WHEN status != 'recording' AND file_path IS NOT NULL THEN 1 ELSE 0 END), 0)
+               FROM record_session
+              WHERE room_id = ?1",
+            params![room_id],
+            |row| {
+                Ok(SessionSummary {
+                    total: row.get(0)?,
+                    total_bytes: row.get(1)?,
+                    mergeable: row.get(2)?,
+                })
+            },
+        )
+        .map_err(db_err)
     }
 
     // ---- 设置（v1 单一作用域，key 用点分命名，例如 record.default_qn） ----
@@ -1035,9 +1071,20 @@ impl Db {
 
     /// 删除一条会话记录（只删数据库行，不动文件）。
     pub fn delete_session(&self, id: &str) -> Result<(), AppError> {
-        self.lock()
-            .execute("DELETE FROM record_session WHERE id = ?1", params![id])
+        let conn = self.lock();
+        let room_id: Option<String> = conn
+            .query_row(
+                "SELECT room_id FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
             .map_err(db_err)?;
+        conn.execute("DELETE FROM record_session WHERE id = ?1", params![id])
+            .map_err(db_err)?;
+        if let Some(room_id) = room_id {
+            refresh_room_last_session(&conn, &room_id).map_err(db_err)?;
+        }
         Ok(())
     }
 
@@ -1755,11 +1802,82 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             .map_err(db_err)?;
         tracing::info!(column = "room.removed_at", "数据库迁移：新增列");
     }
+    let mut backfill_last_session = false;
+    for (name, ddl) in [
+        (
+            "last_session_id",
+            "ALTER TABLE room ADD COLUMN last_session_id TEXT",
+        ),
+        (
+            "last_session_started_at",
+            "ALTER TABLE room ADD COLUMN last_session_started_at INTEGER",
+        ),
+        (
+            "last_session_duration_ms",
+            "ALTER TABLE room ADD COLUMN last_session_duration_ms INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        if !room_columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            backfill_last_session = true;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
+    }
+    // 老库补列后必须回填一次，否则升级后监控列表的「最近录制」会全是空，
+    // 直到该房间再次产生 session。批量 UPDATE 走 idx_record_session_room。
+    if backfill_last_session {
+        conn.execute(
+            "UPDATE room SET
+                last_session_id = (
+                    SELECT id FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_started_at = (
+                    SELECT started_at FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_duration_ms = COALESCE((
+                    SELECT duration_ms FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ), 0)",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!("数据库迁移：回填 room 最近录制摘要");
+    }
     Ok(())
 }
 
 fn db_err(err: rusqlite::Error) -> AppError {
     AppError::Db(err.to_string())
+}
+
+/// 房间表的最近一场录制摘要：session 写入/收尾/删除后调用，监控列表只读 room。
+fn refresh_room_last_session(conn: &Connection, room_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE room SET
+            last_session_id = (
+                SELECT id FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            ),
+            last_session_started_at = (
+                SELECT started_at FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            ),
+            last_session_duration_ms = COALESCE((
+                SELECT duration_ms FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            ), 0)
+          WHERE id = ?1",
+        params![room_id],
+    )?;
+    Ok(())
 }
 
 pub fn now_ts() -> i64 {
@@ -1769,7 +1887,9 @@ pub fn now_ts() -> i64 {
 const ROOM_SELECT: &str = "SELECT
     id, platform, room_key, canonical_url, title, host_name, avatar_url, cover_url,
     area_name, is_live, started_at, online, auto_record, monitor_paused,
-    record_qn, view_qn, record_line, last_checked_at, created_at, updated_at
+    record_qn, view_qn, record_line, last_checked_at,
+    last_session_id, last_session_started_at, last_session_duration_ms,
+    created_at, updated_at
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -1800,8 +1920,11 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         view_qn: row.get(15)?,
         record_line: row.get(16)?,
         last_checked_at: row.get(17)?,
-        created_at: row.get(18)?,
-        updated_at: row.get(19)?,
+        last_session_id: row.get(18)?,
+        last_session_started_at: row.get(19)?,
+        last_session_duration_ms: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
     })
 }
 
@@ -1868,6 +1991,32 @@ mod tests {
                         ('s-a3', 'rm-a', 4000, 'recording', '/tmp/a3.flv', 999, 0);",
             )
             .expect("播种媒体库失败");
+    }
+
+    #[test]
+    fn room_last_session_summary_refreshes() {
+        let (db, _path) = temp_db("room-last-session");
+        seed_media(&db);
+        {
+            let conn = db.lock();
+            refresh_room_last_session(&conn, "rm-a").expect("刷新 rm-a 失败");
+            refresh_room_last_session(&conn, "rm-b").expect("刷新 rm-b 失败");
+        }
+        let rooms = db.list_rooms().expect("读取房间失败");
+        let a = rooms
+            .iter()
+            .find(|room| room.id == "rm-a")
+            .expect("rm-a 缺失");
+        assert_eq!(a.last_session_id.as_deref(), Some("s-a3"));
+        assert_eq!(a.last_session_started_at, Some(4000));
+        assert_eq!(a.last_session_duration_ms, 0);
+        let b = rooms
+            .iter()
+            .find(|room| room.id == "rm-b")
+            .expect("rm-b 缺失");
+        assert_eq!(b.last_session_id.as_deref(), Some("s-b1"));
+        assert_eq!(b.last_session_started_at, Some(2000));
+        assert_eq!(b.last_session_duration_ms, 500);
     }
 
     #[test]

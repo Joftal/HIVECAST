@@ -80,6 +80,12 @@ pub struct RoomRecord {
     pub record_line: Option<String>,
     #[ts(type = "number")]
     pub last_checked_at: Option<i64>,
+    /// 最近一场录制的摘要；由 session 写入/收尾时刷新，监控列表不再单独查 sessions。
+    pub last_session_id: Option<String>,
+    #[ts(type = "number")]
+    pub last_session_started_at: Option<i64>,
+    #[ts(type = "number")]
+    pub last_session_duration_ms: i64,
     #[ts(type = "number")]
     pub created_at: i64,
     #[ts(type = "number")]
@@ -98,6 +104,19 @@ pub struct RecordingInfo {
     pub started_at: i64,
     pub quality: String,
     pub line: String,
+}
+
+/// 单个房间的录制历史汇总；详情抽屉的合计/可合并数不依赖分页结果。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct SessionSummary {
+    #[ts(type = "number")]
+    pub total: i64,
+    #[ts(type = "number")]
+    pub total_bytes: i64,
+    #[ts(type = "number")]
+    pub mergeable: i64,
 }
 
 /// 监控页列表项 = 房间 + 实时录制状态 + 最近的错误。

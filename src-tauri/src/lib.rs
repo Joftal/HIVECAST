@@ -224,6 +224,7 @@ pub fn run() {
             commands::record_start,
             commands::record_stop,
             commands::sessions_list,
+            commands::session_summary,
             commands::view_slots,
             commands::view_open,
             commands::view_close,
