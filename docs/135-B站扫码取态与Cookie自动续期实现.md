@@ -1,6 +1,6 @@
 # 135 · B 站扫码取态修正与 Cookie 自动续期
 
-> 状态：**已实现**（2026-11-10）。承接 [134](134-B站扫码登录与Cookie自动续期审计.md) 的审计结论，本文记录实际落地、协议细节、测试与尚未完成的真机验证。
+> 状态：**已实现并完成真机扫码验证**（2026-11-10）。承接 [134](134-B站扫码登录与Cookie自动续期审计.md) 的审计结论，本文记录实际落地、协议细节、测试与真机验证进度；实际 Cookie 轮换仍待 B 站返回 `refresh=true`。
 > 关联：[132-登录与Cookie](132-登录与Cookie.md)、[39-M14-Cookie加密存储](39-M14-Cookie加密存储.md)。
 
 ---
@@ -168,27 +168,55 @@
 
 ---
 
-## 8. 尚未完成的真机验证
+## 8. 真机验证进度
 
-本次**没有真实扫码**，因此以下在线链路只经过代码与协议核对，尚未在本机跑通：
+### 8.1 已完成（2026-11-10）
 
-1. 真扫码 poll 响应是否同时给 `Set-Cookie` 与 `data.url`（双路径已兼容两种情况）；
-2. `cookie/info` 对真实 `ac_time_value` 是否返回 `refresh=true`；
-3. `correspond/1/{path}` 是否能取到 `refresh_csrf`；
-4. `cookie/refresh` 返回的 `Set-Cookie` 是否补齐三项；
-5. `confirm/refresh` 的成功/失败分支。
+真机扫码账号：**执事只食芝士**（uid `352130563`），`credential` 行 `status=ok`，账号卡显示「已登录 / 7 个 Cookie / 自动续期可用」。Cookie 名称为：
 
-这些步骤依赖一个可扫码的测试账号，代码已把每一步失败原因写成可读错误或 warn 日志，且所有失败都不会破坏原 Cookie。建议首次验收时：
+`SESSDATA / bili_jct / DedeUserID / DedeUserID__ckMd5 / sid / default_sites / ac_time_value`
 
-- 用测试账号扫码，确认账号卡出现「自动续期可用」；
-- 在日志中搜索 `扫码确认，登录态来源已合并` 与 `自动续期`；
-- 若要把 12 小时等待缩短，仅在调试构建临时调小 `REFRESH_INTERVAL`，验收后改回；
-- 续期成功后重启应用，确认账号仍是同一 `uid`，且视频清晰度没有掉档。
+其中 `ac_time_value` 长度 32；没有 `buvid3 / buvid4`，与 bilibili-api-python 的做法一致：correspond 请求时临时生成 UUID `buvid3`，不要求登录 Cookie 自带。
+
+启动后台检查结果：
+
+- `GET /x/passport-login/web/cookie/info` 返回 `code=0`、`refresh=false`，判定为 `Fresh`，没有轮换；
+- 同一轮 `nav` 复验 `checked=1`，账号状态正常；
+- 账号卡显示续期可用，说明 `CredentialInfo.refreshable` 在真实数据上为 true。
+
+另外用本机已加密存储的 Cookie 做了一次**只读** correspond 探测（不写库、不打印 Cookie/token）：
+
+- `GET https://www.bilibili.com/correspond/1/{path}` 返回 HTTP 200；
+- 页面包含 `<div id="1-name">`，内容为 32 位 token-like 字符串；
+- 临时 UUID 形式的 `buvid3` 同样被接受。
+
+这验证了 RSA-OAEP 公钥、`refresh_{ms}`、hex correspondPath 和 `parse_refresh_csrf` 在真实响应上可用。
+
+### 8.2 尚未触发
+
+当前 B 站明确返回 `refresh=false`，所以以下分支仍未真实执行：
+
+1. `cookie/info` 的 `refresh=true` 分支；
+2. `cookie/refresh` 返回的 `Set-Cookie` 是否补齐 `SESSDATA / bili_jct / DedeUserID`；
+3. `confirm/refresh` 的成功与失败分支；
+4. 续期成功后的写回、清缓存、账号卡更新时间变化。
+
+不能为了测试强行轮换真实 token：refresh 会作废旧 token，失败时可能影响当前登录。等 Cookie 临近过期、B 站返回 `refresh=true` 时，后台循环会自动走完整链路；日志关键字为 `B 站 Cookie 续期成功` 或 `自动续期暂时失败`。
+
+### 8.3 验收步骤
+
+- 打开设置 → 账号，确认 B 站卡显示「自动续期可用」；
+- 启动日志中搜索 `cookie/info`、`登录态复验完成`；
+- 到期窗口内搜索 `B 站 Cookie 续期成功`，确认账号仍是同一 uid；
+- 若续期失败，按 1h → 6h → 24h 退避，原 Cookie 不会被未完成的轮换覆盖。
 
 ---
 
 ## 9. 后续可做
 
+- **登录/更换 Cookie 后唤醒续期循环**：当前循环只在启动时立即跑一次，之后按 12 小时窗口；运行中扫码最坏要等一个窗口才会做第一次 `cookie/info`。新 token 不会立刻过期，但不利于扫码后马上确认续期链路。
+- **手动「立即检查续期」**：便于排查，也可避免为了验收而临时改 `REFRESH_INTERVAL`。
+- **公钥轮换兜底**：`REFRESH_PUBLIC_KEY` 目前硬编码；若 B 站换公钥，correspond 会失败，需要能识别并提示重新登录。
 - 续期成功后主动刷新账号资料（当前只更新 Cookie 与 `updated_at`，昵称/头像变更要等 30 分钟复验）；
 - 把「最近一次续期时间/结果」暴露到账号卡，便于用户判断；
 - 斗鱼 LTP0、虎牙 Cookie 续期另立文档，不复用 B 站这套 RSA 流程。
