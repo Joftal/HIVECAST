@@ -168,6 +168,9 @@ cookie/info
 - 关闭清理：点击「取消」后 4 秒内 poll 计数不变（378 → 378）。
 - 切页清理：扫码面板打开时切到「监控」，poll 计数不变（379 → 379），组件卸载后没有迟到请求。
 - 手动续期：点「立即检查」后 1 秒内卡片显示 `上次检查 22:41 · 暂不需要续期`，无需 900/2400ms 定时器。
+- 真实 `refresh=true` 强制轮换（2026-11-10 23:19）：临时加仅 `#[cfg(debug_assertions)]` 生效的 `HIVECAST_FORCE_BILI_REFRESH=1`，跳过 `cookie/info` 的 `refresh=false` 判定。日志依次出现 `跳过 cookie/info 判定，强制轮换一次` → `correspond/1/***` → `cookie/refresh` → `confirm/refresh` → `B 站 Cookie 续期成功 account=执事只食芝士 refreshable=true`。
+- 轮换结果：`ac_time_value` 的 SHA-256 前缀由 `cd83e780` 变为 `00b56388`；DB `credential_refresh` 写入 `refreshed|1794323982|0|1794323982`；独立用新 Cookie 请求 `cookie/info` 返回 `code=0 refresh=false`，`nav` 返回 `isLogin=true uname=执事只食芝士 mid=352130563`，证明新 Cookie 可用且无需再次续期。
+- 卡片显示 `上次检查 11/10 23:19 · 已轮换 Cookie`。验证后已删除强制开关；release bundle 本就不含该开关，随后直接用 release 启动并点「立即检查」，显示 `上次检查 11/10 23:26 · 暂不需要续期` 与 `上次轮换 11/10 23:19`，证明正式包不会强制轮换且新 Cookie 已生效。
 
 截图：
 
@@ -177,6 +180,8 @@ cookie/info
 
 ![刷新后](assets/137-qr-refreshed.png)
 
+![真实轮换后的账号卡](assets/137-refresh-rotated.png)
+
 ### 构建
 
 `cargo fmt --check`、`cargo check --all-targets`、`pnpm exec tsc -b`、`pnpm run check:i18n`、`pnpm run check:docs`、`pnpm build`、`pnpm app:build` 全部通过。
@@ -185,7 +190,7 @@ cookie/info
 
 ## 7. 已知边界
 
-1. `cookie/info` 返回 `refresh=true` 的真实轮换链路仍未在真机强制触发；本轮修的是响应校验与写回并发，协议顺序未改。
+1. `refresh=true` 已通过仅 debug 构建生效的 `HIVECAST_FORCE_BILI_REFRESH=1` 在真机强制轮换；该开关验证后已删除，正式包不会主动跳过 `cookie/info` 判定。
 2. QR generate/poll 请求仍会带本地旧账号 Cookie（`platform/http.rs` 的默认注入）。B 站 passport 以 `qrcode_key` 为准，当前未观察到影响；如果后续换号异常，可给这两个请求显式传空 Cookie。
 3. 关闭窗口到托盘时轮询会持续到二维码到期（最多 180 秒、约 112 次请求），这是为保证扫码完成的有意行为。
 4. `revalidate` 与续期仍可能同时请求 B 站；两者写回都受快照/写锁保护，但网络请求本身没有合并。
