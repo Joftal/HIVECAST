@@ -153,6 +153,7 @@
 | [135-B站扫码取态与Cookie自动续期实现](docs/135-B站扫码取态与Cookie自动续期实现.md) | 扫码改为 Set-Cookie + poll data.url 双路径并强校验三项；refresh_token 以 ac_time_value 合入加密 Cookie，零迁移；新增 12 小时 cookie/info + RSA correspondPath + refresh + confirm 续期，单飞锁、1h/6h/24h 退避、写回前快照；账号卡显示续期可用性；261 tests、i18n 740 keys、docs 136 files 通过；真实扫码链路待真机 | 实现 B 站自动续期、排查扫码登录态不完整或续期失败时 |
 | [136-B站Cookie续期状态与手动检查](docs/136-B站Cookie续期状态与手动检查.md) | 登录/换 Cookie 后 Notify 唤醒续期循环；账号卡新增「立即检查」与最近一次检查时间/结果/上次轮换；credential_refresh 持久化 outcome（never/fresh/refreshed/failed/not_refreshable/key_stale）；correspond 404/412 或缺少 refresh_csrf 判定 key_stale 并提示重新登录；265 tests、i18n 753 keys、docs 137 files 与真机验收通过 | 排查登录后未立即续期、续期结果不可见、B 站改接口导致续期一直失败时 |
 | [137-B站扫码与Cookie全链路复查](docs/137-B站扫码与Cookie全链路复查.md) | 重新审查扫码与续期生命周期：修复换号时旧 bili_jct/DedeUserID 补齐 landing 的混号 Cookie、续期响应为空仍报成功的校验缺陷；新增 CREDENTIAL_WRITE 写锁与续期状态快照、QR key URL 编码、confirmed 失败转 error 停表、poll 单飞、qrSeq 代次、checkingRef、account://refresh 事件替代延迟定时器、-101 立即标过期；268 tests、真实 QR 生成/轮询、构建通过 | 排查扫码换号串号、续期写回竞态、轮询并发/关闭、二维码过期刷新或账号过期提示时 |
+| [138-B站三态Cookie与取流审计](docs/138-B站三态Cookie与取流审计.md) | 对比扫码 / 网页 Cookie.txt / 未登录三态的登录、直播间数据、画质、线路、FLV/HLS/fMP4/HEVC 录制与续期：扫码与网页取流一致，网页 Cookie 缺 `ac_time_value` 无法自动续期；修复匿名仍把 4K/原画标可用、Cookie.txt 前缀导致 buvid3 丢失；270 tests、真实接口与 ffmpeg 录制验证通过 | 验证 B 站 Cookie 行为、排查未登录画质虚标、排查网页 Cookie 无法续期或 Cookie 文件解析时 |
 
 ## 阅读顺序建议
 

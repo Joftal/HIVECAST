@@ -74,16 +74,24 @@ pub fn platform_for_host(host: &str) -> Option<&'static str> {
 fn strip_platform_prefix(text: &str) -> &str {
     for label in [
         "哔哩哔哩",
+        "B站",
         "斗鱼",
         "虎牙",
         "抖音",
         "bilibili",
+        "Bilibili",
         "douyu",
         "huya",
         "douyin",
     ] {
         if let Some(rest) = text.strip_prefix(label) {
+            // 兼容从整理文件里复制的「哔哩哔哩Cookie：…」「Bilibili Cookie: …」。
             let rest = rest.trim_start();
+            let rest = rest
+                .strip_prefix("Cookie")
+                .or_else(|| rest.strip_prefix("cookie"))
+                .unwrap_or(rest)
+                .trim_start();
             if let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) {
                 let rest = rest.trim_start();
                 if !rest.is_empty() {
@@ -288,6 +296,20 @@ mod tests {
         );
         remove("douyu");
         assert_eq!(cookie_for_url("https://www.douyu.com/9999"), None);
+    }
+
+    #[test]
+    fn strips_cookie_file_platform_prefix() {
+        for raw in [
+            "哔哩哔哩Cookie：buvid3=b; SESSDATA=s; bili_jct=j",
+            "哔哩哔哩 Cookie: buvid3=b; SESSDATA=s; bili_jct=j",
+            "Bilibili Cookie: buvid3=b; SESSDATA=s; bili_jct=j",
+            "B站：buvid3=b; SESSDATA=s; bili_jct=j",
+        ] {
+            let normalized = normalize(raw).unwrap();
+            assert_eq!(value(&normalized, "buvid3"), Some("b"), "raw={raw}");
+            assert!(!names(&normalized).iter().any(|name| name.contains('：')));
+        }
     }
 
     #[test]

@@ -304,6 +304,22 @@ impl PlatformAdapter for BilibiliAdapter {
             .flat_map(|format| format.codec.iter())
             .flat_map(|codec| codec.accept_qn.iter().copied())
             .collect();
+        // 无凭据或以最高档探测时，current_qn 才是当前实际能拿到的封顶：
+        // 未登录请求 10000 会回 250，accept_qn 却仍列出 4K/原画，不能拿来当“可用”。
+        // 登录后请求 10000 回 10000，无法据此判断 2K/4K 权限，仍沿用平台能力清单。
+        let anonymous = crate::credential::get("bilibili").is_none();
+        let granted_qn = if anonymous || qn >= QN_ORIGIN {
+            playurl
+                .stream
+                .iter()
+                .flat_map(|stream| stream.format.iter())
+                .flat_map(|format| format.codec.iter())
+                .map(|codec| codec.current_qn)
+                .max()
+                .unwrap_or(0)
+        } else {
+            QN_ORIGIN as i64
+        };
         // accept_qn 是按编码列出的，用并集反推每档画质实际支持哪些视频编码。
         let mut qn_codecs: BTreeMap<i64, BTreeSet<&'static str>> = BTreeMap::new();
         for stream in &playurl.stream {
@@ -469,7 +485,7 @@ impl PlatformAdapter for BilibiliAdapter {
                     qn: *qn as u32,
                     label: desc.clone(),
                     hint,
-                    available: accepted.contains(qn),
+                    available: quality_available(*qn, &accepted, granted_qn),
                     codec,
                 }
             })
@@ -486,7 +502,7 @@ impl PlatformAdapter for BilibiliAdapter {
                 qn: value,
                 label: format!("qn{qn}"),
                 hint: codec.as_deref().map(|value| value.to_uppercase()),
-                available: true,
+                available: quality_available(*qn, &accepted, granted_qn),
                 codec,
             });
         }
@@ -494,6 +510,14 @@ impl PlatformAdapter for BilibiliAdapter {
 
         Ok(StreamPlan { groups, qualities })
     }
+}
+
+/// 画质是否真的可选。
+///
+/// `accept_qn` 是平台给的编码能力清单，未登录时也会列出 4K/原画；
+/// 最高档探测的 `current_qn` 才是账号当前的实际上限。
+fn quality_available(qn: i64, accepted: &BTreeSet<i64>, granted: i64) -> bool {
+    accepted.contains(&qn) && (granted >= QN_ORIGIN as i64 || qn <= granted)
 }
 
 fn extract_room_number(input: &str) -> Option<String> {
@@ -621,6 +645,17 @@ mod tests {
         assert_eq!(request_qn(QN_ORIGIN), QN_ORIGIN);
         assert_eq!(request_qn(20_000), 20_000);
         assert_eq!(request_qn(0), 0);
+    }
+
+    #[test]
+    fn caps_quality_availability_to_granted_when_probing_highest() {
+        let accepted = BTreeSet::from([15_000, 10_000, 400, 250, 150]);
+        assert!(quality_available(15_000, &accepted, 10_000));
+        assert!(quality_available(10_000, &accepted, 10_000));
+        assert!(!quality_available(15_000, &accepted, 250));
+        assert!(!quality_available(10_000, &accepted, 250));
+        assert!(!quality_available(400, &accepted, 250));
+        assert!(quality_available(250, &accepted, 250));
     }
 
     #[test]
