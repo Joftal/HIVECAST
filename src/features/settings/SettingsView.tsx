@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import {
@@ -20,9 +20,8 @@ import {
   type TrashInfo,
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
-import { Button, IconButton, Segmented, Switch, cx } from "../../components/ui/Controls";
+import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { useNotify } from "../../lib/notify";
-import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { SearchField } from "../../components/arc/search-field/search-field";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import InfoTip from "../../components/ui/InfoTip";
@@ -292,15 +291,18 @@ function Section({ title, desc, children }: { title: string; desc?: string; chil
 }
 
 type Props = {
-  open: boolean;
   initialPage?: PageKey;
-  onClose: () => void;
   onSaved: (settings: Settings) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
-export default function SettingsView({ open, initialPage, onClose, onSaved }: Props) {
+export default function SettingsView({
+  initialPage,
+  onSaved,
+  onDirtyChange,
+}: Props) {
   const { t } = useTranslation();
-  const [page, setPage] = useState<PageKey>("account");
+  const [page, setPage] = useState<PageKey>(initialPage ?? "account");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [initial, setInitial] = useState("");
   const [version, setVersion] = useState("");
@@ -308,14 +310,12 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   const notify = useNotify();
   const [query, setQuery] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [discardOpen, setDiscardOpen] = useState(false);
   const [preview, setPreview] = useState<FilenamePreview | null>(null);
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [trash, setTrash] = useState<TrashInfo | null>(null);
   // 分割体积在 UI 上允许 MB/GB 切换，落库统一存 MB。
   const [sizeUnit, setSizeUnit] = useState<"MB" | "GB">("MB");
-  const searchRef = useRef<HTMLInputElement | null>(null);
 
   const changedCount = useMemo(() => {
     if (!settings || !initial) return 0;
@@ -331,9 +331,12 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   }, [settings, initial]);
   const dirty = changedCount > 0;
   const reduceMotion = useReducedMotion();
-  // macOS 用 Overlay 标题栏，红绿灯浮在左上角，需要给标题让位。
-  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const isWindows = /Win/.test(navigator.platform || navigator.userAgent);
+
+  // App 负责拿这个状态决定切页前是否要确认放弃。
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -381,11 +384,10 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
   // 从「找不到 ffmpeg」横幅进入时直接落到存储页，省掉一次导航。
   useEffect(() => {
-    if (open && initialPage) setPage(initialPage);
-  }, [open, initialPage]);
+    if (initialPage) setPage(initialPage);
+  }, [initialPage]);
 
   useEffect(() => {
-    if (!open) return;
     setQuery("");
     if (isTauri()) {
       void trashInfo()
@@ -393,14 +395,13 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
         .catch(() => setTrash(null));
     }
     setFocusId(null);
-    setDiscardOpen(false);
     void load();
     void loadLogs();
     void loadFfmpeg();
     // 运行中日志目录可能失效并回落到默认目录；设置页开着时也要让状态行跟上。
     const timer = window.setInterval(() => void loadLogs(), 5000);
     return () => window.clearInterval(timer);
-  }, [open, load, loadLogs]);
+  }, [load, loadLogs, loadFfmpeg]);
 
   const patch = (next: Partial<Settings>) => {
     setSettings((current) => (current ? { ...current, ...next } : current));
@@ -420,12 +421,16 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     setBusy(true);
     try {
       const result = await settingsUpdate(settings);
+      const languageChanged = result.language !== settings.language;
       setSettings(result);
       setInitial(JSON.stringify(result));
-      if (result.language === "system") {
-        setLanguage(detectLanguage());
-      } else {
-        setLanguage(result.language as Language);
+      // 只有语言确实变了才切换 i18n；否则每次保存都会触发一次无意义的全局语言重渲染。
+      if (languageChanged) {
+        if (result.language === "system") {
+          setLanguage(detectLanguage());
+        } else {
+          setLanguage(result.language as Language);
+        }
       }
       onSaved(result);
       void loadLogs();
@@ -438,32 +443,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     }
   }, [settings, onSaved, notify, t]);
 
-  const attemptClose = useCallback(() => {
-    if (dirty) setDiscardOpen(true);
-    else onClose();
-  }, [dirty, onClose]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (discardOpen) setDiscardOpen(false);
-        else attemptClose();
-        return;
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-        event.preventDefault();
-        void save();
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, discardOpen, attemptClose, save]);
-
   useEffect(() => {
     if (!focusId) return;
     const node = document.getElementById(focusId);
@@ -474,7 +453,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
   // 文件名预览跟着输入实时算；防抖 200ms，避免每敲一个字都过一次 IPC。
   useEffect(() => {
-    if (!open || !settings || !isTauri()) return;
+    if (!settings || !isTauri()) return;
     const timer = window.setTimeout(() => {
       void filenamePreview(
         settings.mediaFilenameTemplate,
@@ -486,7 +465,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     }, 200);
     return () => window.clearTimeout(timer);
   }, [
-    open,
     settings?.mediaFilenameTemplate,
     settings?.mediaStripEmoji,
     settings?.mediaGroupDirs,
@@ -546,10 +524,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       return hay.includes(needle);
     });
   }, [query, t]);
-
-  if (!open) return null;
-
-  const meta = PAGES.find((one) => one.key === page) ?? PAGES[0];
 
   const renderBody = () => {
     if (!settings) return <div className="py-10 text-center text-[12px] text-muted">{t("common.loading")}</div>;
@@ -618,11 +592,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     }
 
     if (page === "account") {
-      return (
-        <Section title={t("settings.groupPlatforms")}>
-          <AccountSection />
-        </Section>
-      );
+      return <AccountSection />;
     }
 
     if (page === "danmaku") {
@@ -972,11 +942,15 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                         <span
                           aria-hidden
                           className={cx(
-                            "flex h-[13px] w-[13px] shrink-0 items-center justify-center rounded-full border",
-                            active ? "border-accent bg-accent" : "border-line-strong bg-surface",
+                            "flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-[4px] border",
+                            active ? "border-accent bg-accent text-accent-ink" : "border-line-strong bg-surface",
                           )}
                         >
-                          {active ? <span className="h-[5px] w-[5px] rounded-full bg-accent-ink" /> : null}
+                          {active ? (
+                            <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                              <path d="m2 5.2 1.9 1.9L8 3" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : null}
                         </span>
                         {t(mode.labelKey)}
                       </span>
@@ -1520,30 +1494,10 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("settings.title")}
-      className="fixed inset-0 z-50 flex animate-fade-in bg-canvas text-ink"
-    >
-      <aside className="flex w-[240px] shrink-0 flex-col border-r border-line/80 bg-canvas">
-        <div
-          className="drag-region flex h-[60px] shrink-0 items-center gap-2 pr-2.5"
-          style={{ paddingLeft: isMac ? 78 : 16 }}
-        >
-          <span className="min-w-0 flex-1 truncate text-[17px] font-semibold tracking-[-0.01em] text-ink">
-            {t("settings.title")}
-          </span>
-          <IconButton label={t("settings.close")} onClick={attemptClose} className="no-drag h-7 w-7">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-              <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
-            </svg>
-          </IconButton>
-        </div>
-
-        <div className="shrink-0 px-3 pb-2">
+    <div className="flex min-h-0 flex-1 bg-canvas text-ink">
+      <aside className="flex w-[220px] shrink-0 flex-col border-r border-line/80 bg-canvas">
+        <div className="shrink-0 px-3 pb-2 pt-4">
           <SearchField
-            ref={searchRef}
             label={t("settings.searchSettings")}
             hideLabel
             value={query}
@@ -1557,11 +1511,6 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
             placeholder={t("settings.searchSettings")}
             spellCheck={false}
             clearLabel={t("settings.searchClear")}
-            hint={
-              <kbd className="rounded-[3px] border border-line bg-surface px-1 py-0.5 font-sans text-[9px] leading-none text-faint">
-                ⌘F
-              </kbd>
-            }
           />
         </div>
 
@@ -1613,80 +1562,17 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
           </nav>
         </LayoutGroup>
 
-        <div className="shrink-0 border-t border-line/80 px-4 py-3">
-          <div className="flex items-center gap-2.5">
-            <img
-              src={appIcon}
-              alt=""
-              width={24}
-              height={24}
-              className="h-6 w-6 shrink-0 select-none rounded-[6px]"
-              draggable={false}
-            />
-            <div className="min-w-0 flex-1 leading-tight">
-              <div className="truncate text-[11.5px] font-medium text-ink">HIVECAST</div>
-              <div className="mt-0.5 font-mono text-[9.5px] tabular-nums text-faint">
-                {version ? "v" + version : "—"}
-              </div>
-            </div>
-          </div>
-          <div className={cx("mt-2 flex items-center gap-1.5 text-[10px]", dirty ? "text-warn" : "text-faint")}>
-            <span
-              className={cx("h-1.5 w-1.5 rounded-full", dirty ? "bg-warn" : "bg-ok")}
-              aria-hidden
-            />
-            {dirty ? t("settings.unsaved") : t("settings.savedAll")}
-          </div>
-        </div>
       </aside>
 
-      <main className="relative flex min-w-0 flex-1 flex-col bg-surface">
-        <header className="shrink-0 border-b border-line/70 px-10 pb-5 pt-6">
-          <div className="mx-auto flex w-full max-w-[780px] items-start gap-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="truncate text-[21px] font-semibold tracking-[-0.015em] text-ink">
-                {query.trim() ? t("settings.searchSettings") : t(meta.titleKey)}
-              </h1>
-              <p className="mt-1.5 truncate text-[11.5px] leading-4 text-muted">
-                {query.trim()
-                  ? t("settings.searchResults", { n: results.length })
-                  : t(meta.descKey)}
-              </p>
-            </div>
-            <span className="mt-1 hidden shrink-0 items-center gap-1 text-[10px] text-faint sm:flex">
-              <kbd className="rounded-[4px] border border-line bg-surface px-1.5 py-0.5 font-sans text-[9.5px] leading-none">⌘S</kbd>
-              {t("settings.save")}
-            </span>
-          </div>
-        </header>
-
-        <div className="min-h-0 flex-1 overflow-auto px-10 py-7">
-          <div
-            className={cx(
-              "mx-auto w-full max-w-[780px] space-y-7",
-              dirty ? "pb-28" : "pb-6",
-            )}
-          >
-            {renderBody()}
-          </div>
-        </div>
-
-        <AnimatePresence>
-          {dirty ? (
-            <motion.div
-              key="savebar"
-              initial={{ opacity: 0, y: 10, scale: 0.99 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.99 }}
-              transition={{ duration: reduceMotion ? 0 : 0.18, ease: "easeOut" }}
-              className="pointer-events-none absolute inset-x-0 bottom-5 z-20 flex justify-center px-10"
-            >
-              <div className="pointer-events-auto flex w-full max-w-[520px] items-center gap-2 rounded-[12px] border border-line bg-surface/95 py-2 pl-3.5 pr-2 shadow-[0_12px_32px_rgba(16,24,40,0.14)] backdrop-blur-xl">
-                <span className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
-                  <span className="truncate">{t("settings.unsavedCount", { n: changedCount })}</span>
+      <main className="flex min-w-0 flex-1 flex-col bg-surface">
+        <div className="min-h-0 flex-1 overflow-auto px-8 py-6">
+          <div className="mx-auto w-full max-w-[780px] pb-6">
+            {dirty ? (
+              <div className="sticky top-0 z-20 -mx-8 -mt-6 mb-5 flex h-12 items-center justify-between gap-4 border-b border-line/60 bg-surface/90 px-8 backdrop-blur-sm">
+                <span className="text-[11px] tabular-nums text-muted">
+                  {t("settings.unsavedCount", { n: changedCount })}
                 </span>
-                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                <div className="flex shrink-0 items-center gap-1.5">
                   <Button variant="ghost" size="sm" disabled={busy} onClick={revert}>
                     {t("settings.undo")}
                   </Button>
@@ -1700,31 +1586,11 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                   </Button>
                 </div>
               </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-      </main>
-
-      <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>
-        <DialogContent title={t("settings.discardTitle")} description={t("settings.discardBody")}>
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setDiscardOpen(false)}>
-              {t("settings.keepEditing")}
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                setDiscardOpen(false);
-                setSettings(null);
-                setInitial("");
-                onClose();
-              }}
-            >
-              {t("settings.discard")}
-            </Button>
+            ) : null}
+            <div className="space-y-7">{renderBody()}</div>
           </div>
-        </DialogContent>
-      </Dialog>
+        </div>
+      </main>
     </div>
   );
 }

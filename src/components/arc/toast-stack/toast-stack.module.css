@@ -41,11 +41,17 @@
 /* Clips only while its width folds, so the focus ring stays whole at rest. */
 .actionSlot { display: flex; flex: none; justify-content: flex-end; margin-top: -4px; }
 .actionSlot[data-moving="true"] { overflow: hidden; }
+.actions { display: flex; align-items: center; gap: 6px; }
+/* 两个操作按钮不再挤在标题右侧：整行落到文案下方，右对齐。 */
+.content[data-multi="true"] { flex-wrap: wrap; row-gap: var(--space-2); }
+.actionSlot[data-multi="true"] { order: 1; flex-basis: 100%; margin-top: 0; padding-left: calc(18px + var(--space-3)); }
 .action, .close { flex: none; border: 1px solid transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: scale var(--duration-spring) var(--ease-spring), background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
 .action { height: 28px; padding: 0 var(--space-3); border-color: var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.actionDanger { border-color: color-mix(in oklab, var(--danger) 30%, var(--border)); color: var(--danger); }
 .close { display: grid; width: 28px; height: 28px; margin: -4px -2px 0 0; place-items: center; border-radius: var(--radius-pill); background: transparent; color: var(--text-muted); }
 @media (hover: hover) and (pointer: fine) {
   .action:hover { border-color: var(--border-strong); background: var(--surface-muted); }
+  .actionDanger:hover { border-color: color-mix(in oklab, var(--danger) 45%, var(--border)); background: color-mix(in oklab, var(--danger) 8%, var(--surface)); }
   .close:hover { background: var(--surface-muted); color: var(--foreground); }
 }
 /* Quick press, spring release. */

@@ -13,17 +13,17 @@ import {
   type QrTicket,
 } from "../../lib/ipc";
 import { formatCountdown, useSecondsLeft } from "../../lib/countdown";
-import { Button } from "../../components/ui/Controls";
+import { Button, cx } from "../../components/ui/Controls";
 import { useNotify } from "../../lib/notify";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"] as const;
 type Platform = (typeof PLATFORMS)[number];
 
-const PLATFORM_DOT: Record<Platform, string> = {
-  bilibili: "#22a7f0",
-  douyu: "#ff7a1a",
-  huya: "#f5a623",
-  douyin: "#ff2d6f",
+const PLATFORM_ABBR: Record<Platform, string> = {
+  bilibili: "BL",
+  douyu: "DY",
+  huya: "HY",
+  douyin: "DO",
 };
 
 type QrState = {
@@ -179,9 +179,9 @@ export default function AccountSection() {
   if (!isTauri()) return null;
 
   const cookieEditor = (platform: Platform) => (
-    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-5 py-3">
-      <div className="flex items-center justify-between">
-        <span className="text-[11.5px] text-muted">
+    <div className="animate-fade-rise mt-3 space-y-2 rounded-[9px] border border-line bg-raised/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[10.5px] font-medium text-muted">
           {t("account.cookieTitle", {
             name: t("platformName." + platform, { defaultValue: platform }),
           })}
@@ -192,7 +192,7 @@ export default function AccountSection() {
             setEditing(null);
             setDraft("");
           }}
-          className="text-[10.5px] text-faint transition-colors hover:text-ink"
+          className="shrink-0 text-[10px] text-faint transition-colors hover:text-ink"
         >
           {t("account.cancel")}
         </button>
@@ -205,8 +205,8 @@ export default function AccountSection() {
         rows={3}
         className="focus-ring w-full resize-none rounded-ctl border border-line bg-surface px-2.5 py-2 font-mono text-[10.5px] leading-relaxed text-ink transition-colors placeholder:text-faint focus:border-accent-line"
       />
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10.5px] leading-4 text-faint">{t("account.cookieHint")}</span>
+      <div className="flex items-end justify-between gap-3">
+        <span className="min-w-0 text-[10px] leading-4 text-faint">{t("account.cookieHint")}</span>
         <Button
           size="sm"
           variant="primary"
@@ -220,106 +220,150 @@ export default function AccountSection() {
   );
 
   const qrPanel = qr ? (
-    <div className="animate-fade-rise space-y-2 border-t border-line bg-raised/50 px-5 py-3">
-      <div className="flex items-center justify-between">
-        <span className="text-[11.5px] text-muted">{t("account.qrTitle")}</span>
+    <div className="animate-fade-rise mt-3 space-y-2.5 rounded-[9px] border border-line bg-raised/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[10.5px] font-medium text-muted">
+          {t("account.qrTitle")}
+        </span>
         <button
           type="button"
           onClick={() => setQr(null)}
-          className="text-[10.5px] text-faint transition-colors hover:text-ink"
+          className="shrink-0 text-[10px] text-faint transition-colors hover:text-ink"
         >
           {t("account.cancel")}
         </button>
       </div>
-      <div className="flex items-start gap-4">
+      <div className="flex items-start gap-3">
         <div
-          className="w-[152px] shrink-0 overflow-hidden rounded-ctl border border-line bg-white p-2 [&_svg]:h-full [&_svg]:w-full"
+          className="w-[128px] shrink-0 overflow-hidden rounded-ctl border border-line bg-white p-1.5 [&_svg]:h-full [&_svg]:w-full"
           // SVG 由本地 qrcode 库生成，不含外部输入。
           dangerouslySetInnerHTML={{ __html: qr.ticket.svg }}
         />
         <div className="min-w-0 flex-1 space-y-1.5">
           <p
-            className={
+            className={cx(
+              "text-[11px] leading-4",
               qrState === "scanned"
-                ? "text-[11.5px] text-accent-text"
+                ? "text-accent-text"
                 : qrState === "expired" || qr?.error
-                  ? "text-[11.5px] text-rec"
-                  : "text-[11.5px] text-muted"
-            }
+                  ? "text-rec"
+                  : "text-muted",
+            )}
           >
             {qrMessage}
           </p>
-          {counting && secondsLeft !== null && (
+          {counting && secondsLeft !== null ? (
             <p
-              className={
-                "font-mono text-[10.5px] tabular-nums " +
-                (secondsLeft <= 30 ? "text-warn" : "text-faint")
-              }
+              className={cx(
+                "font-mono text-[10px] tabular-nums",
+                secondsLeft <= 30 ? "text-warn" : "text-faint",
+              )}
             >
               {t("account.qrExpiresIn", { time: formatCountdown(secondsLeft) })}
             </p>
-          )}
-          <p className="text-[10.5px] leading-4 text-faint">{t("account.qrHint")}</p>
-          {(qrState === "expired" || qr?.error) && (
+          ) : null}
+          <p className="text-[10px] leading-4 text-faint">{t("account.qrHint")}</p>
+          {qrState === "expired" || qr?.error ? (
             <Button size="sm" variant="secondary" onClick={() => void openQr()}>
               {t("account.qrRefresh")}
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
   ) : null;
 
   return (
-    <div className="divide-y divide-line">
-      <div className="px-5 py-2.5 text-[10.5px] text-faint">
-        {t("account.singleAccountHint")}
-      </div>
+    <div className="space-y-3.5">
+      <p className="text-[11px] leading-4 text-muted">{t("account.singleAccountHint")}</p>
 
-      {PLATFORMS.map((platform) => {
-        const item = find(platform);
-        const expired = item?.status === "expired";
-        return (
-          <div key={platform}>
-            <div className="flex items-center gap-3 px-5 py-3">
-              <span className="flex w-[76px] shrink-0 items-center gap-1.5 text-[12.5px] text-ink">
+      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+        {PLATFORMS.map((platform) => {
+          const item = find(platform);
+          const expired = item?.status === "expired";
+          const connected = Boolean(item);
+          const name = t("platformName." + platform, { defaultValue: platform });
+          const status = connected
+            ? expired
+              ? t("account.expired")
+              : t("account.connected")
+            : t("account.notConnected");
+
+          return (
+            <article
+              key={platform}
+              className="flex flex-col rounded-[12px] border border-line bg-surface p-4 shadow-[0_1px_2px_rgba(16,24,40,0.04)]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border border-line bg-raised font-mono text-[10px] tracking-[0.08em] text-muted">
+                    {PLATFORM_ABBR[platform]}
+                  </span>
+                  <div className="min-w-0">
+                    <h3 className="truncate text-[12.5px] font-semibold text-ink">{name}</h3>
+                    {item ? (
+                      <p className="mt-0.5 font-mono text-[9.5px] tabular-nums text-faint">
+                        {t("account.cookieCount", { n: item.cookieNames.length })}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
                 <span
-                  className="h-1.5 w-1.5 rounded-full"
-                  style={{ background: PLATFORM_DOT[platform] }}
-                  aria-hidden
-                />
-                {t("platformName." + platform, { defaultValue: platform })}
-              </span>
-              <span
-                className={
-                  "min-w-0 flex-1 truncate text-[12px] " + (expired ? "text-warn" : "text-muted")
-                }
-              >
-                {item
-                  ? expired
-                    ? t("account.expired")
-                    : item.accountName || t("account.connected")
-                  : t("account.notConnected")}
-              </span>
-              {item && (
-                <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-faint">
-                  {t("account.cookieCount", { n: item.cookieNames.length })}
+                  className={cx(
+                    "shrink-0 rounded-full border px-2 py-0.5 text-[9.5px] leading-4",
+                    expired
+                      ? "border-warn/35 text-warn"
+                      : connected
+                        ? "border-line text-muted"
+                        : "border-line text-faint",
+                  )}
+                >
+                  {status}
                 </span>
-              )}
-              <div className="flex shrink-0 items-center gap-1">
-                {platform === "bilibili" && (
+              </div>
+
+              <div className="mt-3 min-w-0">
+                {item ? (
+                  <p
+                    className={cx(
+                      "truncate text-[13px]",
+                      expired ? "text-ink-soft" : "text-ink",
+                    )}
+                  >
+                    {item.accountName || t("account.connected")}
+                  </p>
+                ) : null}
+                <p
+                  className={cx(
+                    item ? "mt-1 text-[10px] leading-4" : "text-[10.5px] leading-4",
+                    expired ? "text-warn/90" : "text-faint",
+                  )}
+                >
+                  {item
+                    ? expired
+                      ? t("account.expiredHint")
+                      : t("account.cookieHint")
+                    : platform === "bilibili"
+                      ? t("account.bilibiliHint")
+                      : t("account.cookieHint")}
+                </p>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-1 border-t border-line/80 pt-2.5">
+                {platform === "bilibili" ? (
                   <Button
                     size="sm"
-                    variant="ghost"
+                    variant={connected ? "ghost" : "secondary"}
                     disabled={busy}
                     onClick={() => {
                       setEditing(null);
+                      setDraft("");
                       void openQr();
                     }}
                   >
                     {t("account.qrLogin")}
                   </Button>
-                )}
+                ) : null}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -332,7 +376,7 @@ export default function AccountSection() {
                 >
                   {item ? t("account.updateCookie") : t("account.pasteCookie")}
                 </Button>
-                {item && (
+                {item ? (
                   <Button
                     size="sm"
                     variant="ghost"
@@ -343,23 +387,15 @@ export default function AccountSection() {
                   >
                     {confirming === platform ? t("account.confirmLogout") : t("account.logout")}
                   </Button>
-                )}
+                ) : null}
               </div>
-            </div>
 
-            {platform === "bilibili" && !item && !qr && (
-              <p className="px-5 pb-3 text-[10.5px] leading-4 text-faint">{t("account.bilibiliHint")}</p>
-            )}
-            {expired && (
-              <p className="px-5 pb-3 text-[10.5px] leading-4 text-warn">{t("account.expiredHint")}</p>
-            )}
-
-            {editing === platform ? cookieEditor(platform) : null}
-            {platform === "bilibili" ? qrPanel : null}
-          </div>
-        );
-      })}
-
+              {editing === platform ? cookieEditor(platform) : null}
+              {platform === "bilibili" ? qrPanel : null}
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }

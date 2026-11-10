@@ -337,7 +337,7 @@
     "undo": "Undo",
     "savedAll": "All changes saved",
     "discardTitle": "Discard unsaved changes?",
-    "discardBody": "Your changes will be lost when you close settings.",
+    "discardBody": "Your changes will be lost when you leave settings.",
     "discard": "Discard changes",
     "keepEditing": "Keep editing",
     "groupPlatforms": "Platforms",

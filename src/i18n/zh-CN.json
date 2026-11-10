@@ -337,7 +337,7 @@
     "undo": "撤销",
     "savedAll": "所有更改已保存",
     "discardTitle": "放弃未保存的更改？",
-    "discardBody": "关闭设置后，本次修改不会保留。",
+    "discardBody": "离开设置后，本次修改不会保留。",
     "discard": "放弃更改",
     "keepEditing": "继续编辑",
     "groupPlatforms": "直播平台",

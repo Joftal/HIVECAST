@@ -14,6 +14,8 @@ export interface ToastAction {
   label: string;
   /** Runs the action. The toast closes afterwards unless the handler updates it, so an Undo can morph the toast into its result. */
   onClick: (id: string) => void;
+  /** 危险操作使用红色文字按钮，常用于「放弃更改」。 */
+  tone?: "default" | "danger";
 }
 
 export interface ToastOptions {
@@ -23,6 +25,8 @@ export interface ToastOptions {
   title: string;
   description?: string;
   action?: ToastAction;
+  /** 同时展示多个操作按钮；与 action 二选一，优先 actions。 */
+  actions?: ToastAction[];
   /** Milliseconds before the toast closes itself. Defaults by type; loading toasts wait for an update. Pass Infinity to keep it until closed. */
   duration?: number;
 }
@@ -58,8 +62,8 @@ export interface ToastStackProps {
   className?: string;
 }
 
-type ToastRecord = { id: string; type: ToastType; title: string; description?: string; action?: ToastAction; duration: number; seq: number; version: number };
-type ToastStore = ToastStackApi & { subscribe: (listener: () => void) => () => void; getSnapshot: () => ToastRecord[]; runAction: (id: string) => void };
+type ToastRecord = { id: string; type: ToastType; title: string; description?: string; action?: ToastAction; actions?: ToastAction[]; duration: number; seq: number; version: number };
+type ToastStore = ToastStackApi & { subscribe: (listener: () => void) => () => void; getSnapshot: () => ToastRecord[]; runAction: (id: string, action?: ToastAction) => void };
 type Target = { y: number; scale: number; height: number; opacity: number; content: number };
 
 /** Each tucked toast shows this many pixels above the one in front of it. */
@@ -143,10 +147,12 @@ function createToastStore(base: number, limit: number): ToastStore {
     if (id === undefined) { if (toasts.length) commit([]); return; }
     if (toasts.some(item => item.id === id)) commit(toasts.filter(item => item.id !== id));
   };
-  const runAction = (id: string) => {
+  const runAction = (id: string, action?: ToastAction) => {
     const found = toasts.find(item => item.id === id);
-    if (!found?.action) return;
-    found.action.onClick(id);
+    if (!found) return;
+    const target = action ?? found.action;
+    if (!target) return;
+    target.onClick(id);
     if (toasts.find(item => item.id === id)?.version === found.version) dismiss(id);
   };
   return {
@@ -345,10 +351,11 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, top
   }
 
   // An action that updates its toast usually folds itself away; keyboard focus lands on the close button instead of the page.
-  function runAction(event: MouseEvent<HTMLButtonElement>) {
+  function runAction(action: ToastAction, event: MouseEvent<HTMLButtonElement>) {
     const keyboard = focusVisible(event.currentTarget);
-    store.runAction(id);
-    if (keyboard && !store.getSnapshot().find(item => item.id === id)?.action) closeRef.current?.focus();
+    store.runAction(id, action);
+    const remaining = store.getSnapshot().find(item => item.id === id);
+    if (keyboard && remaining && !remaining.action && !remaining.actions?.length) closeRef.current?.focus();
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLLIElement>) {
@@ -358,12 +365,13 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, top
   }
 
   const markMoving = (moving: boolean) => { if (actionRef.current) actionRef.current.dataset.moving = moving ? "true" : "false"; };
+  const actions = toast.actions?.length ? toast.actions : toast.action ? [toast.action] : [];
   const Icon = toast.type === "loading" ? null : icons[toast.type];
   const swap = reduce ? fadeOnly : textSwap;
 
   return <motion.li ref={itemRef} className={styles.item} style={{ y, scale, height, opacity, zIndex: toast.seq }} data-front={front} data-expanded={expanded} data-top={top ? "" : undefined} inert={hidden} onKeyDown={onKeyDown}>
     <motion.div ref={cardRef} className={styles.card} style={{ x, opacity: swipeFade }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={event => onPointerEnd(event, false)} onPointerCancel={event => onPointerEnd(event, true)} onClick={onCardClick}>
-      <motion.div ref={contentRef} className={styles.content} style={{ opacity: contentOpacity }}>
+      <motion.div ref={contentRef} className={styles.content} data-multi={actions.length > 1 ? "true" : undefined} style={{ opacity: contentOpacity }}>
         {/* A new type morphs its icon in place: the old glyph shrinks into a blur while the new one grows out of it. */}
         <span className={styles.icon} data-type={toast.type} aria-hidden="true">
           <AnimatePresence mode="popLayout" initial={false}>
@@ -377,8 +385,12 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, top
         </div>
         {/* The action folds its width away when an update removes it, so the copy widens instead of snapping. */}
         <AnimatePresence initial={false}>
-          {toast.action ? <motion.div key="action" ref={actionRef} className={styles.actionSlot} initial={reduce ? { opacity: 0 } : { width: 0, opacity: 0 }} animate={{ width: "auto", opacity: 1 }} exit={reduce ? { opacity: 0 } : { width: 0, opacity: 0 }} transition={reduce ? reducedFade : { width: motionTokens.spring.smooth, opacity: fade }} onAnimationStart={() => markMoving(true)} onAnimationComplete={() => markMoving(false)}>
-            <button type="button" className={styles.action} onClick={runAction}>{toast.action.label}</button>
+          {actions.length ? <motion.div key="action" ref={actionRef} className={styles.actionSlot} data-multi={actions.length > 1 ? "true" : undefined} initial={reduce ? { opacity: 0 } : { width: 0, opacity: 0 }} animate={{ width: "auto", opacity: 1 }} exit={reduce ? { opacity: 0 } : { width: 0, opacity: 0 }} transition={reduce ? reducedFade : { width: motionTokens.spring.smooth, opacity: fade }} onAnimationStart={() => markMoving(true)} onAnimationComplete={() => markMoving(false)}>
+            <div className={styles.actions}>
+              {actions.map((action, index) => (
+                <button key={index} type="button" className={[styles.action, action.tone === "danger" ? styles.actionDanger : ""].filter(Boolean).join(" ")} onClick={event => runAction(action, event)}>{action.label}</button>
+              ))}
+            </div>
           </motion.div> : null}
         </AnimatePresence>
         <button ref={closeRef} type="button" className={styles.close} aria-label="Dismiss notification" onClick={() => store.dismiss(id)}>

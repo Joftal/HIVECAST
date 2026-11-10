@@ -32,15 +32,17 @@ import { useNotify } from "./lib/notify";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
 
-type TabKey = "monitor" | "watch" | "media" | "tasks";
+type TabKey = "monitor" | "watch" | "media" | "tasks" | "settings";
 const PAGE_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 export default function App() {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<TabKey>("monitor");
-  const [settingsOpen, setSettingsOpen] = useState(false);
   // 从缺失提示进入设置时落到存储页；null = 普通打开。
   const [settingsPage, setSettingsPage] = useState<PageKey | null>(null);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  // 设置是常规页签，记住进入前的页面，关闭时回到那里。
+  const lastTab = useRef<TabKey>("monitor");
   const [ffmpegMissing, setFfmpegMissing] = useState(false);
   const ffmpegToastShown = useRef(false);
   const notify = useNotify();
@@ -64,6 +66,51 @@ export default function App() {
   const prevTab = useRef<TabKey>(tab);
   const reduceMotion = useReducedMotion() ?? false;
   const lang = i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en-US";
+
+  const openSettings = useCallback(
+    (page: PageKey | null = null) => {
+      if (tab !== "settings") lastTab.current = tab;
+      setSettingsPage(page);
+      setTab("settings");
+    },
+    [tab],
+  );
+
+  const requestTab = useCallback(
+    (next: TabKey) => {
+      if (next === tab) return;
+      if (tab === "settings" && settingsDirty) {
+        // 离开提示就是一条带操作按钮的顶层 toast，不再占用页面底部。
+        notify.toast({
+          id: "settings-leave",
+          type: "warning",
+          title: t("settings.discardTitle"),
+          description: t("settings.discardBody"),
+          duration: Infinity,
+          actions: [
+            { label: t("settings.keepEditing"), onClick: () => notify.dismiss("settings-leave") },
+            {
+              label: t("settings.discard"),
+              tone: "danger",
+              onClick: () => {
+                notify.dismiss("settings-leave");
+                setSettingsDirty(false);
+                setTab(next);
+              },
+            },
+          ],
+        });
+        return;
+      }
+      setTab(next);
+    },
+    [tab, settingsDirty, notify, t],
+  );
+
+  // 设置已经保存或撤销后，之前被拦下的离开提示就不该继续挂着。
+  useEffect(() => {
+    if (!settingsDirty) notify.dismiss("settings-leave");
+  }, [settingsDirty, notify]);
 
   // 启动和保存设置后都重新探测一次：用户可能刚补上 ffmpeg 或换掉路径。
   const refreshFfmpeg = useCallback(() => {
@@ -90,14 +137,11 @@ export default function App() {
       title: t("app.ffmpegMissing"),
       action: {
         label: t("app.ffmpegFix"),
-        onClick: () => {
-          setSettingsPage("storage");
-          setSettingsOpen(true);
-        },
+        onClick: () => openSettings("storage"),
       },
       duration: Infinity,
     });
-  }, [ffmpegMissing, notify, t]);
+  }, [ffmpegMissing, notify, t, openSettings]);
 
   // 启动时读一次性设置：语言、主题与通知开关。读失败就保持默认，不打扰用户。
   useEffect(() => {
@@ -168,17 +212,13 @@ export default function App() {
     void closeQuitNow().finally(() => setCloseBusy(false));
   };
 
-  // Cmd/Ctrl + , 打开设置，和 macOS 惯例一致。
+  // 离开设置就把未保存状态清掉；下次从顶栏进入是干净的一页。
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
-        event.preventDefault();
-        setSettingsOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    if (tab !== "settings") {
+      setSettingsDirty(false);
+      setSettingsPage(null);
+    }
+  }, [tab]);
 
   // 离开观看页就停掉所有观看管道：不拉流、不转封装，但房间与布局留在本地。
   useEffect(() => {
@@ -345,7 +385,7 @@ export default function App() {
             <button
               key={item.key}
               type="button"
-              onClick={() => setTab(item.key)}
+              onClick={() => requestTab(item.key)}
               className={cx(
                 "focus-ring relative px-3 text-[12px] font-medium transition-colors",
                 tab === item.key ? "text-ink" : "text-muted hover:text-ink-soft",
@@ -384,9 +424,10 @@ export default function App() {
           />
           <IconButton
             label={t("settings.title")}
+            active={tab === "settings"}
             onClick={() => {
-              setSettingsPage(null);
-              setSettingsOpen(true);
+              if (tab === "settings") requestTab(lastTab.current);
+              else openSettings(null);
             }}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
@@ -431,8 +472,23 @@ export default function App() {
           />
         ) : tab === "media" ? (
           <MediaPage seed={mediaSeed} onSeedApplied={() => setMediaSeed(null)} />
-        ) : (
+        ) : tab === "tasks" ? (
           <TasksPage seed={taskSeed} onSeedApplied={() => setTaskSeed(null)} />
+        ) : (
+          <SettingsView
+            initialPage={settingsPage ?? undefined}
+            onDirtyChange={setSettingsDirty}
+            onSaved={(settings) => {
+              notifyRef.current = settings;
+              const mode = (settings.theme as ThemeMode) ?? "light";
+              // 保存其他字段时不要重放主题：只在主题真的变化时应用，避免整页闪一下。
+              if (mode !== theme) {
+                setTheme(mode);
+                setAppearance(applyTheme(mode));
+              }
+              refreshFfmpeg();
+            }}
+          />
         )}
       </motion.main>
 
@@ -449,22 +505,6 @@ export default function App() {
       ) : null}
 
       <ToastStack position="top-center" label={t("toast.region")} />
-
-      <SettingsView
-        open={settingsOpen}
-        initialPage={settingsPage ?? undefined}
-        onClose={() => {
-          setSettingsOpen(false);
-          setSettingsPage(null);
-        }}
-        onSaved={(settings) => {
-          notifyRef.current = settings;
-          const mode = (settings.theme as ThemeMode) ?? "light";
-          setTheme(mode);
-          setAppearance(applyTheme(mode));
-          refreshFfmpeg();
-        }}
-      />
     </div>
   );
 }
