@@ -151,6 +151,7 @@
 | [133-弹幕协议与落盘](docs/133-弹幕协议与落盘.md) | 四平台弹幕协议：B 站 16 字节头+protover 0/1/2/3+WBI、斗鱼 12 字节小端+STT、虎牙 WUP/JCE、抖音 protobuf+gzip+ACK；心跳/假死/重连表、JSONL 字段与 flush、ASS 时间轴与车道规则、去重与实测清单 | 改弹幕连接、解析、重连、JSONL 落盘或 ASS 导出时 |
 | [134-B站扫码登录与Cookie自动续期审计](docs/134-B站扫码登录与Cookie自动续期审计.md) | 审计 B 站扫码、Cookie 加密保存与 30 分钟复验：主流程可用，但 `refresh_token` 被 serde 丢弃、自动续期完全未实现；扫码成功取态只读 Set-Cookie 存疑；给出 cookie/info → correspond( RSA-OAEP ) → refresh → confirm 的完整协议、数据存储取舍、调度/失败/并发策略与验收清单 | 接 B 站自动续期、排查扫码后登录态不完整、或区分「复验」与「续期」时 |
 | [135-B站扫码取态与Cookie自动续期实现](docs/135-B站扫码取态与Cookie自动续期实现.md) | 扫码改为 Set-Cookie + poll data.url 双路径并强校验三项；refresh_token 以 ac_time_value 合入加密 Cookie，零迁移；新增 12 小时 cookie/info + RSA correspondPath + refresh + confirm 续期，单飞锁、1h/6h/24h 退避、写回前快照；账号卡显示续期可用性；261 tests、i18n 740 keys、docs 136 files 通过；真实扫码链路待真机 | 实现 B 站自动续期、排查扫码登录态不完整或续期失败时 |
+| [136-B站Cookie续期状态与手动检查](docs/136-B站Cookie续期状态与手动检查.md) | 登录/换 Cookie 后 Notify 唤醒续期循环；账号卡新增「立即检查」与最近一次检查时间/结果/上次轮换；credential_refresh 持久化 outcome（never/fresh/refreshed/failed/not_refreshable/key_stale）；correspond 404/412 或缺少 refresh_csrf 判定 key_stale 并提示重新登录；保存后 900/2400ms 延迟刷新；265 tests、i18n 753 keys、docs 137 files 与真机验收通过 | 排查登录后未立即续期、续期结果不可见、B 站改接口导致续期一直失败时 |
 
 ## 阅读顺序建议
 

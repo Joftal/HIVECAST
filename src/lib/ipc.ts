@@ -7,6 +7,7 @@ import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
 import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
+import type { RefreshStatus } from "./bindings/RefreshStatus";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
@@ -43,6 +44,7 @@ export type {
   FilenamePreview,
   QrPoll,
   QrTicket,
+  RefreshStatus,
   DanmakuBatch,
   DanmakuMessage,
   LineInfo,
@@ -485,6 +487,11 @@ export async function bilibiliQrStart(): Promise<QrTicket> {
 
 export async function bilibiliQrPoll(qrcodeKey: string): Promise<QrPoll> {
   return invoke<QrPoll>("bilibili_qr_poll", { qrcodeKey });
+}
+
+/** 立即检查一次 B 站 Cookie 续期；结果同时写入账号的 refreshStatus。 */
+export async function bilibiliRefreshNow(): Promise<RefreshStatus> {
+  return invoke<RefreshStatus>("bilibili_refresh_now");
 }
 
 // ---- 关闭与退出 ----

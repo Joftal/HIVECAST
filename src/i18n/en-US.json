@@ -788,6 +788,21 @@
     "qrExpired": "QR code expired, please refresh",
     "autoRefreshOn": "Auto refresh available (checked every 12 hours)",
     "autoRefreshOff": "Auto refresh unavailable: refresh_token missing. Scan again to enable it.",
+    "refreshNow": "Check now",
+    "refreshChecking": "Checking…",
+    "refreshNever": "Renewal not checked yet",
+    "refreshChecked": "Last checked {{time}} · {{result}}",
+    "refreshLastRotated": "Last rotated {{time}}",
+    "refreshDone": "Renewal check complete: {{result}}",
+    "refreshOutcome": {
+      "never": "Not checked yet",
+      "fresh": "No renewal needed",
+      "refreshed": "Cookie rotated",
+      "failed": "Check failed",
+      "notRefreshable": "Auto renewal unavailable",
+      "discarded": "Result discarded",
+      "keyStale": "Sign in again"
+    },
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
   },
   "close": {

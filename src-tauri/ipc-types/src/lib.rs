@@ -734,6 +734,39 @@ pub struct Playback {
     pub offset_ms: i64,
 }
 
+/// 最近一次 B 站 Cookie 自动续期检查的持久化结果。
+///
+/// 只记录「检查」本身，不包含 Cookie 内容；时间戳为 0 表示从未发生。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RefreshStatus {
+    /// 最近一次检查完成时间（Unix 秒）；0 表示尚未检查
+    #[ts(type = "number")]
+    pub checked_at: i64,
+    /// never | fresh | refreshed | failed | not_refreshable | key_stale
+    pub outcome: String,
+    /// 失败时的可读原因；成功或未检查时为 None
+    pub message: Option<String>,
+    /// 续期公钥/页面结构疑似变更：需要重新扫码登录
+    pub key_stale: bool,
+    /// 最近一次真正轮换 Cookie 的时间（Unix 秒）；0 表示从未轮换
+    #[ts(type = "number")]
+    pub last_refreshed_at: i64,
+}
+
+impl Default for RefreshStatus {
+    fn default() -> Self {
+        Self {
+            checked_at: 0,
+            outcome: "never".into(),
+            message: None,
+            key_stale: false,
+            last_refreshed_at: 0,
+        }
+    }
+}
+
 /// 已保存的平台账号（v1 单账号，account_id 预留）。
 ///
 /// 不返回 Cookie 本身，只给条目名：设置页只需要展示「带了哪些字段」。
@@ -752,6 +785,8 @@ pub struct CredentialInfo {
     pub status: String,
     /// 是否具备自动续期条件（B 站：Cookie 里有 ac_time_value + bili_jct）
     pub refreshable: bool,
+    /// 最近一次自动续期检查的时间与结果（非 B 站恒为 never）
+    pub refresh_status: RefreshStatus,
     #[ts(type = "number")]
     pub updated_at: i64,
 }

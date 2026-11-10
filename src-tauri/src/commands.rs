@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use hivecast_ipc::{
     ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
     MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult, QrPoll,
-    QrTicket, RecordSession, RecordingUsage, RoomRecord, RoomView, SessionSummary, Settings,
-    StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
+    QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView, SessionSummary,
+    Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -1338,6 +1338,15 @@ pub async fn bilibili_qr_poll(
         state.broker.clear_groups();
     }
     Ok(poll)
+}
+
+/// 设置页「立即检查」：跑一次完整续期链路并把结果落库。
+#[tauri::command]
+pub async fn bilibili_refresh_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshStatus, AppError> {
+    crate::account::refresh_now(&state.db, &app).await
 }
 
 // ---- 媒体库 ----

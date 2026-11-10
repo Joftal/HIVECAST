@@ -283,6 +283,7 @@ pub fn run() {
             commands::credential_delete,
             commands::bilibili_qr_start,
             commands::bilibili_qr_poll,
+            commands::bilibili_refresh_now,
             commands::media_list,
             commands::media_group_clips,
             commands::media_hosts,

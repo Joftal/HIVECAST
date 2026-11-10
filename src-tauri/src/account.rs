@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket};
+use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket, RefreshStatus};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Oaep, RsaPublicKey};
 use serde::Deserialize;
@@ -18,9 +18,9 @@ use sha2::Sha256;
 use tauri::{Emitter, Manager};
 
 use crate::credential;
-use crate::db::{now_ts, CredentialRow, Db};
+use crate::db::{now_ts, CredentialRefreshRow, CredentialRow, Db};
 use crate::error::AppError;
-use crate::platform::http;
+use crate::platform::{http, PlatformError};
 
 const PASSPORT: &str = "https://passport.bilibili.com";
 const API: &str = "https://api.bilibili.com";
@@ -38,6 +38,8 @@ JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----";
 /// 定时与手动续期共用一把锁：两个请求同时轮换会让 token 互相作废。
 static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// 登录/换 Cookie 后唤醒后台续期循环，不必等下一个 12 小时窗口。
+static REFRESH_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
@@ -106,6 +108,10 @@ pub struct Account {
 }
 
 pub fn info_from_row(row: &CredentialRow) -> CredentialInfo {
+    info_with_refresh(row, RefreshStatus::default())
+}
+
+fn info_with_refresh(row: &CredentialRow, refresh_status: RefreshStatus) -> CredentialInfo {
     CredentialInfo {
         platform: row.platform.clone(),
         account_id: row.account_id.clone(),
@@ -115,7 +121,68 @@ pub fn info_from_row(row: &CredentialRow) -> CredentialInfo {
         cookie_names: credential::names(&row.cookie),
         status: row.status.clone(),
         refreshable: row.platform == "bilibili" && credential::has_refresh_token(&row.cookie),
+        refresh_status,
         updated_at: row.updated_at,
+    }
+}
+
+fn refresh_status_from_row(row: CredentialRefreshRow) -> RefreshStatus {
+    RefreshStatus {
+        checked_at: row.checked_at,
+        outcome: row.outcome,
+        message: row.message,
+        key_stale: row.key_stale,
+        last_refreshed_at: row.last_refreshed_at,
+    }
+}
+
+/// 读取某平台最近一次续期结果；没有记录时返回 never。
+fn load_refresh_status(db: &Db, platform: &str) -> RefreshStatus {
+    match db.credential_refresh(platform) {
+        Ok(Some(row)) => refresh_status_from_row(row),
+        Ok(None) => RefreshStatus::default(),
+        Err(err) => {
+            tracing::warn!(platform, error = %err, "读取续期状态失败，按未检查处理");
+            RefreshStatus::default()
+        }
+    }
+}
+
+fn save_refresh_status(db: &Db, platform: &str, status: &RefreshStatus) {
+    let row = CredentialRefreshRow {
+        platform: platform.to_string(),
+        checked_at: status.checked_at,
+        outcome: status.outcome.clone(),
+        message: status.message.clone(),
+        key_stale: status.key_stale,
+        last_refreshed_at: status.last_refreshed_at,
+    };
+    if let Err(err) = db.save_credential_refresh(&row) {
+        tracing::warn!(platform, error = %err, "写入续期状态失败");
+    }
+}
+
+fn short_error(message: &str) -> String {
+    let mut out: String = message.chars().take(180).collect();
+    if message.chars().count() > 180 {
+        out.push('…');
+    }
+    out.replace('\n', " ")
+}
+
+/// 请求后台循环立即检查一次（登录、换 Cookie 之后调用）。
+fn wake_refresh_loop(reason: &'static str) {
+    tracing::info!(platform = "bilibili", reason, "已请求立即检查 Cookie 续期");
+    REFRESH_WAKE.notify_one();
+}
+
+fn correspond_key_stale(err: &PlatformError) -> bool {
+    match err {
+        // correspondPath 被拒绝时 B 站会返回 404/412；其他网络错误仍按普通失败处理。
+        PlatformError::Network(message) => {
+            message.contains("HTTP 404") || message.contains("HTTP 412")
+        }
+        _ => false,
     }
 }
 
@@ -259,6 +326,7 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         );
         let account = bilibili_nav(&merged).await?;
         let row = store_account(db, "bilibili", &merged, &account)?;
+        wake_refresh_loop("扫码登录");
         tracing::info!(platform = "bilibili", account = %row.account_name, uid = %row.uid, "扫码登录成功并已保存");
         return Ok(QrPoll {
             state: state.to_string(),
@@ -394,12 +462,73 @@ pub enum RefreshOutcome {
     Discarded,
 }
 
-/// 检查并按需刷新 B 站 Web Cookie。
+/// 检查并按需刷新 B 站 Web Cookie，同时把本次检查结果落到 credential_refresh。
 ///
 /// 流程见 docs/134：cookie/info → correspondPath → cookie/refresh → confirm/refresh。
-/// 所有失败都只返回错误、不写库；唯一例外是 confirm/refresh 失败——新 Cookie 已经
+/// 所有失败都只返回错误、不写 Cookie；唯一例外是 confirm/refresh 失败——新 Cookie 已经
 /// 轮换成功，必须保留，否则新旧两边都可能失效。
 pub async fn refresh_bilibili_cookie(
+    db: &Db,
+    app: &tauri::AppHandle,
+) -> Result<RefreshOutcome, AppError> {
+    let result = refresh_bilibili_cookie_inner(db, app).await;
+    record_refresh_result(db, &result);
+    result
+}
+
+fn record_refresh_result(db: &Db, result: &Result<RefreshOutcome, AppError>) {
+    match result {
+        Ok(RefreshOutcome::NoCredential) => {
+            if let Err(err) = db.clear_credential_refresh("bilibili") {
+                tracing::warn!(error = %err, "清除续期状态失败");
+            }
+        }
+        Ok(RefreshOutcome::Discarded) => {
+            // 请求期间账号已被替换：本轮结果不属于新账号，保留新账号自己的状态。
+        }
+        Ok(outcome) => {
+            let previous = load_refresh_status(db, "bilibili");
+            let now = now_ts();
+            let (name, message) = match outcome {
+                RefreshOutcome::NotRefreshable => (
+                    "not_refreshable",
+                    Some("Cookie 缺少 ac_time_value 或 bili_jct，无法自动续期".to_string()),
+                ),
+                RefreshOutcome::Fresh => ("fresh", None),
+                RefreshOutcome::Refreshed => ("refreshed", None),
+                RefreshOutcome::NoCredential | RefreshOutcome::Discarded => unreachable!(),
+            };
+            let status = RefreshStatus {
+                checked_at: now,
+                outcome: name.to_string(),
+                message,
+                key_stale: false,
+                last_refreshed_at: if *outcome == RefreshOutcome::Refreshed {
+                    now
+                } else {
+                    previous.last_refreshed_at
+                },
+            };
+            save_refresh_status(db, "bilibili", &status);
+        }
+        Err(err) => {
+            let key_stale = matches!(
+                err,
+                AppError::Platform { code, .. } if *code == "refresh_key_stale"
+            );
+            let status = RefreshStatus {
+                checked_at: now_ts(),
+                outcome: if key_stale { "key_stale" } else { "failed" }.to_string(),
+                message: Some(short_error(&err.to_string())),
+                key_stale,
+                last_refreshed_at: load_refresh_status(db, "bilibili").last_refreshed_at,
+            };
+            save_refresh_status(db, "bilibili", &status);
+        }
+    }
+}
+
+async fn refresh_bilibili_cookie_inner(
     db: &Db,
     app: &tauri::AppHandle,
 ) -> Result<RefreshOutcome, AppError> {
@@ -459,12 +588,32 @@ pub async fn refresh_bilibili_cookie(
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let probe_cookie = credential::merge(&original, &format!("buvid3={buvid3}"));
-    let (html, _) = http::get_text(&correspond_url, REFERER, &[("Cookie", &probe_cookie)])
-        .await
-        .map_err(AppError::from)?;
-    let refresh_csrf = parse_refresh_csrf(&html).ok_or_else(|| AppError::Platform {
-        code: "platform_upstream",
-        message: "续期页面里没有 refresh_csrf（correspondPath 可能已过期）".into(),
+    let (html, _) =
+        match http::get_text(&correspond_url, REFERER, &[("Cookie", &probe_cookie)]).await {
+            Ok(value) => value,
+            Err(err) if correspond_key_stale(&err) => {
+                tracing::warn!(
+                    platform = "bilibili",
+                    error = %err,
+                    "续期公钥疑似失效：correspond 页面拒绝请求"
+                );
+                return Err(AppError::Platform {
+                    code: "refresh_key_stale",
+                    message: "B 站续期接口已变更（correspond 页面不可用）".into(),
+                });
+            }
+            Err(err) => return Err(AppError::from(err)),
+        };
+    let refresh_csrf = parse_refresh_csrf(&html).ok_or_else(|| {
+        tracing::warn!(
+            platform = "bilibili",
+            bytes = html.len(),
+            "续期页面里没有 refresh_csrf，续期接口可能已变更"
+        );
+        AppError::Platform {
+            code: "refresh_key_stale",
+            message: "B 站续期页面结构已变更（未找到 refresh_csrf）".into(),
+        }
     })?;
 
     let refresh_url = format!("{PASSPORT}/x/passport-login/web/cookie/refresh");
@@ -603,7 +752,21 @@ pub async fn refresh_loop(db: std::sync::Arc<Db>, app: tauri::AppHandle) {
         // 抖动只用于错开各客户端的请求，不改变业务语义。
         let jitter = if failures == 0 { 30 * 60 } else { 5 * 60 };
         let wait = base + Duration::from_secs(rand::thread_rng().gen_range(0..jitter));
-        tokio::time::sleep(wait).await;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = REFRESH_WAKE.notified() => {
+                tracing::info!(platform = "bilibili", "续期循环被唤醒，立即重新检查");
+            }
+        }
+    }
+}
+
+/// 手动「立即检查」：直接跑一次完整续期并返回落库后的状态。
+pub async fn refresh_now(db: &Db, app: &tauri::AppHandle) -> Result<RefreshStatus, AppError> {
+    tracing::info!(platform = "bilibili", "手动检查 Cookie 续期");
+    match refresh_bilibili_cookie(db, app).await? {
+        RefreshOutcome::NoCredential => Err(AppError::User("尚未登录 B 站".into())),
+        _ => Ok(load_refresh_status(db, "bilibili")),
     }
 }
 
@@ -669,6 +832,10 @@ fn store_account(
         err
     })?;
     credential::set(platform, cookie);
+    // 新登录/新 Cookie 的续期状态从零开始，不能沿用上一份凭据的检查结果。
+    if let Err(err) = db.clear_credential_refresh(platform) {
+        tracing::warn!(platform, error = %err, "重置续期状态失败");
+    }
     Ok(row)
 }
 
@@ -695,6 +862,9 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
     };
 
     let row = store_account(db, platform, &cookie, &account)?;
+    if platform == "bilibili" {
+        wake_refresh_loop("保存 Cookie");
+    }
     tracing::info!(platform, account = %row.account_name, "Cookie 已保存");
     Ok(info_from_row(&row))
 }
@@ -710,7 +880,19 @@ pub fn delete(db: &Db, platform: &str) -> Result<(), AppError> {
 }
 
 pub fn list(db: &Db) -> Result<Vec<CredentialInfo>, AppError> {
-    Ok(db.credentials()?.iter().map(info_from_row).collect())
+    let bilibili_refresh = load_refresh_status(db, "bilibili");
+    Ok(db
+        .credentials()?
+        .iter()
+        .map(|row| {
+            let status = if row.platform == "bilibili" {
+                bilibili_refresh.clone()
+            } else {
+                RefreshStatus::default()
+            };
+            info_with_refresh(row, status)
+        })
+        .collect())
 }
 
 /// 启动时与运行中定期复验 B 站登录态：过期就标 expired，设置页会提示重新扫码。
@@ -1009,6 +1191,102 @@ mod tests {
             .expect("轮询失败");
         println!("poll = {} {}", poll.state, poll.message);
         assert!(matches!(poll.state.as_str(), "pending" | "scanned"));
+    }
+
+    #[test]
+    fn refresh_status_defaults_to_never() {
+        let status = RefreshStatus::default();
+        assert_eq!(status.checked_at, 0);
+        assert_eq!(status.outcome, "never");
+        assert!(!status.key_stale);
+        assert_eq!(status.last_refreshed_at, 0);
+    }
+
+    #[test]
+    fn refresh_status_records_results_and_keeps_last_rotation() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("hivecast-refresh-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("refresh.db")).unwrap();
+
+        save_refresh_status(
+            &db,
+            "bilibili",
+            &RefreshStatus {
+                checked_at: 10,
+                outcome: "fresh".into(),
+                message: None,
+                key_stale: false,
+                last_refreshed_at: 111,
+            },
+        );
+        record_refresh_result(&db, &Ok(RefreshOutcome::Fresh));
+        let status = load_refresh_status(&db, "bilibili");
+        assert_eq!(status.outcome, "fresh");
+        assert!(status.checked_at > 10);
+        assert_eq!(status.last_refreshed_at, 111);
+
+        // 接口变更：标记 key_stale，但保留已经发生过的轮换时间。
+        record_refresh_result(
+            &db,
+            &Err(AppError::Platform {
+                code: "refresh_key_stale",
+                message: "续期接口已变更".into(),
+            }),
+        );
+        let status = load_refresh_status(&db, "bilibili");
+        assert_eq!(status.outcome, "key_stale");
+        assert!(status.key_stale);
+        assert_eq!(status.last_refreshed_at, 111);
+        assert!(status
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("续期接口已变更"));
+
+        // 成功轮换后 last_refreshed_at 跟随本次检查时间。
+        record_refresh_result(&db, &Ok(RefreshOutcome::Refreshed));
+        let status = load_refresh_status(&db, "bilibili");
+        assert_eq!(status.outcome, "refreshed");
+        assert!(!status.key_stale);
+        assert_eq!(status.last_refreshed_at, status.checked_at);
+
+        // 被丢弃的结果不能覆盖新账号的状态。
+        record_refresh_result(&db, &Ok(RefreshOutcome::Discarded));
+        assert_eq!(load_refresh_status(&db, "bilibili").outcome, "refreshed");
+
+        // 账号不存在时清空旧状态，下次登录从 never 开始。
+        record_refresh_result(&db, &Ok(RefreshOutcome::NoCredential));
+        let status = load_refresh_status(&db, "bilibili");
+        assert_eq!(status.outcome, "never");
+        assert_eq!(status.checked_at, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn correspond_key_stale_only_matches_404_or_412() {
+        let stale =
+            |message: &str| correspond_key_stale(&PlatformError::Network(message.to_string()));
+        assert!(stale("https://www.bilibili.com/correspond/1/ab → HTTP 404"));
+        assert!(stale("https://www.bilibili.com/correspond/1/ab → HTTP 412"));
+        assert!(!stale(
+            "https://www.bilibili.com/correspond/1/ab → HTTP 500"
+        ));
+        assert!(!stale("connection reset"));
+    }
+
+    #[test]
+    fn short_error_truncates_and_flattens_newlines() {
+        let short = short_error("a\nb");
+        assert_eq!(short, "a b");
+        let long = short_error(&"x".repeat(200));
+        assert_eq!(long.chars().count(), 181);
+        assert!(long.ends_with('…'));
     }
 
     fn test_db() -> Db {

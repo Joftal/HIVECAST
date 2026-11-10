@@ -788,6 +788,21 @@
     "qrExpired": "二维码已过期，请刷新",
     "autoRefreshOn": "自动续期可用（每 12 小时检查，失效时自动轮换 Cookie）",
     "autoRefreshOff": "自动续期不可用：缺少 refresh_token，建议重新扫码",
+    "refreshNow": "立即检查",
+    "refreshChecking": "检查中…",
+    "refreshNever": "尚未检查续期状态",
+    "refreshChecked": "上次检查 {{time}} · {{result}}",
+    "refreshLastRotated": "上次轮换 {{time}}",
+    "refreshDone": "续期检查完成：{{result}}",
+    "refreshOutcome": {
+      "never": "尚未检查",
+      "fresh": "暂不需要续期",
+      "refreshed": "已轮换 Cookie",
+      "failed": "检查失败",
+      "notRefreshable": "无法自动续期",
+      "discarded": "结果已丢弃",
+      "keyStale": "需要重新登录"
+    },
     "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。"
   },
   "close": {

@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS media_file (
 
 CREATE INDEX IF NOT EXISTS idx_media_file_session
     ON media_file (session_id, role);
+
+-- B 站 Cookie 自动续期的最近一次检查结果：只存状态，不重复存 Cookie。
+CREATE TABLE IF NOT EXISTS credential_refresh (
+    platform TEXT PRIMARY KEY,
+    checked_at INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT 'never',
+    message TEXT,
+    key_stale INTEGER NOT NULL DEFAULT 0,
+    last_refreshed_at INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 /// 媒体库筛选条件：全部下推到 SQL，前端不再把 200 条拉回来自己过滤。
@@ -1742,14 +1752,94 @@ impl Db {
     }
 
     pub fn delete_credential(&self, platform: &str) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM credential WHERE platform = ?1",
+            params![platform],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "DELETE FROM credential_refresh WHERE platform = ?1",
+            params![platform],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 最近一次续期检查结果；没有记录时返回 None（前端按 never 展示）。
+    pub fn credential_refresh(
+        &self,
+        platform: &str,
+    ) -> Result<Option<CredentialRefreshRow>, AppError> {
+        self.lock()
+            .query_row(
+                "SELECT platform, checked_at, outcome, message, key_stale, last_refreshed_at
+                   FROM credential_refresh WHERE platform = ?1",
+                params![platform],
+                |row| {
+                    Ok(CredentialRefreshRow {
+                        platform: row.get(0)?,
+                        checked_at: row.get(1)?,
+                        outcome: row.get(2)?,
+                        message: row.get(3)?,
+                        key_stale: row.get(4)?,
+                        last_refreshed_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// 写入检查结果。last_refreshed_at 只在真正轮换时前进，普通检查不会把它清零。
+    pub fn save_credential_refresh(&self, row: &CredentialRefreshRow) -> Result<(), AppError> {
         self.lock()
             .execute(
-                "DELETE FROM credential WHERE platform = ?1",
+                "INSERT INTO credential_refresh
+                    (platform, checked_at, outcome, message, key_stale, last_refreshed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (platform) DO UPDATE SET
+                    checked_at = excluded.checked_at,
+                    outcome = excluded.outcome,
+                    message = excluded.message,
+                    key_stale = excluded.key_stale,
+                    last_refreshed_at = CASE
+                        WHEN excluded.last_refreshed_at > 0 THEN excluded.last_refreshed_at
+                        ELSE credential_refresh.last_refreshed_at
+                    END",
+                params![
+                    row.platform,
+                    row.checked_at,
+                    row.outcome,
+                    row.message,
+                    row.key_stale as i64,
+                    row.last_refreshed_at,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn clear_credential_refresh(&self, platform: &str) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "DELETE FROM credential_refresh WHERE platform = ?1",
                 params![platform],
             )
             .map_err(db_err)?;
         Ok(())
     }
+}
+
+/// B 站 Cookie 续期的检查结果（只用于持久化，不直接进 IPC）。
+#[derive(Debug, Clone)]
+pub struct CredentialRefreshRow {
+    pub platform: String,
+    pub checked_at: i64,
+    pub outcome: String,
+    pub message: Option<String>,
+    pub key_stale: bool,
+    pub last_refreshed_at: i64,
 }
 
 /// 轻量迁移：老库缺弹幕列时补上。

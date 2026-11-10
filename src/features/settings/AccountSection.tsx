@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   bilibiliQrPoll,
   bilibiliQrStart,
+  bilibiliRefreshNow,
   credentialDelete,
   credentialSave,
   credentialsList,
@@ -11,6 +12,7 @@ import {
   type CredentialInfo,
   type QrPoll,
   type QrTicket,
+  type RefreshStatus,
 } from "../../lib/ipc";
 import { formatCountdown, useSecondsLeft } from "../../lib/countdown";
 import { Button, cx } from "../../components/ui/Controls";
@@ -26,6 +28,16 @@ const PLATFORM_ABBR: Record<Platform, string> = {
   douyin: "DO",
 };
 
+const REFRESH_OUTCOME_KEY: Record<string, string> = {
+  never: "account.refreshOutcome.never",
+  fresh: "account.refreshOutcome.fresh",
+  refreshed: "account.refreshOutcome.refreshed",
+  failed: "account.refreshOutcome.failed",
+  not_refreshable: "account.refreshOutcome.notRefreshable",
+  discarded: "account.refreshOutcome.discarded",
+  key_stale: "account.refreshOutcome.keyStale",
+};
+
 type QrState = {
   ticket: QrTicket;
   poll: QrPoll | null;
@@ -35,12 +47,13 @@ type QrState = {
 };
 
 export default function AccountSection() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [items, setItems] = useState<CredentialInfo[] | null>(null);
   const notify = useNotify();
   const [editing, setEditing] = useState<Platform | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [qr, setQr] = useState<QrState | null>(null);
   const [confirming, setConfirming] = useState<Platform | null>(null);
 
@@ -59,6 +72,42 @@ export default function AccountSection() {
 
   const find = (platform: string) => items?.find((item) => item.platform === platform);
 
+  // 保存 Cookie / 扫码成功后，后端会异步唤醒续期循环；首轮检查通常几百毫秒内完成，
+  // 这里补两次延迟刷新，避免卡片停在「尚未检查续期状态」，也覆盖网络较慢的情况。
+  const reloadAfterWake = () => {
+    window.setTimeout(() => void load(), 900);
+    window.setTimeout(() => void load(), 2400);
+  };
+
+  const refreshOutcomeLabel = (status: RefreshStatus) => {
+    if (status.keyStale) return t("account.refreshOutcome.keyStale");
+    return t(REFRESH_OUTCOME_KEY[status.outcome] ?? "account.refreshOutcome.failed");
+  };
+
+  const refreshTime = (value: number) =>
+    new Date(value * 1000).toLocaleString(i18n.resolvedLanguage ?? undefined, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+  const checkRefresh = async () => {
+    setChecking(true);
+    try {
+      const status = await bilibiliRefreshNow();
+      await load();
+      notify.success(t("account.refreshDone", { result: refreshOutcomeLabel(status) }));
+    } catch (err) {
+      notify.error(err);
+      // 失败也会落库：重新拉一次，让卡片显示最近一次检查结果。
+      await load();
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const saveCookie = async (platform: Platform) => {
     setBusy(true);
     try {
@@ -67,6 +116,7 @@ export default function AccountSection() {
       setDraft("");
       notify.success(t("account.savedAs", { name: saved.accountName }));
       await load();
+      reloadAfterWake();
     } catch (err) {
       notify.error(err);
     } finally {
@@ -164,6 +214,7 @@ export default function AccountSection() {
           notify.success(poll.message);
           setQr(null);
           await load();
+          reloadAfterWake();
         }
       } catch (err) {
         if (cancelled) return;
@@ -348,22 +399,72 @@ export default function AccountSection() {
                       : t("account.cookieHint")}
                 </p>
                 {platform === "bilibili" && item ? (
-                  <p
-                    className={cx(
-                      "mt-1 flex items-center gap-1.5 text-[10px] leading-4",
-                      item.refreshable ? "text-muted" : "text-warn/90",
-                    )}
-                  >
-                    <span
+                  <div className="mt-1.5">
+                    <p
                       className={cx(
-                        "h-1 w-1 rounded-full",
-                        item.refreshable ? "bg-live" : "bg-warn",
+                        "flex items-center gap-1.5 text-[10px] leading-4",
+                        item.refreshable ? "text-muted" : "text-warn/90",
                       )}
-                    />
-                    {item.refreshable
-                      ? t("account.autoRefreshOn")
-                      : t("account.autoRefreshOff")}
-                  </p>
+                    >
+                      <span
+                        className={cx(
+                          "h-1 w-1 rounded-full",
+                          item.refreshable ? "bg-live" : "bg-warn",
+                        )}
+                      />
+                      {item.refreshable
+                        ? t("account.autoRefreshOn")
+                        : t("account.autoRefreshOff")}
+                    </p>
+                    {item.refreshable ? (
+                      <div className="mt-1 flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p
+                            className={cx(
+                              "truncate text-[10px] leading-4",
+                              item.refreshStatus.keyStale ? "text-warn" : "text-faint",
+                            )}
+                            title={item.refreshStatus.message ?? undefined}
+                          >
+                            {item.refreshStatus.checkedAt > 0
+                              ? t("account.refreshChecked", {
+                                  time: refreshTime(item.refreshStatus.checkedAt),
+                                  result: refreshOutcomeLabel(item.refreshStatus),
+                                })
+                              : t("account.refreshNever")}
+                          </p>
+                          {(item.refreshStatus.outcome === "failed" ||
+                            item.refreshStatus.outcome === "not_refreshable" ||
+                            item.refreshStatus.keyStale) &&
+                          item.refreshStatus.message ? (
+                            <p
+                              className="truncate text-[10px] leading-4 text-warn"
+                              title={item.refreshStatus.message}
+                            >
+                              {item.refreshStatus.message}
+                            </p>
+                          ) : null}
+                          {item.refreshStatus.lastRefreshedAt > 0 &&
+                          item.refreshStatus.outcome !== "refreshed" ? (
+                            <p className="truncate text-[9.5px] leading-4 text-faint">
+                              {t("account.refreshLastRotated", {
+                                time: refreshTime(item.refreshStatus.lastRefreshedAt),
+                              })}
+                            </p>
+                          ) : null}
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0"
+                          disabled={busy || checking}
+                          onClick={() => void checkRefresh()}
+                        >
+                          {checking ? t("account.refreshChecking") : t("account.refreshNow")}
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
 
