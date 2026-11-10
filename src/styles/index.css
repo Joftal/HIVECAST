@@ -293,3 +293,9 @@ input[type="number"]::-webkit-outer-spin-button {
   .empty-art-pulse, .empty-art-scan, .empty-art-draw { animation: none; }
   .empty-art-draw { stroke-dashoffset: 0; }
 }
+/* 离屏浮层 Alert：比页面内 Alert 更高一层，避免和设置面板同色糊在一起。 */
+.alert-float {
+  border-color: var(--c-line-strong);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-floating);
+}

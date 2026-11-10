@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { motion, useReducedMotion } from "motion/react";import { Button, IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
 import { ToastStack } from "./components/arc/toast-stack/toast-stack";
+import { Alert } from "./components/arc/alert/alert";
 import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
@@ -41,6 +42,14 @@ export default function App() {
   // 从缺失提示进入设置时落到存储页；null = 普通打开。
   const [settingsPage, setSettingsPage] = useState<PageKey | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsChangedCount, setSettingsChangedCount] = useState(0);
+  // 未保存时点了别的页签：记下目标页，用页面内的 Alert 做离开确认。
+  const [settingsLeave, setSettingsLeave] = useState<TabKey | null>(null);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  // SettingsView 把保存函数注册到这里，离开设置的 Alert 直接复用它。
+  const settingsSaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  // 顶栏改主题/语言时，通知设置页同步本地副本，避免保存时把旧值写回。
+  const settingsSyncRef = useRef<((patch: Partial<Settings>) => void) | null>(null);
   // 设置是常规页签，记住进入前的页面，关闭时回到那里。
   const lastTab = useRef<TabKey>("monitor");
   const [ffmpegMissing, setFfmpegMissing] = useState(false);
@@ -76,41 +85,67 @@ export default function App() {
     [tab],
   );
 
+  const markSettingsDirty = useCallback((dirty: boolean, changedCount: number) => {
+    setSettingsDirty(dirty);
+    setSettingsChangedCount(changedCount);
+  }, []);
+
+  const registerSettingsSave = useCallback((save: (() => Promise<boolean>) | null) => {
+    settingsSaveRef.current = save;
+  }, []);
+
+  const registerSettingsSync = useCallback((sync: ((patch: Partial<Settings>) => void) | null) => {
+    settingsSyncRef.current = sync;
+  }, []);
+
   const requestTab = useCallback(
     (next: TabKey) => {
       if (next === tab) return;
       if (tab === "settings" && settingsDirty) {
-        // 离开提示就是一条带操作按钮的顶层 toast，不再占用页面底部。
-        notify.toast({
-          id: "settings-leave",
-          type: "warning",
-          title: t("settings.discardTitle"),
-          description: t("settings.discardBody"),
-          duration: Infinity,
-          actions: [
-            { label: t("settings.keepEditing"), onClick: () => notify.dismiss("settings-leave") },
-            {
-              label: t("settings.discard"),
-              tone: "danger",
-              onClick: () => {
-                notify.dismiss("settings-leave");
-                setSettingsDirty(false);
-                setTab(next);
-              },
-            },
-          ],
-        });
+        // 不做整屏确认：记下目标页，由右下角的 Alert 接管。
+        setSettingsLeave(next);
         return;
       }
       setTab(next);
     },
-    [tab, settingsDirty, notify, t],
+    [tab, settingsDirty],
   );
+
+  const closeSettingsLeave = useCallback(() => {
+    setSettingsLeave(null);
+    setSettingsSaving(false);
+  }, []);
+
+  const discardSettingsLeave = useCallback(() => {
+    const next = settingsLeave;
+    setSettingsLeave(null);
+    setSettingsSaving(false);
+    setSettingsDirty(false);
+    if (next) setTab(next);
+  }, [settingsLeave]);
+
+  const saveSettingsLeave = useCallback(async () => {
+    const next = settingsLeave;
+    if (!next || settingsSaving) return;
+    setSettingsSaving(true);
+    const saved = (await settingsSaveRef.current?.()) ?? false;
+    if (!saved) {
+      setSettingsSaving(false);
+      return;
+    }
+    setSettingsDirty(false);
+    setSettingsSaving(false);
+    setSettingsLeave(null);
+    setTab(next);
+  }, [settingsLeave, settingsSaving]);
 
   // 设置已经保存或撤销后，之前被拦下的离开提示就不该继续挂着。
   useEffect(() => {
-    if (!settingsDirty) notify.dismiss("settings-leave");
-  }, [settingsDirty, notify]);
+    if (!settingsDirty) {
+      setSettingsLeave(null);
+      setSettingsSaving(false);
+    }
+  }, [settingsDirty]);
 
   // 启动和保存设置后都重新探测一次：用户可能刚补上 ffmpeg 或换掉路径。
   const refreshFfmpeg = useCallback(() => {
@@ -251,6 +286,7 @@ export default function App() {
   // 顶栏语言切换也写回设置，免得重启后被设置里的旧值覆盖。
   const pickLanguage = (code: Language) => {
     setLanguage(code);
+    settingsSyncRef.current?.({ language: code });
     persist({ language: code });
   };
 
@@ -264,6 +300,8 @@ export default function App() {
     const y = `${top + height / 2}px`;
     setTheme(next);
     setAppearance(next);
+    // 设置页可能正开着：同步它的本地副本，保存时才不会把旧主题写回去。
+    settingsSyncRef.current?.({ theme: next });
     themeTimer.current = window.setTimeout(() => {
       themeTimer.current = null;
       const apply = () => {
@@ -477,7 +515,9 @@ export default function App() {
         ) : (
           <SettingsView
             initialPage={settingsPage ?? undefined}
-            onDirtyChange={setSettingsDirty}
+            onDirtyChange={markSettingsDirty}
+            onRegisterSave={registerSettingsSave}
+            onRegisterSync={registerSettingsSync}
             onSaved={(settings) => {
               notifyRef.current = settings;
               const mode = (settings.theme as ThemeMode) ?? "light";
@@ -505,6 +545,31 @@ export default function App() {
       ) : null}
 
       <ToastStack position="top-center" label={t("toast.region")} />
+
+      {/* 离开设置的确认：Arc Alert 右下角浮层，不铺满屏幕、不占内容布局。 */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-5 z-[70] flex justify-end px-5">
+        <Alert
+          open={settingsLeave !== null}
+          tone="warning"
+          title={settingsSaving ? t("settings.saving") : t("settings.unsavedCount", { n: settingsChangedCount })}
+          className="alert-float pointer-events-auto w-[min(420px,calc(100vw-40px))]"
+          footer={settingsSaving ? null : (
+            <>
+              <Button size="sm" variant="ghost" onClick={closeSettingsLeave}>
+                {t("settings.keepEditing")}
+              </Button>
+              <Button size="sm" variant="danger" onClick={discardSettingsLeave}>
+                {t("settings.discard")}
+              </Button>
+              <Button size="sm" variant="primary" onClick={() => void saveSettingsLeave()}>
+                {t("settings.saveAndLeave")}
+              </Button>
+            </>
+          )}
+        >
+          {settingsSaving ? null : t("settings.leaveBody")}
+        </Alert>
+      </div>
     </div>
   );
 }

@@ -293,20 +293,25 @@ function Section({ title, desc, children }: { title: string; desc?: string; chil
 type Props = {
   initialPage?: PageKey;
   onSaved: (settings: Settings) => void;
-  onDirtyChange?: (dirty: boolean) => void;
+  onDirtyChange?: (dirty: boolean, changedCount: number) => void;
+  /** 把保存动作交给 App，让离开设置的 Alert 与页面共用同一个保存入口。 */
+  onRegisterSave?: (save: (() => Promise<boolean>) | null) => void;
+  /** 顶栏改了主题/语言后，把新值同步进来，避免保存时用旧值覆盖。 */
+  onRegisterSync?: (sync: ((patch: Partial<Settings>) => void) | null) => void;
 };
 
 export default function SettingsView({
   initialPage,
   onSaved,
   onDirtyChange,
+  onRegisterSave,
+  onRegisterSync,
 }: Props) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [page, setPage] = useState<PageKey>(initialPage ?? "account");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [initial, setInitial] = useState("");
   const [version, setVersion] = useState("");
-  const [busy, setBusy] = useState(false);
   const notify = useNotify();
   const [query, setQuery] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
@@ -333,10 +338,10 @@ export default function SettingsView({
   const reduceMotion = useReducedMotion();
   const isWindows = /Win/.test(navigator.platform || navigator.userAgent);
 
-  // App 负责拿这个状态决定切页前是否要确认放弃。
+  // App 负责拿这个状态决定切页前是否要确认保存/放弃。
   useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
+    onDirtyChange?.(dirty, changedCount);
+  }, [changedCount, dirty, onDirtyChange]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -407,41 +412,52 @@ export default function SettingsView({
     setSettings((current) => (current ? { ...current, ...next } : current));
   };
 
-  const revert = useCallback(() => {
-    if (!initial) return;
-    try {
-      setSettings(JSON.parse(initial) as Settings);
-    } catch {
-      // initial 只来自 settingsGet 的序列化结果，正常不会解析失败。
-    }
-  }, [initial]);
+  // 顶栏是设置页之外的另一个写入口：它改主题/语言时，把新值同步到本地
+  // settings 和 initial，否则保存会把顶栏刚写入的旧值覆盖回去。
+  const syncExternal = useCallback((next: Partial<Settings>) => {
+    setSettings((current) => (current ? { ...current, ...next } : current));
+    setInitial((current) => {
+      if (!current) return current;
+      try {
+        return JSON.stringify({ ...(JSON.parse(current) as Settings), ...next });
+      } catch {
+        return current;
+      }
+    });
+  }, []);
 
-  const save = useCallback(async () => {
-    if (!settings) return;
-    setBusy(true);
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!settings) return false;
     try {
       const result = await settingsUpdate(settings);
-      const languageChanged = result.language !== settings.language;
+      const currentLanguage = i18n.resolvedLanguage?.startsWith("zh") ? "zh-CN" : "en-US";
+      const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
       setSettings(result);
       setInitial(JSON.stringify(result));
-      // 只有语言确实变了才切换 i18n；否则每次保存都会触发一次无意义的全局语言重渲染。
-      if (languageChanged) {
-        if (result.language === "system") {
-          setLanguage(detectLanguage());
-        } else {
-          setLanguage(result.language as Language);
-        }
-      }
+      // 和当前界面语言比较，而不是和保存前的本地副本比较：设置页里主动改语言时
+      // local 已经是新值，否则这里会误判为“没变”，保存后界面仍是旧语言。
+      if (nextLanguage !== currentLanguage) setLanguage(nextLanguage);
       onSaved(result);
       void loadLogs();
       void loadFfmpeg();
       notify.success(t("settings.savedAll"));
+      return true;
     } catch (err) {
       notify.error(err);
-    } finally {
-      setBusy(false);
+      return false;
     }
   }, [settings, onSaved, notify, t]);
+
+  // 保存按钮只存在于离开设置的 Alert；页面本身不再占一条 sticky 工具条。
+  useEffect(() => {
+    onRegisterSave?.(save);
+    return () => onRegisterSave?.(null);
+  }, [onRegisterSave, save]);
+
+  useEffect(() => {
+    onRegisterSync?.(syncExternal);
+    return () => onRegisterSync?.(null);
+  }, [onRegisterSync, syncExternal]);
 
   useEffect(() => {
     if (!focusId) return;
@@ -1567,26 +1583,6 @@ export default function SettingsView({
       <main className="flex min-w-0 flex-1 flex-col bg-surface">
         <div className="min-h-0 flex-1 overflow-auto px-8 py-6">
           <div className="mx-auto w-full max-w-[780px] pb-6">
-            {dirty ? (
-              <div className="sticky top-0 z-20 -mx-8 -mt-6 mb-5 flex h-12 items-center justify-between gap-4 border-b border-line/60 bg-surface/90 px-8 backdrop-blur-sm">
-                <span className="text-[11px] tabular-nums text-muted">
-                  {t("settings.unsavedCount", { n: changedCount })}
-                </span>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <Button variant="ghost" size="sm" disabled={busy} onClick={revert}>
-                    {t("settings.undo")}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={!settings || busy}
-                    onClick={() => void save()}
-                  >
-                    {busy ? t("settings.saving") : t("settings.save")}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
             <div className="space-y-7">{renderBody()}</div>
           </div>
         </div>
