@@ -170,6 +170,33 @@ pub fn merge(base: &str, extra: &str) -> String {
         .join("; ")
 }
 
+/// 取单个 Cookie 的值；同名项保留最后一个（与 merge 的覆盖语义一致）。
+pub fn value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
+    cookie
+        .split(';')
+        .filter_map(|chunk| chunk.split_once('='))
+        .filter(|(key, _)| key.trim() == name)
+        .map(|(_, value)| value.trim())
+        .last()
+}
+
+/// 去掉指定 Cookie 项（例如换号时清掉旧号的 ac_time_value）。
+pub fn without(cookie: &str, name: &str) -> String {
+    cookie
+        .split(';')
+        .filter_map(|chunk| chunk.trim().split_once('='))
+        .filter(|(key, _)| key.trim() != name)
+        .map(|(key, value)| format!("{}={}", key.trim(), value.trim()))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// 是否具备自动续期所需的最小凭据（B 站：ac_time_value + bili_jct）。
+pub fn has_refresh_token(cookie: &str) -> bool {
+    value(cookie, "ac_time_value").is_some_and(|token| !token.is_empty())
+        && value(cookie, "bili_jct").is_some_and(|token| !token.is_empty())
+}
+
 /// 给界面展示的条目名（不含值，避免把登录态渲染到屏幕上）。
 pub fn names(cookie: &str) -> Vec<String> {
     let mut names: Vec<String> = cookie

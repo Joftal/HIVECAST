@@ -116,6 +116,15 @@ impl AppState {
             tracing::warn!(error = %err, "历史 Cookie 加密迁移失败");
         }
         crate::credential::load_from_db(&db);
+        // 自动续期与复验是两条独立的循环：
+        // - 续期每 12 小时问一次 cookie/info，需要时才轮换 Cookie；
+        // - 复验每 30 分钟打一次 nav，只负责发现失效。
+        let db_for_refresh = db.clone();
+        let app_for_refresh = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::account::refresh_loop(db_for_refresh, app_for_refresh).await;
+        });
+
         // B 站登录态会过期，启动后异步复验一次；之后每 30 分钟再看一次，
         // 运行中 Cookie 失效也能及时发现（网络慢不该拖住启动）。
         let db_for_auth = db.clone();

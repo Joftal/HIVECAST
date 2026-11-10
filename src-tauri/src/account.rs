@@ -2,15 +2,19 @@
 //!
 //! 扫码流程（对齐 passport 的 web 端）：
 //! 1. generate 拿 qrcode_key + 二维码内容；
-//! 2. 轮询 poll，data.code 为 0 时登录成功，登录态只出现在响应的 Set-Cookie 里；
-//! 3. 把 Set-Cookie 并进已有 Cookie，再打一次 nav 接口确认身份，最后落库。
+//! 2. 轮询 poll，data.code 为 0 时登录成功；登录态可能在 Set-Cookie，也可能在 data.url 的查询串里；
+//! 3. 两条路径都取、合并并校验 SESSDATA/bili_jct/DedeUserID，再打一次 nav 确认身份，最后落库；
+//! 4. 扫码返回的 refresh_token 以 ac_time_value 并入 Cookie，之后由 refresh_loop 自动续期。
 //!
 //! 其余平台没有公开的扫码接口（斗鱼/虎牙/抖音都依赖风控），v1 走粘贴 Cookie。
 
 use std::time::Duration;
 
 use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket};
+use rsa::pkcs8::DecodePublicKey;
+use rsa::{Oaep, RsaPublicKey};
 use serde::Deserialize;
+use sha2::Sha256;
 use tauri::{Emitter, Manager};
 
 use crate::credential;
@@ -22,7 +26,18 @@ const PASSPORT: &str = "https://passport.bilibili.com";
 const API: &str = "https://api.bilibili.com";
 /// 运行中定期复验登录态：B 站 Cookie 可能在长时间录制中失效，只在启动时查一次不够。
 pub const REVALIDATE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// 续期检查周期。真正是否轮换由 cookie/info 的 data.refresh 决定，这里只控制问的频率。
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 const REFERER: &str = "https://www.bilibili.com/";
+/// B 站 Web 前端的 Cookie 刷新公钥（1024 位，PKCS#1 OAEP + SHA-256）。
+const REFRESH_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDLgd2OAkcGVtoE3ThUREbio0Eg
+Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71
+nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40
+JNrRuoEUXpabUzGB8QIDAQAB
+-----END PUBLIC KEY-----";
+/// 定时与手动续期共用一把锁：两个请求同时轮换会让 token 互相作废。
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
@@ -44,9 +59,30 @@ struct PollData {
     code: i64,
     #[serde(default)]
     message: String,
-    /// 距离二维码失效还剩多少秒；B 站轮询接口每次都带。
+    /// 距离二维码失效还剩多少秒；接口不保证返回，缺省按 0（本地以 QR_TTL_SECONDS 为准）。
     #[serde(default)]
     expires_in: i64,
+    /// 确认态才有：登录态也可能只放在这个跨域 URL 的查询串里。
+    #[serde(default)]
+    url: String,
+    /// 后续自动续期用的 refresh_token，等价于 Web Cookie 的 ac_time_value。
+    #[serde(default)]
+    refresh_token: String,
+    /// 服务端时间戳，仅用于日志诊断。
+    #[serde(default)]
+    timestamp: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CookieInfoData {
+    #[serde(default)]
+    refresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshData {
+    #[serde(default)]
+    refresh_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +114,7 @@ pub fn info_from_row(row: &CredentialRow) -> CredentialInfo {
         avatar: row.avatar.clone(),
         cookie_names: credential::names(&row.cookie),
         status: row.status.clone(),
+        refreshable: row.platform == "bilibili" && credential::has_refresh_token(&row.cookie),
         updated_at: row.updated_at,
     }
 }
@@ -183,9 +220,43 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
     }
     if state == "confirmed" {
         tracing::info!(platform = "bilibili", "扫码已确认，开始校验登录态");
-        let extra = cookies_from_set_cookie(&fetched.set_cookies);
-        let base = credential::get("bilibili").unwrap_or_default();
-        let merged = credential::merge(&base, &extra);
+        let poll_data = fetched
+            .data
+            .data
+            .as_ref()
+            .ok_or_else(|| AppError::User("登录响应缺少 data".into()))?;
+        // 两个载体都取：实测不同客户端/风控下 Set-Cookie 可能不完整，而 data.url 里一定带登录态。
+        let from_header = cookies_from_set_cookie(&fetched.set_cookies);
+        let from_url = cookies_from_poll_url(&poll_data.url);
+        let landing = credential::merge(&from_header, &from_url);
+        let mut base = credential::get("bilibili").unwrap_or_default();
+        if poll_data.refresh_token.is_empty() {
+            // 重新扫码换号时，旧号的 ac_time_value 不能留给新号。
+            base = credential::without(&base, "ac_time_value");
+        }
+        let mut merged = credential::merge(&base, &landing);
+        if !poll_data.refresh_token.is_empty() {
+            merged = with_refresh_token(&merged, &poll_data.refresh_token);
+        }
+        if !has_login_cookies(&merged) {
+            tracing::warn!(
+                platform = "bilibili",
+                has_header = !from_header.is_empty(),
+                has_url = !from_url.is_empty(),
+                "扫码成功但登录 Cookie 不完整"
+            );
+            return Err(AppError::User(
+                "登录信息不完整（缺少 SESSDATA/bili_jct/DedeUserID），请重新扫码".into(),
+            ));
+        }
+        tracing::info!(
+            platform = "bilibili",
+            from_header = !from_header.is_empty(),
+            from_url = !from_url.is_empty(),
+            refreshable = !poll_data.refresh_token.is_empty(),
+            timestamp = poll_data.timestamp,
+            "扫码确认，登录态来源已合并"
+        );
         let account = bilibili_nav(&merged).await?;
         let row = store_account(db, "bilibili", &merged, &account)?;
         tracing::info!(platform = "bilibili", account = %row.account_name, uid = %row.uid, "扫码登录成功并已保存");
@@ -223,6 +294,317 @@ fn cookies_from_set_cookie(headers: &[String]) -> String {
         })
         .collect();
     pairs.join("; ")
+}
+
+/// 从 poll 的 data.url 查询串里取登录态。
+///
+/// 不做 URL 解码：SESSDATA 里的 %2C 是服务端下发的原值，解码后反而会和
+/// Set-Cookie 里的值不一致。只认 B 站登录会用到的几个字段，避免把无关参数写进 Cookie。
+fn cookies_from_poll_url(raw: &str) -> String {
+    let Some((_, query)) = raw.split_once('?') else {
+        return String::new();
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for chunk in query.split('&') {
+        let Some((name, value)) = chunk.split_once('=') else {
+            continue;
+        };
+        if !matches!(
+            name,
+            "SESSDATA" | "bili_jct" | "DedeUserID" | "DedeUserID__ckMd5" | "sid"
+        ) {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        match pairs.iter_mut().find(|(existing, _)| existing == name) {
+            Some(slot) => slot.1 = value.to_string(),
+            None => pairs.push((name.to_string(), value.to_string())),
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// 登录态的最低要求：三项齐全才敢落库，否则后续 nav/续期都会半残。
+fn has_login_cookies(cookie: &str) -> bool {
+    ["SESSDATA", "bili_jct", "DedeUserID"]
+        .iter()
+        .all(|name| credential::value(cookie, name).is_some_and(|value| !value.is_empty()))
+}
+
+fn with_refresh_token(cookie: &str, token: &str) -> String {
+    credential::merge(cookie, &format!("ac_time_value={token}"))
+}
+
+/// 从 correspond 页里抠出一次性 refresh_csrf。
+fn parse_refresh_csrf(html: &str) -> Option<String> {
+    let marker = "id=\"1-name\"";
+    let start = html.find(marker)?;
+    let rest = &html[start + marker.len()..];
+    let content_start = rest.find('>')? + 1;
+    let content = &rest[content_start..];
+    let end = content.find("</div>")?;
+    let csrf = content[..end].trim();
+    (!csrf.is_empty()).then(|| csrf.to_string())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn correspond_path_with_key(key: &RsaPublicKey, now_ms: i64) -> Result<String, AppError> {
+    let mut rng = rand::thread_rng();
+    let message = format!("refresh_{now_ms}");
+    let encrypted = key
+        .encrypt(&mut rng, Oaep::new::<Sha256>(), message.as_bytes())
+        .map_err(|err| AppError::Internal(format!("生成 correspondPath 失败：{err}")))?;
+    Ok(encode_hex(&encrypted))
+}
+
+fn correspond_path(now_ms: i64) -> Result<String, AppError> {
+    let key = RsaPublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY)
+        .map_err(|err| AppError::Internal(format!("B 站续期公钥无效：{err}")))?;
+    correspond_path_with_key(&key, now_ms)
+}
+
+/// 一次续期检查的结果；调度层据此决定下一次检查的间隔。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// 本机没有 B 站账号
+    NoCredential,
+    /// 没有 ac_time_value 或 bili_jct：只能重新扫码
+    NotRefreshable,
+    /// cookie/info 说还不需要刷新
+    Fresh,
+    /// 已完成轮换并写回
+    Refreshed,
+    /// 请求期间用户重新登录/删除了账号，本轮结果丢弃
+    Discarded,
+}
+
+/// 检查并按需刷新 B 站 Web Cookie。
+///
+/// 流程见 docs/134：cookie/info → correspondPath → cookie/refresh → confirm/refresh。
+/// 所有失败都只返回错误、不写库；唯一例外是 confirm/refresh 失败——新 Cookie 已经
+/// 轮换成功，必须保留，否则新旧两边都可能失效。
+pub async fn refresh_bilibili_cookie(
+    db: &Db,
+    app: &tauri::AppHandle,
+) -> Result<RefreshOutcome, AppError> {
+    let _guard = REFRESH_LOCK.lock().await;
+
+    let rows = db.credentials()?;
+    let Some(row) = rows.into_iter().find(|row| row.platform == "bilibili") else {
+        return Ok(RefreshOutcome::NoCredential);
+    };
+    let original = row.cookie;
+    let Some(old_token) = credential::value(&original, "ac_time_value")
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+    else {
+        tracing::debug!(platform = "bilibili", "没有 ac_time_value，跳过自动续期");
+        return Ok(RefreshOutcome::NotRefreshable);
+    };
+    let Some(old_jct) = credential::value(&original, "bili_jct")
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+    else {
+        tracing::debug!(platform = "bilibili", "没有 bili_jct，跳过自动续期");
+        return Ok(RefreshOutcome::NotRefreshable);
+    };
+
+    let info_url = format!("{PASSPORT}/x/passport-login/web/cookie/info");
+    let info: Envelope<CookieInfoData> =
+        http::get_json(&info_url, REFERER, &[("Cookie", &original)])
+            .await
+            .map_err(AppError::from)?;
+    let need_refresh = match (info.code, info.data) {
+        (0, Some(data)) => data.refresh,
+        (-101, _) => {
+            return Err(AppError::User("Cookie 已失效或未登录".into()));
+        }
+        (code, _) => {
+            return Err(AppError::Platform {
+                code: "platform_upstream",
+                message: format!(
+                    "检查 Cookie 续期失败（code {code}）{}",
+                    info.message.unwrap_or_default()
+                ),
+            });
+        }
+    };
+    if !need_refresh {
+        tracing::debug!(platform = "bilibili", "cookie/info 表示暂不需要续期");
+        return Ok(RefreshOutcome::Fresh);
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let path = correspond_path(now_ms)?;
+    let correspond_url = format!("https://www.bilibili.com/correspond/1/{path}");
+    // 参考公开实现：correspond 与刷新请求用随机 buvid3，避免设备指纹干扰。
+    let buvid3 = credential::value(&original, "buvid3")
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let probe_cookie = credential::merge(&original, &format!("buvid3={buvid3}"));
+    let (html, _) = http::get_text(&correspond_url, REFERER, &[("Cookie", &probe_cookie)])
+        .await
+        .map_err(AppError::from)?;
+    let refresh_csrf = parse_refresh_csrf(&html).ok_or_else(|| AppError::Platform {
+        code: "platform_upstream",
+        message: "续期页面里没有 refresh_csrf（correspondPath 可能已过期）".into(),
+    })?;
+
+    let refresh_url = format!("{PASSPORT}/x/passport-login/web/cookie/refresh");
+    let refresh_form = [
+        ("csrf", old_jct.clone()),
+        ("refresh_csrf", refresh_csrf),
+        ("refresh_token", old_token.clone()),
+        ("source", "main_web".to_string()),
+    ];
+    let refreshed: http::FetchedWithHeaders<Envelope<RefreshData>> =
+        http::post_form_json_with_headers(
+            &refresh_url,
+            REFERER,
+            "https://www.bilibili.com",
+            &probe_cookie,
+            &refresh_form,
+        )
+        .await
+        .map_err(AppError::from)?;
+    if refreshed.data.code != 0 {
+        return Err(AppError::Platform {
+            code: "platform_upstream",
+            message: format!(
+                "刷新 Cookie 失败（code {}）{}",
+                refreshed.data.code,
+                refreshed.data.message.unwrap_or_default()
+            ),
+        });
+    }
+
+    let new_cookie = cookies_from_set_cookie(&refreshed.set_cookies);
+    if !has_login_cookies(&credential::merge(&original, &new_cookie)) {
+        return Err(AppError::Platform {
+            code: "platform_upstream",
+            message: "刷新响应缺少完整的 Set-Cookie".into(),
+        });
+    }
+    let new_token = refreshed
+        .data
+        .data
+        .map(|data| data.refresh_token)
+        .unwrap_or_default();
+    let mut merged = credential::merge(&original, &new_cookie);
+    if new_token.is_empty() {
+        // 服务端没给新 token：旧 token 在 confirm 后作废，不能再留在 Cookie 里。
+        merged = credential::without(&merged, "ac_time_value");
+    } else {
+        merged = with_refresh_token(&merged, &new_token);
+    }
+    let new_jct = credential::value(&merged, "bili_jct")
+        .unwrap_or_default()
+        .to_string();
+
+    // 确认接口必须用「新 bili_jct + 旧 refresh_token」，顺序错了会 400。
+    let confirm_url = format!("{PASSPORT}/x/passport-login/web/confirm/refresh");
+    let confirm_form = [("csrf", new_jct), ("refresh_token", old_token.clone())];
+    match http::post_form_json_with_headers::<Envelope<serde_json::Value>>(
+        &confirm_url,
+        REFERER,
+        "https://www.bilibili.com",
+        &merged,
+        &confirm_form,
+    )
+    .await
+    {
+        Ok(confirmed) if confirmed.data.code == 0 => {}
+        Ok(confirmed) => tracing::warn!(
+            platform = "bilibili",
+            code = confirmed.data.code,
+            message = %confirmed.data.message.unwrap_or_default(),
+            "确认续期失败，保留已轮换的新 Cookie 等下次重试"
+        ),
+        Err(err) => tracing::warn!(
+            platform = "bilibili",
+            error = %err,
+            "确认续期请求失败，保留已轮换的新 Cookie 等下次重试"
+        ),
+    }
+
+    // 请求期间用户可能重新扫码/删除账号；任何 await 之后都必须重新比对快照。
+    if credential::get("bilibili").as_deref() != Some(original.as_str()) {
+        tracing::info!(
+            platform = "bilibili",
+            "续期期间 Cookie 已更新，丢弃本轮结果"
+        );
+        return Ok(RefreshOutcome::Discarded);
+    }
+
+    let refreshed_row = CredentialRow {
+        cookie: merged,
+        status: "ok".to_string(),
+        updated_at: now_ts(),
+        ..row
+    };
+    db.save_credential(&refreshed_row)?;
+    credential::set("bilibili", &refreshed_row.cookie);
+    clear_stream_cache(app);
+    tracing::info!(
+        platform = "bilibili",
+        account = %refreshed_row.account_name,
+        refreshable = credential::has_refresh_token(&refreshed_row.cookie),
+        "B 站 Cookie 续期成功"
+    );
+    Ok(RefreshOutcome::Refreshed)
+}
+
+/// 后台续期循环：正常每 12 小时问一次，失败按 1h → 6h → 24h 退避，并加抖动。
+pub async fn refresh_loop(db: std::sync::Arc<Db>, app: tauri::AppHandle) {
+    use rand::Rng;
+
+    let mut failures = 0u32;
+    loop {
+        match refresh_bilibili_cookie(&db, &app).await {
+            Ok(outcome) => {
+                failures = 0;
+                if outcome == RefreshOutcome::Refreshed {
+                    tracing::info!(platform = "bilibili", "后台续期完成");
+                }
+            }
+            Err(err) => {
+                failures = failures.saturating_add(1);
+                tracing::warn!(
+                    platform = "bilibili",
+                    failures,
+                    error = %err,
+                    "自动续期暂时失败，稍后重试"
+                );
+            }
+        }
+        let base = match failures {
+            0 => REFRESH_INTERVAL,
+            1 => Duration::from_secs(60 * 60),
+            2 => Duration::from_secs(6 * 60 * 60),
+            _ => Duration::from_secs(24 * 60 * 60),
+        };
+        // 抖动只用于错开各客户端的请求，不改变业务语义。
+        let jitter = if failures == 0 { 30 * 60 } else { 5 * 60 };
+        let wait = base + Duration::from_secs(rand::thread_rng().gen_range(0..jitter));
+        tokio::time::sleep(wait).await;
+    }
 }
 
 /// 用指定 Cookie 查当前身份；未登录时返回中文原因，方便直接展示。
@@ -510,6 +892,106 @@ mod tests {
             serde_json::from_str(r#"{"code":0,"data":{"code":86101}}"#).unwrap();
         assert_eq!(without.data.unwrap().expires_in, 0);
         assert_eq!(QR_TTL_SECONDS, 180);
+    }
+
+    #[test]
+    fn parses_poll_refresh_fields() {
+        let poll: Envelope<PollData> = serde_json::from_str(
+            r#"{"code":0,"data":{"code":0,"url":"https://passport.biligame.com/crossDomain?SESSDATA=a%2Cb&bili_jct=j&DedeUserID=42","refresh_token":"tok","timestamp":1700000000000}}"#,
+        )
+        .unwrap();
+        let data = poll.data.unwrap();
+        assert_eq!(data.refresh_token, "tok");
+        assert_eq!(data.timestamp, 1_700_000_000_000);
+        assert!(data.url.contains("SESSDATA="));
+    }
+
+    #[test]
+    fn keeps_raw_percent_encoding_from_poll_url() {
+        let url = "https://passport.biligame.com/crossDomain?SESSDATA=a%2Cb&bili_jct=j&DedeUserID=42&DedeUserID__ckMd5=m&sid=s&ignored=x";
+        assert_eq!(
+            cookies_from_poll_url(url),
+            "SESSDATA=a%2Cb; bili_jct=j; DedeUserID=42; DedeUserID__ckMd5=m; sid=s"
+        );
+        // 没有查询串 / 缺字段都不能伪造 Cookie。
+        assert_eq!(cookies_from_poll_url("https://example.com"), "");
+        assert_eq!(cookies_from_poll_url("https://example.com?SESSDATA="), "");
+    }
+
+    #[test]
+    fn poll_cookie_keeps_last_duplicate() {
+        let url = "https://example.com?SESSDATA=old&SESSDATA=new&bili_jct=j";
+        assert_eq!(cookies_from_poll_url(url), "SESSDATA=new; bili_jct=j");
+    }
+
+    #[test]
+    fn refresh_token_is_replaced_not_appended() {
+        let cookie = "SESSDATA=a; ac_time_value=old; bili_jct=j; DedeUserID=42";
+        assert_eq!(
+            with_refresh_token(cookie, "new"),
+            "SESSDATA=a; ac_time_value=new; bili_jct=j; DedeUserID=42"
+        );
+        assert_eq!(
+            credential::without(cookie, "ac_time_value"),
+            "SESSDATA=a; bili_jct=j; DedeUserID=42"
+        );
+        assert!(has_login_cookies(cookie));
+        assert!(!has_login_cookies("SESSDATA=a; bili_jct=j"));
+    }
+
+    #[test]
+    fn refreshable_flag_needs_bilibili_and_both_tokens() {
+        let row = |platform: &str, cookie: &str| CredentialRow {
+            platform: platform.to_string(),
+            account_id: String::new(),
+            cookie: cookie.to_string(),
+            uid: "42".into(),
+            account_name: "tester".into(),
+            avatar: None,
+            status: "ok".into(),
+            updated_at: 0,
+        };
+        assert!(
+            info_from_row(&row(
+                "bilibili",
+                "SESSDATA=a; bili_jct=j; DedeUserID=42; ac_time_value=t"
+            ))
+            .refreshable
+        );
+        assert!(
+            !info_from_row(&row("bilibili", "SESSDATA=a; bili_jct=j; DedeUserID=42")).refreshable
+        );
+        assert!(
+            !info_from_row(&row(
+                "douyu",
+                "SESSDATA=a; bili_jct=j; DedeUserID=42; ac_time_value=t"
+            ))
+            .refreshable
+        );
+    }
+
+    #[test]
+    fn parses_refresh_csrf_from_correspond_page() {
+        let html = r#"<html><body><div id="1-name">  abc123  </div></body></html>"#;
+        assert_eq!(parse_refresh_csrf(html).as_deref(), Some("abc123"));
+        assert_eq!(parse_refresh_csrf("<html>404</html>"), None);
+    }
+
+    #[test]
+    fn correspond_path_encrypts_refresh_timestamp() {
+        let mut rng = rand::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let public = private.to_public_key();
+        let path = correspond_path_with_key(&public, 1_700_000_000_123).unwrap();
+        assert_eq!(path.len(), 256);
+        let bytes: Vec<u8> = (0..path.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&path[i..i + 2], 16).unwrap())
+            .collect();
+        let plain = private.decrypt(Oaep::new::<Sha256>(), &bytes).unwrap();
+        assert_eq!(String::from_utf8(plain).unwrap(), "refresh_1700000000123");
+        // 测试里顺手证明 PEM 公钥可解析（真实路径不走这里）。
+        assert!(RsaPublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY).is_ok());
     }
 
     /// 联网冒烟：cargo test --lib account -- --ignored --nocapture

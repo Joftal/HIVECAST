@@ -750,6 +750,8 @@ pub struct CredentialInfo {
     pub cookie_names: Vec<String>,
     /// ok | expired
     pub status: String,
+    /// 是否具备自动续期条件（B 站：Cookie 里有 ac_time_value + bili_jct）
+    pub refreshable: bool,
     #[ts(type = "number")]
     pub updated_at: i64,
 }

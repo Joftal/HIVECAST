@@ -351,6 +351,39 @@ pub async fn post_form_json<T: DeserializeOwned>(
     Ok(Fetched { data, date })
 }
 
+/// 表单 POST，显式指定 Origin/Cookie，并读回 Set-Cookie（B 站 Cookie 续期走这条路）。
+///
+/// 与 post_form_json 的区别：不硬编码斗鱼的 Origin，也不依赖全局凭据注入；
+/// 续期必须用调用方刚刚轮换出来的 Cookie，不能被内存里的旧值覆盖。
+pub async fn post_form_json_with_headers<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    origin: &str,
+    cookie: &str,
+    form: &[(&str, String)],
+) -> Result<FetchedWithHeaders<T>, PlatformError> {
+    let request = client()
+        .post(url)
+        .header("Referer", referer)
+        .header("Origin", origin)
+        .header("Cookie", cookie)
+        .form(form);
+
+    let response = send(request, url).await?;
+    let set_cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .collect();
+    let data = response
+        .json::<T>()
+        .await
+        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+    Ok(FetchedWithHeaders { data, set_cookies })
+}
+
 #[cfg(test)]
 mod tests {
     use super::redact_url;

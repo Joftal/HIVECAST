@@ -13,4 +13,8 @@ cookieNames: Array<string>,
 /**
  * ok | expired
  */
-status: string, updatedAt: number, };
+status: string,
+/**
+ * 是否具备自动续期条件（B 站：Cookie 里有 ac_time_value + bili_jct）
+ */
+refreshable: boolean, updatedAt: number, };

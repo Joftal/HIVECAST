@@ -786,6 +786,8 @@
     "qrRefresh": "刷新二维码",
     "qrExpiresIn": "{{time}} 后失效",
     "qrExpired": "二维码已过期，请刷新",
+    "autoRefreshOn": "自动续期可用（每 12 小时检查，失效时自动轮换 Cookie）",
+    "autoRefreshOff": "自动续期不可用：缺少 refresh_token，建议重新扫码",
     "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。"
   },
   "close": {

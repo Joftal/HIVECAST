@@ -347,6 +347,24 @@ export default function AccountSection() {
                       ? t("account.bilibiliHint")
                       : t("account.cookieHint")}
                 </p>
+                {platform === "bilibili" && item ? (
+                  <p
+                    className={cx(
+                      "mt-1 flex items-center gap-1.5 text-[10px] leading-4",
+                      item.refreshable ? "text-muted" : "text-warn/90",
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        "h-1 w-1 rounded-full",
+                        item.refreshable ? "bg-live" : "bg-warn",
+                      )}
+                    />
+                    {item.refreshable
+                      ? t("account.autoRefreshOn")
+                      : t("account.autoRefreshOff")}
+                  </p>
+                ) : null}
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-1 border-t border-line/80 pt-2.5">

@@ -786,6 +786,8 @@
     "qrRefresh": "Refresh QR code",
     "qrExpiresIn": "Expires in {{time}}",
     "qrExpired": "QR code expired, please refresh",
+    "autoRefreshOn": "Auto refresh available (checked every 12 hours)",
+    "autoRefreshOff": "Auto refresh unavailable: refresh_token missing. Scan again to enable it.",
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
   },
   "close": {
