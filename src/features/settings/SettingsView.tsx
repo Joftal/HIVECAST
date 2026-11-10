@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import {
@@ -66,7 +67,6 @@ type PageMeta = {
   descKey: string;
   icon: ReactNode;
   group: NavGroup;
-  tint: string;
 };
 
 const ICON = {
@@ -122,14 +122,14 @@ const ICON = {
 };
 
 const PAGES: PageMeta[] = [
-  { key: "account", labelKey: "settings.navAccount", titleKey: "settings.pageAccount", descKey: "settings.pageAccountDesc", icon: ICON.account, group: "account", tint: "var(--c-accent)" },
-  { key: "record", labelKey: "settings.navRecord", titleKey: "settings.pageRecord", descKey: "settings.pageRecordDesc", icon: ICON.record, group: "recording", tint: "var(--c-rec)" },
-  { key: "danmaku", labelKey: "settings.navDanmaku", titleKey: "settings.pageDanmaku", descKey: "settings.pageDanmakuDesc", icon: ICON.danmaku, group: "recording", tint: "#3b82f6" },
-  { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage, group: "recording", tint: "var(--c-warn)" },
-  { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify, group: "app", tint: "#8b5cf6" },
-  { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance, group: "app", tint: "#0f9f9a" },
-  { key: "system", labelKey: "settings.navSystem", titleKey: "settings.pageSystem", descKey: "settings.pageSystemDesc", icon: ICON.system, group: "app", tint: "var(--c-muted)" },
-  { key: "about", labelKey: "settings.navAbout", titleKey: "settings.pageAbout", descKey: "settings.pageAboutDesc", icon: ICON.about, group: "app", tint: "var(--c-faint)" },
+  { key: "account", labelKey: "settings.navAccount", titleKey: "settings.pageAccount", descKey: "settings.pageAccountDesc", icon: ICON.account, group: "account" },
+  { key: "record", labelKey: "settings.navRecord", titleKey: "settings.pageRecord", descKey: "settings.pageRecordDesc", icon: ICON.record, group: "recording" },
+  { key: "danmaku", labelKey: "settings.navDanmaku", titleKey: "settings.pageDanmaku", descKey: "settings.pageDanmakuDesc", icon: ICON.danmaku, group: "recording" },
+  { key: "storage", labelKey: "settings.navStorage", titleKey: "settings.pageStorage", descKey: "settings.pageStorageDesc", icon: ICON.storage, group: "recording" },
+  { key: "notify", labelKey: "settings.navNotify", titleKey: "settings.pageNotify", descKey: "settings.pageNotifyDesc", icon: ICON.notify, group: "app" },
+  { key: "appearance", labelKey: "settings.navAppearance", titleKey: "settings.pageAppearance", descKey: "settings.pageAppearanceDesc", icon: ICON.appearance, group: "app" },
+  { key: "system", labelKey: "settings.navSystem", titleKey: "settings.pageSystem", descKey: "settings.pageSystemDesc", icon: ICON.system, group: "app" },
+  { key: "about", labelKey: "settings.navAbout", titleKey: "settings.pageAbout", descKey: "settings.pageAboutDesc", icon: ICON.about, group: "app" },
 ];
 
 const NAV_GROUPS: { key: NavGroup; labelKey: string }[] = [
@@ -139,15 +139,10 @@ const NAV_GROUPS: { key: NavGroup; labelKey: string }[] = [
 ];
 
 function PageIcon({ page, size = 15, className }: { page: PageKey; size?: number; className?: string }) {
-  const tint = PAGES.find((one) => one.key === page)?.tint ?? "var(--c-accent)";
   return (
     <span
       aria-hidden
-      className={cx("flex shrink-0 items-center justify-center rounded-[7px]", className ?? "h-6 w-6")}
-      style={{
-        color: tint,
-        background: `color-mix(in oklab, ${tint} 13%, transparent)`,
-      }}
+      className={cx("flex shrink-0 items-center justify-center text-current", className ?? "h-6 w-6")}
     >
       <span style={{ width: size, height: size }} className="[&_svg]:h-full [&_svg]:w-full">
         {ICON[page]}
@@ -284,12 +279,14 @@ function Row({
 
 function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
   return (
-    <section className="overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
-      <header className="border-b border-line bg-raised/35 px-5 py-3">
-        <h3 className="text-[12px] font-semibold text-ink">{title}</h3>
-        {desc ? <p className="mt-0.5 text-[11px] leading-4 text-faint">{desc}</p> : null}
-      </header>
-      <div className="divide-y divide-line">{children}</div>
+    <section className="space-y-2.5">
+      <div className="px-0.5">
+        <h3 className="text-[12.5px] font-semibold tracking-[-0.005em] text-ink">{title}</h3>
+        {desc ? <p className="mt-1 max-w-[620px] text-[11.5px] leading-[17px] text-muted">{desc}</p> : null}
+      </div>
+      <div className="overflow-hidden rounded-[10px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+        <div className="divide-y divide-line">{children}</div>
+      </div>
     </section>
   );
 }
@@ -320,7 +317,20 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   const [sizeUnit, setSizeUnit] = useState<"MB" | "GB">("MB");
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  const dirty = Boolean(settings) && JSON.stringify(settings) !== initial;
+  const changedCount = useMemo(() => {
+    if (!settings || !initial) return 0;
+    try {
+      const base = JSON.parse(initial) as Record<string, unknown>;
+      const current = settings as unknown as Record<string, unknown>;
+      return Object.keys(current).filter(
+        (key) => JSON.stringify(current[key]) !== JSON.stringify(base[key]),
+      ).length;
+    } catch {
+      return 0;
+    }
+  }, [settings, initial]);
+  const dirty = changedCount > 0;
+  const reduceMotion = useReducedMotion();
   // macOS 用 Overlay 标题栏，红绿灯浮在左上角，需要给标题让位。
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const isWindows = /Win/.test(navigator.platform || navigator.userAgent);
@@ -395,6 +405,15 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
   const patch = (next: Partial<Settings>) => {
     setSettings((current) => (current ? { ...current, ...next } : current));
   };
+
+  const revert = useCallback(() => {
+    if (!initial) return;
+    try {
+      setSettings(JSON.parse(initial) as Settings);
+    } catch {
+      // initial 只来自 settingsGet 的序列化结果，正常不会解析失败。
+    }
+  }, [initial]);
 
   const save = useCallback(async () => {
     if (!settings) return;
@@ -564,7 +583,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
                     {hits.length}
                   </span>
                 </div>
-                <div className="divide-y divide-line overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+                <div className="divide-y divide-line overflow-hidden rounded-[10px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
                   {hits.map((entry) => (
                     <button
                       key={entry.id}
@@ -609,7 +628,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     if (page === "danmaku") {
       const eventsDisabled = !settings.recordDanmaku;
       return (
-        <div className="space-y-6">
+        <div className="space-y-7">
           <Section title={t("settings.sectionDanmaku")} desc={t("settings.sectionDanmakuDesc")}>
             <Row
               id="set-danmaku-master"
@@ -678,7 +697,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
     if (page === "record") {
       return (
-        <div className="space-y-6">
+        <div className="space-y-7">
           <Section title={t("settings.sectionStream")} desc={t("settings.sectionStreamDesc")}>
             <Row
               id="set-record-quality"
@@ -1061,7 +1080,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
     if (page === "storage") {
       return (
-        <div className="space-y-6">
+        <div className="space-y-7">
           <Section title={t("settings.sectionTools")}>
             <Row
               id="set-ffmpeg-path"
@@ -1435,7 +1454,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
 
     if (page === "system") {
       return (
-        <div className="space-y-6">
+        <div className="space-y-7">
           <Section title={t("settings.sectionClose")}>
             <Row
               id="set-close-action"
@@ -1473,7 +1492,7 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
     }
 
     return (
-      <div className="space-y-6">
+      <div className="space-y-7">
         <Section title={t("settings.groupAbout")}>
           <div id="set-about" className={cx("flex items-center gap-3 px-4 py-4", focusId === "set-about" && "bg-accent-soft")}>
             <img
@@ -1507,31 +1526,22 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
       aria-label={t("settings.title")}
       className="fixed inset-0 z-50 flex animate-fade-in bg-canvas text-ink"
     >
-      <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-surface">
+      <aside className="flex w-[240px] shrink-0 flex-col border-r border-line/80 bg-canvas">
         <div
-          className="drag-region flex h-[58px] shrink-0 items-center gap-2.5 pr-3"
+          className="drag-region flex h-[60px] shrink-0 items-center gap-2 pr-2.5"
           style={{ paddingLeft: isMac ? 78 : 16 }}
         >
-          <img
-            src={appIcon}
-            alt=""
-            width={28}
-            height={28}
-            className="h-7 w-7 shrink-0 select-none rounded-[7px]"
-            draggable={false}
-          />
-          <div className="min-w-0 flex-1 leading-tight">
-            <div className="truncate text-[12.5px] font-semibold text-ink">HIVECAST</div>
-            <div className="truncate text-[10px] text-faint">{t("settings.title")}</div>
-          </div>
-          <IconButton label={t("settings.close")} onClick={attemptClose} className="no-drag">
+          <span className="min-w-0 flex-1 truncate text-[17px] font-semibold tracking-[-0.01em] text-ink">
+            {t("settings.title")}
+          </span>
+          <IconButton label={t("settings.close")} onClick={attemptClose} className="no-drag h-7 w-7">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
               <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" strokeLinecap="round" />
             </svg>
           </IconButton>
         </div>
 
-        <div className="shrink-0 px-3 pb-1 pt-1.5">
+        <div className="shrink-0 px-3 pb-2">
           <SearchField
             ref={searchRef}
             label={t("settings.searchSettings")}
@@ -1555,116 +1565,144 @@ export default function SettingsView({ open, initialPage, onClose, onSaved }: Pr
           />
         </div>
 
-        <nav aria-label={t("settings.title")} className="min-h-0 flex-1 overflow-auto px-3 pb-4">
-          {NAV_GROUPS.map((group) => {
-            const pages = PAGES.filter((one) => one.group === group.key);
-            if (pages.length === 0) return null;
-            return (
-              <div key={group.key} className="pt-4 first:pt-2">
-                <p className={GROUP + " px-2 pb-1.5"}>{t(group.labelKey)}</p>
-                <div className="space-y-0.5">
-                  {pages.map((one) => {
-                    const active = one.key === page && !query.trim();
-                    return (
-                      <button
-                        key={one.key}
-                        type="button"
-                        onClick={() => {
-                          setPage(one.key);
-                          setQuery("");
-                        }}
-                        aria-current={active ? "page" : undefined}
-                        className={cx(
-                          "focus-ring group flex h-9 w-full items-center gap-2.5 rounded-[8px] border px-2 text-left text-[12.5px] transition-all",
-                          active
-                            ? "border-line bg-canvas font-medium text-ink shadow-[0_1px_2px_rgba(16,24,40,0.05)]"
-                            : "border-transparent text-muted hover:bg-raised/70 hover:text-ink",
-                        )}
-                      >
-                        <PageIcon
-                          page={one.key}
-                          size={14}
-                          className={cx("h-[26px] w-[26px] rounded-[6px]", !active && "opacity-85")}
-                        />
-                        <span className="truncate">{t(one.labelKey)}</span>
-                        {active ? <span className="ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" /> : null}
-                      </button>
-                    );
-                  })}
+        <LayoutGroup id="settings-nav">
+          <nav aria-label={t("settings.title")} className="min-h-0 flex-1 overflow-auto px-3 pb-4">
+            {NAV_GROUPS.map((group) => {
+              const pages = PAGES.filter((one) => one.group === group.key);
+              if (pages.length === 0) return null;
+              return (
+                <div key={group.key} className="pt-4 first:pt-2.5">
+                  <p className={GROUP + " px-2.5 pb-1.5"}>{t(group.labelKey)}</p>
+                  <div className="space-y-0.5">
+                    {pages.map((one) => {
+                      const active = one.key === page && !query.trim();
+                      return (
+                        <button
+                          key={one.key}
+                          type="button"
+                          onClick={() => {
+                            setPage(one.key);
+                            setQuery("");
+                          }}
+                          aria-current={active ? "page" : undefined}
+                          className={cx(
+                            "focus-ring relative flex h-8 w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left text-[12.5px] transition-colors",
+                            active ? "font-medium text-ink" : "text-muted hover:text-ink",
+                          )}
+                        >
+                          {active ? (
+                            <motion.span
+                              layoutId="settings-nav-active"
+                              className="absolute inset-0 rounded-[7px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.06)]"
+                              transition={
+                                reduceMotion
+                                  ? { duration: 0 }
+                                  : { type: "spring", stiffness: 520, damping: 42 }
+                              }
+                            />
+                          ) : null}
+                          <PageIcon page={one.key} size={14} className="relative z-10 h-4 w-4" />
+                          <span className="relative z-10 truncate">{t(one.labelKey)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </nav>
+              );
+            })}
+          </nav>
+        </LayoutGroup>
 
-        <div className="shrink-0 border-t border-line px-4 py-3">
-          <div className="flex items-center justify-between text-[10px] text-faint">
-            <span className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
-              HIVECAST
-            </span>
-            <span className="font-mono tabular-nums">{version ? "v" + version : "—"}</span>
+        <div className="shrink-0 border-t border-line/80 px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <img
+              src={appIcon}
+              alt=""
+              width={24}
+              height={24}
+              className="h-6 w-6 shrink-0 select-none rounded-[6px]"
+              draggable={false}
+            />
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="truncate text-[11.5px] font-medium text-ink">HIVECAST</div>
+              <div className="mt-0.5 font-mono text-[9.5px] tabular-nums text-faint">
+                {version ? "v" + version : "—"}
+              </div>
+            </div>
+          </div>
+          <div className={cx("mt-2 flex items-center gap-1.5 text-[10px]", dirty ? "text-warn" : "text-faint")}>
+            <span
+              className={cx("h-1.5 w-1.5 rounded-full", dirty ? "bg-warn" : "bg-ok")}
+              aria-hidden
+            />
+            {dirty ? t("settings.unsaved") : t("settings.savedAll")}
           </div>
         </div>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col bg-canvas">
-        <header className="shrink-0 border-b border-line/80 bg-canvas/85 px-10 py-6 backdrop-blur">
-          <div className="mx-auto flex w-full max-w-[760px] items-center gap-3.5">
-            {query.trim() ? (
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] bg-accent-soft text-accent-text">
-                <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-                  <circle cx="7" cy="7" r="4.2" />
-                  <path d="M10.2 10.2 13.6 13.6" strokeLinecap="round" />
-                </svg>
-              </span>
-            ) : (
-              <PageIcon page={meta.key} size={18} className="h-10 w-10 rounded-[10px]" />
-            )}
+      <main className="relative flex min-w-0 flex-1 flex-col bg-surface">
+        <header className="shrink-0 border-b border-line/70 px-10 pb-5 pt-6">
+          <div className="mx-auto flex w-full max-w-[780px] items-start gap-4">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h1 className="truncate text-[20px] font-semibold tracking-[-0.01em] text-ink">
-                  {query.trim() ? t("settings.searchSettings") : t(meta.titleKey)}
-                </h1>
-                {dirty ? (
-                  <span className="shrink-0 rounded-full bg-warn/10 px-2 py-0.5 text-[9.5px] font-medium text-warn">
-                    {t("settings.unsavedShort")}
-                  </span>
-                ) : null}
-              </div>
-              <p className="mt-1 truncate text-[11.5px] leading-4 text-muted">
+              <h1 className="truncate text-[21px] font-semibold tracking-[-0.015em] text-ink">
+                {query.trim() ? t("settings.searchSettings") : t(meta.titleKey)}
+              </h1>
+              <p className="mt-1.5 truncate text-[11.5px] leading-4 text-muted">
                 {query.trim()
                   ? t("settings.searchResults", { n: results.length })
                   : t(meta.descKey)}
               </p>
             </div>
-            <span className="hidden shrink-0 items-center gap-1 text-[10px] text-faint sm:flex">
+            <span className="mt-1 hidden shrink-0 items-center gap-1 text-[10px] text-faint sm:flex">
               <kbd className="rounded-[4px] border border-line bg-surface px-1.5 py-0.5 font-sans text-[9.5px] leading-none">⌘S</kbd>
               {t("settings.save")}
             </span>
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto px-10 py-6">
-          <div className="mx-auto w-full max-w-[760px] space-y-5 pb-4">
+        <div className="min-h-0 flex-1 overflow-auto px-10 py-7">
+          <div
+            className={cx(
+              "mx-auto w-full max-w-[780px] space-y-7",
+              dirty ? "pb-28" : "pb-6",
+            )}
+          >
             {renderBody()}
           </div>
         </div>
 
-        <footer className="shrink-0 border-t border-line bg-surface/85 px-10 py-3 backdrop-blur">
-          <div className="mx-auto flex w-full max-w-[760px] items-center gap-2">
-            <span className={cx("flex items-center gap-2 text-[11px]", dirty ? "text-warn" : "text-faint")}>
-              <span className={cx("h-1.5 w-1.5 rounded-full", dirty ? "bg-warn" : "bg-ok")} aria-hidden />
-              {dirty ? t("settings.unsaved") : t("settings.savedAll")}
-            </span>
-            <Button variant="ghost" onClick={attemptClose} className="ml-auto">
-              {t("settings.close")}
-            </Button>
-            <Button variant="primary" disabled={!settings || busy || !dirty} onClick={() => void save()}>
-              {busy ? t("settings.saving") : t("settings.save")}
-            </Button>
-          </div>
-        </footer>
+        <AnimatePresence>
+          {dirty ? (
+            <motion.div
+              key="savebar"
+              initial={{ opacity: 0, y: 10, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.99 }}
+              transition={{ duration: reduceMotion ? 0 : 0.18, ease: "easeOut" }}
+              className="pointer-events-none absolute inset-x-0 bottom-5 z-20 flex justify-center px-10"
+            >
+              <div className="pointer-events-auto flex w-full max-w-[520px] items-center gap-2 rounded-[12px] border border-line bg-surface/95 py-2 pl-3.5 pr-2 shadow-[0_12px_32px_rgba(16,24,40,0.14)] backdrop-blur-xl">
+                <span className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
+                  <span className="truncate">{t("settings.unsavedCount", { n: changedCount })}</span>
+                </span>
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <Button variant="ghost" size="sm" disabled={busy} onClick={revert}>
+                    {t("settings.undo")}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!settings || busy}
+                    onClick={() => void save()}
+                  >
+                    {busy ? t("settings.saving") : t("settings.save")}
+                  </Button>
+                </div>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
       </main>
 
       <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>

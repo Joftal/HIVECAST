@@ -141,6 +141,7 @@
 | [125-画质动态变化、录制稳定性与兜底](docs/125-画质动态变化、录制稳定性与兜底.md) | 自动画质录制开场后钉住实际 qn，直播中途出现 4K 不跳档；观看菜单打开刷新能力清单，60 秒 TTL 后可发现新增档位；B 站合并 qn_desc/accept_qn 防漏档，清单为空时前端回退通用档位；tsc/build、cargo check、i18n 737 keys、docs 126 files 通过 | 改自动画质录制、画质清单刷新、漏档兜底或排查中途变档时 |
 | [126-全平台画质可用性改造](docs/126-全平台画质可用性改造.md) | 每个平台返回的档位都获得唯一可回选 qn：斗鱼 rate4/8/未知 rate、虎牙 H.264+HEVC 精确 qn、抖音 ld/md/未知 key、B 站杜比/2K/4K 全部开放；虎牙 HEVC 取流改用 codec=265；实测匿名 4K/HDR 403 属账号权限；tsc/build、cargo check、i18n 737 keys、docs 127 files 通过 | 改画质 qn 映射、虎牙 HEVC、B 站杜比或排查“平台有但选不到”时 |
 | [127-平台Cookie实测与全量画质验证](docs/127-平台Cookie实测与全量画质验证.md) | 用四平台 Cookie 通过真实适配器枚举并回选全部画质：B 站 2K/H264 1440p、斗鱼四档、虎牙 H264+2K HEVC、抖音四档均实测成功；虎牙 4K/HDR 带 Cookie 仍 403（权限）；修复 Cookie 平台前缀解析与斗鱼候选 codec；tsc/build、cargo check、i18n 737 keys、docs 128 files 通过 | 验证 Cookie、平台画质权限或排查“平台有但取不到”时 |
+| [128-设置界面UIArc重做](docs/128-设置界面UIArc重做.md) | 按 UIArc settings-page 重做设置页：灰侧栏白主区、中性图标、滑动白卡导航、字段级未保存计数、浮动撤销/保存栏；保留行式设置行与既有机能；tsc/build、i18n 739 keys、app bundle 30.34 MiB、浅深色真机验收通过 | 改设置页布局、保存栏、侧栏导航或设置搜索时 |
 | [84-弹幕录制设置](docs/84-弹幕录制设置.md) | v1.1 已实施并完成 macOS 真机验收：全局录制弹幕总开关 + 礼物/SC/舰长事件开关；设置页独立「弹幕录制」页、`RecordRules` 写入器过滤、开录门禁、0 字节 JSONL 清理与 attach 泄漏修复；247 passed / 17 ignored、597 i18n keys；真实房间验证总开关开/关两场、JSONL/ASS 与 DB 路径；含评审分析、行为矩阵与已知限制 | 改弹幕录制开关、排查 JSONL/ASS 事件缺失或评估验收范围时 |
 | [59-监控录制联动修复四](docs/59-监控录制联动修复四.md) | B1–B9 九条全部修复：未确认收尾只记 finished/stream_ended 但不通知不静默且计入连续失败（3 次冷却 5 分钟）、离线确认去掉 180 秒窗口改纯计数、停录幂等且监控跳过已停会话、续录只丢地址缓存保留共享冷却、设置/房间 2 秒缓存、检测任务 panic 兜底、刷新走 start_checked；4 个新单测 + 真机验收（伪造 ffmpeg 秒退三次进冷却、磁盘红线单次停录、SIGTERM） | 排查误报下播、重复停录或改续录/离线判定时 |
 

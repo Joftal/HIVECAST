@@ -333,6 +333,8 @@
     "notifyAuthHint": "Notify when a cookie expires and needs signing in again",
     "unsaved": "Unsaved changes",
     "unsavedShort": "Unsaved",
+    "unsavedCount": "{{n}} unsaved changes",
+    "undo": "Undo",
     "savedAll": "All changes saved",
     "discardTitle": "Discard unsaved changes?",
     "discardBody": "Your changes will be lost when you close settings.",
