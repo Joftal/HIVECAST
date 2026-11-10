@@ -494,6 +494,13 @@ export async function bilibiliRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("bilibili_refresh_now");
 }
 
+/** 账号凭据或续期状态变化（登录、保存、过期、续期结果写入）。 */
+export const EVENT_ACCOUNT_REFRESH = "account://refresh";
+
+export function onAccountRefresh(handler: () => void): Promise<UnlistenFn> {
+  return listen(EVENT_ACCOUNT_REFRESH, () => handler());
+}
+
 // ---- 关闭与退出 ----
 
 /** 还没结束的录制与后处理任务。 */

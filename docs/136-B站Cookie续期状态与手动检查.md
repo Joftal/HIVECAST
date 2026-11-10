@@ -13,7 +13,7 @@
 | 手动检查 | 无入口 | 账号卡「立即检查」+ `bilibili_refresh_now` 命令 |
 | 最近一次结果 | 进程内、刷新后丢失 | `credential_refresh` 持久化；卡片显示时间、结果、上次轮换 |
 | 续期接口变更 | 只记一条普通失败 | `correspond 404/412` 或缺少 `refresh_csrf` 判定 `key_stale`，提示重新登录 |
-| 登录后的卡片状态 | 常停在「尚未检查」 | 保存/扫码后 900ms、2400ms 各补一次刷新 |
+| 登录后的卡片状态 | 常停在「尚未检查」 | 后端写入续期状态后发 `account://refresh`，前端收到即刷新（137 起改为事件驱动） |
 
 一句话：**续期不再「悄悄在后台跑」——登录会立刻触发，结果看得见，接口变了会明确要求重新登录，而不是假装一切正常。**
 
@@ -133,16 +133,11 @@ pub async fn bilibili_refresh_now(
 
 失败时 toast 显示错误，卡片仍会落一次 `failed`，不会只弹提示不留痕。
 
-### 4.1 登录后的延迟刷新
+### 4.1 登录后的状态刷新（137 起为事件驱动）
 
-保存 Cookie / 扫码成功后，前端先 `await load()`。此时后端刚被唤醒，`cookie/info` 往往还没返回，直接读库会看到「尚未检查」。因此在 `reloadAfterWake` 里补两次快照：
+保存 Cookie / 扫码成功后，前端先 `await load()`。此时后端刚被唤醒，`cookie/info` 往往还没返回，直接读库会看到「尚未检查」。
 
-```ts
-window.setTimeout(() => void load(), 900);
-window.setTimeout(() => void load(), 2400);
-```
-
-这不是轮询，只是覆盖首轮检查的正常延迟；真机实测 `checked_at` 在保存后约 250–500ms 写入，900ms 已经足够，2400ms 兜底慢网络。
+137 起不再用 900ms/2400ms 定时器猜测，而是由后端在续期状态真正落库后发送 `account://refresh`，前端 `onAccountRefresh(() => load())` 收到即刷新。慢请求（HTTP 超时 10 秒）也能正确更新，不需要重新进入账号页。
 
 ---
 
@@ -278,7 +273,7 @@ pnpm app:build                            bundle 30.65 MiB
 1. 只覆盖 B 站。斗鱼、虎牙、抖音仍只有 Cookie 校验，没有自动续期。
 2. `REFRESH_PUBLIC_KEY` 是硬编码的 B 站 Web 公钥；B 站改版后，只有 `correspond` 返回 404/412 或缺少 `refresh_csrf` 才能识别为 `key_stale`，其他形态可能表现为普通 `failed`。
 3. 手动检查是同步网络请求；需要轮换时会依次请求 `cookie/info`、`correspond`、`cookie/refresh`、`confirm/refresh`，按钮会一直显示「检查中…」。
-4. 900ms/2400ms 两次刷新只覆盖常见网络延迟；若首轮检查超过 2.4 秒，卡片仍可能短暂显示「尚未检查」，重新进入账号页或点「立即检查」即可。
+4. 卡片刷新依赖后端 `account://refresh` 事件；后端进程未启动或事件通道异常时，仍需重新进入账号页或点「立即检查」。
 5. 状态只在设置 → 账号卡展示，不在主界面做全局红点或横幅；续期失败不会打断录制。
 6. 后台检查周期仍是 12 小时；唤醒只发生在登录、换 Cookie 与手动检查，不会因为电脑休眠/恢复额外触发。
 7. `last_refreshed_at` 只在真正轮换时前进；普通 fresh 检查不会把它刷新成当前时间。
@@ -295,7 +290,7 @@ pnpm app:build                            bundle 30.65 MiB
 | `src-tauri/src/ipc-types` | `RefreshStatus`、`CredentialInfo.refresh_status` |
 | `src/lib/bindings/RefreshStatus.ts` | 前端绑定 |
 | `src/lib/ipc.ts` | `bilibiliRefreshNow` |
-| `src/features/settings/AccountSection.tsx` | 状态行、手动检查、`reloadAfterWake` |
+| `src/features/settings/AccountSection.tsx` | 状态行、手动检查；137 起改为 `onAccountRefresh` 事件刷新 |
 | `src/i18n/zh-CN.json`、`en-US.json` | `account.refresh*` 文案 |
 
 ---

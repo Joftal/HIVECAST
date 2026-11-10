@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   bilibiliQrPoll,
@@ -8,6 +8,7 @@ import {
   credentialSave,
   credentialsList,
   describeError,
+  onAccountRefresh,
   isTauri,
   type CredentialInfo,
   type QrPoll,
@@ -56,6 +57,10 @@ export default function AccountSection() {
   const [checking, setChecking] = useState(false);
   const [qr, setQr] = useState<QrState | null>(null);
   const [confirming, setConfirming] = useState<Platform | null>(null);
+  /** 每次打开/关闭二维码递增，丢弃迟到的 generate/poll 响应。 */
+  const qrSeq = useRef(0);
+  /** 手动检查的同步闸门：state 更新前连点也不会发第二次请求。 */
+  const checkingRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -70,14 +75,25 @@ export default function AccountSection() {
     void load();
   }, [load]);
 
-  const find = (platform: string) => items?.find((item) => item.platform === platform);
+  // 续期检查可能耗时十几秒，且可能发生在设置页之外。后端写完状态后发事件，
+  // 前端据此重拉，不再用 setTimeout 猜完成时间（也避免卸载后仍触发 load）。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void onAccountRefresh(() => {
+      if (!disposed) void load();
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [load]);
 
-  // 保存 Cookie / 扫码成功后，后端会异步唤醒续期循环；首轮检查通常几百毫秒内完成，
-  // 这里补两次延迟刷新，避免卡片停在「尚未检查续期状态」，也覆盖网络较慢的情况。
-  const reloadAfterWake = () => {
-    window.setTimeout(() => void load(), 900);
-    window.setTimeout(() => void load(), 2400);
-  };
+  const find = (platform: string) => items?.find((item) => item.platform === platform);
 
   const refreshOutcomeLabel = (status: RefreshStatus) => {
     if (status.keyStale) return t("account.refreshOutcome.keyStale");
@@ -94,6 +110,8 @@ export default function AccountSection() {
     });
 
   const checkRefresh = async () => {
+    if (checkingRef.current) return;
+    checkingRef.current = true;
     setChecking(true);
     try {
       const status = await bilibiliRefreshNow();
@@ -104,6 +122,7 @@ export default function AccountSection() {
       // 失败也会落库：重新拉一次，让卡片显示最近一次检查结果。
       await load();
     } finally {
+      checkingRef.current = false;
       setChecking(false);
     }
   };
@@ -116,7 +135,6 @@ export default function AccountSection() {
       setDraft("");
       notify.success(t("account.savedAs", { name: saved.accountName }));
       await load();
-      reloadAfterWake();
     } catch (err) {
       notify.error(err);
     } finally {
@@ -142,11 +160,20 @@ export default function AccountSection() {
     }
   };
 
+  const closeQr = () => {
+    qrSeq.current += 1;
+    setQr(null);
+    setBusy(false);
+  };
+
   const openQr = async () => {
+    const seq = ++qrSeq.current;
     setQr(null);
     setBusy(true);
     try {
       const ticket = await bilibiliQrStart();
+      // 关闭面板或重新打开后，旧请求的响应必须丢弃。
+      if (seq !== qrSeq.current) return;
       setQr({
         ticket,
         poll: null,
@@ -154,9 +181,9 @@ export default function AccountSection() {
         expiresAt: Date.now() + Math.max(1, ticket.expiresIn) * 1000,
       });
     } catch (err) {
-      notify.error(err);
+      if (seq === qrSeq.current) notify.error(err);
     } finally {
-      setBusy(false);
+      if (seq === qrSeq.current) setBusy(false);
     }
   };
 
@@ -191,7 +218,11 @@ export default function AccountSection() {
     const state = qr.poll?.state ?? "pending";
     if (state !== "pending" && state !== "scanned") return;
     let cancelled = false;
+    // 单飞：HTTP 超时 10s，若网络慢，setInterval 会叠出多个在途 poll。
+    let inFlight = false;
     const timer = window.setInterval(async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       try {
         const poll = await bilibiliQrPoll(qr.ticket.qrcodeKey);
         if (cancelled) return;
@@ -209,16 +240,19 @@ export default function AccountSection() {
               }
             : current,
         );
+        // confirmed 的后处理失败、二维码失效都会返回 error/expired，effect 依赖
+        // qrState 变化后自动卸载，不会继续轮询已消费的 key。
         if (poll.state === "confirmed") {
           window.clearInterval(timer);
           notify.success(poll.message);
           setQr(null);
           await load();
-          reloadAfterWake();
         }
       } catch (err) {
         if (cancelled) return;
         setQr((current) => (current ? { ...current, error: describeError(err) } : current));
+      } finally {
+        inFlight = false;
       }
     }, 1600);
     return () => {
@@ -278,7 +312,7 @@ export default function AccountSection() {
         </span>
         <button
           type="button"
-          onClick={() => setQr(null)}
+          onClick={closeQr}
           className="shrink-0 text-[10px] text-faint transition-colors hover:text-ink"
         >
           {t("account.cancel")}
@@ -490,7 +524,7 @@ export default function AccountSection() {
                   onClick={() => {
                     setEditing(platform);
                     setDraft("");
-                    setQr(null);
+                    closeQr();
                   }}
                 >
                   {item ? t("account.updateCookie") : t("account.pasteCookie")}

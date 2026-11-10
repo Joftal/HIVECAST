@@ -40,6 +40,16 @@ JNrRuoEUXpabUzGB8QIDAQAB
 static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 登录/换 Cookie 后唤醒后台续期循环，不必等下一个 12 小时窗口。
 static REFRESH_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// 凭据的「比较 + 写回」必须原子：续期、重新扫码、手动保存、删除都可能并发。
+static CREDENTIAL_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 账号凭据或续期状态发生变化时通知前端重新拉取，替代靠猜时间的 setTimeout。
+pub const EVENT_ACCOUNT_REFRESH: &str = "account://refresh";
+
+fn credential_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    CREDENTIAL_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
@@ -243,6 +253,29 @@ fn render_qr(content: &str) -> Result<String, AppError> {
         .build())
 }
 
+/// 轮询地址必须编码 key：它来自服务端，但命令边界不能假设内容安全。
+fn qr_poll_url(key: &str) -> Result<String, AppError> {
+    if key.len() > 256 {
+        tracing::warn!(platform = "bilibili", len = key.len(), "qrcode_key 过长");
+        return Err(AppError::User("qrcode_key 不合法".into()));
+    }
+    let mut url = reqwest::Url::parse(&format!("{PASSPORT}/x/passport-login/web/qrcode/poll"))
+        .map_err(|err| AppError::Internal(format!("生成扫码轮询地址失败：{err}")))?;
+    url.query_pairs_mut()
+        .append_pair("qrcode_key", key)
+        .append_pair("source", "main-fe-header");
+    Ok(url.to_string())
+}
+
+fn qr_error(message: impl Into<String>) -> QrPoll {
+    QrPoll {
+        state: "error".into(),
+        message: message.into(),
+        expires_in: 0,
+        credential: None,
+    }
+}
+
 /// 轮询扫码状态；已确认时顺带把登录态落库。
 pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppError> {
     let key = qrcode_key.trim();
@@ -250,9 +283,7 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         tracing::warn!(platform = "bilibili", "扫码轮询缺少 qrcode_key");
         return Err(AppError::User("缺少 qrcode_key".into()));
     }
-    let url = format!(
-        "{PASSPORT}/x/passport-login/web/qrcode/poll?qrcode_key={key}&source=main-fe-header"
-    );
+    let url = qr_poll_url(key)?;
     let fetched: http::FetchedWithHeaders<Envelope<PollData>> =
         http::get_json_with_headers(&url, REFERER, &[])
             .await
@@ -296,6 +327,19 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         let from_header = cookies_from_set_cookie(&fetched.set_cookies);
         let from_url = cookies_from_poll_url(&poll_data.url);
         let landing = credential::merge(&from_header, &from_url);
+        // 关键：先校验本次登录自己带来的 Cookie，再与旧账号合并。
+        // 否则换号时旧号的 bili_jct/DedeUserID 会把缺失字段补齐，拼出混号 Cookie。
+        if !has_login_cookies(&landing) {
+            tracing::warn!(
+                platform = "bilibili",
+                has_header = !from_header.is_empty(),
+                has_url = !from_url.is_empty(),
+                "扫码成功但本次登录 Cookie 不完整"
+            );
+            return Ok(qr_error(
+                "登录信息不完整（缺少 SESSDATA/bili_jct/DedeUserID），请刷新二维码",
+            ));
+        }
         let mut base = credential::get("bilibili").unwrap_or_default();
         if poll_data.refresh_token.is_empty() {
             // 重新扫码换号时，旧号的 ac_time_value 不能留给新号。
@@ -305,17 +349,6 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         if !poll_data.refresh_token.is_empty() {
             merged = with_refresh_token(&merged, &poll_data.refresh_token);
         }
-        if !has_login_cookies(&merged) {
-            tracing::warn!(
-                platform = "bilibili",
-                has_header = !from_header.is_empty(),
-                has_url = !from_url.is_empty(),
-                "扫码成功但登录 Cookie 不完整"
-            );
-            return Err(AppError::User(
-                "登录信息不完整（缺少 SESSDATA/bili_jct/DedeUserID），请重新扫码".into(),
-            ));
-        }
         tracing::info!(
             platform = "bilibili",
             from_header = !from_header.is_empty(),
@@ -324,8 +357,20 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
             timestamp = poll_data.timestamp,
             "扫码确认，登录态来源已合并"
         );
-        let account = bilibili_nav(&merged).await?;
-        let row = store_account(db, "bilibili", &merged, &account)?;
+        let account = match bilibili_nav(&merged).await {
+            Ok(account) => account,
+            Err(err) => {
+                tracing::warn!(platform = "bilibili", error = %err, "扫码成功但账号校验失败");
+                return Ok(qr_error(format!("登录校验失败：{err}")));
+            }
+        };
+        let row = match store_account(db, "bilibili", &merged, &account) {
+            Ok(row) => row,
+            Err(err) => {
+                tracing::warn!(platform = "bilibili", error = %err, "扫码成功但保存账号失败");
+                return Ok(qr_error(format!("保存登录状态失败：{err}")));
+            }
+        };
         wake_refresh_loop("扫码登录");
         tracing::info!(platform = "bilibili", account = %row.account_name, uid = %row.uid, "扫码登录成功并已保存");
         return Ok(QrPoll {
@@ -462,6 +507,45 @@ pub enum RefreshOutcome {
     Discarded,
 }
 
+/// 续期时发现 Cookie 已失效：立即把账号标成过期，不等下一次 30 分钟复验。
+fn mark_credential_expired(db: &Db, row: &CredentialRow) -> bool {
+    let _guard = credential_write_guard();
+    if credential::get("bilibili").as_deref() != Some(row.cookie.as_str()) {
+        tracing::info!(platform = "bilibili", "标记过期前发现 Cookie 已更新，跳过");
+        return false;
+    }
+    match db.update_credential_profile(
+        "bilibili",
+        "expired",
+        &row.account_name,
+        row.avatar.as_deref(),
+        now_ts(),
+    ) {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(platform = "bilibili", "标记过期时账号已被删除");
+            false
+        }
+        Err(err) => {
+            tracing::warn!(platform = "bilibili", error = %err, "标记账号过期失败");
+            false
+        }
+    }
+}
+
+fn notify_credential_expired(app: &tauri::AppHandle, account_name: &str) {
+    let notice = AppNotice {
+        kind: "credential_expired".into(),
+        room_id: String::new(),
+        host_name: account_name.to_string(),
+        detail: Some("bilibili".into()),
+        suppress: false,
+    };
+    if let Err(err) = app.emit(crate::recorder::EVENT_APP_NOTICE, notice) {
+        tracing::warn!(platform = "bilibili", error = %err, "账号过期通知发送失败");
+    }
+}
+
 /// 检查并按需刷新 B 站 Web Cookie，同时把本次检查结果落到 credential_refresh。
 ///
 /// 流程见 docs/134：cookie/info → correspondPath → cookie/refresh → confirm/refresh。
@@ -471,12 +555,53 @@ pub async fn refresh_bilibili_cookie(
     db: &Db,
     app: &tauri::AppHandle,
 ) -> Result<RefreshOutcome, AppError> {
+    let checked_cookie = credential::get("bilibili");
     let result = refresh_bilibili_cookie_inner(db, app).await;
-    record_refresh_result(db, &result);
+    // 续期期间用户可能重新扫码/保存/删除；结果只允许写到「本次检查的那份凭据」上。
+    // Refreshed 时 inner 已经写回新 Cookie，所以 expected 要取写回后的值。
+    let expected = match &result {
+        Ok(RefreshOutcome::Refreshed) => credential::get("bilibili"),
+        Ok(RefreshOutcome::NoCredential) => None,
+        _ => checked_cookie,
+    };
+    if record_refresh_result_checked(db, &result, expected.as_deref()) {
+        emit_account_refresh(app);
+    }
     result
 }
 
+fn emit_account_refresh(app: &tauri::AppHandle) {
+    if let Err(err) = app.emit(EVENT_ACCOUNT_REFRESH, ()) {
+        tracing::warn!(error = %err, "账号刷新事件发送失败");
+    }
+}
+
+/// 只有当前凭据仍等于 expected 时才落续期状态，避免旧请求覆盖新账号的状态。
+fn record_refresh_result_checked(
+    db: &Db,
+    result: &Result<RefreshOutcome, AppError>,
+    expected: Option<&str>,
+) -> bool {
+    let _guard = credential_write_guard();
+    let current = credential::get("bilibili");
+    if current.as_deref() != expected {
+        tracing::info!(
+            platform = "bilibili",
+            "续期期间账号已变化，丢弃本次续期状态"
+        );
+        return false;
+    }
+    write_refresh_result(db, result);
+    true
+}
+
+#[cfg(test)]
 fn record_refresh_result(db: &Db, result: &Result<RefreshOutcome, AppError>) {
+    let _guard = credential_write_guard();
+    write_refresh_result(db, result);
+}
+
+fn write_refresh_result(db: &Db, result: &Result<RefreshOutcome, AppError>) {
     match result {
         Ok(RefreshOutcome::NoCredential) => {
             if let Err(err) = db.clear_credential_refresh("bilibili") {
@@ -538,7 +663,7 @@ async fn refresh_bilibili_cookie_inner(
     let Some(row) = rows.into_iter().find(|row| row.platform == "bilibili") else {
         return Ok(RefreshOutcome::NoCredential);
     };
-    let original = row.cookie;
+    let original = row.cookie.clone();
     let Some(old_token) = credential::value(&original, "ac_time_value")
         .filter(|token| !token.is_empty())
         .map(str::to_string)
@@ -562,6 +687,14 @@ async fn refresh_bilibili_cookie_inner(
     let need_refresh = match (info.code, info.data) {
         (0, Some(data)) => data.refresh,
         (-101, _) => {
+            let was_ok = row.status == "ok";
+            if mark_credential_expired(db, &row) {
+                clear_stream_cache(app);
+                if was_ok {
+                    notify_credential_expired(app, &row.account_name);
+                }
+                emit_account_refresh(app);
+            }
             return Err(AppError::User("Cookie 已失效或未登录".into()));
         }
         (code, _) => {
@@ -645,10 +778,17 @@ async fn refresh_bilibili_cookie_inner(
     }
 
     let new_cookie = cookies_from_set_cookie(&refreshed.set_cookies);
-    if !has_login_cookies(&credential::merge(&original, &new_cookie)) {
+    // 只校验本次响应自己带来的字段。若拿 original 合并后再校验，旧 Cookie 永远
+    // 三项齐全，会把「refresh 响应完全没给 Set-Cookie」误判成刷新成功。
+    if !has_login_cookies(&new_cookie) {
+        tracing::warn!(
+            platform = "bilibili",
+            has_header = !refreshed.set_cookies.is_empty(),
+            "续期响应缺少完整的登录 Cookie"
+        );
         return Err(AppError::Platform {
             code: "platform_upstream",
-            message: "刷新响应缺少完整的 Set-Cookie".into(),
+            message: "刷新响应缺少完整的 Set-Cookie（SESSDATA/bili_jct/DedeUserID）".into(),
         });
     }
     let new_token = refreshed
@@ -693,23 +833,27 @@ async fn refresh_bilibili_cookie_inner(
         ),
     }
 
-    // 请求期间用户可能重新扫码/删除账号；任何 await 之后都必须重新比对快照。
-    if credential::get("bilibili").as_deref() != Some(original.as_str()) {
-        tracing::info!(
-            platform = "bilibili",
-            "续期期间 Cookie 已更新，丢弃本轮结果"
-        );
-        return Ok(RefreshOutcome::Discarded);
-    }
-
-    let refreshed_row = CredentialRow {
-        cookie: merged,
-        status: "ok".to_string(),
-        updated_at: now_ts(),
-        ..row
+    // 请求期间用户可能重新扫码/保存/删除账号；比较与写回必须持有同一把写锁，
+    // 否则刚比对完就可能被新登录覆盖，反过来把新登录冲掉。
+    let refreshed_row = {
+        let _guard = credential_write_guard();
+        if credential::get("bilibili").as_deref() != Some(original.as_str()) {
+            tracing::info!(
+                platform = "bilibili",
+                "续期期间 Cookie 已更新，丢弃本轮结果"
+            );
+            return Ok(RefreshOutcome::Discarded);
+        }
+        let refreshed_row = CredentialRow {
+            cookie: merged,
+            status: "ok".to_string(),
+            updated_at: now_ts(),
+            ..row
+        };
+        db.save_credential(&refreshed_row)?;
+        credential::set("bilibili", &refreshed_row.cookie);
+        refreshed_row
     };
-    db.save_credential(&refreshed_row)?;
-    credential::set("bilibili", &refreshed_row.cookie);
     clear_stream_cache(app);
     tracing::info!(
         platform = "bilibili",
@@ -817,6 +961,7 @@ fn store_account(
     account: &Account,
 ) -> Result<CredentialRow, AppError> {
     tracing::debug!(platform, account = %account.name, uid = %account.uid, "保存平台凭据");
+    let _guard = credential_write_guard();
     let row = CredentialRow {
         platform: platform.to_string(),
         account_id: String::new(),
@@ -870,6 +1015,7 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
 }
 
 pub fn delete(db: &Db, platform: &str) -> Result<(), AppError> {
+    let _guard = credential_write_guard();
     db.delete_credential(platform).map_err(|err| {
         tracing::warn!(platform, error = %err, "删除平台凭据失败");
         err
@@ -922,6 +1068,9 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
         // 必须在请求返回后再检查一次，不能在 await 之前取快照。
         match bilibili_nav(&row.cookie).await {
             Ok(account) => {
+                // 比较与写回必须在同一把写锁内：否则刚判断完 Cookie 未变，
+                // 新登录就可能插进来，随后被这次旧复验覆盖账号信息。
+                let _guard = credential_write_guard();
                 let cookie_unchanged =
                     credential::get("bilibili").as_deref() == Some(row.cookie.as_str());
                 if !cookie_unchanged {
@@ -948,6 +1097,7 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                             "B 站登录态复验通过，已更新账号信息"
                         );
                         clear_stream_cache(app);
+                        emit_account_refresh(app);
                     }
                     Ok(false) => {
                         tracing::warn!(platform = "bilibili", "复验通过但账号已被删除，跳过写回")
@@ -984,6 +1134,7 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                     tracing::warn!(platform = "bilibili", "登录态复验暂时不可用，保留原状态");
                     continue;
                 }
+                let _guard = credential_write_guard();
                 let cookie_unchanged =
                     credential::get("bilibili").as_deref() == Some(row.cookie.as_str());
                 if !cookie_unchanged {
@@ -1001,7 +1152,10 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                     row.avatar.as_deref(),
                     now_ts(),
                 ) {
-                    Ok(true) => clear_stream_cache(app),
+                    Ok(true) => {
+                        clear_stream_cache(app);
+                        emit_account_refresh(app);
+                    }
                     Ok(false) => tracing::warn!(
                         platform = "bilibili",
                         account = %account_name,
@@ -1191,6 +1345,41 @@ mod tests {
             .expect("轮询失败");
         println!("poll = {} {}", poll.state, poll.message);
         assert!(matches!(poll.state.as_str(), "pending" | "scanned"));
+    }
+
+    #[test]
+    fn qr_poll_url_encodes_qrcode_key() {
+        let url = qr_poll_url("abc&source=evil").unwrap();
+        assert!(url.contains("qrcode_key=abc%26source%3Devil"));
+        assert_eq!(url.matches("source=").count(), 1);
+        assert!(qr_poll_url(&"x".repeat(257)).is_err());
+        assert_eq!(qr_error("bad").state, "error");
+    }
+
+    #[test]
+    fn qr_landing_needs_its_own_identity_fields() {
+        let old = "SESSDATA=old; bili_jct=oldj; DedeUserID=1";
+        let landing = "SESSDATA=new";
+        // 本次登录只给了 SESSDATA：不能借旧账号的 bili_jct/DedeUserID 通过校验。
+        assert!(!has_login_cookies(landing));
+        assert!(has_login_cookies(&credential::merge(old, landing)));
+        // 完整 landing 才允许合并。
+        let full = "SESSDATA=new; bili_jct=newj; DedeUserID=2";
+        assert!(has_login_cookies(full));
+    }
+
+    #[test]
+    fn refresh_response_must_carry_its_own_login_cookies() {
+        let old = "SESSDATA=old; bili_jct=oldj; DedeUserID=1";
+        let partial = cookies_from_set_cookie(&["SESSDATA=new; Path=/".to_string()]);
+        assert!(!has_login_cookies(&partial));
+        assert!(has_login_cookies(&credential::merge(old, &partial)));
+        let full = cookies_from_set_cookie(&[
+            "SESSDATA=new; Path=/".to_string(),
+            "bili_jct=newj; Path=/".to_string(),
+            "DedeUserID=2; Path=/".to_string(),
+        ]);
+        assert!(has_login_cookies(&full));
     }
 
     #[test]
