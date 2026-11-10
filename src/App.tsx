@@ -3,14 +3,14 @@ import { useTranslation } from "react-i18next";
 import { motion, useReducedMotion } from "motion/react";import { Button, IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
 import { ToastStack } from "./components/arc/toast-stack/toast-stack";
-import { Alert } from "./components/arc/alert/alert";
+import { UndoToast } from "./components/arc/undo-toast/undo-toast";
 import ResizeHandles from "./components/ResizeHandles";
 import MediaPage from "./features/media/MediaPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsView, { type PageKey } from "./features/settings/SettingsView";
 import TasksPage from "./features/tasks/TasksPage";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
-import { setLanguage, type Language } from "./i18n";
+import { detectLanguage, setLanguage, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
 import CloseDialog from "./features/close/CloseDialog";
 import {
@@ -43,11 +43,11 @@ export default function App() {
   const [settingsPage, setSettingsPage] = useState<PageKey | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsChangedCount, setSettingsChangedCount] = useState(0);
-  // 未保存时点了别的页签：记下目标页，用页面内的 Alert 做离开确认。
-  const [settingsLeave, setSettingsLeave] = useState<TabKey | null>(null);
   const [settingsSaving, setSettingsSaving] = useState(false);
-  // SettingsView 把保存函数注册到这里，离开设置的 Alert 直接复用它。
-  const settingsSaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  // 未保存时离开设置：先默认保存，再用底部 Undo toast 给一次反悔机会。
+  const [settingsUndo, setSettingsUndo] = useState<{ before: Settings; count: number } | null>(null);
+  // SettingsView 把保存函数注册到这里；返回保存前的快照，失败返回 null。
+  const settingsSaveRef = useRef<((options?: { quiet?: boolean }) => Promise<Settings | null>) | null>(null);
   // 顶栏改主题/语言时，通知设置页同步本地副本，避免保存时把旧值写回。
   const settingsSyncRef = useRef<((patch: Partial<Settings>) => void) | null>(null);
   // 设置是常规页签，记住进入前的页面，关闭时回到那里。
@@ -80,6 +80,7 @@ export default function App() {
     (page: PageKey | null = null) => {
       if (tab !== "settings") lastTab.current = tab;
       setSettingsPage(page);
+      setSettingsUndo(null);
       setTab("settings");
     },
     [tab],
@@ -90,7 +91,7 @@ export default function App() {
     setSettingsChangedCount(changedCount);
   }, []);
 
-  const registerSettingsSave = useCallback((save: (() => Promise<boolean>) | null) => {
+  const registerSettingsSave = useCallback((save: ((options?: { quiet?: boolean }) => Promise<Settings | null>) | null) => {
     settingsSaveRef.current = save;
   }, []);
 
@@ -99,53 +100,27 @@ export default function App() {
   }, []);
 
   const requestTab = useCallback(
-    (next: TabKey) => {
+    async (next: TabKey) => {
       if (next === tab) return;
       if (tab === "settings" && settingsDirty) {
-        // 不做整屏确认：记下目标页，由右下角的 Alert 接管。
-        setSettingsLeave(next);
+        // 未保存就离开：默认保存，成功后才切页；失败则留在设置页由页面错误提示接管。
+        if (settingsSaving) return;
+        setSettingsSaving(true);
+        const before = (await settingsSaveRef.current?.({ quiet: true })) ?? null;
+        setSettingsSaving(false);
+        if (!before) return;
+        setSettingsDirty(false);
+        setTab(next);
+        setSettingsUndo({ before, count: settingsChangedCount });
         return;
       }
+      if (next === "settings") setSettingsUndo(null);
       setTab(next);
     },
-    [tab, settingsDirty],
+    [tab, settingsDirty, settingsSaving, settingsChangedCount],
   );
 
-  const closeSettingsLeave = useCallback(() => {
-    setSettingsLeave(null);
-    setSettingsSaving(false);
-  }, []);
-
-  const discardSettingsLeave = useCallback(() => {
-    const next = settingsLeave;
-    setSettingsLeave(null);
-    setSettingsSaving(false);
-    setSettingsDirty(false);
-    if (next) setTab(next);
-  }, [settingsLeave]);
-
-  const saveSettingsLeave = useCallback(async () => {
-    const next = settingsLeave;
-    if (!next || settingsSaving) return;
-    setSettingsSaving(true);
-    const saved = (await settingsSaveRef.current?.()) ?? false;
-    if (!saved) {
-      setSettingsSaving(false);
-      return;
-    }
-    setSettingsDirty(false);
-    setSettingsSaving(false);
-    setSettingsLeave(null);
-    setTab(next);
-  }, [settingsLeave, settingsSaving]);
-
-  // 设置已经保存或撤销后，之前被拦下的离开提示就不该继续挂着。
-  useEffect(() => {
-    if (!settingsDirty) {
-      setSettingsLeave(null);
-      setSettingsSaving(false);
-    }
-  }, [settingsDirty]);
+  const dismissSettingsUndo = useCallback(() => setSettingsUndo(null), []);
 
   // 启动和保存设置后都重新探测一次：用户可能刚补上 ffmpeg 或换掉路径。
   const refreshFfmpeg = useCallback(() => {
@@ -158,6 +133,29 @@ export default function App() {
   useEffect(() => {
     refreshFfmpeg();
   }, [refreshFfmpeg]);
+
+  // 撤销刚刚的默认保存：把保存前的快照写回，并同步主题/语言与通知开关。
+  const undoSettingsSave = useCallback(async () => {
+    const pending = settingsUndo;
+    if (!pending) return;
+    setSettingsUndo(null);
+    try {
+      const result = await settingsUpdate(pending.before);
+      notifyRef.current = result;
+      const mode = (result.theme as ThemeMode) ?? "light";
+      if (mode !== theme) {
+        setTheme(mode);
+        setAppearance(applyTheme(mode));
+      }
+      const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
+      setLanguage(nextLanguage);
+      refreshFfmpeg();
+      notify.success(t("settings.undoDone"));
+    } catch (err) {
+      notify.error(err);
+    }
+  }, [settingsUndo, theme, notify, t, refreshFfmpeg]);
+
 
   // ffmpeg 缺失是持久环境问题：用一条不自动消失的顶层 warning toast 代替页面内的横条。
   useEffect(() => {
@@ -423,7 +421,7 @@ export default function App() {
             <button
               key={item.key}
               type="button"
-              onClick={() => requestTab(item.key)}
+              onClick={() => void requestTab(item.key)}
               className={cx(
                 "focus-ring relative px-3 text-[12px] font-medium transition-colors",
                 tab === item.key ? "text-ink" : "text-muted hover:text-ink-soft",
@@ -464,7 +462,7 @@ export default function App() {
             label={t("settings.title")}
             active={tab === "settings"}
             onClick={() => {
-              if (tab === "settings") requestTab(lastTab.current);
+              if (tab === "settings") void requestTab(lastTab.current);
               else openSettings(null);
             }}
           >
@@ -546,30 +544,21 @@ export default function App() {
 
       <ToastStack position="top-center" label={t("toast.region")} />
 
-      {/* 离开设置的确认：Arc Alert 右下角浮层，不铺满屏幕、不占内容布局。 */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-5 z-[70] flex justify-end px-5">
-        <Alert
-          open={settingsLeave !== null}
-          tone="warning"
-          title={settingsSaving ? t("settings.saving") : t("settings.unsavedCount", { n: settingsChangedCount })}
-          className="alert-float pointer-events-auto w-[min(420px,calc(100vw-40px))]"
-          footer={settingsSaving ? null : (
-            <>
-              <Button size="sm" variant="ghost" onClick={closeSettingsLeave}>
-                {t("settings.keepEditing")}
-              </Button>
-              <Button size="sm" variant="danger" onClick={discardSettingsLeave}>
-                {t("settings.discard")}
-              </Button>
-              <Button size="sm" variant="primary" onClick={() => void saveSettingsLeave()}>
-                {t("settings.saveAndLeave")}
-              </Button>
-            </>
-          )}
-        >
-          {settingsSaving ? null : t("settings.leaveBody")}
-        </Alert>
-      </div>
+      {/* 未保存离开时已默认保存；底部 Undo toast 给一次撤销机会，超时或关闭即保留保存结果。 */}
+      <UndoToast
+        open={settingsUndo !== null}
+        title={t("settings.savedTitle")}
+        description={
+          settingsUndo
+            ? settingsUndo.count === 1
+              ? t("settings.savedOne")
+              : t("settings.savedMany", { n: settingsUndo.count })
+            : ""
+        }
+        actionLabel={t("settings.undo")}
+        onUndo={() => void undoSettingsSave()}
+        onDismiss={dismissSettingsUndo}
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { LayoutGroup, motion, useReducedMotion } from "motion/react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
+import { Check, Undo2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { detectLanguage, setLanguage, type Language } from "../../i18n";
 import {
@@ -21,6 +22,7 @@ import {
 } from "../../lib/ipc";
 import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
+import { ButtonGroup } from "../../components/arc/button-group/button-group";
 import { useNotify } from "../../lib/notify";
 import { SearchField } from "../../components/arc/search-field/search-field";
 import { SelectMenu } from "../../components/ui/SelectMenu";
@@ -294,8 +296,8 @@ type Props = {
   initialPage?: PageKey;
   onSaved: (settings: Settings) => void;
   onDirtyChange?: (dirty: boolean, changedCount: number) => void;
-  /** 把保存动作交给 App，让离开设置的 Alert 与页面共用同一个保存入口。 */
-  onRegisterSave?: (save: (() => Promise<boolean>) | null) => void;
+  /** 把保存动作交给 App：离开设置时先默认保存，并记住保存前的值用于撤销。 */
+  onRegisterSave?: (save: ((options?: { quiet?: boolean }) => Promise<Settings | null>) | null) => void;
   /** 顶栏改了主题/语言后，把新值同步进来，避免保存时用旧值覆盖。 */
   onRegisterSync?: (sync: ((patch: Partial<Settings>) => void) | null) => void;
 };
@@ -311,6 +313,7 @@ export default function SettingsView({
   const [page, setPage] = useState<PageKey>(initialPage ?? "account");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [initial, setInitial] = useState("");
+  const [saving, setSaving] = useState(false);
   const [version, setVersion] = useState("");
   const notify = useNotify();
   const [query, setQuery] = useState("");
@@ -426,29 +429,78 @@ export default function SettingsView({
     });
   }, []);
 
-  const save = useCallback(async (): Promise<boolean> => {
-    if (!settings) return false;
-    try {
-      const result = await settingsUpdate(settings);
-      const currentLanguage = i18n.resolvedLanguage?.startsWith("zh") ? "zh-CN" : "en-US";
-      const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
-      setSettings(result);
-      setInitial(JSON.stringify(result));
-      // 和当前界面语言比较，而不是和保存前的本地副本比较：设置页里主动改语言时
-      // local 已经是新值，否则这里会误判为“没变”，保存后界面仍是旧语言。
-      if (nextLanguage !== currentLanguage) setLanguage(nextLanguage);
-      onSaved(result);
-      void loadLogs();
-      void loadFfmpeg();
-      notify.success(t("settings.savedAll"));
-      return true;
-    } catch (err) {
-      notify.error(err);
-      return false;
-    }
-  }, [settings, onSaved, notify, t]);
+  const savingRef = useRef<Promise<Settings | null> | null>(null);
 
-  // 保存按钮只存在于离开设置的 Alert；页面本身不再占一条 sticky 工具条。
+  // 返回保存前的快照，App 用它做「撤销本次保存」；失败返回 null。
+  const save = useCallback((options?: { quiet?: boolean }): Promise<Settings | null> => {
+    const running = savingRef.current;
+    if (running) return running;
+    if (!settings || !initial) return Promise.resolve(null);
+    // 撤销要回到「保存前的数据库值」，也就是脏状态基线 initial；settings 里已经是本次修改后的值。
+    let previous: Settings;
+    try {
+      previous = JSON.parse(initial) as Settings;
+    } catch {
+      return Promise.resolve(null);
+    }
+    const task = (async () => {
+      setSaving(true);
+      try {
+        const result = await settingsUpdate(settings);
+        const currentLanguage = i18n.resolvedLanguage?.startsWith("zh") ? "zh-CN" : "en-US";
+        const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
+        setSettings(result);
+        setInitial(JSON.stringify(result));
+        // 和当前界面语言比较，而不是和保存前的本地副本比较：设置页里主动改语言时
+        // local 已经是新值，否则这里会误判为“没变”，保存后界面仍是旧语言。
+        if (nextLanguage !== currentLanguage) setLanguage(nextLanguage);
+        onSaved(result);
+        void loadLogs();
+        void loadFfmpeg();
+        if (!options?.quiet) notify.success(t("settings.savedAll"));
+        return previous;
+      } catch (err) {
+        notify.error(err);
+        return null;
+      } finally {
+        setSaving(false);
+      }
+    })();
+    savingRef.current = task;
+    void task.finally(() => {
+      if (savingRef.current === task) savingRef.current = null;
+    });
+    return task;
+  }, [settings, initial, i18n, onSaved, loadLogs, loadFfmpeg, notify, t]);
+
+  // 浮层里的「撤销」只回滚本地草稿，不写库；用户随后可以继续编辑或保存。
+  const undoChanges = useCallback(() => {
+    if (!initial) return;
+    try {
+      setSettings(JSON.parse(initial) as Settings);
+    } catch {
+      // initial 只由 JSON.stringify 写入，解析失败时保持现状即可。
+    }
+  }, [initial]);
+
+  const saveItems = useMemo(
+    () => [
+      {
+        id: "undo",
+        label: t("settings.undo"),
+        icon: <Undo2 size={14} strokeWidth={1.9} aria-hidden="true" />,
+        onSelect: undoChanges,
+      },
+      {
+        id: "save",
+        label: t("settings.saveChanges"),
+        icon: <Check size={14} strokeWidth={1.9} aria-hidden="true" />,
+        onSelect: () => void save(),
+      },
+    ],
+    [t, undoChanges, save],
+  );
+
   useEffect(() => {
     onRegisterSave?.(save);
     return () => onRegisterSave?.(null);
@@ -1510,7 +1562,7 @@ export default function SettingsView({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 bg-canvas text-ink">
+    <div className="relative flex min-h-0 flex-1 bg-canvas text-ink">
       <aside className="flex w-[220px] shrink-0 flex-col border-r border-line/80 bg-canvas">
         <div className="shrink-0 px-3 pb-2 pt-4">
           <SearchField
@@ -1582,11 +1634,35 @@ export default function SettingsView({
 
       <main className="flex min-w-0 flex-1 flex-col bg-surface">
         <div className="min-h-0 flex-1 overflow-auto px-8 py-6">
-          <div className="mx-auto w-full max-w-[780px] pb-6">
+          <div className={cx("mx-auto w-full max-w-[780px]", dirty ? "pb-24" : "pb-6")}>
             <div className="space-y-7">{renderBody()}</div>
           </div>
         </div>
       </main>
+
+      {/* 有未保存修改时，保存/撤销浮在内容之上，不占布局；离开设置时同一套保存函数由 App 调用。 */}
+      <AnimatePresence>
+        {dirty ? (
+          <motion.div
+            key="settings-save-dock"
+            initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+            transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38 }}
+            className="pointer-events-none absolute inset-x-0 bottom-5 z-[60] flex justify-center px-5"
+          >
+            <div className="pointer-events-auto max-w-[calc(100vw-40px)]">
+              <ButtonGroup
+                items={saveItems}
+                label={t("settings.pendingChanges")}
+                size="sm"
+                disabled={saving}
+                className="shadow-[var(--shadow-floating)]"
+              />
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
