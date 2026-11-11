@@ -1,6 +1,6 @@
 # 139 · 监控/录制与 Cookie 状态全场景分析
 
-> 状态：**代码路径审查完成**（2026-11-11）；同日 R1/R2/R3/R4/R6/R7 已在 [140](140-监控录制Cookie联动修复.md) 修复，R5 评估后保留现状。本文保留审查时的原始判断，修复细节以 140 为准。结论分三类：**代码确定**、**已有实测**（引用 138）、**待真机复核的风险**。
+> 状态：**代码路径审查完成**（2026-11-11）；同日 R1/R2/R3/R4/R6/R7 已在 [140](140-监控录制Cookie联动修复.md) 修复，R5 评估后保留现状。本文保留审查时的原始判断，修复细节以 140 为准；§11 补充“录制中补 Cookie、轮询与进程生命周期”的直接回答。结论分三类：**代码确定**、**已有实测**（引用 138）、**待真机复核的风险**。
 > 关联：[131-录制状态机与恢复](131-录制状态机与恢复.md)、[132-登录与Cookie](132-登录与Cookie.md)、[136-B站Cookie续期状态与手动检查](136-B站Cookie续期状态与手动检查.md)、[137-B站扫码与Cookie全链路复查](137-B站扫码与Cookie全链路复查.md)、[138-B站三态Cookie与取流审计](138-B站三态Cookie与取流审计.md)。
 
 ---
@@ -214,3 +214,73 @@
 - 本文最初是**代码路径审查**，没有重新做“真实直播 + Cookie 轮转 + 断流”的长时间实验；画质降档/升档的实机表现引用 138 的真实接口与录制数据。修复后的验证状态见 140 §4：单测/DB 回写已覆盖，真实 1080p→720p 断流已在 140 的真机 smoke 中复现并验证。
 - 斗鱼/抖音的 Cookie 链路与 B 站不同，本报告的“Cookie 生效”结论只对 B 站账号 Cookie 成立；虎牙是“有就带”，斗鱼 ffmpeg 只带 `dy_did`，抖音不读 store。
 - 录制质量元数据的修复已涉及 DB schema/事件（140），但媒体库/任务中心尚未展示 `quality_history`；分割片段按完整 history 复制，跨片段展示语义未定。
+
+
+---
+
+## 11. 补充：录制中补 Cookie、30 秒轮询与进程生命周期
+
+### 11.1 时间线
+
+假设监控间隔 30 秒，第 1 秒无 Cookie 自动开录：
+
+| 时刻 | 事件 | 实际行为 |
+| --- | --- | --- |
+| t=0s | 开录解析 | 无 Cookie，B 站返回 `actual_qn=250`；自动档位（默认 40000）把本场锚点 `plan_qn` 钉在 250 |
+| t=1s | ffmpeg 启动 | 地址/headers 已固定，不持有 Cookie；写入 `quality=超清`、history 首段 |
+| t=10s | 保存有效 Cookie | `credential::set` 写入内存；`broker.clear_groups()` 清 groups/infos、epoch+1；**不调用 recorder.stop** |
+| t=30s | 下一次监控轮询 | `room_info_fresh` 跳过 15 秒缓存，HTTP 请求按 URL 注入当前 Cookie；所以这次请求**用的是新 Cookie** |
+| t=30s | 轮询结果处理 | `room_info` 只返回标题/主播/封面/开播状态/在线人数；**没有画质档位**，也不改写 `RecordingInfo` |
+| t=30s | 自动开录判断 | `recorder.is_recording(room.id)==true`，直接跳过 `start_checked`；不会重新取流、不会升级画质 |
+| t=30s+ | 已启动 ffmpeg | 继续用 t=0 的地址和 250 档位录，Cookie 对它没有写入点 |
+
+### 11.2 直接回答
+
+| 问题 | 结论 |
+| --- | --- |
+| 30 秒后的轮询会用新 Cookie 请求吗？ | **会**。保存 Cookie 已清缓存，监控走 `room_info_fresh`，HTTP 层每次请求按域名注入当前 Cookie。 |
+| 轮询下发的“录制信息”会升级画质吗？ | **不会**。轮询只下发房间信息，不包含画质清单；正在录制的 `RecordingInfo.quality` 是本地快照，轮询不碰它。 |
+| 补 Cookie 会中断录制进程吗？ | **不会**。保存/删除 Cookie 只清 Broker 缓存，不停止 ffmpeg。 |
+| 补 Cookie 后本场会自动升到 1080p 吗？ | **默认不会**。自动档位把 `plan_qn` 钉在开录时的实际值 250；后续 respawn 仍请求 250。即使断流重连，也不会升。 |
+| 什么情况下本场会升？ | 用户显式选了 10000/原画，`plan_qn=10000`；断流 respawn 时重新解析，若新 Cookie 有权限就升到 10000。或者停止后重新开录/下一场，新 session 重新取流。 |
+| 常规一场直播只有一个 ffmpeg 吗？ | **任一时刻只有一个**；但同一 session 可能因异常断流换过多个 ffmpeg 子进程。正常分段不会重启进程。 |
+
+### 11.3 为什么轮询不会改录制
+
+1. `/Library/dshproject/HIVECAST/src-tauri/src/monitor.rs:588` 调 `broker.room_info_fresh(&reference)`；`/Library/dshproject/HIVECAST/src-tauri/src/broker.rs:213-217` 明确跳过 15 秒 info 缓存，但只走房间信息接口。
+2. `/Library/dshproject/HIVECAST/src-tauri/src/platform/mod.rs:38-49` 的 `RoomInfo` 只有 `host_name/room_name/avatar_url/cover_url/area_name/is_live/started_at/online/extra`，没有 qn、线路或录制参数。
+3. `/Library/dshproject/HIVECAST/src-tauri/src/monitor.rs:643-650` 的自动开录条件包含 `!recorder.is_recording(&room.id)`；已在录制就直接短路，不会重新 `start_checked`。
+4. 画质只在 `stream_plan` 时解析（开录、respawn、观看新建会话）；`/Library/dshproject/HIVECAST/src-tauri/src/platform/http.rs:207-216` 是请求期注入 Cookie，已经建立的 ffmpeg 连接不会重新请求。
+
+### 11.4 自动档位与显式档位的差别
+
+`/Library/dshproject/HIVECAST/src-tauri/src/recorder.rs` 的 `plan_qn = pinned_qn(record_qn, actual_qn)`：
+
+- **自动档位（requested=0 或 40000）**：`plan_qn=actual_qn`。无 Cookie 开录时 actual=250，整场锚点就是 250；后面补 Cookie、断流重连都还是 250。
+- **显式档位（例如 10000）**：`plan_qn=10000`。无 Cookie 开录 actual=250，但断流重连会重新请求 10000；补 Cookie 后 respawn 可以升回原画。
+- **有效 Cookie 开录（actual=10000）**：自动档位锚点也是 10000；之后 Cookie 失效降成 250，再补 Cookie 后 respawn 仍请求 10000，可以升回。
+
+也就是说，“开录时实际拿到什么档位”决定了自动档位的整场锚点，而不是“用户设置里选的是最高”。
+
+### 11.5 进程生命周期
+
+| 场景 | 是否换 ffmpeg | 是否新 session |
+| --- | --- | --- |
+| 正常直播、无断流 | 否，1 个进程录到底 | 否 |
+| 异常退出/卡死/干净 EOF 复核后续录 | 是，`respawn` 起新进程 | 否，同一个 `session_id`，分片续写 |
+| 按标题/时长/体积分段 | **否**。ffmpeg `-f segment` 持续写 `.partNNNN.ts`，收尾时 `plan_clips` 按边界拆成多个 clip | 否（片段是 session 的子记录） |
+| 手动停止后再开 | 是 | 是，新 session |
+| 主播下播后重新开播 | 是 | 是，新 session |
+| 连续重启预算耗尽 | 不再起新进程 | 本场结束 |
+
+所以“分段必须重启录制进程”在当前实现里不成立：分段是同一个 ffmpeg 的分片输出 + 收尾切分，不是每段重启。真正会重启的只有异常续录。
+
+### 11.6 如果希望补 Cookie 后本场自动升画质
+
+当前做不到“同一个 ffmpeg 热切档位”。可选方案：
+
+1. **改锚点策略**：自动档位不再钉首段实际值，而是保留 40000；respawn 时按新 Cookie 重新解析，能升就升。代价是每次断流都可能换档，history/通知会更频繁。
+2. **受控升级**：补 Cookie 后主动触发一次 respawn，先校验新档位高于当前档位，再换进程。会有几秒断流和分片边界，但 session 不变。
+3. **不自动升**：保持现状，让用户停止后重开，或等下一场。最稳，但“补 Cookie 立即生效”的预期落空。
+
+无论哪种，画质升级都必须换 ffmpeg 进程；不存在“进程不换、码率自动升”的路径。
