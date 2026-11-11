@@ -8,12 +8,18 @@ export type Language = (typeof LANGUAGES)[number];
 
 const STORAGE_KEY = "hivecast.lang";
 
-// 默认跟随系统语言；只区分中英两套，其余回落到英文。
-export function detectLanguage(): Language {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved && (LANGUAGES as readonly string[]).includes(saved)) return saved as Language;
+// 只区分中英两套，其余回落到英文。
+export function detectSystemLanguage(): Language {
   const nav = navigator.language.toLowerCase();
   return nav.startsWith("zh") ? "zh-CN" : "en-US";
+}
+
+// 默认跟随系统语言；localStorage 里存的是「偏好」（具体语言或 system）。
+export function detectLanguage(): Language {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved === "system") return detectSystemLanguage();
+  if (saved && (LANGUAGES as readonly string[]).includes(saved)) return saved as Language;
+  return detectSystemLanguage();
 }
 
 void i18n.use(initReactI18next).init({
@@ -29,6 +35,16 @@ void i18n.use(initReactI18next).init({
 
 export function setLanguage(lang: Language) {
   localStorage.setItem(STORAGE_KEY, lang);
+  applyLanguage(lang);
+}
+
+/// 保存「跟随系统 / 具体语言」这个偏好，并立即应用解析后的语言。
+export function setLanguagePreference(preference: "system" | Language) {
+  localStorage.setItem(STORAGE_KEY, preference);
+  applyLanguage(preference === "system" ? detectSystemLanguage() : preference);
+}
+
+function applyLanguage(lang: Language) {
   void i18n.changeLanguage(lang);
   document.documentElement.lang = lang;
 }

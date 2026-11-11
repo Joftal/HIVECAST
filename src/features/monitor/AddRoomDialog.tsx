@@ -38,16 +38,18 @@ export default function AddRoomDialog({ open, onOpenChange, onAdded }: Props) {
     if (!value || adding) return;
     setAdding(true);
     try {
-      const view = await roomAdd(value, monitor, autoRecord);
+      const result = await roomAdd(value, monitor, autoRecord);
       setInput("");
       setMonitor(true);
       setAutoRecord(true);
       onOpenChange(false);
-      notify.success(
-        t("monitor.added"),
-        view.room.hostName || view.room.title || view.room.roomKey,
-      );
-      await onAdded?.(view);
+      const name = result.room.hostName || result.room.title || result.room.roomKey;
+      if (result.created) {
+        notify.success(t("monitor.added"), name);
+      } else {
+        notify.info(t("monitor.alreadyAdded"), name);
+      }
+      await onAdded?.(result);
     } catch (err) {
       notify.error(err);
     } finally {

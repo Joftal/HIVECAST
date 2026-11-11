@@ -91,6 +91,8 @@ pub struct RoomRecord {
     pub last_session_reason: Option<String>,
     #[ts(type = "number")]
     pub last_session_file_size: i64,
+    /// 最近一场录制实际拿到的清晰度描述（如「2K · FLV · H.264」）；None 表示还没有录制。
+    pub last_session_quality: Option<String>,
     /// 主播本地备注（可当成本地 ID）与标签（逗号分隔）。
     pub note: String,
     pub tags: String,
@@ -192,6 +194,17 @@ pub struct RoomView {
     pub room: RoomRecord,
     pub recording: Option<RecordingInfo>,
     pub error: Option<String>,
+}
+
+/// 添加房间的结果：`created=false` 表示本地已有同一直播间，本次没有新增。
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct AddRoomResult {
+    pub room: RoomRecord,
+    pub recording: Option<RecordingInfo>,
+    pub error: Option<String>,
+    pub created: bool,
 }
 
 /// 一场录制内的一个实际画质区间。

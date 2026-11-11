@@ -236,6 +236,7 @@ impl PlatformAdapter for DouyuAdapter {
             is_live: data.show_status == 1 && data.video_loop == 0,
             started_at: None,
             online: None,
+            stable_id: None,
             extra: json!({
                 "roomId": data.room_id,
                 "showStatus": data.show_status,

@@ -45,6 +45,9 @@ pub struct RoomInfo {
     /// 开播时间（Unix 秒）
     pub started_at: Option<i64>,
     pub online: Option<u64>,
+    /// 平台内稳定标识（B 站真实 room_id）；短号/别名解析后用它做去重键。
+    #[serde(default)]
+    pub stable_id: Option<String>,
     /// 平台原始附加字段，原样透传
     pub extra: serde_json::Value,
 }

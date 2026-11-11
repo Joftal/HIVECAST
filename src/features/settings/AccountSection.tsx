@@ -33,6 +33,7 @@ const REFRESH_OUTCOME_KEY: Record<string, string> = {
   never: "account.refreshOutcome.never",
   fresh: "account.refreshOutcome.fresh",
   refreshed: "account.refreshOutcome.refreshed",
+  confirm_failed: "account.refreshOutcome.confirmFailed",
   failed: "account.refreshOutcome.failed",
   not_refreshable: "account.refreshOutcome.notRefreshable",
   discarded: "account.refreshOutcome.discarded",
@@ -468,6 +469,7 @@ export default function AccountSection() {
                               : t("account.refreshNever")}
                           </p>
                           {(item.refreshStatus.outcome === "failed" ||
+                            item.refreshStatus.outcome === "confirm_failed" ||
                             item.refreshStatus.outcome === "not_refreshable" ||
                             item.refreshStatus.keyStale) &&
                           item.refreshStatus.message ? (

@@ -16,7 +16,7 @@
         "title": "HIVECAST",
         "width": 1320,
         "height": 860,
-        "minWidth": 1040,
+        "minWidth": 1180,
         "minHeight": 680,
         "center": true,
         "resizable": true,

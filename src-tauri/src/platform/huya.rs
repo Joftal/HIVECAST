@@ -114,6 +114,7 @@ impl PlatformAdapter for HuyaAdapter {
             is_live: is_on && !banned,
             started_at,
             online,
+            stable_id: None,
             extra: serde_json::json!({
                 "roomKey": room.room_key,
                 "banned": banned,

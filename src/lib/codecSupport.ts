@@ -13,6 +13,11 @@ export function videoCodecSupported(codec: string | null | undefined): boolean {
   return types.some((type) => MediaSource.isTypeSupported(type));
 }
 
+/** 录制链路（ffmpeg 分片 + 后处理）目前只支持 H.264/H.265；AV1 取流会生成空文件。 */
+export function recordingCodecSupported(codec: string | null | undefined): boolean {
+  return codec !== "av1";
+}
+
 export function codecLabel(codec: string | null | undefined): string {
   if (codec === "h265") return "HEVC";
   if (codec === "av1") return "AV1";

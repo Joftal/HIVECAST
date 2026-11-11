@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo, LogStatus,
-    MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult, QrPoll,
-    QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView, SessionSummary,
-    Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
+    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo,
+    LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
+    QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView,
+    SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo,
+    ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -12,7 +13,7 @@ use tauri_plugin_notification::NotificationExt;
 use crate::db::{now_ts, MediaFilter, MediaHostFilter};
 use crate::error::AppError;
 use crate::monitor::room_ref;
-use crate::platform::resolve_input;
+use crate::platform::{resolve_input, RoomInfo, RoomRef};
 use crate::postprocess;
 use crate::recorder::EVENT_ROOMS_CHANGED;
 use crate::state::AppState;
@@ -77,7 +78,33 @@ pub async fn monitor_status(
         .cloned())
 }
 
-/// 添加房间：纯本地解析 + 拉一次房间信息；同平台同房间号已存在时直接返回已有记录。
+/// 把短号/别名归一成平台稳定 ID，避免同一场直播被录两遍。
+fn canonical_reference(reference: &RoomRef, info: &RoomInfo) -> RoomRef {
+    let Some(stable) = info
+        .stable_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return reference.clone();
+    };
+    if stable == reference.room_key {
+        return reference.clone();
+    }
+    let canonical_url = if reference.platform == "bilibili" {
+        format!("https://live.bilibili.com/{stable}")
+    } else {
+        reference.canonical_url.clone()
+    };
+    RoomRef {
+        platform: reference.platform.clone(),
+        room_key: stable.to_string(),
+        canonical_url,
+        input: reference.input.clone(),
+    }
+}
+
+/// 添加房间：先解析稳定 ID，再查重；同一直播间只保留一条记录。
 #[tauri::command]
 pub async fn room_add(
     app: AppHandle,
@@ -87,34 +114,79 @@ pub async fn room_add(
     monitor: Option<bool>,
     // 是否开播自动录制；仅在监控开启时有效。
     auto_record: Option<bool>,
-) -> Result<RoomView, AppError> {
-    let reference = resolve_input(&input)?;
+) -> Result<AddRoomResult, AppError> {
+    // b23.tv 短链先跟随跳转，拿到真实房间号后再走统一解析。
+    let expanded = crate::platform::bilibili::expand_short_link(&input).await;
+    let reference = resolve_input(expanded.as_deref().unwrap_or(&input))?;
+    let info = state.broker.room_info(&reference).await?;
+    let canonical = canonical_reference(&reference, &info);
     let monitor = monitor.unwrap_or(true);
     // 不监控就没有「自动录制」可言，直接按关闭处理，避免出现看不见的录制。
     let auto_record = monitor && auto_record.unwrap_or(true);
-    if let Some(existing) = state
+
+    // 先按稳定 ID 查；再查旧短号行，把历史数据并到稳定 ID 上。
+    let canonical_existing = state
         .db
-        .find_room(&reference.platform, &reference.room_key)?
-    {
-        // 之前移除过的房间还在库里（历史录像挂在它上面）：这次当恢复处理，
-        // 走下面的插入分支，ON CONFLICT 会清掉软删除标记。
+        .find_room(&canonical.platform, &canonical.room_key)?;
+    let alias_existing = if canonical.room_key != reference.room_key {
+        state
+            .db
+            .find_room(&reference.platform, &reference.room_key)?
+    } else {
+        None
+    };
+    let mut existing = canonical_existing;
+    if let Some(alias) = alias_existing {
+        match existing.take() {
+            None => {
+                state
+                    .db
+                    .rekey_room(&alias.id, &canonical.room_key, &canonical.canonical_url)?;
+                existing = state.db.get_room(&alias.id)?;
+            }
+            Some(canonical_row) if canonical_row.id != alias.id => {
+                // 两边都有记录时，优先保留仍在监控中的那条。
+                let canonical_active = !state.db.room_removed(&canonical_row.id)?;
+                let alias_active = !state.db.room_removed(&alias.id)?;
+                let (keep, drop) = if !canonical_active && alias_active {
+                    (&alias, &canonical_row)
+                } else {
+                    (&canonical_row, &alias)
+                };
+                state.db.merge_room(&keep.id, &drop.id)?;
+                if keep.room_key != canonical.room_key {
+                    state
+                        .db
+                        .rekey_room(&keep.id, &canonical.room_key, &canonical.canonical_url)?;
+                }
+                existing = state.db.get_room(&keep.id)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(existing) = existing {
         if !state.db.room_removed(&existing.id)? {
-            return Ok(RoomView {
-                recording: state.recorder.active(&existing.id),
-                error: state.recorder.last_error(&existing.id),
-                room: existing,
+            state.db.update_room_info(&existing.id, &info)?;
+            let room = state
+                .db
+                .get_room(&existing.id)?
+                .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+            return Ok(AddRoomResult {
+                recording: state.recorder.active(&room.id),
+                error: state.recorder.last_error(&room.id),
+                room,
+                created: false,
             });
         }
     }
 
-    let info = state.broker.room_info(&reference).await?;
     let settings = crate::settings::load(&state.db);
     let timestamp = now_ts();
     let draft = RoomRecord {
         id: uuid::Uuid::new_v4().to_string(),
-        platform: reference.platform.clone(),
-        room_key: reference.room_key.clone(),
-        canonical_url: reference.canonical_url.clone(),
+        platform: canonical.platform.clone(),
+        room_key: canonical.room_key.clone(),
+        canonical_url: canonical.canonical_url.clone(),
         title: info.room_name.clone(),
         host_name: info.host_name.clone(),
         avatar_url: info.avatar_url.clone(),
@@ -136,6 +208,7 @@ pub async fn room_add(
         last_session_status: None,
         last_session_reason: None,
         last_session_file_size: 0,
+        last_session_quality: None,
         note: String::new(),
         tags: String::new(),
         title_include: None,
@@ -167,10 +240,11 @@ pub async fn room_add(
         }
     }
 
-    Ok(RoomView {
+    Ok(AddRoomResult {
         recording: state.recorder.active(&room.id),
         error: state.recorder.last_error(&room.id),
         room,
+        created: true,
     })
 }
 
@@ -268,17 +342,23 @@ pub async fn room_set_auto_record(
     enabled: bool,
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", room_id = %id, enabled, "设置自动录制");
-    state.db.set_auto_record(&id, enabled)?;
     let room = state
         .db
         .get_room(&id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    if enabled && room.monitor_paused {
+        return Err(AppError::User(
+            "监控已暂停，恢复监控后才能开启自动录制".into(),
+        ));
+    }
+    state.db.set_auto_record(&id, enabled)?;
 
     if enabled {
         state.recorder.resume_auto(&id);
     }
     if enabled
         && room.is_live
+        && !room.monitor_paused
         && !state.recorder.is_recording(&id)
         && crate::monitor::auto_record_allowed(&room, &room.title)
     {
@@ -985,6 +1065,37 @@ mod tests {
             source_deleted: false,
             post_error: None,
         }
+    }
+
+    #[test]
+    fn canonical_reference_promotes_bilibili_short_id() {
+        let reference = RoomRef {
+            platform: "bilibili".into(),
+            room_key: "6".into(),
+            canonical_url: "https://live.bilibili.com/6".into(),
+            input: "6".into(),
+        };
+        let info = RoomInfo {
+            host_name: "主播".into(),
+            room_name: "标题".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: None,
+            online: None,
+            stable_id: Some("7734200".into()),
+            extra: serde_json::Value::Null,
+        };
+        let canonical = canonical_reference(&reference, &info);
+        assert_eq!(canonical.room_key, "7734200");
+        assert_eq!(canonical.canonical_url, "https://live.bilibili.com/7734200");
+
+        // 没有稳定 ID 的平台保持原键，避免改变斗鱼/虎牙的行为。
+        let mut no_stable = info;
+        no_stable.stable_id = None;
+        let unchanged = canonical_reference(&reference, &no_stable);
+        assert_eq!(unchanged.room_key, "6");
     }
 
     #[test]

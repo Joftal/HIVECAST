@@ -563,6 +563,7 @@ mod tests {
                         is_live: true,
                         started_at: Some(1),
                         online: None,
+                        stable_id: None,
                         extra: serde_json::Value::Null,
                     }),
                 },

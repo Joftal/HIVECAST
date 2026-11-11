@@ -199,6 +199,7 @@ impl PlatformAdapter for DouyinAdapter {
                 .as_deref()
                 .and_then(parse_count)
                 .or(payload.user_count.map(|count| count.max(0) as u64)),
+            stable_id: None,
             extra: json!({
                 "roomId": payload.id_str,
                 "status": payload.status,

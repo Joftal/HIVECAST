@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "./invoke";
 import type { ActiveTask } from "./bindings/ActiveTask";
+import type { AddRoomResult } from "./bindings/AddRoomResult";
 import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { FfmpegStatus } from "./bindings/FfmpegStatus";
@@ -110,8 +111,8 @@ export async function roomAdd(
   input: string,
   monitor = true,
   autoRecord = true,
-): Promise<RoomView> {
-  return invoke<RoomView>("room_add", { input, monitor, autoRecord });
+): Promise<AddRoomResult> {
+  return invoke<AddRoomResult>("room_add", { input, monitor, autoRecord });
 }
 
 export async function roomRemove(id: string): Promise<void> {

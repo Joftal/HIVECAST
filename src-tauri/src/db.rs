@@ -384,6 +384,58 @@ impl Db {
         .map_err(db_err)
     }
 
+    /// 把旧短号行改挂到平台稳定 ID 上；保留主键，历史 session 不受影响。
+    pub fn rekey_room(
+        &self,
+        id: &str,
+        room_key: &str,
+        canonical_url: &str,
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE room SET room_key = ?2, canonical_url = ?3 WHERE id = ?1",
+                params![id, room_key, canonical_url],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 合并两条指向同一直播间的旧记录：保留 keep，把 drop 的 session/history 迁过去。
+    pub fn merge_room(&self, keep_id: &str, drop_id: &str) -> Result<(), AppError> {
+        if keep_id == drop_id {
+            return Ok(());
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute(
+            "UPDATE room SET
+                note = CASE WHEN COALESCE(note, '') = '' THEN
+                    COALESCE((SELECT note FROM room WHERE id = ?2), '') ELSE note END,
+                tags = CASE WHEN COALESCE(tags, '') = '' THEN
+                    COALESCE((SELECT tags FROM room WHERE id = ?2), '') ELSE tags END,
+                auto_record = MAX(auto_record, COALESCE((SELECT auto_record FROM room WHERE id = ?2), 0)),
+                monitor_paused = MIN(monitor_paused, COALESCE((SELECT monitor_paused FROM room WHERE id = ?2), 0))
+              WHERE id = ?1",
+            params![keep_id, drop_id],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "UPDATE record_session SET room_id = ?1 WHERE room_id = ?2",
+            params![keep_id, drop_id],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "UPDATE task_history SET room_id = ?1 WHERE room_id = ?2",
+            params![keep_id, drop_id],
+        )
+        .map_err(db_err)?;
+        tx.execute("DELETE FROM room WHERE id = ?1", params![drop_id])
+            .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        refresh_room_last_session(&conn, keep_id).map_err(db_err)?;
+        Ok(())
+    }
+
     /// 新房间入库；同平台同房间号视为同一条，更新展示信息并返回。
     pub fn insert_room(&self, room: &RoomRecord, info: &RoomInfo) -> Result<RoomRecord, AppError> {
         let now = now_ts();
@@ -2002,6 +2054,10 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             "ALTER TABLE room ADD COLUMN last_session_file_size INTEGER NOT NULL DEFAULT 0",
         ),
         (
+            "last_session_quality",
+            "ALTER TABLE room ADD COLUMN last_session_quality TEXT",
+        ),
+        (
             "note",
             "ALTER TABLE room ADD COLUMN note TEXT NOT NULL DEFAULT ''",
         ),
@@ -2074,7 +2130,12 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
                     SELECT file_size FROM record_session
                     WHERE room_id = room.id
                     ORDER BY started_at DESC, id DESC LIMIT 1
-                ), 0)",
+                ), 0),
+                last_session_quality = (
+                    SELECT quality FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                )",
             [],
         )
         .map_err(db_err)?;
@@ -2120,7 +2181,12 @@ fn refresh_room_last_session(conn: &Connection, room_id: &str) -> rusqlite::Resu
                 SELECT file_size FROM record_session
                 WHERE room_id = ?1
                 ORDER BY started_at DESC, id DESC LIMIT 1
-            ), 0)
+            ), 0),
+            last_session_quality = (
+                SELECT quality FROM record_session
+                WHERE room_id = ?1
+                ORDER BY started_at DESC, id DESC LIMIT 1
+            )
           WHERE id = ?1",
         params![room_id],
     )?;
@@ -2139,7 +2205,7 @@ const ROOM_SELECT: &str = "SELECT
     last_session_status, last_session_reason, last_session_file_size,
     note, tags, title_include, title_exclude,
     split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
-    created_at, updated_at
+    created_at, updated_at, last_session_quality
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -2187,6 +2253,7 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         notify_error: row.get::<_, Option<i64>>(31)?.map(|value| value != 0),
         created_at: row.get(32)?,
         updated_at: row.get(33)?,
+        last_session_quality: row.get(34)?,
     })
 }
 
@@ -2254,7 +2321,8 @@ mod tests {
                  VALUES ('s-a1', 'rm-a', 1000, 'finished', '/tmp/a1.flv', 100, 1000),
                         ('s-a2', 'rm-a', 3000, 'finished', '/tmp/a2.flv', 300, 2000),
                         ('s-b1', 'rm-b', 2000, 'finished', '/tmp/b1.flv', 50, 500),
-                        ('s-a3', 'rm-a', 4000, 'recording', '/tmp/a3.flv', 999, 0);",
+                        ('s-a3', 'rm-a', 4000, 'recording', '/tmp/a3.flv', 999, 0);
+                 UPDATE record_session SET quality = '2K · FLV · H.264' WHERE id = 's-a3';",
             )
             .expect("播种媒体库失败");
     }
@@ -2276,6 +2344,7 @@ mod tests {
         assert_eq!(a.last_session_id.as_deref(), Some("s-a3"));
         assert_eq!(a.last_session_started_at, Some(4000));
         assert_eq!(a.last_session_duration_ms, 0);
+        assert_eq!(a.last_session_quality.as_deref(), Some("2K · FLV · H.264"));
         let b = rooms
             .iter()
             .find(|room| room.id == "rm-b")
@@ -2283,6 +2352,42 @@ mod tests {
         assert_eq!(b.last_session_id.as_deref(), Some("s-b1"));
         assert_eq!(b.last_session_started_at, Some(2000));
         assert_eq!(b.last_session_duration_ms, 500);
+    }
+
+    #[test]
+    fn merging_alias_room_keeps_history_and_preferred_flags() {
+        let (db, _path) = temp_db("merge-room");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room
+                    (id, platform, room_key, canonical_url, host_name, title, note, tags, auto_record, monitor_paused, created_at, updated_at)
+                 VALUES
+                    ('keep', 'bilibili', '6', 'https://live.bilibili.com/6', '主播', '短号', '', 'LOL', 0, 1, 0, 0),
+                    ('drop', 'bilibili', '7734200', 'https://live.bilibili.com/7734200', '主播', '真号', '备注', '', 1, 0, 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, quality)
+                 VALUES ('s-drop', 'drop', 100, 'finished', '/tmp/drop.flv', 10, 1000, '原画 · FLV · H.264');",
+            )
+            .expect("播种房间失败");
+
+        db.merge_room("keep", "drop").expect("合并失败");
+        db.rekey_room("keep", "7734200", "https://live.bilibili.com/7734200")
+            .expect("改键失败");
+
+        let room = db
+            .get_room("keep")
+            .expect("读房间失败")
+            .expect("保留行存在");
+        assert_eq!(room.room_key, "7734200");
+        assert_eq!(room.note, "备注", "保留行备注为空时继承被合并行");
+        assert_eq!(room.tags, "LOL", "保留行已有标签不被覆盖");
+        assert!(room.auto_record, "两边任一开启自动录制就保持开启");
+        assert!(!room.monitor_paused, "两边任一在监控就保持监控");
+        assert_eq!(room.last_session_id.as_deref(), Some("s-drop"));
+        assert_eq!(
+            room.last_session_quality.as_deref(),
+            Some("原画 · FLV · H.264")
+        );
+        assert!(db.get_room("drop").expect("查询失败").is_none());
     }
 
     #[test]
@@ -2716,6 +2821,7 @@ mod tests {
             is_live: true,
             started_at: Some(5000),
             online: Some(1),
+            stable_id: None,
             extra: serde_json::Value::Null,
         };
         db.insert_room(&existing, &info).expect("恢复房间失败");

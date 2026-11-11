@@ -2377,7 +2377,7 @@ impl Recorder {
             .unwrap_or_else(|| active.recording.session_id.clone());
         let _post_job = jobs.begin("post", post_label, Some(active.recording.quality.clone()));
         // 状态先算出来：分割清单要把最终状态写进去，崩溃恢复才能还原。
-        let (final_status, reason, error) = match stop_reason.as_deref() {
+        let (mut final_status, mut reason, mut error) = match stop_reason.as_deref() {
             Some("stopped") => ("finished", "stopped", None),
             Some("stream_ended") => ("finished", "stream_ended", None),
             Some("app_exit") => ("aborted", "app_exit", None),
@@ -2561,6 +2561,16 @@ impl Recorder {
             ended_at: crate::db::now_ts(),
         });
         let (stored_path, file_size) = (first.path, first.size);
+        // 0 字节不能算「录制完成」：否则任务中心显示成功、媒体库留一个空文件，
+        // 监控也会把这次当成正常结束。保留清单让启动恢复还能重试。
+        if final_status == "finished" {
+            if let Some((empty_reason, empty_error)) = empty_recording_failure(file_size) {
+                tracing::warn!(room_id, "录制没有产生任何数据，标记为失败");
+                final_status = "failed";
+                reason = empty_reason;
+                error = empty_error;
+            }
+        }
         // 片段历史是否全部落库；失败时不能删清单，否则恢复逻辑再没有重试依据。
         let mut history_ok = stored_path.is_file() && file_size > 0;
         if !history_ok {
@@ -4080,19 +4090,20 @@ fn candidate_qn(candidate: &StreamCandidate) -> u32 {
         .unwrap_or(0)
 }
 
-/// 编码/源流格式是否真的变了。编码未知时按同一类处理：平台没给 codec
-/// 不代表换了编码，贸然新开会话会让每次升级都多出一条录像。
+/// 0 字节的「正常结束」不能算成功：媒体库里留空文件、任务中心显示完成都会误导。
+fn empty_recording_failure(file_size: i64) -> Option<(&'static str, Option<String>)> {
+    (file_size <= 0).then(|| ("empty", Some("录制没有产生任何数据".to_string())))
+}
+
+/// 编码/源流格式是否真的变了。平台没给 codec 时按「已变化」处理：
+/// 未知 → HEVC/AV1 若继续写同一容器，收尾合并可能得到非法文件；宁可多分一段。
 fn container_changed(
     current_codec: Option<Codec>,
     next_codec: Option<Codec>,
     current_format: StreamFormat,
     next_format: StreamFormat,
 ) -> bool {
-    let codec_changed = match (current_codec, next_codec) {
-        (Some(current), Some(next)) => current != next,
-        _ => false,
-    };
-    codec_changed || current_format != next_format
+    current_codec != next_codec || current_format != next_format
 }
 
 /// 续录的实际档位是否变了：qn 可用时比 qn，平台没给 qn 时退回画质名。
@@ -4631,6 +4642,14 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_finished_recording_is_downgraded() {
+        let (reason, error) = empty_recording_failure(0).expect("0 字节应判失败");
+        assert_eq!(reason, "empty");
+        assert!(error.unwrap().contains("没有产生任何数据"));
+        assert!(empty_recording_failure(1).is_none());
+    }
+
+    #[test]
     fn container_change_only_when_codec_or_format_really_differs() {
         use crate::platform::{Codec, StreamFormat};
         assert!(container_changed(
@@ -4652,14 +4671,20 @@ mod tests {
             StreamFormat::Flv
         ));
         assert!(
-            !container_changed(
+            container_changed(
                 None,
                 Some(Codec::H265),
                 StreamFormat::Flv,
                 StreamFormat::Flv
             ),
-            "编码未知时不要误判成换编码"
+            "编码未知 → HEVC 必须分段，不能继续写同一容器"
         );
+        assert!(!container_changed(
+            None,
+            None,
+            StreamFormat::Flv,
+            StreamFormat::Flv
+        ));
     }
 
     #[test]
@@ -5245,6 +5270,7 @@ mod tests {
                 last_session_status: None,
                 last_session_reason: None,
                 last_session_file_size: 0,
+                last_session_quality: None,
                 note: String::new(),
                 tags: String::new(),
                 title_include: None,
@@ -5265,6 +5291,7 @@ mod tests {
                 is_live: true,
                 started_at: Some(1),
                 online: Some(1),
+                stable_id: None,
                 extra: serde_json::Value::Null,
             },
         )
@@ -5394,6 +5421,7 @@ mod tests {
                 last_session_status: None,
                 last_session_reason: None,
                 last_session_file_size: 0,
+                last_session_quality: None,
                 note: String::new(),
                 tags: String::new(),
                 title_include: None,
@@ -5414,6 +5442,7 @@ mod tests {
                 is_live: true,
                 started_at: Some(1),
                 online: Some(1),
+                stable_id: None,
                 extra: serde_json::Value::Null,
             },
         )

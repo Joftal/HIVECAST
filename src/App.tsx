@@ -10,7 +10,7 @@ import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsView, { type PageKey } from "./features/settings/SettingsView";
 import TasksPage from "./features/tasks/TasksPage";
 import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
-import { detectLanguage, setLanguage, type Language } from "./i18n";
+import { setLanguage, setLanguagePreference, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
 import CloseDialog from "./features/close/CloseDialog";
 import {
@@ -147,8 +147,7 @@ export default function App() {
         setTheme(mode);
         setAppearance(applyTheme(mode));
       }
-      const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
-      setLanguage(nextLanguage);
+      setLanguagePreference(result.language === "system" ? "system" : (result.language as Language));
       refreshFfmpeg();
       notify.success(t("settings.undoDone"));
     } catch (err) {
@@ -185,7 +184,7 @@ export default function App() {
     void settingsGet()
       .then((settings) => {
         notifyRef.current = settings;
-        if (settings.language !== "system") setLanguage(settings.language as Language);
+        setLanguagePreference(settings.language === "system" ? "system" : (settings.language as Language));
         const mode = (settings.theme as ThemeMode) ?? "light";
         setTheme(mode);
         setAppearance(applyTheme(mode));

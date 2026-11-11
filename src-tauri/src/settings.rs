@@ -401,6 +401,8 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     db.set_setting(KEY_NOTIFY_AUTH, &settings.notify_auth.to_string())?;
     db.set_setting(KEY_LANGUAGE, &settings.language)?;
     db.set_setting(KEY_THEME, &settings.theme)?;
+    db.set_setting(KEY_CLOSE_ACTION, &settings.close_action)?;
+    db.set_setting(KEY_PREVENT_SLEEP, &settings.prevent_sleep.to_string())?;
     db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
     db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
     db.set_setting(KEY_POST_MODE, &settings.post_mode)?;
@@ -724,8 +726,8 @@ mod tests {
                 post_convert_format: "mkv".into(),
                 post_delete_source: true,
                 post_custom_output_ext: ".MKV".into(),
-                close_action: "tray".into(),
-                prevent_sleep: false,
+                close_action: CLOSE_QUIT.into(),
+                prevent_sleep: true,
                 record_danmaku: false,
                 record_danmaku_gift: false,
                 record_danmaku_super_chat: true,
@@ -774,8 +776,8 @@ mod tests {
         assert_eq!(loaded.post_convert_format, "mkv");
         assert!(loaded.post_delete_source);
         assert_eq!(loaded.post_custom_output_ext, "mkv");
-        assert_eq!(loaded.close_action, CLOSE_TRAY, "未知关闭行为回落到托盘");
-        assert!(!loaded.prevent_sleep);
+        assert_eq!(loaded.close_action, CLOSE_QUIT, "关闭行为应落库并回读");
+        assert!(loaded.prevent_sleep, "防休眠开关应落库并回读");
         assert!(!loaded.record_danmaku, "弹幕总开关应原样保存");
         assert!(!loaded.record_danmaku_gift);
         assert!(loaded.record_danmaku_super_chat);

@@ -641,6 +641,7 @@ async fn check_room(
                 // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位；
                 // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
                 if room.auto_record
+                    && !room.monitor_paused
                     && auto_record_allowed(&room, &info.room_name)
                     && !recorder.is_recording(&room.id)
                     && !recorder.auto_suppressed(&room.id, info.started_at)

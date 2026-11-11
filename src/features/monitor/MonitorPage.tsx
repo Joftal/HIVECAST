@@ -45,7 +45,7 @@ import {
   type RoomView,
   type SessionSummary,
 } from "../../lib/ipc";
-import { codecLabel, videoCodecSupported } from "../../lib/codecSupport";
+import { codecLabel, recordingCodecSupported, videoCodecSupported } from "../../lib/codecSupport";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
 const PLATFORM_DOT: Record<string, string> = {
@@ -56,7 +56,14 @@ const PLATFORM_DOT: Record<string, string> = {
 };
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。*/
-const COLUMNS = "120px 66px 72px 84px minmax(0,1fr) 120px 140px 76px 138px 148px";
+const COLUMNS = "120px 58px 60px 58px minmax(0,1fr) 104px 104px 74px 120px 140px";
+// 搜索时把平台中文名与常见别名一起算进去，输入「B站」也能命中。
+const PLATFORM_ALIASES: Record<string, string> = {
+  bilibili: "b站 bilibili 哔哩哔哩",
+  douyu: "斗鱼 douyu",
+  huya: "虎牙 huya",
+  douyin: "抖音 douyin",
+};
 // 行内动作组比 Arc 默认 sm 再紧一档：英文 Watch/Record 也能放进 148px 操作列。
 const ROW_ACTION_GROUP_STYLE = {
   "--fbg-h": "28px",
@@ -512,6 +519,8 @@ export default function MonitorPage({
 
   // 详情是「录制详情」抽屉，默认不展开；点行不再自动打开。
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 同一个抽屉既展示录制详情，也承载行菜单的「直播间设置」。
+  const [detailMode, setDetailMode] = useState<"detail" | "settings">("detail");
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
@@ -682,7 +691,18 @@ export default function MonitorPage({
       if (tag !== "all" && !parseTags(view.room.tags).includes(tag)) return false;
       if (onlyRecording && !view.recording) return false;
       if (!needle) return true;
-      return (view.room.title + " " + view.room.hostName + " " + view.room.roomKey + " " + view.room.note + " " + view.room.tags)
+      return [
+        view.room.title,
+        view.room.hostName,
+        view.room.roomKey,
+        view.room.note,
+        view.room.tags,
+        view.room.areaName ?? "",
+        view.room.canonicalUrl,
+        t("platformName." + view.room.platform, { defaultValue: view.room.platform }),
+        PLATFORM_ALIASES[view.room.platform] ?? "",
+      ]
+        .join(" ")
         .toLowerCase()
         .includes(needle);
     });
@@ -696,7 +716,7 @@ export default function MonitorPage({
       const diff = rank(b) - rank(a);
       return (sort.dir === "asc" ? diff : -diff) || byName(a, b);
     });
-  }, [views, query, platform, tag, onlyRecording, sort, collator]);
+  }, [views, query, platform, tag, onlyRecording, sort, collator, t]);
 
   // 分屏入口：顺序沿用当前表格顺序（筛选 + 排序），余下的按房间列表补齐。
   const pickedIds = useMemo(() => {
@@ -830,7 +850,7 @@ export default function MonitorPage({
     }
   };
 
-  const qualityOptionsFor = (roomId: string, qn: number, gateCodec: boolean) => {
+  const qualityOptionsFor = (roomId: string, qn: number, mode: "record" | "view") => {
     const auto = { value: "0", label: t("monitor.qn.0") };
     if (!qualities || optionsKey?.roomId !== roomId) {
       // 能力清单未到时只给「自动」和当前档位，不猜平台专有 qn。
@@ -838,14 +858,17 @@ export default function MonitorPage({
       return [auto, { value: String(qn), label: t("monitor.qn." + qn, { defaultValue: String(qn) }) }];
     }
     const options = qualities.map((quality) => {
-      const supported = !gateCodec || videoCodecSupported(quality.codec);
+      const supported =
+        mode === "view" ? videoCodecSupported(quality.codec) : recordingCodecSupported(quality.codec);
       return {
         value: String(quality.qn),
         label: quality.label,
         hint: !quality.available
           ? (quality.hint ?? t("watch.qualityUnavailable"))
           : !supported
-            ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
+            ? mode === "view"
+              ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
+              : t("monitor.recordingCodecUnsupported", { codec: codecLabel(quality.codec) })
             : (quality.hint ?? undefined),
         disabled: !quality.available || !supported,
       };
@@ -1003,9 +1026,17 @@ export default function MonitorPage({
         <span className="min-w-0">
           <InlineTags room={room} />
         </span>
-        <span className="truncate text-[12.5px] text-muted">
-          {t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
-        </span>
+        <button
+          type="button"
+          onClick={() => {
+            setDetailMode("settings");
+            setSelectedId(room.id);
+          }}
+          title={`${t("monitor.actualQuality")}: ${room.lastSessionQuality ?? "—"}\n${t("monitor.targetQuality")}: ${t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}`}
+          className="focus-ring truncate rounded-ctl text-left text-[12.5px] text-muted transition-colors hover:text-ink"
+        >
+          {room.lastSessionQuality ?? t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
+        </button>
         <span className="tnum text-right text-[12.5px] leading-4 text-ink-soft">
           {startedAt ? (
             <>
@@ -1093,7 +1124,10 @@ export default function MonitorPage({
               {
                 key: "detail",
                 label: t("monitor.recordDetail"),
-                onSelect: () => setSelectedId(room.id),
+                onSelect: () => {
+                  setDetailMode("detail");
+                  setSelectedId(room.id);
+                },
               },
               {
                 key: "refresh",
@@ -1103,7 +1137,10 @@ export default function MonitorPage({
               {
                 key: "settings",
                 label: t("monitor.roomSettings"),
-                onSelect: () => notify.info(t("monitor.roomSettingsSoon")),
+                onSelect: () => {
+                  setDetailMode("settings");
+                  setSelectedId(room.id);
+                },
               },
               {
                 key: "pause",
@@ -1114,6 +1151,7 @@ export default function MonitorPage({
               {
                 key: "auto-record",
                 label: room.autoRecord ? t("monitor.autoRecordOff") : t("monitor.autoRecordOn"),
+                disabled: room.monitorPaused,
                 onSelect: () =>
                   void run(room.id, async () => {
                     await roomSetAutoRecord(room.id, !room.autoRecord);
@@ -1167,7 +1205,9 @@ export default function MonitorPage({
         <aside className="relative flex h-full w-[min(440px,94vw)] animate-sheet flex-col border-l border-line bg-surface shadow-2xl">
           <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
             <div className="min-w-0">
-              <h2 className="text-[14px] font-semibold text-ink">{t("monitor.recordDetail")}</h2>
+              <h2 className="text-[14px] font-semibold text-ink">
+                {detailMode === "settings" ? t("monitor.roomSettings") : t("monitor.recordDetail")}
+              </h2>
               <p className="mt-0.5 truncate text-[11.5px] leading-4 text-muted">
                 {t("platformName." + room.platform)} · {room.roomKey}
               </p>
@@ -1407,7 +1447,7 @@ export default function MonitorPage({
                 </div>
                 <Switch
                   checked={room.autoRecord}
-                  disabled={busy}
+                  disabled={busy || room.monitorPaused}
                   onChange={(next) =>
                     void run(room.id, async () => {
                       await roomSetAutoRecord(room.id, next);
@@ -1457,6 +1497,7 @@ export default function MonitorPage({
                 { label: t("monitor.colArea"), value: room.areaName ?? "—" },
                 { label: t("monitor.statOnline"), value: room.online ? compactNumber(room.online, locale) : "—" },
                 { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
+                { label: t("monitor.actualQuality"), value: room.lastSessionQuality ?? "—" },
                 { label: t("monitor.detailRecorded"), value: recordedLabel },
               ].map((item, index) => (
                 <div
@@ -1545,7 +1586,7 @@ export default function MonitorPage({
                   onOpenChange={(open) => {
                     if (open) void loadOptions(room.id, room.recordQn, true);
                   }}
-                  options={qualityOptionsFor(room.id, room.recordQn, false)}
+                  options={qualityOptionsFor(room.id, room.recordQn, "record")}
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>
@@ -1559,7 +1600,7 @@ export default function MonitorPage({
                   onOpenChange={(open) => {
                     if (open) void loadOptions(room.id, room.recordQn, true);
                   }}
-                  options={qualityOptionsFor(room.id, room.viewQn, true)}
+                  options={qualityOptionsFor(room.id, room.viewQn, "view")}
                   className="min-w-0 flex-1 justify-between"
                 />
               </div>

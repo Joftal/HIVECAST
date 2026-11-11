@@ -503,6 +503,8 @@ pub enum RefreshOutcome {
     Fresh,
     /// 已完成轮换并写回
     Refreshed,
+    /// Cookie 已轮换并写回，但 confirm 接口失败：新 Cookie 可用，旧 refresh token 可能未作废
+    ConfirmFailed,
     /// 请求期间用户重新登录/删除了账号，本轮结果丢弃
     Discarded,
 }
@@ -563,7 +565,9 @@ pub async fn refresh_bilibili_cookie(
     // 续期期间用户可能重新扫码/保存/删除；结果只允许写到「本次检查的那份凭据」上。
     // Refreshed 时 inner 已经写回新 Cookie，所以 expected 要取写回后的值。
     let expected = match &result {
-        Ok(RefreshOutcome::Refreshed) => credential::get("bilibili"),
+        Ok(RefreshOutcome::Refreshed) | Ok(RefreshOutcome::ConfirmFailed) => {
+            credential::get("bilibili")
+        }
         Ok(RefreshOutcome::NoCredential) => None,
         _ => checked_cookie,
     };
@@ -624,6 +628,10 @@ fn write_refresh_result(db: &Db, result: &Result<RefreshOutcome, AppError>) {
                 ),
                 RefreshOutcome::Fresh => ("fresh", None),
                 RefreshOutcome::Refreshed => ("refreshed", None),
+                RefreshOutcome::ConfirmFailed => (
+                    "confirm_failed",
+                    Some("Cookie 已轮换，但确认续期失败；若之后提示未登录，请重新扫码".to_string()),
+                ),
                 RefreshOutcome::NoCredential | RefreshOutcome::Discarded => unreachable!(),
             };
             let status = RefreshStatus {
@@ -631,7 +639,10 @@ fn write_refresh_result(db: &Db, result: &Result<RefreshOutcome, AppError>) {
                 outcome: name.to_string(),
                 message,
                 key_stale: false,
-                last_refreshed_at: if *outcome == RefreshOutcome::Refreshed {
+                last_refreshed_at: if matches!(
+                    outcome,
+                    RefreshOutcome::Refreshed | RefreshOutcome::ConfirmFailed
+                ) {
                     now
                 } else {
                     previous.last_refreshed_at
@@ -813,6 +824,7 @@ async fn refresh_bilibili_cookie_inner(
     // 确认接口必须用「新 bili_jct + 旧 refresh_token」，顺序错了会 400。
     let confirm_url = format!("{PASSPORT}/x/passport-login/web/confirm/refresh");
     let confirm_form = [("csrf", new_jct), ("refresh_token", old_token.clone())];
+    let mut confirm_failed = false;
     match http::post_form_json_with_headers::<Envelope<serde_json::Value>>(
         &confirm_url,
         REFERER,
@@ -823,17 +835,23 @@ async fn refresh_bilibili_cookie_inner(
     .await
     {
         Ok(confirmed) if confirmed.data.code == 0 => {}
-        Ok(confirmed) => tracing::warn!(
-            platform = "bilibili",
-            code = confirmed.data.code,
-            message = %confirmed.data.message.unwrap_or_default(),
-            "确认续期失败，保留已轮换的新 Cookie 等下次重试"
-        ),
-        Err(err) => tracing::warn!(
-            platform = "bilibili",
-            error = %err,
-            "确认续期请求失败，保留已轮换的新 Cookie 等下次重试"
-        ),
+        Ok(confirmed) => {
+            confirm_failed = true;
+            tracing::warn!(
+                platform = "bilibili",
+                code = confirmed.data.code,
+                message = %confirmed.data.message.unwrap_or_default(),
+                "确认续期失败，保留已轮换的新 Cookie 等下次重试"
+            )
+        }
+        Err(err) => {
+            confirm_failed = true;
+            tracing::warn!(
+                platform = "bilibili",
+                error = %err,
+                "确认续期请求失败，保留已轮换的新 Cookie 等下次重试"
+            )
+        }
     }
 
     // 请求期间用户可能重新扫码/保存/删除账号；比较与写回必须持有同一把写锁，
@@ -864,7 +882,11 @@ async fn refresh_bilibili_cookie_inner(
         refreshable = credential::has_refresh_token(&refreshed_row.cookie),
         "B 站 Cookie 续期成功"
     );
-    Ok(RefreshOutcome::Refreshed)
+    Ok(if confirm_failed {
+        RefreshOutcome::ConfirmFailed
+    } else {
+        RefreshOutcome::Refreshed
+    })
 }
 
 /// 后台续期循环：正常每 12 小时问一次，失败按 1h → 6h → 24h 退避，并加抖动。
@@ -1449,9 +1471,19 @@ mod tests {
         assert!(!status.key_stale);
         assert_eq!(status.last_refreshed_at, status.checked_at);
 
+        // confirm 失败：Cookie 已轮换，仍推进轮换时间，但状态明确标成 confirm_failed。
+        record_refresh_result(&db, &Ok(RefreshOutcome::ConfirmFailed));
+        let status = load_refresh_status(&db, "bilibili");
+        assert_eq!(status.outcome, "confirm_failed");
+        assert_eq!(status.last_refreshed_at, status.checked_at);
+        assert!(status.message.as_deref().unwrap().contains("确认续期失败"));
+
         // 被丢弃的结果不能覆盖新账号的状态。
         record_refresh_result(&db, &Ok(RefreshOutcome::Discarded));
-        assert_eq!(load_refresh_status(&db, "bilibili").outcome, "refreshed");
+        assert_eq!(
+            load_refresh_status(&db, "bilibili").outcome,
+            "confirm_failed"
+        );
 
         // 账号不存在时清空旧状态，下次登录从 never 开始。
         record_refresh_result(&db, &Ok(RefreshOutcome::NoCredential));

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { Check, Undo2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { detectLanguage, setLanguage, type Language } from "../../i18n";
+import { setLanguagePreference, type Language } from "../../i18n";
 import {
   appInfo,
   ffmpegStatus,
@@ -308,7 +308,7 @@ export default function SettingsView({
   onRegisterSave,
   onRegisterSync,
 }: Props) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [page, setPage] = useState<PageKey>(initialPage ?? "account");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [initial, setInitial] = useState("");
@@ -446,13 +446,11 @@ export default function SettingsView({
       setSaving(true);
       try {
         const result = await settingsUpdate(settings);
-        const currentLanguage = i18n.resolvedLanguage?.startsWith("zh") ? "zh-CN" : "en-US";
-        const nextLanguage = result.language === "system" ? detectLanguage() : (result.language as Language);
         setSettings(result);
         setInitial(JSON.stringify(result));
-        // 和当前界面语言比较，而不是和保存前的本地副本比较：设置页里主动改语言时
-        // local 已经是新值，否则这里会误判为“没变”，保存后界面仍是旧语言。
-        if (nextLanguage !== currentLanguage) setLanguage(nextLanguage);
+        // 存活的是「偏好」而不是解析后的语言：选「跟随系统」后再次保存也要把 system 写进 localStorage，
+        // 否则下次启动仍会读到上一次的具体语言。
+        setLanguagePreference(result.language === "system" ? "system" : (result.language as Language));
         onSaved(result);
         void loadLogs();
         void loadFfmpeg();
@@ -470,7 +468,7 @@ export default function SettingsView({
       if (savingRef.current === task) savingRef.current = null;
     });
     return task;
-  }, [settings, initial, i18n, onSaved, loadLogs, loadFfmpeg, notify, t]);
+  }, [settings, initial, onSaved, loadLogs, loadFfmpeg, notify, t]);
 
   // 浮层里的「撤销」只回滚本地草稿，不写库；用户随后可以继续编辑或保存。
   const undoChanges = useCallback(() => {

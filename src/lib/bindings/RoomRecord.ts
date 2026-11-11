@@ -36,6 +36,10 @@ lastSessionId: string | null, lastSessionStartedAt: number, lastSessionDurationM
  */
 lastSessionStatus: string | null, lastSessionReason: string | null, lastSessionFileSize: number,
 /**
+ * 最近一场录制实际拿到的清晰度描述（如「2K · FLV · H.264」）；None 表示还没有录制。
+ */
+lastSessionQuality: string | null,
+/**
  * 主播本地备注（可当成本地 ID）与标签（逗号分隔）。
  */
 note: string, tags: string,

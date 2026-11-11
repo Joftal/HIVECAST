@@ -267,6 +267,7 @@ impl PlatformAdapter for BilibiliAdapter {
             is_live: data.live_status == 1,
             started_at: data.live_time.as_ref().and_then(LiveTime::unix),
             online: Some(data.online.max(0) as u64),
+            stable_id: Some(data.room_id.to_string()),
             extra: json!({
                 "roomId": data.room_id,
                 "shortId": data.short_id,
@@ -567,6 +568,29 @@ fn quality_available(qn: i64, accepted: &BTreeSet<i64>, granted: i64, probed_hig
     }
 }
 
+/// b23.tv 分享短链需要先跟随 302 才能拿到真实房间号。
+/// 只接受 b23 入口，且最终必须仍落在 B 站域名，避免把任意 URL 当直播链接。
+pub async fn expand_short_link(input: &str) -> Option<String> {
+    let url = Url::parse(input.trim()).ok()?;
+    if !is_short_link(&url) {
+        return None;
+    }
+    let response = crate::platform::http::client().get(url).send().await.ok()?;
+    let final_url = response.url().clone();
+    let host = final_url.host_str()?;
+    if !matches!(
+        host,
+        "live.bilibili.com" | "www.bilibili.com" | "bilibili.com"
+    ) {
+        return None;
+    }
+    Some(final_url.to_string())
+}
+
+fn is_short_link(url: &Url) -> bool {
+    url.host_str() == Some("b23.tv")
+}
+
 fn extract_room_number(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -758,6 +782,14 @@ mod tests {
             "545068"
         );
         assert!(adapter.resolve("https://www.douyu.com/9999").is_none());
+    }
+
+    #[test]
+    fn only_b23_is_treated_as_short_link() {
+        assert!(is_short_link(&Url::parse("https://b23.tv/abc123").unwrap()));
+        assert!(!is_short_link(
+            &Url::parse("https://live.bilibili.com/6").unwrap()
+        ));
     }
 
     /// 联网冒烟测试：cargo test --lib -- --ignored --nocapture
