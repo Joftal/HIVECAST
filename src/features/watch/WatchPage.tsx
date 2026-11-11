@@ -49,7 +49,6 @@ import { useWatchPrefs } from "../../lib/watchPrefs";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const MAX_SLOTS = 4;
-const FALLBACK_QUALITY_QNS = [40000, 10000, 400, 250, 150, 80] as const;
 
 export type WatchSeed = { ids: string[]; nonce: number; kind?: LayoutKind };
 
@@ -1264,11 +1263,7 @@ function SlotCell({
       disabled: !quality.available || !supported,
     };
   });
-  if (qualityOptions.length === 0) {
-    for (const qn of FALLBACK_QUALITY_QNS) {
-      qualityOptions.push({ value: qn, label: t("watch.qn." + qn) });
-    }
-  }
+  // 清单未到时只补当前档位；自动项由 Player 单独追加。
   if (
     session.requestedQn !== 0 &&
     !qualityOptions.some((option) => option.value === session.requestedQn)

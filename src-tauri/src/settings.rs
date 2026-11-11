@@ -102,7 +102,7 @@ pub const MAX_BACKOFF_CAP: u32 = 3_600;
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
     Settings {
-        default_record_qn: 10_000,
+        default_record_qn: RECORD_QN_HIGHEST,
         default_view_qn: 0,
         record_source_format: "auto".into(),
         record_codec: "auto".into(),
@@ -157,10 +157,10 @@ pub fn load(db: &Db) -> Settings {
     let read = |key: &str| db.get_setting(key).ok().flatten();
 
     if let Some(value) = read(KEY_RECORD_QN).and_then(|v| v.parse::<u32>().ok()) {
-        settings.default_record_qn = value;
+        settings.default_record_qn = normalize_record_qn(value);
     }
     if let Some(value) = read(KEY_VIEW_QN).and_then(|v| v.parse::<u32>().ok()) {
-        settings.default_view_qn = value;
+        settings.default_view_qn = normalize_view_qn(value);
     }
     if let Some(value) = read(KEY_RECORD_SOURCE_FORMAT)
         .filter(|v| matches!(v.as_str(), "auto" | "flv" | "hls" | "ts"))
@@ -300,7 +300,7 @@ pub fn persist_media_root(db: &Db, path: &str) -> Result<(), AppError> {
 pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let mut settings = input.clone();
     settings.default_record_qn = normalize_record_qn(settings.default_record_qn);
-    settings.default_view_qn = normalize_qn(settings.default_view_qn);
+    settings.default_view_qn = normalize_view_qn(settings.default_view_qn);
     if !matches!(
         settings.record_source_format.as_str(),
         "auto" | "flv" | "hls" | "ts"
@@ -535,27 +535,18 @@ fn validate_log_dir(raw: &str) -> Result<String, AppError> {
     Ok(path.display().to_string())
 }
 
-fn normalize_qn(qn: u32) -> u32 {
-    // 0 表示「自动」。平台原生档位有 80/150/250/400 这类非整百值，
-    // 必须原样保留，否则用户选「超清 250」会被改成 200，实际只能拿到 150。
-    if qn == 0 {
-        return 0;
-    }
-    if matches!(
-        qn,
-        80 | 150 | 250 | 400 | 10_000 | 20_000 | 30_000 | RECORD_QN_HIGHEST
-    ) {
-        return qn;
-    }
-    (qn / 100 * 100).clamp(80, RECORD_QN_HIGHEST)
+/// 全局录制档位只有「最高可用」：具体档位由每个房间的画质菜单决定。
+/// 旧版本存过 10000/250 等全局值，加载和保存时统一迁移到 40000。
+fn normalize_record_qn(_qn: u32) -> u32 {
+    RECORD_QN_HIGHEST
 }
 
-/// 录制目标档位没有「平台决定」：0 统一按默认的原画（10000）处理。
-fn normalize_record_qn(qn: u32) -> u32 {
-    if qn == 0 {
-        10_000
+/// 全局观看档位只保留「自动」与「最高可用」，避免把 B 站专有 qn 发给其它平台。
+fn normalize_view_qn(qn: u32) -> u32 {
+    if qn == RECORD_QN_HIGHEST {
+        RECORD_QN_HIGHEST
     } else {
-        normalize_qn(qn)
+        0
     }
 }
 
@@ -608,17 +599,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qn_rounds_to_platform_steps() {
-        assert_eq!(normalize_qn(0), 0, "观看档位 0 仍表示自动");
-        assert_eq!(normalize_record_qn(0), 10_000, "录制 0 归一化为默认原画");
-        assert_eq!(normalize_qn(12345), 12300);
-        assert_eq!(normalize_qn(10000), 10000);
-        assert_eq!(normalize_qn(250), 250, "平台原生 250 不能被取整成 200");
-        assert_eq!(normalize_qn(150), 150);
-        assert_eq!(normalize_qn(400), 400);
-        assert_eq!(normalize_record_qn(250), 250);
-        assert_eq!(normalize_qn(1), 80);
-        assert_eq!(normalize_qn(999_999), 40000);
+    fn global_qn_is_restricted_to_auto_or_highest() {
+        assert_eq!(normalize_record_qn(0), 40_000, "录制全局档位只有最高可用");
+        assert_eq!(normalize_record_qn(250), 40_000, "旧全局档位迁移到最高");
+        assert_eq!(normalize_view_qn(0), 0, "观看 0 仍表示自动");
+        assert_eq!(normalize_view_qn(250), 0, "观看全局档位只允许自动/最高");
+        assert_eq!(normalize_view_qn(40_000), 40_000);
     }
 
     #[test]
@@ -749,7 +735,7 @@ mod tests {
         )
         .expect("save settings");
 
-        assert_eq!(saved.default_record_qn, 12300);
+        assert_eq!(saved.default_record_qn, 40_000);
         assert_eq!(saved.record_source_format, "hls");
         assert_eq!(saved.record_codec, "h265");
         assert!(saved.split_on_title);
@@ -770,7 +756,7 @@ mod tests {
         assert!(media.is_dir(), "保存时应把媒体目录建出来");
 
         let loaded = load(&db);
-        assert_eq!(loaded.default_record_qn, 12300);
+        assert_eq!(loaded.default_record_qn, 40_000);
         assert_eq!(loaded.record_source_format, "hls");
         assert_eq!(loaded.record_codec, "h265");
         assert!(loaded.split_on_title);

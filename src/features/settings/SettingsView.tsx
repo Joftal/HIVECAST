@@ -47,18 +47,14 @@ const POST_MODES: Array<{ value: "source" | "convert" | "custom"; labelKey: stri
   { value: "custom", labelKey: "settings.postModeCustom", descKey: "settings.postModeCustomDesc" },
 ];
 
+// 全局只保留「自动」与「最高可用」：B 站专有的 25000/15000/30000
+// 不能发给斗鱼/虎牙，具体档位由房间级动态菜单决定。
 const QN_OPTIONS = [
   { value: 0, key: "qnAuto" },
   { value: 40000, key: "qnHighest" },
-  { value: 10000, key: "qnOrigin" },
-  { value: 400, key: "qnBluray" },
-  { value: 250, key: "qnUltra" },
-  { value: 150, key: "qnHigh" },
-  { value: 80, key: "qnStandard" },
 ];
 
-/// 录制目标没有「平台决定」：默认原画，用户可显式选更高/更低档。
-const RECORD_QN_OPTIONS = QN_OPTIONS.filter((option) => option.value !== 0);
+const RECORD_QN_OPTIONS = [{ value: 40000, key: "qnHighest" }];
 
 export type PageKey = "account" | "record" | "danmaku" | "storage" | "notify" | "appearance" | "system" | "about";
 

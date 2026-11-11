@@ -26,6 +26,8 @@ const REFERER: &str = "https://live.bilibili.com/";
 /// 清晰度权重（数字与 B 站 qn 一致，越大越好）。
 #[allow(dead_code)] // 供 M1.5 的画质协商使用
 pub const QN_ORIGIN: u32 = 10000;
+/// B 站接口能接受的最大 qn（杜比 30000）；应用层的 40000 只是“最高可用”哨兵。
+const QN_MAX: u32 = 30_000;
 #[allow(dead_code)]
 pub const QN_BLURAY: u32 = 400;
 #[allow(dead_code)]
@@ -140,7 +142,7 @@ struct PlayUrlInfo {
     playurl: PlayUrl,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct PlayUrl {
     #[serde(default)]
     stream: Vec<StreamDef>,
@@ -148,7 +150,7 @@ struct PlayUrl {
     g_qn_desc: Vec<QnDesc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct StreamDef {
     #[serde(default)]
     protocol_name: String,
@@ -156,7 +158,7 @@ struct StreamDef {
     format: Vec<FormatDef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct FormatDef {
     #[serde(default)]
     format_name: String,
@@ -164,7 +166,7 @@ struct FormatDef {
     codec: Vec<CodecDef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct CodecDef {
     #[serde(default)]
     codec_name: String,
@@ -180,7 +182,7 @@ struct CodecDef {
     media_info: Option<MediaInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct MediaInfo {
     #[serde(default)]
     width: u32,
@@ -191,7 +193,7 @@ struct MediaInfo {
     realtime_avg_bw: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct UrlInfo {
     #[serde(default)]
     host: String,
@@ -199,7 +201,7 @@ struct UrlInfo {
     extra: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct QnDesc {
     qn: i64,
     #[serde(default)]
@@ -276,53 +278,65 @@ impl PlatformAdapter for BilibiliAdapter {
     }
 
     async fn stream_plan(&self, room: &RoomRef, qn: u32) -> Result<StreamPlan, PlatformError> {
-        let qn = request_qn(qn);
-        let url = format!(
-            "{API}/xlive/web-room/v2/index/getRoomPlayInfo?room_id={}&protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1",
-            room.room_key
-        );
-        let envelope: Envelope<PlayInfoData> = http::get_json(&url, REFERER, &[]).await?;
-        let data = unwrap_envelope(envelope, &room.room_key)?;
-
+        let requested_qn = request_qn(qn);
+        let data = fetch_playinfo(&room.room_key, requested_qn).await?;
         if data.live_status != 1 {
             return Err(PlatformError::NotLive);
         }
-        let playurl = data
+        let base = data
             .playurl_info
             .ok_or_else(|| PlatformError::Parse("缺少 playurl_info".into()))?
             .playurl;
 
-        let qn_desc: BTreeMap<i64, String> = playurl
+        // 线路按用户请求的档位取；能力清单另用 qn=30000 探测一次。
+        // 不能拿“当前目标 10000”的响应去判断 2K/4K/杜比是否可用：
+        // 登录账号请求 10000 时，平台会把 granted 封在 10000，菜单就会永远把高档标灰。
+        let (quality_playurl, probed_high) = if requested_qn < QN_MAX {
+            match fetch_playinfo(&room.room_key, QN_MAX).await {
+                Ok(high) if high.live_status == 1 => match high.playurl_info {
+                    Some(info) => (info.playurl, true),
+                    None => (base.clone(), false),
+                },
+                Ok(_) => (base.clone(), false),
+                Err(err) => {
+                    tracing::debug!(
+                        room = %room.room_key,
+                        %err,
+                        "B 站高档画质探测失败，回退到请求档位的能力清单"
+                    );
+                    (base.clone(), false)
+                }
+            }
+        } else {
+            // 请求已经是最高档，一次响应同时是线路与能力清单。
+            (base.clone(), true)
+        };
+
+        let qn_desc: BTreeMap<i64, String> = quality_playurl
             .g_qn_desc
             .iter()
             .map(|item| (item.qn, item.desc.clone()))
             .collect();
-        let accepted: BTreeSet<i64> = playurl
+        let accepted: BTreeSet<i64> = quality_playurl
             .stream
             .iter()
             .flat_map(|stream| stream.format.iter())
             .flat_map(|format| format.codec.iter())
             .flat_map(|codec| codec.accept_qn.iter().copied())
             .collect();
-        // 无凭据（或凭据已过期）或以最高档探测时，current_qn 才是当前实际能拿到的封顶：
-        // 未登录请求 10000 会回 250，accept_qn 却仍列出 4K/原画，不能拿来当“可用”。
-        // 登录后请求 10000 回 10000，无法据此判断 2K/4K 权限，仍沿用平台能力清单。
-        let anonymous = !crate::credential::is_ok("bilibili");
-        let granted_qn = if anonymous || qn >= QN_ORIGIN {
-            playurl
-                .stream
-                .iter()
-                .flat_map(|stream| stream.format.iter())
-                .flat_map(|format| format.codec.iter())
-                .map(|codec| codec.current_qn)
-                .max()
-                .unwrap_or(0)
-        } else {
-            QN_ORIGIN as i64
-        };
+        // 高档探测响应的 current_qn 才是账号真实上限；未登录会回 250。
+        let granted_qn = quality_playurl
+            .stream
+            .iter()
+            .flat_map(|stream| stream.format.iter())
+            .flat_map(|format| format.codec.iter())
+            .map(|codec| codec.current_qn)
+            .max()
+            .unwrap_or(0);
+
         // accept_qn 是按编码列出的，用并集反推每档画质实际支持哪些视频编码。
         let mut qn_codecs: BTreeMap<i64, BTreeSet<&'static str>> = BTreeMap::new();
-        for stream in &playurl.stream {
+        for stream in &quality_playurl.stream {
             for format in &stream.format {
                 for codec in &format.codec {
                     let codec_kind = map_codec(&codec.codec_name).as_str();
@@ -335,7 +349,7 @@ impl PlatformAdapter for BilibiliAdapter {
 
         // key = CDN 主机；保持首次出现顺序作为线路优先级。
         let mut grouped: Vec<(String, Vec<StreamCandidate>)> = Vec::new();
-        for stream in &playurl.stream {
+        for stream in &base.stream {
             for format in &stream.format {
                 for codec in &format.codec {
                     let format_kind = map_format(&format.format_name);
@@ -451,73 +465,106 @@ impl PlatformAdapter for BilibiliAdapter {
             group.priority = index as u32;
         }
 
-        let codec_for = |qn: &i64| -> Option<String> {
-            qn_codecs
-                .get(qn)
-                .and_then(|set| {
-                    if set.contains("h264") {
-                        Some("h264")
-                    } else if set.contains("h265") {
-                        Some("h265")
-                    } else if set.contains("av1") {
-                        Some("av1")
-                    } else {
-                        None
-                    }
-                })
-                .map(str::to_string)
-        };
-        let mut qualities: Vec<QualityInfo> = qn_desc
-            .iter()
-            .filter(|(qn, _)| **qn > 0)
-            .map(|(qn, desc)| {
-                let codec = codec_for(qn);
-                let hint = if codec.as_deref() == Some("h265") {
-                    Some("HEVC".to_string())
-                } else if codec.as_deref() == Some("av1") {
-                    Some("AV1".to_string())
-                } else if desc.contains("杜比") {
-                    Some("杜比".to_string())
-                } else {
-                    None
-                };
-                QualityInfo {
-                    qn: *qn as u32,
-                    label: desc.clone(),
-                    hint,
-                    available: quality_available(*qn, &accepted, granted_qn),
-                    codec,
-                }
-            })
-            .collect();
-        // 平台有时只把新档位放进 accept_qn、不补 g_qn_desc；合并两份数据避免漏档。
-        let known: BTreeSet<u32> = qualities.iter().map(|quality| quality.qn).collect();
-        for qn in accepted.iter().filter(|qn| **qn > 0) {
-            let value = *qn as u32;
-            if known.contains(&value) {
-                continue;
-            }
-            let codec = codec_for(qn);
-            qualities.push(QualityInfo {
-                qn: value,
-                label: format!("qn{qn}"),
-                hint: codec.as_deref().map(|value| value.to_uppercase()),
-                available: quality_available(*qn, &accepted, granted_qn),
-                codec,
-            });
-        }
-        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+        let qualities = build_qualities(&qn_desc, &accepted, &qn_codecs, granted_qn, probed_high);
 
         Ok(StreamPlan { groups, qualities })
+    }
+}
+
+async fn fetch_playinfo(room_key: &str, qn: u32) -> Result<PlayInfoData, PlatformError> {
+    let url = format!(
+        "{API}/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room_key}&protocol=0,1&format=0,1,2&codec=0,1,2&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1"
+    );
+    let envelope: Envelope<PlayInfoData> = http::get_json(&url, REFERER, &[]).await?;
+    unwrap_envelope(envelope, room_key)
+}
+
+/// 从能力清单构造房间级画质列表。
+///
+/// `probed_high` 为 true 时，`granted_qn` 来自 qn=30000 的探测响应，
+/// 可以直接用 `qn <= granted` 判断；探测失败时退回旧规则，避免把未知档位误标成不可用。
+fn build_qualities(
+    qn_desc: &BTreeMap<i64, String>,
+    accepted: &BTreeSet<i64>,
+    qn_codecs: &BTreeMap<i64, BTreeSet<&'static str>>,
+    granted_qn: i64,
+    probed_high: bool,
+) -> Vec<QualityInfo> {
+    let codec_for = |qn: &i64| -> Option<String> {
+        qn_codecs
+            .get(qn)
+            .and_then(|set| {
+                if set.contains("h264") {
+                    Some("h264")
+                } else if set.contains("h265") {
+                    Some("h265")
+                } else if set.contains("av1") {
+                    Some("av1")
+                } else {
+                    None
+                }
+            })
+            .map(str::to_string)
+    };
+    let mut qualities: Vec<QualityInfo> = qn_desc
+        .iter()
+        .filter(|(qn, _)| **qn > 0)
+        .map(|(qn, desc)| {
+            let codec = codec_for(qn);
+            QualityInfo {
+                qn: *qn as u32,
+                label: desc.clone(),
+                hint: quality_hint(desc, codec.as_deref()),
+                available: quality_available(*qn, accepted, granted_qn, probed_high),
+                codec,
+            }
+        })
+        .collect();
+    // 平台有时只把新档位放进 accept_qn、不补 g_qn_desc；合并两份数据避免漏档。
+    let known: BTreeSet<u32> = qualities.iter().map(|quality| quality.qn).collect();
+    for qn in accepted.iter().filter(|qn| **qn > 0) {
+        let value = *qn as u32;
+        if known.contains(&value) {
+            continue;
+        }
+        let codec = codec_for(qn);
+        qualities.push(QualityInfo {
+            qn: value,
+            label: format!("qn{qn}"),
+            hint: quality_hint("", codec.as_deref()),
+            available: quality_available(*qn, accepted, granted_qn, probed_high),
+            codec,
+        });
+    }
+    qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+    qualities
+}
+
+fn quality_hint(desc: &str, codec: Option<&str>) -> Option<String> {
+    // 杜比是画质语义，优先于编码；否则 30000 会被标成 HEVC，用户看不出是杜比。
+    if desc.contains("杜比") {
+        return Some("杜比".to_string());
+    }
+    match codec {
+        Some("h265") => Some("HEVC".to_string()),
+        Some("av1") => Some("AV1".to_string()),
+        _ => None,
     }
 }
 
 /// 画质是否真的可选。
 ///
 /// `accept_qn` 是平台给的编码能力清单，未登录时也会列出 4K/原画；
-/// 最高档探测的 `current_qn` 才是账号当前的实际上限。
-fn quality_available(qn: i64, accepted: &BTreeSet<i64>, granted: i64) -> bool {
-    accepted.contains(&qn) && (granted >= QN_ORIGIN as i64 || qn <= granted)
+/// 高档探测的 `current_qn` 才是账号当前的实际上限。
+fn quality_available(qn: i64, accepted: &BTreeSet<i64>, granted: i64, probed_high: bool) -> bool {
+    if !accepted.contains(&qn) {
+        return false;
+    }
+    if probed_high {
+        qn <= granted
+    } else {
+        granted >= QN_ORIGIN as i64 || qn <= granted
+    }
 }
 
 fn extract_room_number(input: &str) -> Option<String> {
@@ -559,10 +606,11 @@ fn host_label(host: &str) -> String {
         .unwrap_or_else(|| host.to_string())
 }
 
-/// 应用层用 40000 表示「最高可用」；B 站没有这个 qn，原画 10000 即常规最高档。
+/// 应用层用 40000 表示「最高可用」；B 站接口最高接受 30000（杜比）。
+/// 实测 qn=30000 会按账号/房间权限回退到 15000 或 25000，是安全的最高探测值。
 fn request_qn(qn: u32) -> u32 {
     if qn == 40_000 {
-        QN_ORIGIN
+        QN_MAX
     } else {
         qn
     }
@@ -640,22 +688,54 @@ mod tests {
     }
 
     #[test]
-    fn maps_highest_sentinel_to_origin() {
-        assert_eq!(request_qn(40_000), QN_ORIGIN);
-        assert_eq!(request_qn(QN_ORIGIN), QN_ORIGIN);
+    fn maps_highest_sentinel_to_dolby_probe() {
+        assert_eq!(request_qn(40_000), QN_MAX);
+        assert_eq!(request_qn(QN_MAX), QN_MAX);
         assert_eq!(request_qn(20_000), 20_000);
+        assert_eq!(request_qn(QN_ORIGIN), QN_ORIGIN);
         assert_eq!(request_qn(0), 0);
     }
 
     #[test]
-    fn caps_quality_availability_to_granted_when_probing_highest() {
-        let accepted = BTreeSet::from([15_000, 10_000, 400, 250, 150]);
-        assert!(quality_available(15_000, &accepted, 10_000));
-        assert!(quality_available(10_000, &accepted, 10_000));
-        assert!(!quality_available(15_000, &accepted, 250));
-        assert!(!quality_available(10_000, &accepted, 250));
-        assert!(!quality_available(400, &accepted, 250));
-        assert!(quality_available(250, &accepted, 250));
+    fn caps_quality_availability_to_high_probe_grant() {
+        let accepted = BTreeSet::from([25_000, 15_000, 10_000, 400, 250, 150]);
+        assert!(quality_available(25_000, &accepted, 25_000, true));
+        assert!(quality_available(15_000, &accepted, 25_000, true));
+        assert!(quality_available(10_000, &accepted, 10_000, true));
+        assert!(!quality_available(15_000, &accepted, 10_000, true));
+        assert!(!quality_available(15_000, &accepted, 250, true));
+        assert!(!quality_available(400, &accepted, 250, true));
+        assert!(quality_available(250, &accepted, 250, true));
+        // 高档探测失败时退回旧规则，不能把未知的高档直接标灰。
+        assert!(quality_available(15_000, &accepted, 10_000, false));
+        assert!(!quality_available(15_000, &accepted, 250, false));
+    }
+
+    #[test]
+    fn builds_room_catalog_from_high_probe() {
+        let qn_desc = BTreeMap::from([
+            (30_000, "杜比".to_string()),
+            (25_000, "原画真彩".to_string()),
+            (15_000, "2K".to_string()),
+            (10_000, "原画".to_string()),
+            (250, "超清".to_string()),
+        ]);
+        let accepted = BTreeSet::from([30_000, 25_000, 15_000, 10_000, 250]);
+        let codecs = BTreeMap::from([
+            (30_000, BTreeSet::from(["h265"])),
+            (25_000, BTreeSet::from(["h265"])),
+            (15_000, BTreeSet::from(["h264"])),
+            (10_000, BTreeSet::from(["h264", "h265", "av1"])),
+            (250, BTreeSet::from(["h264"])),
+        ]);
+        let qualities = build_qualities(&qn_desc, &accepted, &codecs, 25_000, true);
+        assert_eq!(qualities.first().map(|q| q.qn), Some(30_000));
+        let by_qn = |qn: u32| qualities.iter().find(|q| q.qn == qn).expect("档位应存在");
+        assert_eq!(by_qn(30_000).hint.as_deref(), Some("杜比"));
+        assert!(!by_qn(30_000).available, "超过探测到的 25000 上限");
+        assert!(by_qn(25_000).available);
+        assert!(by_qn(15_000).available);
+        assert_eq!(by_qn(10_000).codec.as_deref(), Some("h264"));
     }
 
     #[test]

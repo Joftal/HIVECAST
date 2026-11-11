@@ -47,7 +47,6 @@ import {
 } from "../../lib/ipc";
 import { codecLabel, videoCodecSupported } from "../../lib/codecSupport";
 
-const QUALITIES = [0, 40000, 10000, 400, 250, 150, 80];
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
 const PLATFORM_DOT: Record<string, string> = {
   bilibili: "#22a7f0",
@@ -834,7 +833,9 @@ export default function MonitorPage({
   const qualityOptionsFor = (roomId: string, qn: number, gateCodec: boolean) => {
     const auto = { value: "0", label: t("monitor.qn.0") };
     if (!qualities || optionsKey?.roomId !== roomId) {
-      return QUALITIES.map((value) => ({ value: String(value), label: t("monitor.qn." + value) }));
+      // 能力清单未到时只给「自动」和当前档位，不猜平台专有 qn。
+      if (qn === 0) return [auto];
+      return [auto, { value: String(qn), label: t("monitor.qn." + qn, { defaultValue: String(qn) }) }];
     }
     const options = qualities.map((quality) => {
       const supported = !gateCodec || videoCodecSupported(quality.codec);

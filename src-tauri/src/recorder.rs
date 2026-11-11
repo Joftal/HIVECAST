@@ -991,7 +991,11 @@ impl Recorder {
                 line = ?room.record_line,
                 "开录没有可用线路"
             );
-            AppError::User("没有可用的线路".into())
+            if only_av1_available(&plan.groups) {
+                AppError::User("当前直播只提供 AV1 编码，录制链路暂不支持 AV1".into())
+            } else {
+                AppError::User("没有可用的线路".into())
+            }
         })?;
 
         let actual_qn = candidate_qn(candidate);
@@ -4200,7 +4204,27 @@ fn best_in_group<'a>(group: &'a StreamGroup, prefs: StreamPrefs) -> Option<&'a S
         .candidates
         .iter()
         .filter(|candidate| candidate.url.is_some())
+        // AV1 不能直接 copy 进 MPEG-TS/Matroska 分片：ffmpeg 会报
+        // "Output file does not contain any stream"，产物为 0 字节。
+        // 观看仍可走 AV1（MSE 有能力门禁），录制链路暂不支持。
+        .filter(|candidate| candidate.codec != Some(Codec::Av1))
         .max_by_key(|candidate| candidate_score(candidate, prefs))
+}
+
+/// 直播只给 AV1 时，错误要说明原因，不能笼统报「没有可用的线路」。
+fn only_av1_available(groups: &[StreamGroup]) -> bool {
+    let mut saw_av1 = false;
+    for candidate in groups.iter().flat_map(|group| group.candidates.iter()) {
+        if candidate.url.is_none() {
+            continue;
+        }
+        if candidate.codec == Some(Codec::Av1) {
+            saw_av1 = true;
+        } else {
+            return false;
+        }
+    }
+    saw_av1
 }
 
 /// 选流：画质 > 编码 > 格式。
@@ -4431,6 +4455,46 @@ mod tests {
             pick_candidate(&same_codec, None, prefs(250, None, Some(StreamFormat::Hls)))
                 .expect("有候选");
         assert_eq!(picked.id, "hls");
+    }
+
+    #[test]
+    fn recording_skips_av1_and_reports_av1_only_plans() {
+        use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup};
+        let candidate = |name: &str, codec: Codec| StreamCandidate {
+            id: name.into(),
+            name: name.into(),
+            weight: 1.0,
+            format: StreamFormat::Flv,
+            codec: Some(codec),
+            width: None,
+            height: None,
+            fps: None,
+            bitrate_kbps: None,
+            url: Some(format!("http://{name}")),
+            headers: Default::default(),
+            attrs: Default::default(),
+        };
+        let prefs = StreamPrefs {
+            qn: 0,
+            codec: None,
+            format: None,
+        };
+        let mixed = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![candidate("av1", Codec::Av1), candidate("h264", Codec::H264)],
+        }];
+        let (picked, _) = pick_candidate(&mixed, None, prefs).expect("应跳过 AV1");
+        assert_eq!(picked.id, "h264");
+        assert!(!only_av1_available(&mixed));
+
+        let av1_only = vec![StreamGroup {
+            name: "线路".into(),
+            priority: 0,
+            candidates: vec![candidate("av1", Codec::Av1)],
+        }];
+        assert!(pick_candidate(&av1_only, None, prefs).is_none());
+        assert!(only_av1_available(&av1_only));
     }
 
     #[test]
