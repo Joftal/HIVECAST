@@ -3,4 +3,8 @@
 /**
  * 正在进行的录制快照。
  */
-export type RecordingInfo = { roomId: string, sessionId: string, filePath: string, startedAt: number, quality: string, line: string, };
+export type RecordingInfo = { roomId: string, sessionId: string, filePath: string, startedAt: number, quality: string, line: string,
+/**
+ * 本场目标档位与展示名（实际 quality 可能因匿名/Cookie 失效而降档）
+ */
+targetQn: number, targetQuality: string, };

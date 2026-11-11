@@ -57,6 +57,9 @@ const QN_OPTIONS = [
   { value: 80, key: "qnStandard" },
 ];
 
+/// 录制目标没有「平台决定」：默认原画，用户可显式选更高/更低档。
+const RECORD_QN_OPTIONS = QN_OPTIONS.filter((option) => option.value !== 0);
+
 export type PageKey = "account" | "record" | "danmaku" | "storage" | "notify" | "appearance" | "system" | "about";
 
 type NavGroup = "account" | "recording" | "app";
@@ -747,7 +750,7 @@ export default function SettingsView({
               <SelectField
                 value={settings.defaultRecordQn}
                 onChange={(next) => patch({ defaultRecordQn: next })}
-                options={QN_OPTIONS.map((option) => ({ value: option.value, label: t("settings." + option.key) }))}
+                options={RECORD_QN_OPTIONS.map((option) => ({ value: option.value, label: t("settings." + option.key) }))}
               />
             </Row>
             <Row

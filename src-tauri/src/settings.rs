@@ -102,7 +102,7 @@ pub const MAX_BACKOFF_CAP: u32 = 3_600;
 /// 首次启动的默认值。
 pub fn defaults() -> Settings {
     Settings {
-        default_record_qn: RECORD_QN_HIGHEST,
+        default_record_qn: 10_000,
         default_view_qn: 0,
         record_source_format: "auto".into(),
         record_codec: "auto".into(),
@@ -299,7 +299,7 @@ pub fn persist_media_root(db: &Db, path: &str) -> Result<(), AppError> {
 /// 校验并落库；返回纠正过的值（例如并发数被夹到 1..=8），前端据此回填输入框。
 pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let mut settings = input.clone();
-    settings.default_record_qn = normalize_qn(settings.default_record_qn);
+    settings.default_record_qn = normalize_record_qn(settings.default_record_qn);
     settings.default_view_qn = normalize_qn(settings.default_view_qn);
     if !matches!(
         settings.record_source_format.as_str(),
@@ -536,11 +536,26 @@ fn validate_log_dir(raw: &str) -> Result<String, AppError> {
 }
 
 fn normalize_qn(qn: u32) -> u32 {
-    // 0 表示「自动」，其余按平台档位取整到 100 的倍数，避免用户输入 12345 这种脏值。
+    // 0 表示「自动」。平台原生档位有 80/150/250/400 这类非整百值，
+    // 必须原样保留，否则用户选「超清 250」会被改成 200，实际只能拿到 150。
     if qn == 0 {
-        0
+        return 0;
+    }
+    if matches!(
+        qn,
+        80 | 150 | 250 | 400 | 10_000 | 20_000 | 30_000 | RECORD_QN_HIGHEST
+    ) {
+        return qn;
+    }
+    (qn / 100 * 100).clamp(80, RECORD_QN_HIGHEST)
+}
+
+/// 录制目标档位没有「平台决定」：0 统一按默认的原画（10000）处理。
+fn normalize_record_qn(qn: u32) -> u32 {
+    if qn == 0 {
+        10_000
     } else {
-        (qn / 100 * 100).clamp(80, RECORD_QN_HIGHEST)
+        normalize_qn(qn)
     }
 }
 
@@ -594,9 +609,14 @@ mod tests {
 
     #[test]
     fn qn_rounds_to_platform_steps() {
-        assert_eq!(normalize_qn(0), 0, "0 是自动，不能被动");
+        assert_eq!(normalize_qn(0), 0, "观看档位 0 仍表示自动");
+        assert_eq!(normalize_record_qn(0), 10_000, "录制 0 归一化为默认原画");
         assert_eq!(normalize_qn(12345), 12300);
         assert_eq!(normalize_qn(10000), 10000);
+        assert_eq!(normalize_qn(250), 250, "平台原生 250 不能被取整成 200");
+        assert_eq!(normalize_qn(150), 150);
+        assert_eq!(normalize_qn(400), 400);
+        assert_eq!(normalize_record_qn(250), 250);
         assert_eq!(normalize_qn(1), 80);
         assert_eq!(normalize_qn(999_999), 40000);
     }

@@ -86,7 +86,7 @@ impl StreamBroker {
 
     /// 取某房间某档位的线路组与真实画质清单。命中缓存时不会触网。
     pub async fn plan(&self, room: &RoomRef, qn: u32) -> Result<Arc<StreamPlan>, PlatformError> {
-        self.plan_inner(room, qn, false).await
+        self.plan_inner(room, qn, false, false).await
     }
 
     /// 断流续录专用：丢掉旧地址重新解析，但保留共享的失败冷却（B3）。
@@ -103,7 +103,17 @@ impl StreamBroker {
             let mut inner = self.inner.lock().expect("broker 状态被污染");
             drop_address_cache(&mut inner, room);
         }
-        self.plan_inner(room, qn, true).await
+        self.plan_inner(room, qn, true, false).await
+    }
+
+    /// 画质升级探测：丢地址重新解析，但失败不累计监控退避、成功也不清退避。
+    /// 升级是锦上添花，探测失败不能把正常的监控节奏打乱。
+    pub async fn probe(&self, room: &RoomRef, qn: u32) -> Result<Arc<StreamPlan>, PlatformError> {
+        {
+            let mut inner = self.inner.lock().expect("broker 状态被污染");
+            drop_address_cache(&mut inner, room);
+        }
+        self.plan_inner(room, qn, true, true).await
     }
 
     async fn plan_inner(
@@ -111,6 +121,7 @@ impl StreamBroker {
         room: &RoomRef,
         qn: u32,
         bypass_cooldown: bool,
+        probe: bool,
     ) -> Result<Arc<StreamPlan>, PlatformError> {
         let key = StreamKey::new(room, qn);
         // 冷却与限速按「房间」算，而不是按「房间+档位」：以前 info 用房间键、
@@ -178,7 +189,9 @@ impl StreamBroker {
                     );
                     return Ok(Arc::new(plan));
                 }
-                inner.failures.remove(&gate_key);
+                if !probe {
+                    inner.failures.remove(&gate_key);
+                }
                 let plan = Arc::new(plan);
                 inner.groups.insert(
                     key,
@@ -199,7 +212,9 @@ impl StreamBroker {
                     );
                     return Err(err);
                 }
-                self.note_failure(&mut inner, &gate_key, &err);
+                if !probe {
+                    self.note_failure(&mut inner, &gate_key, &err);
+                }
                 Err(err)
             }
         }

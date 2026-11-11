@@ -123,6 +123,10 @@ pub struct RecordingInfo {
     pub started_at: i64,
     pub quality: String,
     pub line: String,
+    /// 本场目标档位与展示名（实际 quality 可能因匿名/Cookie 失效而降档）
+    #[ts(type = "number")]
+    pub target_qn: u32,
+    pub target_quality: String,
 }
 
 /// 单个房间的录制历史汇总；详情抽屉的合计/可合并数不依赖分页结果。

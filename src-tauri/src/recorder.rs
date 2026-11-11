@@ -63,6 +63,8 @@ const START_FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
 const HEALTHY_RESET: Duration = Duration::from_secs(30 * 60);
 /// 平台状态查不到时间隔这么久再问一次，避免把限流当成下播（A4）。
 const PLATFORM_RECHECK_DELAY: Duration = Duration::from_secs(20);
+/// 自动兜底重检画质的间隔；凭据事件是强制的，不受这个限制。
+const UPGRADE_COOLDOWN: Duration = Duration::from_secs(300);
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 启动后的崩溃恢复合并完成（I2：合并在后台跑，媒体库要重新取列表）。
 pub const EVENT_MEDIA_CHANGED: &str = "media://changed";
@@ -204,8 +206,14 @@ struct Active {
     eof_retries: u32,
     /// 当前实际画质档位；续录拿到不同档位时随之更新
     qn: u32,
-    /// 续录请求锚点：自动档位固定首段实际值，显式档位保留用户所选
+    /// 本场目标档位：默认原画；Cookie 恢复后升级也以它为准
+    target_qn: u32,
+    /// 续录/升级请求锚点：始终等于 target_qn
     plan_qn: u32,
+    /// 画质升级正在进行：watcher 必须跳过主动停进程的退出事件
+    upgrading: bool,
+    /// 本场成功升级的次数（不计入 restarts 上限）
+    upgrades: u32,
     /// 本场各时段的实际画质；只在档位变化时追加
     quality_history: Vec<QualitySegment>,
     line: Option<String>,
@@ -290,6 +298,10 @@ pub struct Recorder {
     /// 连续「开录请求本身失败」的次数与最后一次时刻（G5）。
     /// 和 hard_failures 分开：那条是「录到一半断了」，这条是「根本没录起来」。
     start_failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// 每房间升级单飞锁：监控兜底与凭据变更可能同时触发探测。
+    upgrade_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// 上次升级尝试时刻：同一房间 300 秒内只探一次，避免每拍都打平台。
+    upgrade_checked: Mutex<HashMap<String, Instant>>,
     /// 正在开录的房间：停录请求要能看见「ffmpeg 已经在起、但还没进 active」的这段窗口（C5）。
     starting: Mutex<HashSet<String>>,
     /// 开录在途时收到的停录请求：房间 → 原因。等 start 把会话挂进 active 再消费。
@@ -327,6 +339,8 @@ impl Recorder {
             offline_seen: Mutex::new(HashSet::new()),
             hard_failures: Mutex::new(HashMap::new()),
             start_failures: Mutex::new(HashMap::new()),
+            upgrade_locks: Mutex::new(HashMap::new()),
+            upgrade_checked: Mutex::new(HashMap::new()),
             danmaku,
             thumbs: std::sync::RwLock::new(None),
         }
@@ -638,6 +652,15 @@ impl Recorder {
             .contains_key(room_id)
     }
 
+    /// 画质升级正在主动停旧进程：watcher 此时不能把退出当成断流。
+    pub fn is_upgrading(&self, room_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .get(room_id)
+            .is_some_and(|active| active.upgrading)
+    }
+
     /// 这一路是不是已经在收尾了（stop_reason 已置、ffmpeg 还没退出）。
     /// 监控侧据此避免每秒重复发一遍停止请求（B6）。
     pub fn stopping(&self, room_id: &str) -> bool {
@@ -808,7 +831,7 @@ impl Recorder {
         broker: &StreamBroker,
         room: &RoomRecord,
     ) -> Result<RecordingInfo, AppError> {
-        self.start_inner(app, broker, room, false).await
+        self.start_inner(app, broker, room, false, true).await
     }
 
     /// 监控专用入口：拿锁后复查房间是否刚被移除或暂停（R3）。
@@ -826,7 +849,7 @@ impl Recorder {
         if self.in_start_cooldown(&room.id) {
             return Err(AppError::User("连续开录失败，已暂停自动重试 5 分钟".into()));
         }
-        let result = self.start_inner(app, broker, room, true).await;
+        let result = self.start_inner(app, broker, room, true, true).await;
         match &result {
             Ok(_) => self.clear_start_failure(&room.id),
             Err(err) if start_failure_is_counted(err) => self.note_start_failure(&room.id),
@@ -841,6 +864,7 @@ impl Recorder {
         broker: &StreamBroker,
         room: &RoomRecord,
         recheck: bool,
+        notify_started: bool,
     ) -> Result<RecordingInfo, AppError> {
         // 先拿房间级开录锁，再复查状态；否则并发调用会各自拉起一个 ffmpeg 写同一个文件。
         let gate = self
@@ -1115,6 +1139,15 @@ impl Recorder {
             return Err(AppError::Internal(err.to_string()));
         }
 
+        let target_quality = if record_qn >= crate::settings::RECORD_QN_HIGHEST {
+            "最高可用".to_string()
+        } else {
+            plan.qualities
+                .iter()
+                .find(|quality| quality.qn == record_qn)
+                .map(|quality| quality.label.clone())
+                .unwrap_or_else(|| candidate.name.clone())
+        };
         let recording = RecordingInfo {
             room_id: room.id.clone(),
             session_id,
@@ -1122,6 +1155,8 @@ impl Recorder {
             started_at,
             quality: candidate.name.clone(),
             line: group.name.clone(),
+            target_qn: record_qn,
+            target_quality,
         };
 
         let entry = Active {
@@ -1138,7 +1173,10 @@ impl Recorder {
             stalls: 0,
             eof_retries: 0,
             qn: actual_qn,
-            plan_qn: pinned_qn(record_qn, actual_qn),
+            target_qn: record_qn,
+            plan_qn: record_qn,
+            upgrading: false,
+            upgrades: 0,
             quality_history,
             line: room.record_line.clone(),
             prefs,
@@ -1238,7 +1276,7 @@ impl Recorder {
         );
         self.clear_error(&room.id);
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-        if room.notify_live.unwrap_or(true) {
+        if notify_started && room.notify_live.unwrap_or(true) {
             emit_notice(app, "started", &room.id, &room.host_name, None);
         }
         if quality_fallback(record_qn, actual_qn) {
@@ -1444,6 +1482,11 @@ impl Recorder {
                 };
                 if !rec.is_recording(&room_id) {
                     return;
+                }
+                // 升级会主动停掉旧 ffmpeg；这段窗口的退出是预期行为，
+                // 交给升级任务自己续上，watcher 既不能收尾也不能续录。
+                if rec.is_upgrading(&room_id) {
+                    continue;
                 }
                 // 标题变化要切片段：只在收尾时按时间点找分片边界，录制过程不打断。
                 rec.track_title(&room_id);
@@ -1698,6 +1741,36 @@ impl Recorder {
         broker: &StreamBroker,
         room_id: &str,
     ) -> bool {
+        self.respawn_inner(
+            app,
+            broker,
+            room_id,
+            false,
+            true,
+            "quality_fallback",
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// 续录/升级共用的重启逻辑。
+    /// - skip_delay：升级时旧进程刚停，不必再等 3 秒
+    /// - count_restart：升级不计入 restarts 上限，单独记 upgrades
+    /// - qn：本次请求档位；None 用本场目标
+    /// - require_better_than：候选必须严格高于该档，否则不动进程
+    #[allow(clippy::too_many_arguments)]
+    async fn respawn_inner(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: &StreamBroker,
+        room_id: &str,
+        skip_delay: bool,
+        count_restart: bool,
+        notice_kind: &'static str,
+        qn: Option<u32>,
+        require_better_than: Option<u32>,
+    ) -> bool {
         // 房间已经被删除就别再续录：用户已经不关心这场直播了（F2）。
         if self.room_removed(room_id) {
             tracing::info!(room_id, "房间已删除，不再续录");
@@ -1722,7 +1795,7 @@ impl Recorder {
             let Some(active) = inner.get(room_id) else {
                 return false;
             };
-            if active.restarts >= MAX_RESTARTS {
+            if count_restart && active.restarts >= MAX_RESTARTS {
                 tracing::warn!(room_id, restarts = active.restarts, "续录次数用尽");
                 return false;
             }
@@ -1758,8 +1831,11 @@ impl Recorder {
         // 但只丢地址、不丢共享失败冷却：录制重启不该把监控侧的限流退避清零（B3）。
         // 本次解析允许穿过冷却（续录是用户已经在等的动作），失败了也照常累计退避。
         // 给 CDN 一点时间回收上一条连接的动作放在 broker 调用前，顺序与旧版一致。
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let plan = match broker.plan_for_respawn(&reference, plan_qn).await {
+        if !skip_delay {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        let requested_qn = qn.unwrap_or(plan_qn);
+        let plan = match broker.plan_for_respawn(&reference, requested_qn).await {
             Ok(plan) => plan,
             Err(err) => {
                 tracing::warn!(%err, room_id, "续录解析线路失败");
@@ -1768,12 +1844,23 @@ impl Recorder {
         };
         // 续录钉住首段的编码与源流格式：平台中途换编码时，宁可牺牲一点码率，
         // 也不要让同一场的分片在 H.264/H.265 之间跳变。
-        let prefs = respawn_prefs(plan_qn, prefs, codec, format);
+        let prefs = respawn_prefs(requested_qn, prefs, codec, format);
         let Some((candidate, group)) = pick_candidate(&plan.groups, line.as_deref(), prefs) else {
             tracing::warn!(room_id, "续录没有可用线路");
             return false;
         };
         let actual_qn = candidate_qn(candidate);
+        if let Some(previous) = require_better_than {
+            if !quality_is_better(&plan, actual_qn, previous) {
+                tracing::info!(
+                    room_id,
+                    previous_qn = previous,
+                    candidate_qn = actual_qn,
+                    "升级候选没有更高画质，保持当前档位"
+                );
+                return false;
+            }
+        }
         if let (Some(first), Some(next)) = (codec, candidate.codec) {
             if first != next {
                 tracing::warn!(
@@ -1830,7 +1917,12 @@ impl Recorder {
             }
             active.child = child;
             active.stderr_tail = stderr_tail;
-            active.restarts = restarts + 1;
+            if count_restart {
+                active.restarts = restarts + 1;
+            } else {
+                active.upgrades = active.upgrades.saturating_add(1);
+            }
+            active.upgrading = false;
             active.started = Instant::now();
             let previous_qn = active.qn;
             let previous_quality = active.recording.quality.clone();
@@ -1862,10 +1954,11 @@ impl Recorder {
                 room_id,
                 start_number,
                 restarts = active.restarts,
+                upgrades = active.upgrades,
                 quality = %candidate.name,
-                requested_qn = plan_qn,
+                requested_qn,
                 actual_qn,
-                "断流后续录"
+                "续录/升级后重新开始写流"
             );
         }
         if let Some((
@@ -1896,7 +1989,7 @@ impl Recorder {
             if quality_changed && notify_live {
                 emit_notice(
                     app,
-                    "quality_fallback",
+                    notice_kind,
                     room_id,
                     &host_name,
                     Some(format!("{previous_quality} → {}", candidate.name)),
@@ -1905,6 +1998,320 @@ impl Recorder {
         }
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
         true
+    }
+
+    /// 凭据恢复后的画质重检：探测目标档是否已可用，必要时升级。
+    ///
+    /// v1（同编码同源流格式）：在同一个会话里换 ffmpeg，分片继续编号；
+    /// v2（编码/格式发生变化）：结束旧会话并开新会话，两条记录用 group_id 关联。
+    /// 升级失败会退回当前实际档位续录，绝不让已开始的录制停在那里。
+    pub async fn recheck_quality(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: &StreamBroker,
+        room_id: &str,
+        force: bool,
+    ) -> bool {
+        let gate = self
+            .upgrade_locks
+            .lock()
+            .expect("升级锁被污染")
+            .entry(room_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        let _gate = gate.lock().await;
+
+        if !force {
+            let checked = self.upgrade_checked.lock().expect("升级时间被污染");
+            if let Some(at) = checked.get(room_id) {
+                if at.elapsed() < UPGRADE_COOLDOWN {
+                    return false;
+                }
+            }
+        }
+        self.upgrade_checked
+            .lock()
+            .expect("升级时间被污染")
+            .insert(room_id.to_string(), Instant::now());
+
+        let snapshot = {
+            let inner = self.inner.lock().expect("录制状态被污染");
+            let Some(active) = inner.get(room_id) else {
+                return false;
+            };
+            if active.upgrading || active.stop_reason.is_some() {
+                return false;
+            }
+            // 已经达到目标（或目标就是最高可用）时不用探测。
+            if active.target_qn < crate::settings::RECORD_QN_HIGHEST
+                && active.qn >= active.target_qn
+                && active.qn > 0
+            {
+                return false;
+            }
+            Some((
+                active.recording.session_id.clone(),
+                active.qn,
+                active.target_qn,
+                active.line.clone(),
+                active.prefs,
+                active.codec,
+                active.format,
+                active.host_name.clone(),
+                active.notify_live,
+            ))
+        };
+        let Some((
+            session_id,
+            current_qn,
+            target_qn,
+            line,
+            prefs,
+            codec,
+            format,
+            host_name,
+            notify_live,
+        )) = snapshot
+        else {
+            return false;
+        };
+
+        let room = match self.db.get_room(room_id) {
+            Ok(Some(room)) => room,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::warn!(%err, room_id, "画质重检读取房间失败");
+                return false;
+            }
+        };
+        let reference = crate::monitor::room_ref(&room);
+        // 探测失败不写监控退避：这次升级只是锦上添花，不能影响下播判定与重试节奏。
+        let plan = match broker.probe(&reference, target_qn).await {
+            Ok(plan) => plan,
+            Err(err) => {
+                tracing::debug!(%err, room_id, "画质升级探测失败，保持当前档位");
+                return false;
+            }
+        };
+        // 升级探测按用户偏好选流，不能钉住当前编码/格式：
+        // 匿名时可能回落到 H.264，补 Cookie 后同一档位已有 HEVC/新格式，
+        // 这正是 v2 需要识别并另开会话的场景。
+        let probe_prefs = StreamPrefs {
+            qn: target_qn,
+            codec: prefs.codec,
+            format: prefs.format,
+        };
+        let Some((candidate, _group)) = pick_candidate(&plan.groups, line.as_deref(), probe_prefs)
+        else {
+            return false;
+        };
+        let candidate_qn = candidate_qn(candidate);
+        if !quality_is_better(&plan, candidate_qn, current_qn) {
+            tracing::debug!(
+                room_id,
+                current_qn,
+                candidate_qn,
+                target_qn,
+                "平台当前没有更高画质，保持当前档位"
+            );
+            return false;
+        }
+
+        // 标记「升级中」：watcher 看到 ffmpeg 退出时既不能收尾也不能续录。
+        {
+            let mut inner = self.inner.lock().expect("录制状态被污染");
+            let Some(active) = inner.get_mut(room_id) else {
+                return false;
+            };
+            if active.recording.session_id != session_id {
+                return false;
+            }
+            active.upgrading = true;
+        }
+        {
+            let mut inner = self.inner.lock().expect("录制状态被污染");
+            if let Some(active) = inner.get_mut(room_id) {
+                send_graceful(&mut active.child);
+            }
+        }
+        let mut status = None;
+        for _ in 0..50 {
+            if let Some((exit, _)) = self.poll_exit(room_id) {
+                status = Some(exit);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if status.is_none() {
+            status = self.kill_and_wait(room_id).await;
+        }
+        // 等待期间用户点了停录 / 磁盘红线：直接放弃升级，让 watcher 正常收尾。
+        if self.stop_reason(room_id).is_some() {
+            self.set_upgrading(room_id, false);
+            return false;
+        }
+        let status = match status {
+            Some(status) => status,
+            None => {
+                self.set_upgrading(room_id, false);
+                tracing::warn!(room_id, "画质升级时旧 ffmpeg 未能退出，放弃升级");
+                return false;
+            }
+        };
+
+        let same_container = !container_changed(codec, candidate.codec, format, candidate.format);
+        if same_container {
+            let upgraded = self
+                .respawn_inner(
+                    app,
+                    broker,
+                    room_id,
+                    true,
+                    false,
+                    "quality_upgraded",
+                    Some(target_qn),
+                    Some(current_qn),
+                )
+                .await;
+            if !upgraded {
+                // 升级没成，退回旧档位继续录：哪怕这一秒只拿到旧画质，也不能停录。
+                // 这里必须保持 upgrading，否则 watcher 会在回退进程启动前把会话收尾。
+                let _ = self
+                    .respawn_inner(
+                        app,
+                        broker,
+                        room_id,
+                        true,
+                        false,
+                        "quality_fallback",
+                        Some(current_qn),
+                        None,
+                    )
+                    .await;
+            }
+            self.set_upgrading(room_id, false);
+            if upgraded {
+                tracing::info!(
+                    room_id,
+                    previous_qn = current_qn,
+                    target_qn,
+                    candidate_qn,
+                    "画质升级完成（同一会话续写）"
+                );
+            }
+            return upgraded;
+        }
+
+        // v2：编码/源流格式变了，绝不把两种编码混进同一个文件。
+        let old = {
+            let mut inner = self.inner.lock().expect("录制状态被污染");
+            let removed = inner.remove(room_id);
+            removed
+        };
+        let Some(old) = old else {
+            return false;
+        };
+        match self.start_inner(app, broker, &room, false, false).await {
+            Ok(new) => {
+                let _ = self.db.set_session_group(
+                    &old.recording.session_id,
+                    &old.recording.session_id,
+                    0,
+                    None,
+                );
+                let _ = self.db.set_session_group(
+                    &new.session_id,
+                    &old.recording.session_id,
+                    1,
+                    Some("quality_upgrade"),
+                );
+                tracing::info!(
+                    room_id,
+                    old_session = %old.recording.session_id,
+                    new_session = %new.session_id,
+                    previous_quality = %old.recording.quality,
+                    quality = %new.quality,
+                    "画质升级完成（新会话，编码/格式已变化）"
+                );
+                if notify_live {
+                    emit_notice(
+                        app,
+                        "quality_upgraded",
+                        room_id,
+                        &host_name,
+                        Some(format!("{} → {}", old.recording.quality, new.quality)),
+                    );
+                }
+                let rec = Arc::clone(self);
+                let app = app.clone();
+                let room_id = room_id.to_string();
+                tauri::async_runtime::spawn(async move {
+                    rec.finalize_active(
+                        &app,
+                        &room_id,
+                        old,
+                        status,
+                        Some("quality_upgrade".into()),
+                        true,
+                    )
+                    .await;
+                });
+                true
+            }
+            Err(err) => {
+                tracing::warn!(%err, room_id, "画质升级新会话启动失败，回退旧会话续录");
+                {
+                    let mut inner = self.inner.lock().expect("录制状态被污染");
+                    inner.insert(room_id.to_string(), old);
+                }
+                let recovered = self
+                    .respawn_inner(
+                        app,
+                        broker,
+                        room_id,
+                        true,
+                        false,
+                        "quality_fallback",
+                        Some(current_qn),
+                        None,
+                    )
+                    .await;
+                if !recovered {
+                    self.set_upgrading(room_id, false);
+                }
+                false
+            }
+        }
+    }
+
+    fn set_upgrading(&self, room_id: &str, value: bool) {
+        if let Some(active) = self.inner.lock().expect("录制状态被污染").get_mut(room_id) {
+            active.upgrading = value;
+        }
+    }
+
+    /// 凭据保存 / 扫码确认后调用：对所有正在录制的房间做一次强制重检。
+    pub fn recheck_all_quality(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        broker: Arc<StreamBroker>,
+        reason: &'static str,
+    ) {
+        for recording in self.active_all() {
+            let recorder = Arc::clone(self);
+            let app = app.clone();
+            let broker = Arc::clone(&broker);
+            tauri::async_runtime::spawn(async move {
+                tracing::info!(
+                    room_id = %recording.room_id,
+                    reason,
+                    "凭据恢复，检查是否可升级画质"
+                );
+                recorder
+                    .recheck_quality(&app, &broker, &recording.room_id, true)
+                    .await;
+            });
+        }
     }
 
     async fn finalize(
@@ -1931,6 +2338,20 @@ impl Recorder {
             removed
         };
         let Some(active) = active else { return };
+        self.finalize_active(app, room_id, active, status, stop_reason, confirmed_end)
+            .await;
+    }
+
+    /// 收尾一个已经摘下来的 Active：断流收尾与画质升级分会话共用。
+    async fn finalize_active(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        room_id: &str,
+        active: Active,
+        status: std::process::ExitStatus,
+        stop_reason: Option<String>,
+        confirmed_end: bool,
+    ) {
         let _finalizing = FinalizeGuard {
             recorder: self,
             room_id: room_id.to_string(),
@@ -1959,6 +2380,7 @@ impl Recorder {
             Some("disk_full") => ("aborted", "disk_full", None),
             Some("disk_lost") => ("aborted", "disk_lost", None),
             Some("stalled") => ("failed", "stalled", Some("直播流长时间没有数据".into())),
+            Some("quality_upgrade") => ("finished", "quality_upgrade", None),
             _ if status.success() => ("finished", "stream_ended", None),
             _ => {
                 let message = format!("ffmpeg 异常退出：{status}");
@@ -3654,14 +4076,19 @@ fn candidate_qn(candidate: &StreamCandidate) -> u32 {
         .unwrap_or(0)
 }
 
-/// 自动画质在本场开始时落到实际档位后固定下来，避免直播中途出现更高档时跳档。
-/// 显式档位仍保留请求值，允许续录恢复到用户选的档位。
-fn pinned_qn(requested: u32, actual: u32) -> u32 {
-    if requested == 0 && actual > 0 {
-        actual
-    } else {
-        requested
-    }
+/// 编码/源流格式是否真的变了。编码未知时按同一类处理：平台没给 codec
+/// 不代表换了编码，贸然新开会话会让每次升级都多出一条录像。
+fn container_changed(
+    current_codec: Option<Codec>,
+    next_codec: Option<Codec>,
+    current_format: StreamFormat,
+    next_format: StreamFormat,
+) -> bool {
+    let codec_changed = match (current_codec, next_codec) {
+        (Some(current), Some(next)) => current != next,
+        _ => false,
+    };
+    codec_changed || current_format != next_format
 }
 
 /// 续录的实际档位是否变了：qn 可用时比 qn，平台没给 qn 时退回画质名。
@@ -3677,6 +4104,16 @@ fn actual_quality_changed(previous_qn: u32, previous: &str, next_qn: u32, next: 
 ///
 /// `requested == 0`（跟随平台）和 `requested == 40000`（最高可用）本来就会
 /// 落在平台能给的最好档位，不算降级；`actual == 0` 是平台没给 qn，无法判断。
+/// 用平台返回的画质清单顺序比较高低：斗鱼 401/400、虎牙 15000/20000/30000
+/// 的裸 qn 并不单调，只有 qualities 的降序位置可靠；缺档时退回数值比较。
+fn quality_is_better(plan: &crate::platform::StreamPlan, candidate: u32, current: u32) -> bool {
+    let rank = |qn: u32| plan.qualities.iter().position(|quality| quality.qn == qn);
+    match (rank(candidate), rank(current)) {
+        (Some(next), Some(prev)) => next < prev,
+        _ => candidate > current,
+    }
+}
+
 fn quality_fallback(requested: u32, actual: u32) -> bool {
     requested > 0
         && requested < crate::settings::RECORD_QN_HIGHEST
@@ -4110,12 +4547,55 @@ mod tests {
     }
 
     #[test]
-    fn auto_recording_pins_initial_quality() {
-        assert_eq!(pinned_qn(0, 250), 250);
-        assert_eq!(pinned_qn(0, 10_000), 10_000);
-        assert_eq!(pinned_qn(0, 0), 0);
-        assert_eq!(pinned_qn(400, 250), 400, "显式档位保留请求值");
-        assert_eq!(pinned_qn(400, 400), 400);
+    fn quality_upgrade_uses_platform_order() {
+        use crate::platform::StreamPlan;
+        use hivecast_ipc::QualityInfo;
+        let quality = |qn: u32| QualityInfo {
+            qn,
+            label: qn.to_string(),
+            hint: None,
+            available: true,
+            codec: None,
+        };
+        let plan = StreamPlan {
+            groups: Vec::new(),
+            qualities: vec![quality(40_000), quality(10_000), quality(250)],
+        };
+        assert!(quality_is_better(&plan, 10_000, 250));
+        assert!(!quality_is_better(&plan, 250, 10_000));
+        assert!(!quality_is_better(&plan, 250, 250));
+    }
+
+    #[test]
+    fn container_change_only_when_codec_or_format_really_differs() {
+        use crate::platform::{Codec, StreamFormat};
+        assert!(container_changed(
+            Some(Codec::H264),
+            Some(Codec::H265),
+            StreamFormat::Flv,
+            StreamFormat::Flv
+        ));
+        assert!(container_changed(
+            Some(Codec::H264),
+            Some(Codec::H264),
+            StreamFormat::Flv,
+            StreamFormat::Hls
+        ));
+        assert!(!container_changed(
+            Some(Codec::H264),
+            Some(Codec::H264),
+            StreamFormat::Flv,
+            StreamFormat::Flv
+        ));
+        assert!(
+            !container_changed(
+                None,
+                Some(Codec::H265),
+                StreamFormat::Flv,
+                StreamFormat::Flv
+            ),
+            "编码未知时不要误判成换编码"
+        );
     }
 
     #[test]

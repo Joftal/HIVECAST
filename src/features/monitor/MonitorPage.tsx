@@ -1354,7 +1354,15 @@ export default function MonitorPage({
                         <LiveDuration startedAt={recording.startedAt} />
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-faint">
-                        {recording.quality || "—"} · {recording.line || t("monitor.lineAuto")}
+                        {recording.targetQn < 40000 &&
+                        recording.targetQuality &&
+                        recording.targetQuality !== recording.quality
+                          ? t("monitor.qualityTargetActual", {
+                              target: recording.targetQuality,
+                              actual: recording.quality || "—",
+                            })
+                          : recording.quality || "—"}{" "}
+                        · {recording.line || t("monitor.lineAuto")}
                       </div>
                     </div>
                   </div>

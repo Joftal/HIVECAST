@@ -352,7 +352,9 @@ export default function App() {
                     ? "credentialExpired"
                     : notice.kind === "quality_fallback"
                       ? "qualityFallback"
-                      : notice.kind;
+                      : notice.kind === "quality_upgraded"
+                        ? "qualityUpgraded"
+                        : notice.kind;
           const title = t(`notice.${key}.title`);
           const body = t(`notice.${key}.body`, { host: notice.hostName, detail: notice.detail ?? "" });
           if (granted) sendNotification({ title, body });
@@ -360,7 +362,7 @@ export default function App() {
             type:
               notice.kind === "started" || notice.kind === "ended"
                 ? "success"
-                : notice.kind === "quality_fallback"
+                : notice.kind === "quality_fallback" || notice.kind === "quality_upgraded"
                   ? "info"
                   : notice.kind === "credential_expired"
                     ? "warning"

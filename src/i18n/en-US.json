@@ -408,6 +408,7 @@
     "online": "{{n}} viewers",
     "recordingClock": "REC {{time}}",
     "quality": "Record quality",
+    "qualityTargetActual": "Target {{target}} · Actual {{actual}}",
     "viewQuality": "Watch quality",
     "line": "Recording line",
     "lineAuto": "Auto",
@@ -744,6 +745,10 @@
     "qualityFallback": {
       "title": "Recording quality changed",
       "body": "Recording for {{host}} is now at {{detail}}. The recording will continue"
+    },
+    "qualityUpgraded": {
+      "title": "Recording quality upgraded",
+      "body": "{{host}} switched to a higher quality ({{detail}})"
     },
     "credentialExpired": {
       "title": "Session expired",

@@ -1303,6 +1303,7 @@ pub async fn credentials_list(state: State<'_, AppState>) -> Result<Vec<Credenti
 /// 所以这里可能因「Cookie 失效」失败，而不是静默存一份用不了的凭据。
 #[tauri::command]
 pub async fn credential_save(
+    app: AppHandle,
     state: State<'_, AppState>,
     platform: String,
     cookie: String,
@@ -1310,6 +1311,9 @@ pub async fn credential_save(
     tracing::debug!(target: "hivecast_lib::commands", platform = %platform, "保存平台登录凭据");
     let info = crate::account::save_cookie(&state.db, &platform, &cookie).await?;
     state.broker.clear_groups();
+    state
+        .recorder
+        .recheck_all_quality(&app, state.broker.clone(), "credential_saved");
     Ok(info)
 }
 
@@ -1331,12 +1335,16 @@ pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
 
 #[tauri::command]
 pub async fn bilibili_qr_poll(
+    app: AppHandle,
     state: State<'_, AppState>,
     qrcode_key: String,
 ) -> Result<QrPoll, AppError> {
     let poll = crate::account::bilibili_qr_poll(&state.db, &qrcode_key).await?;
     if poll.state == "confirmed" {
         state.broker.clear_groups();
+        state
+            .recorder
+            .recheck_all_quality(&app, state.broker.clone(), "qr_confirmed");
     }
     Ok(poll)
 }

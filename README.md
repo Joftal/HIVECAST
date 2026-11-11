@@ -156,6 +156,7 @@
 | [138-B站三态Cookie与取流审计](docs/138-B站三态Cookie与取流审计.md) | 对比扫码 / 网页 Cookie.txt / 未登录三态的登录、直播间数据、画质、线路、FLV/HLS/fMP4/HEVC 录制与续期：扫码与网页取流一致，网页 Cookie 缺 `ac_time_value` 无法自动续期；修复匿名仍把 4K/原画标可用、Cookie.txt 前缀导致 buvid3 丢失；270 tests、真实接口与 ffmpeg 录制验证通过 | 验证 B 站 Cookie 行为、排查未登录画质虚标、排查网页 Cookie 无法续期或 Cookie 文件解析时 |
 | [139-监控录制与Cookie状态全场景分析](docs/139-监控录制与Cookie状态全场景分析.md) | 逐场景审查监控/录制在无 Cookie、有效 Cookie、中途补/删 Cookie、失效、续期成功/失败、换账号、开录竞态下的行为：已启动 ffmpeg 不受 Cookie 轮转影响，监控不读凭据；确认两处正确性缺口——续录不更新质量元数据、默认最高档失效时静默降档；给出 R1–R7 风险、参考项目对照与验收清单 | 排查“补 Cookie 后画质没变/录制中断/媒体库画质不符”或改 Cookie 与录制联动时 |
 | [140-监控录制Cookie联动修复](docs/140-监控录制Cookie联动修复.md) | 修复 139 的 R1/R2/R3/R4/R6/R7：续录更新 qn/quality/line 并写回 `quality_history`；实际档位变化 WARN + 中性通知；过期 Cookie 按匿名封顶画质；Broker epoch 防旧结果回填 60 秒；R5 评估后保留失败冷却；274 tests、i18n 753 keys、docs 141 files、bundle 30.73 MiB | 排查续录画质/线路元数据、Cookie 失效后画质虚标或缓存回填时 |
+| [141-录制画质目标与自动升档](docs/141-录制画质目标与自动升档.md) | 默认录制目标改为原画 10000，target/requested/actual 三档分离；匿名回落不丢目标，保存 Cookie/扫码/续期后探测升级；同编码同格式 v1 原会话续写，编码或源流格式变化 v2 另开会话并用 group 关联；300 秒冷却、单飞、探测不写监控退避、失败回退；275 tests、i18n 756 keys、docs 142 files、bundle 30.84 MiB，含真实 B 站 v1 与 debug 强制 v2 验收 | 改录制画质目标、补 Cookie 后升档、断流重连画质、或排查“匿名 720p 后登录仍不升原画”时 |
 
 ## 阅读顺序建议
 

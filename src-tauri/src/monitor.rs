@@ -680,6 +680,12 @@ async fn check_room(
                         }
                     }
                 }
+                if recorder.is_recording(&room.id) {
+                    // 兜底重检：凭据恢复时通常已经事件驱动地查过一次，
+                    // 这里只处理漏掉的路径（例如手动改库、外部登录），300 秒冷却。
+                    // 每个房间的检查本来就跑在独立任务里，升级最多阻塞这一路几秒。
+                    recorder.recheck_quality(app, broker, &room.id, false).await;
+                }
             } else {
                 // 一次离线可能只是接口抖动 / 字段缺失，连续两次才认（S1）。
                 let confirmed = recorder.confirm_offline(&room.id);

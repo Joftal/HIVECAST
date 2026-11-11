@@ -408,6 +408,7 @@
     "online": "人气 {{n}}",
     "recordingClock": "录制中 {{time}}",
     "quality": "录制画质",
+    "qualityTargetActual": "目标 {{target}} · 实际 {{actual}}",
     "viewQuality": "观看画质",
     "line": "录制线路",
     "lineAuto": "自动",
@@ -744,6 +745,10 @@
     "qualityFallback": {
       "title": "录制画质已调整",
       "body": "{{host}} 的实际录制画质为 {{detail}}，录像不会中断"
+    },
+    "qualityUpgraded": {
+      "title": "录制画质已升级",
+      "body": "{{host}} 已切换到更高画质（{{detail}}）"
     },
     "credentialExpired": {
       "title": "登录态失效",
