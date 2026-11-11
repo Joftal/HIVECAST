@@ -11,7 +11,7 @@ export type RefreshStatus = {
  */
 checkedAt: number,
 /**
- * never | fresh | refreshed | failed | not_refreshable | discarded | key_stale
+ * never | fresh | refreshed | failed | not_refreshable | key_stale
  */
 outcome: string,
 /**

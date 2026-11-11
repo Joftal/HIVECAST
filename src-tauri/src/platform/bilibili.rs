@@ -304,10 +304,10 @@ impl PlatformAdapter for BilibiliAdapter {
             .flat_map(|format| format.codec.iter())
             .flat_map(|codec| codec.accept_qn.iter().copied())
             .collect();
-        // 无凭据或以最高档探测时，current_qn 才是当前实际能拿到的封顶：
+        // 无凭据（或凭据已过期）或以最高档探测时，current_qn 才是当前实际能拿到的封顶：
         // 未登录请求 10000 会回 250，accept_qn 却仍列出 4K/原画，不能拿来当“可用”。
         // 登录后请求 10000 回 10000，无法据此判断 2K/4K 权限，仍沿用平台能力清单。
-        let anonymous = crate::credential::get("bilibili").is_none();
+        let anonymous = !crate::credential::is_ok("bilibili");
         let granted_qn = if anonymous || qn >= QN_ORIGIN {
             playurl
                 .stream

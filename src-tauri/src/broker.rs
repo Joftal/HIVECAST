@@ -70,6 +70,8 @@ struct Inner {
     info_inflight: HashMap<String, Arc<AsyncMutex<()>>>,
     gates: HashMap<String, Instant>,
     failures: HashMap<String, Failure>,
+    /// 凭据变更代次：clear_groups 递增，用来丢弃在途请求的旧结果
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -138,6 +140,7 @@ impl StreamBroker {
         }
         self.wait_turn(&gate_key).await;
 
+        let epoch = self.inner.lock().expect("broker 状态被污染").epoch;
         let adapter = adapter_for(&room.platform)?;
         let started = Instant::now();
         let result = adapter.stream_plan(room, qn).await;
@@ -166,6 +169,15 @@ impl StreamBroker {
         inner.group_inflight.remove(&key);
         match result {
             Ok(plan) => {
+                if inner.epoch != epoch {
+                    tracing::debug!(
+                        platform = room.platform,
+                        room = %room.room_key,
+                        qn,
+                        "解析期间凭据已变更，丢弃本次取流缓存"
+                    );
+                    return Ok(Arc::new(plan));
+                }
                 inner.failures.remove(&gate_key);
                 let plan = Arc::new(plan);
                 inner.groups.insert(
@@ -178,6 +190,15 @@ impl StreamBroker {
                 Ok(plan)
             }
             Err(err) => {
+                if inner.epoch != epoch {
+                    tracing::debug!(
+                        platform = room.platform,
+                        room = %room.room_key,
+                        qn,
+                        "解析期间凭据已变更，丢弃本次取流失败"
+                    );
+                    return Err(err);
+                }
                 self.note_failure(&mut inner, &gate_key, &err);
                 Err(err)
             }
@@ -227,6 +248,7 @@ impl StreamBroker {
         }
         self.wait_turn(&gate_key).await;
 
+        let epoch = self.inner.lock().expect("broker 状态被污染").epoch;
         let adapter = adapter_for(&room.platform)?;
         let started = Instant::now();
         let result = adapter.room_info(room).await;
@@ -252,6 +274,14 @@ impl StreamBroker {
         inner.info_inflight.remove(&gate_key);
         match result {
             Ok(info) => {
+                if inner.epoch != epoch {
+                    tracing::debug!(
+                        platform = room.platform,
+                        room = %room.room_key,
+                        "解析期间凭据已变更，丢弃本次房间信息缓存"
+                    );
+                    return Ok(Arc::new(info));
+                }
                 inner.failures.remove(&gate_key);
                 let info = Arc::new(info);
                 inner.infos.insert(
@@ -264,6 +294,14 @@ impl StreamBroker {
                 Ok(info)
             }
             Err(err) => {
+                if inner.epoch != epoch {
+                    tracing::debug!(
+                        platform = room.platform,
+                        room = %room.room_key,
+                        "解析期间凭据已变更，丢弃本次房间信息失败"
+                    );
+                    return Err(err);
+                }
                 self.note_failure(&mut inner, &gate_key, &err);
                 Err(err)
             }
@@ -309,6 +347,7 @@ impl StreamBroker {
         let mut inner = self.inner.lock().expect("broker 状态被污染");
         inner.groups.clear();
         inner.infos.clear();
+        inner.epoch = inner.epoch.wrapping_add(1);
         tracing::debug!("账号凭据变更，已清空取流与房间信息缓存");
     }
 
@@ -518,5 +557,32 @@ mod tests {
         // 地址与信息缓存清掉了，失败冷却还在：续录不能替监控放行限流（B3）。
         assert!(broker.cached_info(&room_gate(&room)).is_none());
         assert!(broker.backoff_error(&room_gate(&room)).is_some());
+    }
+
+    #[test]
+    fn credential_change_advances_epoch_and_keeps_cooldown() {
+        let broker = StreamBroker::new();
+        let room = RoomRef {
+            platform: "bilibili".to_string(),
+            room_key: "1".into(),
+            canonical_url: String::new(),
+            input: String::new(),
+        };
+        {
+            let mut inner = broker.inner.lock().expect("broker 状态被污染");
+            broker.note_failure(
+                &mut inner,
+                &room_gate(&room),
+                &PlatformError::Network("x".into()),
+            );
+            assert_eq!(inner.epoch, 0);
+        }
+        broker.clear_groups();
+        let inner = broker.inner.lock().expect("broker 状态被污染");
+        // 代次递增让在途旧请求无法回填；冷却保留，避免登录/轮换被当成放行限流。
+        assert_eq!(inner.epoch, 1);
+        assert!(inner.groups.is_empty());
+        assert!(inner.infos.is_empty());
+        assert!(inner.failures.contains_key(&room_gate(&room)));
     }
 }

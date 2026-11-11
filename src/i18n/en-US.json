@@ -742,8 +742,8 @@
       "body": "Playback for {{host}} failed after several retries: {{detail}}"
     },
     "qualityFallback": {
-      "title": "Quality lowered",
-      "body": "Requested quality for {{host}} is unavailable. Recording continues at quality level {{detail}}; the recording will not stop"
+      "title": "Recording quality changed",
+      "body": "Recording for {{host}} is now at {{detail}}. The recording will continue"
     },
     "credentialExpired": {
       "title": "Session expired",

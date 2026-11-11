@@ -7,9 +7,15 @@ use std::collections::BTreeMap;
 use std::sync::{OnceLock, RwLock};
 
 static STORE: OnceLock<RwLock<BTreeMap<String, String>>> = OnceLock::new();
+/// 凭据状态（ok / expired）；单独存，避免为了读状态去解密 Cookie。
+static STATUS: OnceLock<RwLock<BTreeMap<String, String>>> = OnceLock::new();
 
 fn store() -> &'static RwLock<BTreeMap<String, String>> {
     STORE.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn status_store() -> &'static RwLock<BTreeMap<String, String>> {
+    STATUS.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 /// 启动时把库里的凭据灌进内存，之后 HTTP 层直接按 URL 取用。
@@ -22,8 +28,11 @@ pub fn load_from_db(db: &crate::db::Db) {
         }
     };
     let mut guard = store().write().expect("凭据表被污染");
+    let mut statuses = status_store().write().expect("凭据状态表被污染");
     guard.clear();
+    statuses.clear();
     for row in rows {
+        statuses.insert(row.platform.clone(), row.status);
         guard.insert(row.platform, row.cookie);
     }
     tracing::info!(count = guard.len(), "已加载账号凭据");
@@ -34,10 +43,35 @@ pub fn set(platform: &str, cookie: &str) {
         .write()
         .expect("凭据表被污染")
         .insert(platform.to_string(), cookie.to_string());
+    set_status(platform, "ok");
 }
 
 pub fn remove(platform: &str) {
     store().write().expect("凭据表被污染").remove(platform);
+    status_store()
+        .write()
+        .expect("凭据状态表被污染")
+        .remove(platform);
+}
+
+/// 同步凭据状态；调用方负责先把状态写进数据库。
+pub fn set_status(platform: &str, status: &str) {
+    status_store()
+        .write()
+        .expect("凭据状态表被污染")
+        .insert(platform.to_string(), status.to_string());
+}
+
+/// 只有 Cookie 存在且状态为 ok 才算登录态可用。
+pub fn is_ok(platform: &str) -> bool {
+    if get(platform).is_none() {
+        return false;
+    }
+    status_store()
+        .read()
+        .expect("凭据状态表被污染")
+        .get(platform)
+        .is_some_and(|status| status == "ok")
 }
 
 pub fn get(platform: &str) -> Option<String> {
@@ -310,6 +344,18 @@ mod tests {
             assert_eq!(value(&normalized, "buvid3"), Some("b"), "raw={raw}");
             assert!(!names(&normalized).iter().any(|name| name.contains('：')));
         }
+    }
+
+    #[test]
+    fn credential_status_gates_quality_access() {
+        set("unit-status", "SESSDATA=x");
+        assert!(is_ok("unit-status"));
+        set_status("unit-status", "expired");
+        assert!(!is_ok("unit-status"), "过期 Cookie 不能按登录态使用");
+        set_status("unit-status", "ok");
+        assert!(is_ok("unit-status"));
+        remove("unit-status");
+        assert!(!is_ok("unit-status"), "删掉 Cookie 后状态不再生效");
     }
 
     #[test]

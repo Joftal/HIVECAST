@@ -974,6 +974,7 @@ mod tests {
             file_size: 1,
             duration_ms: 60_000,
             quality: None,
+            quality_history: Vec::new(),
             line: None,
             error: None,
             danmaku_path: None,

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-use hivecast_ipc::{AppNotice, RecordSession, RecordingInfo, RoomRecord};
+use hivecast_ipc::{AppNotice, QualitySegment, RecordSession, RecordingInfo, RoomRecord};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
@@ -202,8 +202,12 @@ struct Active {
     stalls: u32,
     /// 「平台仍显示在播」的干净 EOF 复核次数（R1）
     eof_retries: u32,
-    /// 本场开录时的画质档位与线路：中途改设置不该渗进正在录的这一场（A3）
+    /// 当前实际画质档位；续录拿到不同档位时随之更新
     qn: u32,
+    /// 续录请求锚点：自动档位固定首段实际值，显式档位保留用户所选
+    plan_qn: u32,
+    /// 本场各时段的实际画质；只在档位变化时追加
+    quality_history: Vec<QualitySegment>,
     line: Option<String>,
     /// 本场开录时的编码/源流格式偏好：续录必须与首段保持一致，
     /// 否则同一场录像会混入不同编码/封装的分片。
@@ -1056,6 +1060,12 @@ impl Recorder {
         let danmaku_path_text = danmaku.as_ref().map(|_| danmaku_path.display().to_string());
 
         let session_id = uuid::Uuid::new_v4().to_string();
+        let quality_history = vec![QualitySegment {
+            at: started_at,
+            qn: actual_qn,
+            quality: candidate.name.clone(),
+            line: group.name.clone(),
+        }];
         let created = self.db.create_session(&RecordSession {
             id: session_id.clone(),
             room_id: room.id.clone(),
@@ -1067,6 +1077,7 @@ impl Recorder {
             file_size: 0,
             duration_ms: 0,
             quality: Some(candidate.name.clone()),
+            quality_history: quality_history.clone(),
             line: Some(group.name.clone()),
             error: None,
             danmaku_path: danmaku_path_text.clone(),
@@ -1126,7 +1137,9 @@ impl Recorder {
             last_growth: Instant::now(),
             stalls: 0,
             eof_retries: 0,
-            qn: pinned_qn(record_qn, actual_qn),
+            qn: actual_qn,
+            plan_qn: pinned_qn(record_qn, actual_qn),
+            quality_history,
             line: room.record_line.clone(),
             prefs,
             codec: candidate.codec,
@@ -1698,7 +1711,7 @@ impl Recorder {
             path,
             start_number,
             restarts,
-            qn,
+            plan_qn,
             line,
             prefs,
             codec,
@@ -1722,7 +1735,7 @@ impl Recorder {
                 path,
                 start_number,
                 active.restarts,
-                active.qn,
+                active.plan_qn,
                 active.line.clone(),
                 active.prefs,
                 active.codec,
@@ -1746,7 +1759,7 @@ impl Recorder {
         // 本次解析允许穿过冷却（续录是用户已经在等的动作），失败了也照常累计退避。
         // 给 CDN 一点时间回收上一条连接的动作放在 broker 调用前，顺序与旧版一致。
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let plan = match broker.plan_for_respawn(&reference, qn).await {
+        let plan = match broker.plan_for_respawn(&reference, plan_qn).await {
             Ok(plan) => plan,
             Err(err) => {
                 tracing::warn!(%err, room_id, "续录解析线路失败");
@@ -1755,8 +1768,8 @@ impl Recorder {
         };
         // 续录钉住首段的编码与源流格式：平台中途换编码时，宁可牺牲一点码率，
         // 也不要让同一场的分片在 H.264/H.265 之间跳变。
-        let prefs = respawn_prefs(qn, prefs, codec, format);
-        let Some((candidate, _group)) = pick_candidate(&plan.groups, line.as_deref(), prefs) else {
+        let prefs = respawn_prefs(plan_qn, prefs, codec, format);
+        let Some((candidate, group)) = pick_candidate(&plan.groups, line.as_deref(), prefs) else {
             tracing::warn!(room_id, "续录没有可用线路");
             return false;
         };
@@ -1770,15 +1783,6 @@ impl Recorder {
                     "续录找不到同编码线路，本场可能混入不同编码的分片"
                 );
             }
-        }
-        if quality_fallback(qn, actual_qn) {
-            tracing::warn!(
-                room_id,
-                requested_qn = qn,
-                actual_qn,
-                quality = %candidate.name,
-                "续录画质低于所选档位，已按可用画质续录"
-            );
         }
         if format_fallback(Some(format), candidate.format) {
             tracing::warn!(
@@ -1806,6 +1810,7 @@ impl Recorder {
         let stderr_tail = drain_stderr(&mut child);
         write_pid_file(&path, child.id());
 
+        let mut change = None;
         {
             let mut inner = self.inner.lock().expect("录制状态被污染");
             let Some(active) = inner.get_mut(room_id) else {
@@ -1827,15 +1832,76 @@ impl Recorder {
             active.stderr_tail = stderr_tail;
             active.restarts = restarts + 1;
             active.started = Instant::now();
+            let previous_qn = active.qn;
+            let previous_quality = active.recording.quality.clone();
+            let quality_changed =
+                actual_quality_changed(previous_qn, &previous_quality, actual_qn, &candidate.name);
+            let line_changed = active.recording.line != group.name;
+            if quality_changed || line_changed {
+                if quality_changed {
+                    active.qn = actual_qn;
+                    active.recording.quality = candidate.name.clone();
+                    active.quality_history.push(QualitySegment {
+                        at: crate::db::now_ts(),
+                        qn: actual_qn,
+                        quality: candidate.name.clone(),
+                        line: group.name.clone(),
+                    });
+                }
+                active.recording.line = group.name.clone();
+                change = Some((
+                    quality_changed,
+                    previous_qn,
+                    previous_quality,
+                    active.quality_history.clone(),
+                    active.host_name.clone(),
+                    active.notify_live,
+                ));
+            }
             tracing::info!(
                 room_id,
                 start_number,
                 restarts = active.restarts,
                 quality = %candidate.name,
-                requested_qn = qn,
+                requested_qn = plan_qn,
                 actual_qn,
                 "断流后续录"
             );
+        }
+        if let Some((
+            quality_changed,
+            previous_qn,
+            previous_quality,
+            history,
+            host_name,
+            notify_live,
+        )) = change
+        {
+            if quality_changed {
+                tracing::warn!(
+                    room_id,
+                    previous_qn,
+                    actual_qn,
+                    previous_quality = %previous_quality,
+                    quality = %candidate.name,
+                    "续录实际画质发生变化"
+                );
+            }
+            if let Err(err) =
+                self.db
+                    .update_session_quality(&session_id, &candidate.name, &group.name, &history)
+            {
+                tracing::warn!(%err, room_id, "续录画质/线路写回数据库失败");
+            }
+            if quality_changed && notify_live {
+                emit_notice(
+                    app,
+                    "quality_fallback",
+                    room_id,
+                    &host_name,
+                    Some(format!("{previous_quality} → {}", candidate.name)),
+                );
+            }
         }
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
         true
@@ -1953,6 +2019,7 @@ impl Recorder {
                 reason: reason.to_string(),
                 error: error.clone(),
                 quality: Some(active.recording.quality.clone()),
+                quality_history: active.quality_history.clone(),
                 line: Some(active.recording.line.clone()),
                 post: post_cfg.clone(),
                 clips,
@@ -2189,6 +2256,7 @@ impl Recorder {
                     file_size: clip.size,
                     duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
                     quality: Some(active.recording.quality.clone()),
+                    quality_history: active.quality_history.clone(),
                     line: Some(active.recording.line.clone()),
                     error: error.clone(),
                     danmaku_path: None,
@@ -2755,6 +2823,9 @@ struct SplitManifest {
     reason: String,
     error: Option<String>,
     quality: Option<String>,
+    /// 本场各时段的实际画质；旧清单没有该字段时为空
+    #[serde(default)]
+    quality_history: Vec<QualitySegment>,
     line: Option<String>,
     /// 开录时快照的后处理配置；v1 清单没有这个字段，反序列化时用 source 模式兜底。
     #[serde(default)]
@@ -3348,6 +3419,7 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 file_size: size,
                 duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
                 quality: manifest.quality.clone(),
+                quality_history: manifest.quality_history.clone(),
                 line: manifest.line.clone(),
                 error: manifest.error.clone(),
                 danmaku_path: None,
@@ -3589,6 +3661,15 @@ fn pinned_qn(requested: u32, actual: u32) -> u32 {
         actual
     } else {
         requested
+    }
+}
+
+/// 续录的实际档位是否变了：qn 可用时比 qn，平台没给 qn 时退回画质名。
+fn actual_quality_changed(previous_qn: u32, previous: &str, next_qn: u32, next: &str) -> bool {
+    if previous_qn > 0 && next_qn > 0 {
+        previous_qn != next_qn
+    } else {
+        previous != next
     }
 }
 
@@ -4035,6 +4116,16 @@ mod tests {
         assert_eq!(pinned_qn(0, 0), 0);
         assert_eq!(pinned_qn(400, 250), 400, "显式档位保留请求值");
         assert_eq!(pinned_qn(400, 400), 400);
+    }
+
+    #[test]
+    fn respawn_quality_change_compares_actual_not_requested() {
+        assert!(actual_quality_changed(10_000, "原画", 250, "超清"));
+        assert!(actual_quality_changed(250, "超清", 10_000, "原画"));
+        assert!(!actual_quality_changed(250, "超清", 250, "超清"));
+        // 平台没给 qn 时退回画质名，避免 0 == 0 掩盖换档。
+        assert!(actual_quality_changed(0, "高清", 0, "标清"));
+        assert!(!actual_quality_changed(0, "高清", 0, "高清"));
     }
 
     #[test]
@@ -4529,6 +4620,7 @@ mod tests {
             reason: "stream_ended".into(),
             error: None,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             post: Default::default(),
             clips: vec![
@@ -4644,6 +4736,7 @@ mod tests {
             file_size: 0,
             duration_ms: 0,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             error: None,
             danmaku_path: None,
@@ -4671,6 +4764,7 @@ mod tests {
             reason: "stream_ended".into(),
             error: None,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             post: Default::default(),
             clips: vec![
@@ -4791,6 +4885,7 @@ mod tests {
             file_size: 0,
             duration_ms: 0,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             error: None,
             danmaku_path: None,
@@ -4827,6 +4922,7 @@ mod tests {
             reason: "stream_ended".into(),
             error: None,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             post: Default::default(),
             clips: vec![
@@ -4905,6 +5001,7 @@ mod tests {
             reason: "stream_ended".into(),
             error: None,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             post: Default::default(),
             clips: vec![
@@ -5009,6 +5106,7 @@ mod tests {
             reason: "stream_ended".into(),
             error: None,
             quality: Some("原画".into()),
+            quality_history: Vec::new(),
             line: Some("线路1".into()),
             post: Default::default(),
             clips: vec![

@@ -190,6 +190,21 @@ pub struct RoomView {
     pub error: Option<String>,
 }
 
+/// 一场录制内的一个实际画质区间。
+///
+/// 断流续录可能拿到不同档位：起点 `at` 是这一档开始生效的 Unix 秒，
+/// 最后一段的终点取会话结束时间。只在档位真的变化时追加，避免同档重复。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct QualitySegment {
+    #[ts(type = "number")]
+    pub at: i64,
+    pub qn: u32,
+    pub quality: String,
+    pub line: String,
+}
+
 /// 一次录制记录（历史页数据源）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -211,6 +226,8 @@ pub struct RecordSession {
     #[ts(type = "number")]
     pub duration_ms: i64,
     pub quality: Option<String>,
+    /// 本场各时段的实际画质；空数组表示旧记录只有单值 quality
+    pub quality_history: Vec<QualitySegment>,
     /// 实际使用的线路组名
     pub line: Option<String>,
     pub error: Option<String>,

@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use hivecast_ipc::{
-    MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, RecordSession, RoomRecord,
-    SessionSummary, TaskRecord,
+    MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, QualitySegment, RecordSession,
+    RoomRecord, SessionSummary, TaskRecord,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -581,9 +581,9 @@ impl Db {
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
                     danmaku_path, danmaku_count, source_path, post_mode, post_state,
-                    source_deleted, post_error
+                    source_deleted, post_error, quality_history
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                          ?15, ?16, ?17, ?18, ?19)",
+                          ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 session.id,
                 session.room_id,
@@ -604,6 +604,7 @@ impl Db {
                 session.post_state,
                 session.source_deleted as i64,
                 session.post_error,
+                serde_json::to_string(&session.quality_history).unwrap_or_else(|_| "[]".into()),
             ],
         )
         .map_err(db_err)?;
@@ -632,9 +633,10 @@ impl Db {
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
                     danmaku_path, danmaku_count, group_id, clip_index, split_reason,
-                    source_path, post_mode, post_state, source_deleted, post_error
+                    source_path, post_mode, post_state, source_deleted, post_error,
+                    quality_history
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 session.id,
                 session.room_id,
@@ -658,6 +660,7 @@ impl Db {
                 session.post_state,
                 session.source_deleted as i64,
                 session.post_error,
+                serde_json::to_string(&session.quality_history).unwrap_or_else(|_| "[]".into()),
             ],
         )
         .map_err(db_err)?;
@@ -1291,6 +1294,32 @@ impl Db {
         Ok(())
     }
 
+    /// 断流续录拿到不同实际档位时更新会话元数据。
+    ///
+    /// 只改画质单值与 history，不碰状态、时长、路径：录制仍在同一个会话里继续。
+    pub fn update_session_quality(
+        &self,
+        id: &str,
+        quality: &str,
+        line: &str,
+        history: &[QualitySegment],
+    ) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session
+                    SET quality = ?2, line = ?3, quality_history = ?4
+                  WHERE id = ?1",
+                params![
+                    id,
+                    quality,
+                    line,
+                    serde_json::to_string(history).unwrap_or_else(|_| "[]".into())
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// 手动转封装成功后把主文件切到派生文件，同时保留源封装母带。
     ///
     /// 只改后处理相关列，不动状态、时长和弹幕：转封装不改录制本身。
@@ -1900,6 +1929,10 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             "post_error",
             "ALTER TABLE record_session ADD COLUMN post_error TEXT",
         ),
+        (
+            "quality_history",
+            "ALTER TABLE record_session ADD COLUMN quality_history TEXT",
+        ),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute(ddl, []).map_err(db_err)?;
@@ -2112,7 +2145,8 @@ const ROOM_SELECT: &str = "SELECT
 const SESSION_SELECT: &str = "SELECT
     id, room_id, started_at, ended_at, status, reason, file_path, file_size,
     duration_ms, quality, line, error, danmaku_path, danmaku_count,
-    source_path, post_mode, post_state, source_deleted, post_error
+    source_path, post_mode, post_state, source_deleted, post_error,
+    quality_history
   FROM record_session";
 
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
@@ -2182,6 +2216,10 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
         post_state: row.get(16)?,
         source_deleted: row.get::<_, i64>(17)? != 0,
         post_error: row.get(18)?,
+        quality_history: row
+            .get::<_, Option<String>>(19)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -2486,6 +2524,35 @@ mod tests {
             .expect("主播乙");
         assert_eq!(room_b.count, 1);
         assert_eq!(room_b.bytes, 100);
+    }
+
+    #[test]
+    fn session_quality_history_roundtrips() {
+        let (db, _path) = temp_db("quality-history");
+        seed_media(&db);
+        let history = vec![
+            QualitySegment {
+                at: 1000,
+                qn: 250,
+                quality: "超清".into(),
+                line: "线路1".into(),
+            },
+            QualitySegment {
+                at: 1600,
+                qn: 150,
+                quality: "高清".into(),
+                line: "线路2".into(),
+            },
+        ];
+        db.update_session_quality("s-a1", "高清", "线路2", &history)
+            .expect("写画质历史失败");
+        let session = db
+            .get_session("s-a1")
+            .expect("读会话失败")
+            .expect("会话存在");
+        assert_eq!(session.quality.as_deref(), Some("高清"));
+        assert_eq!(session.line.as_deref(), Some("线路2"));
+        assert_eq!(session.quality_history, history);
     }
 
     #[test]

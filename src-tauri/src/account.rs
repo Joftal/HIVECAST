@@ -521,7 +521,10 @@ fn mark_credential_expired(db: &Db, row: &CredentialRow) -> bool {
         row.avatar.as_deref(),
         now_ts(),
     ) {
-        Ok(true) => true,
+        Ok(true) => {
+            credential::set_status("bilibili", "expired");
+            true
+        }
         Ok(false) => {
             tracing::warn!(platform = "bilibili", "标记过期时账号已被删除");
             false
@@ -1091,6 +1094,7 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                     now_ts(),
                 ) {
                     Ok(true) => {
+                        credential::set_status("bilibili", "ok");
                         tracing::info!(
                             platform = "bilibili",
                             account = %account.name,
@@ -1153,6 +1157,7 @@ pub async fn revalidate(db: &Db, app: &tauri::AppHandle) {
                     now_ts(),
                 ) {
                     Ok(true) => {
+                        credential::set_status("bilibili", "expired");
                         clear_stream_cache(app);
                         emit_account_refresh(app);
                     }

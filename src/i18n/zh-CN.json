@@ -742,8 +742,8 @@
       "body": "{{host}} 的观看多次重连失败：{{detail}}"
     },
     "qualityFallback": {
-      "title": "画质已降档",
-      "body": "{{host}} 请求的画质当前不可用，已按 {{detail}} 档位继续录制，录像不会中断"
+      "title": "录制画质已调整",
+      "body": "{{host}} 的实际录制画质为 {{detail}}，录像不会中断"
     },
     "credentialExpired": {
       "title": "登录态失效",
