@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use hivecast_ipc::{
-    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview,
-    FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo, LiveStatus,
-    LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
-    QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView,
-    SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo,
-    ViewSlotInfo,
+    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, FfmpegStatus,
+    FilenamePreview, FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo,
+    LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback,
+    PostResult, QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord,
+    RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord,
+    TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -1266,9 +1266,15 @@ pub async fn room_merge_sessions(
     let mut sessions: Vec<_> = all_sessions
         .into_iter()
         .filter(|session| session.status != "recording" && session.file_path.is_some())
+        // 合并产物本身也是 finished 会话，再整房合并时跳过，避免越合越多。
+        .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
     sessions.sort_by_key(|session| session.started_at);
     let danmaku_sources = danmaku_sources(&sessions);
+    let total_ms: i64 = sessions
+        .iter()
+        .map(|session| session.duration_ms.max(0))
+        .sum();
     let files: Vec<PathBuf> = sessions
         .into_iter()
         .filter_map(|session| session.file_path.map(PathBuf::from))
@@ -1286,7 +1292,8 @@ pub async fn room_merge_sessions(
     let result = postprocess::merge(&files, None).await;
     match &result {
         Ok(merged) => {
-            merge_danmaku_files(&danmaku_sources, &merged.path);
+            let danmaku = merge_danmaku_files(&danmaku_sources, &merged.path);
+            register_merged_session(&state.db, &room_id, merged, danmaku.as_deref(), total_ms);
             job.finish("done", None);
         }
         Err(err) => job.finish("failed", Some(&err.to_string())),
@@ -1316,6 +1323,12 @@ pub async fn sessions_merge(
         .iter()
         .map(|session| session.duration_ms.max(0))
         .sum();
+    // 跨房间合并时沿用开录最早那段的房间，媒体库里仍能按房间归档。
+    let merged_room_id = sessions
+        .iter()
+        .min_by_key(|session| session.started_at)
+        .map(|session| session.room_id.clone())
+        .unwrap_or_default();
     let danmaku_sources = danmaku_sources(&sessions);
     let files = merge_files_in_order(sessions);
     if files.len() < 2 {
@@ -1331,7 +1344,14 @@ pub async fn sessions_merge(
     let result = postprocess::merge(&files, Some(&progress)).await;
     match &result {
         Ok(merged) => {
-            merge_danmaku_files(&danmaku_sources, &merged.path);
+            let danmaku = merge_danmaku_files(&danmaku_sources, &merged.path);
+            register_merged_session(
+                &state.db,
+                &merged_room_id,
+                merged,
+                danmaku.as_deref(),
+                total_ms,
+            );
             job.finish("done", None);
         }
         Err(err) => job.finish("failed", Some(&err.to_string())),
@@ -1339,21 +1359,78 @@ pub async fn sessions_merge(
     result
 }
 
+/// 把合并产物登记成一条普通录像，媒体库才能挂上弹幕轨、继续导出/删除。
+fn register_merged_session(
+    db: &crate::db::Db,
+    room_id: &str,
+    merged: &PostResult,
+    danmaku: Option<&std::path::Path>,
+    duration_ms: i64,
+) {
+    let now = now_ts();
+    let duration_ms = duration_ms.max(0);
+    let session = RecordSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        room_id: room_id.to_string(),
+        started_at: now - duration_ms / 1000,
+        ended_at: Some(now),
+        status: "finished".into(),
+        reason: Some("merge".into()),
+        file_path: Some(merged.path.clone()),
+        file_size: merged.size,
+        duration_ms,
+        quality: None,
+        quality_history: Vec::new(),
+        line: None,
+        error: None,
+        danmaku_path: danmaku.map(|path| path.to_string_lossy().to_string()),
+        danmaku_count: danmaku.map(count_lines).unwrap_or(0),
+        source_path: None,
+        post_mode: "source".into(),
+        post_state: "done".into(),
+        source_deleted: false,
+        post_error: None,
+    };
+    if let Err(err) = db.create_session(&session) {
+        tracing::warn!(target: "hivecast_lib::commands", %err, "合并录像登记失败");
+    }
+}
+
+fn count_lines(path: &std::path::Path) -> i64 {
+    std::fs::File::open(path)
+        .map(std::io::BufReader::new)
+        .map(|reader| {
+            std::io::BufRead::lines(reader)
+                .filter(|line| line.as_ref().is_ok_and(|line| !line.trim().is_empty()))
+                .count() as i64
+        })
+        .unwrap_or(0)
+}
+
 /// 合并成功后把各段 JSONL 拼成一条，并导出同名 ASS。
 /// 弹幕失败只记日志，不影响已经成功的视频合并。
-fn merge_danmaku_files(sources: &[postprocess::DanmakuSource], merged: &str) {
+fn merge_danmaku_files(sources: &[postprocess::DanmakuSource], merged: &str) -> Option<PathBuf> {
     let path = std::path::Path::new(merged);
     match postprocess::merge_danmaku(sources, path) {
-        Ok(Some(jsonl)) => match postprocess::danmaku_to_ass(&jsonl) {
-            Ok(result) => {
-                tracing::info!(target: "hivecast_lib::commands", ass = %result.path, "合并弹幕字幕完成")
+        Ok(Some(jsonl)) => {
+            match postprocess::danmaku_to_ass(&jsonl) {
+                Ok(result) => {
+                    tracing::info!(target: "hivecast_lib::commands", ass = %result.path, "合并弹幕字幕完成")
+                }
+                Err(err) => {
+                    tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕转 ASS 失败")
+                }
             }
-            Err(err) => {
-                tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕转 ASS 失败")
-            }
-        },
-        Ok(None) => tracing::info!(target: "hivecast_lib::commands", "合并的录像没有弹幕文件"),
-        Err(err) => tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕失败"),
+            Some(jsonl)
+        }
+        Ok(None) => {
+            tracing::info!(target: "hivecast_lib::commands", "合并的录像没有弹幕文件");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕失败");
+            None
+        }
     }
 }
 
@@ -1511,6 +1588,61 @@ mod tests {
         assert_eq!(info.stable_id.as_deref(), Some("7734200"));
         assert_eq!(info.extra["liveStatus"], 1);
         assert_eq!(info.extra["roomId"], "7734200");
+    }
+
+    #[test]
+    fn merged_session_registers_danmaku_and_media_track() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-reg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("hivecast.db")).unwrap();
+        db.exec_batch_for_test(
+            "INSERT INTO room (id, platform, room_key, canonical_url, title, host_name, created_at, updated_at) \
+             VALUES ('room-merge', 'bilibili', '6', 'https://live.bilibili.com/6', '标题', '主播', 1, 1)",
+        )
+        .unwrap();
+        let video = dir.join("merged.mp4");
+        std::fs::write(&video, b"merged-video").unwrap();
+        let jsonl = dir.join("merged.jsonl");
+        std::fs::write(
+            &jsonl,
+            "{\"t\":1000,\"k\":\"chat\",\"u\":\"甲\",\"c\":\"一\",\"col\":16777215}\n\n\
+             {\"t\":2500,\"k\":\"chat\",\"u\":\"乙\",\"c\":\"二\",\"col\":16777215}\n\
+             {\"t\":3000,\"k\":\"chat\",\"u\":\"丙\",\"c\":\"三\",\"col\":16777215}\n",
+        )
+        .unwrap();
+        let merged = PostResult {
+            kind: "merge".into(),
+            path: video.display().to_string(),
+            size: 12,
+            message: Some("合并 2 段".into()),
+        };
+
+        register_merged_session(&db, "room-merge", &merged, Some(&jsonl), 125_000);
+
+        let (items, total) = db
+            .media_list(&MediaFilter {
+                room_id: Some("room-merge".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total, 1);
+        let item = &items[0];
+        assert_eq!(item.danmaku_count, 3);
+        assert_eq!(
+            item.danmaku_path.as_deref(),
+            Some(jsonl.to_str().unwrap()),
+            "媒体库条目必须能拿到弹幕轨路径"
+        );
+        let session = db.get_session(&item.id).unwrap().unwrap();
+        assert_eq!(session.reason.as_deref(), Some("merge"));
+        assert_eq!(session.status, "finished");
+        assert_eq!(session.post_mode, "source");
+        assert_eq!(session.post_state, "done");
+        assert_eq!(session.duration_ms, 125_000);
+        assert_eq!(session.danmaku_count, 3);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1942,6 +2074,52 @@ pub async fn session_export_danmaku(
         .begin("danmaku", file_label(&PathBuf::from(&path)), None);
     tracing::info!(target: "hivecast_lib::commands", session_id = %session_id, file = %path, "导出弹幕为 ASS");
     postprocess::danmaku_to_ass(std::path::Path::new(&path))
+}
+
+/// 读取一段录像的弹幕 JSONL，供媒体库按视频进度回放。
+#[tauri::command]
+pub async fn media_danmaku(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<DanmakuMessage>, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session
+        .danmaku_path
+        .filter(|path| std::path::Path::new(path).is_file())
+        .ok_or_else(|| AppError::User("这段录像没有弹幕文件".into()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| AppError::Internal(format!("读取弹幕文件失败：{err}")))?;
+    let mut messages = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let content = value.get("c").and_then(|v| v.as_str()).unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+        messages.push(DanmakuMessage {
+            offset_ms: value.get("t").and_then(|v| v.as_i64()).unwrap_or(0),
+            kind: value
+                .get("k")
+                .and_then(|v| v.as_str())
+                .unwrap_or("chat")
+                .to_string(),
+            user: value.get("u").and_then(|v| v.as_str()).map(str::to_string),
+            content: content.to_string(),
+            color: value
+                .get("col")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0xFF_FF_FF) as u32,
+        });
+    }
+    messages.sort_by_key(|message| message.offset_ms);
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, count = messages.len(), "读取录像弹幕轨");
+    Ok(messages)
 }
 
 /// 删掉录像主文件之外由录制流程生成的伴随文件：分片、分割清单、pid、

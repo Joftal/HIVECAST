@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
+import DanmakuCanvas from "../watch/DanmakuCanvas";
 import { Button, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
@@ -13,6 +14,7 @@ import {
   isTauri,
   mediaDeleteGroup,
   mediaDeleteSource,
+  mediaDanmaku,
   mediaFiles,
   mediaGroupClips,
   mediaHosts,
@@ -30,6 +32,7 @@ import {
   sessionExportDanmaku,
   sessionRemux,
   sessionsMerge,
+  type DanmakuMessage,
   type MediaFile,
   type MediaHost,
   type MediaItem,
@@ -256,6 +259,11 @@ export default function MediaPage({
   } | null>(null);
   const [playBusy, setPlayBusy] = useState<string | null>(null);
   const [volume, setVolume] = useState(loadVolume);
+  // 录像弹幕轨：从 JSONL 读进内存，由播放位置驱动，不订阅直播流。
+  const [danmakuTrack, setDanmakuTrack] = useState<DanmakuMessage[] | null>(null);
+  const [danmakuLoading, setDanmakuLoading] = useState(false);
+  const [danmakuOn, setDanmakuOn] = useState(true);
+  const [playPosition, setPlayPosition] = useState(0);
 
   // 缩略图事件可能比列表先到，先记在 ref 里，下次合并进 items。
   const thumbsRef = useRef<Record<string, string>>({});
@@ -280,6 +288,35 @@ export default function MediaPage({
       alive = false;
     };
   }, [playing?.item.id, playing?.item.path, playing?.item.postState, playing?.item.sourceDeleted]);
+
+  useEffect(() => {
+    const item = playing?.item;
+    setPlayPosition(playing?.playback.offsetMs ?? 0);
+    setDanmakuTrack(null);
+    if (!item?.danmakuPath) {
+      setDanmakuLoading(false);
+      return;
+    }
+    let alive = true;
+    setDanmakuLoading(true);
+    void mediaDanmaku(item.id)
+      .then((messages) => {
+        if (alive) setDanmakuTrack(messages);
+      })
+      .catch(() => {
+        if (alive) setDanmakuTrack([]);
+      })
+      .finally(() => {
+        if (alive) setDanmakuLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [playing?.item.id, playing?.item.danmakuPath]);
+
+  useEffect(() => {
+    if (playing) setPlayPosition(playing.playback.offsetMs);
+  }, [playing?.playback.offsetMs]);
 
   // 搜索防抖：每敲一个字都查一次库没必要。
   useEffect(() => {
@@ -1401,6 +1438,24 @@ export default function MediaPage({
                         leadMs={playing.playback.leadMs}
                         startAtSec={playing.playback.offsetMs / 1000}
                         onSeek={(positionMs) => void seekTo(playing.item, positionMs)}
+                        onPositionChange={setPlayPosition}
+                        danmakuEnabled={danmakuOn && (danmakuTrack?.length ?? 0) > 0}
+                        onToggleDanmaku={
+                          (danmakuTrack?.length ?? 0) > 0
+                            ? () => setDanmakuOn((value) => !value)
+                            : undefined
+                        }
+                        overlay={
+                          danmakuTrack && danmakuTrack.length > 0 ? (
+                            <div className="pointer-events-none absolute inset-0">
+                              <DanmakuCanvas
+                                enabled={danmakuOn}
+                                messages={danmakuTrack}
+                                positionMs={playPosition}
+                              />
+                            </div>
+                          ) : null
+                        }
                       />
                     </div>
                   </div>
@@ -1432,6 +1487,31 @@ export default function MediaPage({
                         </div>
                       </div>
                     </div>
+
+                    {playing.item.danmakuPath ? (
+                      <div className="mt-4 flex items-center gap-2 rounded-[7px] border border-line bg-raised/40 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
+                          {t("media.danmakuTrack")}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void mediaRevealFile(playing.item.id, playing.item.danmakuPath!).catch(() => undefined)
+                          }
+                          title={playing.item.danmakuPath}
+                          className="focus-ring min-w-0 truncate font-mono text-[10.5px] text-accent-text hover:underline"
+                        >
+                          {baseName(playing.item.danmakuPath)}
+                        </button>
+                        <span className="ml-auto shrink-0 font-sans text-[10px] tabular-nums text-faint">
+                          {danmakuLoading
+                            ? t("media.danmakuLoading")
+                            : danmakuTrack && danmakuTrack.length > 0
+                              ? t("media.danmakuTrackCount", { n: danmakuTrack.length })
+                              : t("media.danmakuEmpty")}
+                        </span>
+                      </div>
+                    ) : null}
 
                     {detailFiles.length > 1 ? (
                       <div className="mt-4 rounded-[7px] border border-line bg-raised/40 px-3 py-2">

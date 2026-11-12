@@ -424,6 +424,11 @@ export async function sessionExportDanmaku(sessionId: string): Promise<PostResul
   return invoke<PostResult>("session_export_danmaku", { sessionId });
 }
 
+/** 读取一段录像的弹幕 JSONL，按 offsetMs 升序，供回放调度。 */
+export async function mediaDanmaku(sessionId: string): Promise<DanmakuMessage[]> {
+  return invoke<DanmakuMessage[]>("media_danmaku", { sessionId });
+}
+
 export async function mediaPlay(
   sessionId: string,
   positionMs?: number | null,

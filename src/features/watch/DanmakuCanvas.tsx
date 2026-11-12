@@ -3,8 +3,12 @@ import { onDanmakuBatch, type DanmakuMessage } from "../../lib/ipc";
 import { useDanmakuPrefs } from "../../lib/danmakuPrefs";
 
 type Props = {
-  roomId: string;
+  roomId?: string;
   enabled: boolean;
+  /** 录像回放：整段弹幕（按 offsetMs 升序）；给了就不再订阅直播。 */
+  messages?: DanmakuMessage[] | null;
+  /** 录像回放：当前播放位置（相对整段开头，毫秒）。 */
+  positionMs?: number;
 };
 
 type Item = {
@@ -45,6 +49,17 @@ function colorOf(value: number): string {
   return "#" + rgb;
 }
 
+function lowerBound(messages: DanmakuMessage[], positionMs: number): number {
+  let low = 0;
+  let high = messages.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (messages[mid].offsetMs < positionMs) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
 function labelOf(message: DanmakuMessage): string {
   const content = message.content;
   if (!message.user) return content;
@@ -58,10 +73,17 @@ function labelOf(message: DanmakuMessage): string {
  * 为什么不用 DOM：200 条/分钟的直播弹幕在 4 宫格里会产生大量节点，
  * Canvas 只维护一个绘制循环，帧率稳定且不参与 React 渲染。
  */
-export default function DanmakuCanvas({ roomId, enabled }: Props) {
+export default function DanmakuCanvas({
+  roomId,
+  enabled,
+  messages,
+  positionMs = 0,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+  const replayRef = useRef<{ messages: DanmakuMessage[]; positionMs: number } | null>(null);
+  replayRef.current = messages ? { messages, positionMs } : null;
   const opacity = useDanmakuPrefs((state) => state.opacity);
   const fontScale = useDanmakuPrefs((state) => state.fontScale);
   const speedScale = useDanmakuPrefs((state) => state.speed);
@@ -88,6 +110,10 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     let disposed = false;
     // 用户改字号/速度/区域/密度时整体重建绘制循环：参数少、重建便宜，比在循环里读 ref 更不容易出错。
     let font = fontOf(fontScale, fontFamily, bold);
+    // 回放游标：只按播放位置单调推进，seek 时重置。
+    let replayCursor = 0;
+    let replayMessages: DanmakuMessage[] | null = null;
+    let replayLastPos = 0;
     const perFrame = Math.max(2, Math.min(6, Math.round(3 * density)));
     const maxItems = Math.round(MAX_ITEMS * Math.min(density, 1.6));
     const duration = DURATION / speedScale;
@@ -171,6 +197,27 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
         return;
       }
 
+      const replay = replayRef.current;
+      if (replay) {
+        const pos = replay.positionMs;
+        const seeked = replay.messages !== replayMessages || pos < replayLastPos - 1500;
+        // 向前跳超过 2.5s 也按 seek 处理，避免把错过的几百条一次性倒进队列。
+        if (seeked || pos > replayLastPos + 2500) {
+          queue.length = 0;
+          items.length = 0;
+          replayCursor = lowerBound(replay.messages, pos);
+          replayMessages = replay.messages;
+        }
+        while (
+          replayCursor < replay.messages.length &&
+          replay.messages[replayCursor].offsetMs <= pos
+        ) {
+          queue.push(replay.messages[replayCursor]);
+          replayCursor += 1;
+        }
+        replayLastPos = pos;
+      }
+
       spawn(now);
 
       for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -206,14 +253,16 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
     raf = requestAnimationFrame(draw);
 
     let off: (() => void) | undefined;
-    void onDanmakuBatch((batch) => {
-      if (batch.roomId !== roomId) return;
-      for (const message of batch.messages) queue.push(message);
-      if (queue.length > MAX_ITEMS * 2) queue.splice(0, queue.length - MAX_ITEMS * 2);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else off = unlisten;
-    });
+    if (roomId) {
+      void onDanmakuBatch((batch) => {
+        if (batch.roomId !== roomId) return;
+        for (const message of batch.messages) queue.push(message);
+        if (queue.length > MAX_ITEMS * 2) queue.splice(0, queue.length - MAX_ITEMS * 2);
+      }).then((unlisten) => {
+        if (disposed) unlisten();
+        else off = unlisten;
+      });
+    }
 
     return () => {
       disposed = true;

@@ -744,6 +744,8 @@ pub struct MediaItem {
     pub status: String,
     #[ts(type = "number")]
     pub danmaku_count: i64,
+    /// 弹幕 JSONL 的绝对路径；没有弹幕时为 null
+    pub danmaku_path: Option<String>,
     /// 磁盘上还能不能找到这个文件
     pub has_file: bool,
     /// 九宫格缩略图的回环地址；还没生成时为 null

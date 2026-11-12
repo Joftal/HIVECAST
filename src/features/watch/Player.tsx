@@ -40,6 +40,8 @@ type Props = {
   startAtSec?: number;
   /** 请求跳到整段的某个位置；落在窗口外由外层重开一个窗口。 */
   onSeek?: (positionMs: number) => void;
+  /** 播放位置（相对整段开头）变化，录像回放用它驱动弹幕轨。 */
+  onPositionChange?: (positionMs: number) => void;
   /** 状态角标位置。观看页顶部有槽位信息条，角标要挪到左下角，否则会叠字。 */
   statsCorner?: "top-right" | "bottom-left";
   /** 观看页把播放统计放进格子标题栏，不再覆盖在视频左下角。 */
@@ -203,6 +205,7 @@ export default function Player({
   leadMs = 0,
   startAtSec,
   onSeek,
+  onPositionChange,
   statsCorner = "top-right",
   showStats = true,
   onStatsChange,
@@ -610,7 +613,11 @@ export default function Player({
         className={fit === "cover" ? "h-full w-full object-cover" : "h-full w-full object-contain"}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onTimeUpdate={(event) => setPositionMs(startMs + event.currentTarget.currentTime * 1000)}
+        onTimeUpdate={(event) => {
+          const next = startMs + event.currentTarget.currentTime * 1000;
+          setPositionMs(next);
+          onPositionChange?.(next);
+        }}
         onEnded={() => {
           if (!vod || !onSeek || durationMs === undefined) return;
           const video = videoRef.current;

@@ -9,6 +9,10 @@ export type MediaItem = { id: string, roomId: string, platform: string, title: s
  */
 path: string, size: number, durationMs: number, startedAt: number, status: string, danmakuCount: number,
 /**
+ * 弹幕 JSONL 的绝对路径；没有弹幕时为 null
+ */
+danmakuPath: string | null,
+/**
  * 磁盘上还能不能找到这个文件
  */
 hasFile: boolean,

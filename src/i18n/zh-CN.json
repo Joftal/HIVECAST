@@ -127,7 +127,11 @@
     "clipCount": "{{n}} 个片段",
     "loadClips": "加载剩余 {{n}} 个片段",
     "clipIndex": "第 {{n}} 段",
-    "selectSession": "选择整场"
+    "selectSession": "选择整场",
+    "danmakuTrack": "弹幕轨",
+    "danmakuTrackCount": "{{n}} 条",
+    "danmakuLoading": "读取中…",
+    "danmakuEmpty": "没有内容"
   },
   "tasks": {
     "title": "任务中心",

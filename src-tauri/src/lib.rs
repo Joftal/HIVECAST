@@ -271,6 +271,7 @@ pub fn run() {
             commands::post_retry,
             commands::post_cancel,
             commands::session_export_danmaku,
+            commands::media_danmaku,
             commands::room_merge_sessions,
             commands::sessions_merge,
             commands::settings_get,

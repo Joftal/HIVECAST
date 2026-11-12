@@ -609,9 +609,11 @@ async fn wbi_mixin_key() -> Result<String, String> {
     if raw.len() < 64 {
         return Err("WBI 密钥长度异常".into());
     }
+    // 混入密钥只取前 32 位；取满 64 位会算出错误的 w_rid，接口固定返回 -352。
     let mixin: String = MIXIN_KEY_ENC_TAB
         .iter()
         .map(|idx| raw.as_bytes()[*idx] as char)
+        .take(32)
         .collect();
     *cached = Some((mixin.clone(), Instant::now()));
     Ok(mixin)

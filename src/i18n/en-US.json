@@ -127,7 +127,11 @@
     "clipCount": "{{n}} clips",
     "loadClips": "Load {{n}} more clips",
     "clipIndex": "Clip {{n}}",
-    "selectSession": "Select session"
+    "selectSession": "Select session",
+    "danmakuTrack": "Danmaku track",
+    "danmakuTrackCount": "{{n}} messages",
+    "danmakuLoading": "Loading…",
+    "danmakuEmpty": "No messages"
   },
   "tasks": {
     "title": "Tasks",

@@ -1006,8 +1006,8 @@ impl Db {
     /// 媒体库单行映射：列表和整组补齐共用，避免两处 SELECT 漂移。
     fn media_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
         let path: String = row.get(5)?;
-        let source_path: Option<String> = row.get(15)?;
-        let source_deleted = row.get::<_, i64>(18)? != 0;
+        let source_path: Option<String> = row.get(16)?;
+        let source_deleted = row.get::<_, i64>(19)? != 0;
         let has_source = !source_deleted
             && source_path
                 .as_deref()
@@ -1024,17 +1024,18 @@ impl Db {
             started_at: row.get(8)?,
             status: row.get(9)?,
             danmaku_count: row.get(10)?,
+            danmaku_path: row.get(11)?,
             has_file: std::path::Path::new(&path).is_file(),
             thumbnail_url: None,
-            group_id: row.get(11)?,
-            clip_index: row.get(12)?,
-            split_reason: row.get(13)?,
-            clip_count: row.get(14)?,
+            group_id: row.get(12)?,
+            clip_index: row.get(13)?,
+            split_reason: row.get(14)?,
+            clip_count: row.get(15)?,
             source_path,
-            post_mode: row.get(16)?,
-            post_state: row.get(17)?,
+            post_mode: row.get(17)?,
+            post_state: row.get(18)?,
             source_deleted,
-            post_error: row.get(19)?,
+            post_error: row.get(20)?,
             has_source,
         })
     }
@@ -1063,6 +1064,7 @@ impl Db {
         let sql = format!(
             "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
                     s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
+                    s.danmaku_path,
                     COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
                     (SELECT COUNT(*) FROM record_session x
                       WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id)),
@@ -1092,6 +1094,7 @@ impl Db {
             .prepare(
                 "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
                         s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
+                        s.danmaku_path,
                         COALESCE(s.group_id, s.id), s.clip_index, s.split_reason,
                         (SELECT COUNT(*) FROM record_session x
                           WHERE COALESCE(x.group_id, x.id) = COALESCE(s.group_id, s.id)),
