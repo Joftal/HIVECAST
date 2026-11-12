@@ -63,8 +63,6 @@ const START_FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
 const HEALTHY_RESET: Duration = Duration::from_secs(30 * 60);
 /// 平台状态查不到时间隔这么久再问一次，避免把限流当成下播（A4）。
 const PLATFORM_RECHECK_DELAY: Duration = Duration::from_secs(20);
-/// 自动兜底重检画质的间隔；凭据事件是强制的，不受这个限制。
-const UPGRADE_COOLDOWN: Duration = Duration::from_secs(300);
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
 /// 启动后的崩溃恢复合并完成（I2：合并在后台跑，媒体库要重新取列表）。
 pub const EVENT_MEDIA_CHANGED: &str = "media://changed";
@@ -298,10 +296,8 @@ pub struct Recorder {
     /// 连续「开录请求本身失败」的次数与最后一次时刻（G5）。
     /// 和 hard_failures 分开：那条是「录到一半断了」，这条是「根本没录起来」。
     start_failures: Mutex<HashMap<String, (u32, Instant)>>,
-    /// 每房间升级单飞锁：监控兜底与凭据变更可能同时触发探测。
+    /// 每房间升级单飞锁：同一房间的凭据变更与续录可能同时触发探测。
     upgrade_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    /// 上次升级尝试时刻：同一房间 300 秒内只探一次，避免每拍都打平台。
-    upgrade_checked: Mutex<HashMap<String, Instant>>,
     /// 正在开录的房间：停录请求要能看见「ffmpeg 已经在起、但还没进 active」的这段窗口（C5）。
     starting: Mutex<HashSet<String>>,
     /// 开录在途时收到的停录请求：房间 → 原因。等 start 把会话挂进 active 再消费。
@@ -340,7 +336,6 @@ impl Recorder {
             hard_failures: Mutex::new(HashMap::new()),
             start_failures: Mutex::new(HashMap::new()),
             upgrade_locks: Mutex::new(HashMap::new()),
-            upgrade_checked: Mutex::new(HashMap::new()),
             danmaku,
             thumbs: std::sync::RwLock::new(None),
         }
@@ -2006,6 +2001,7 @@ impl Recorder {
 
     /// 凭据恢复后的画质重检：探测目标档是否已可用，必要时升级。
     ///
+    /// 只在保存 Cookie / 扫码确认这类登录态变化后触发，不做周期探测。
     /// v1（同编码同源流格式）：在同一个会话里换 ffmpeg，分片继续编号；
     /// v2（编码/格式发生变化）：结束旧会话并开新会话，两条记录用 group_id 关联。
     /// 升级失败会退回当前实际档位续录，绝不让已开始的录制停在那里。
@@ -2014,7 +2010,6 @@ impl Recorder {
         app: &AppHandle,
         broker: &StreamBroker,
         room_id: &str,
-        force: bool,
     ) -> bool {
         let gate = self
             .upgrade_locks
@@ -2024,19 +2019,6 @@ impl Recorder {
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone();
         let _gate = gate.lock().await;
-
-        if !force {
-            let checked = self.upgrade_checked.lock().expect("升级时间被污染");
-            if let Some(at) = checked.get(room_id) {
-                if at.elapsed() < UPGRADE_COOLDOWN {
-                    return false;
-                }
-            }
-        }
-        self.upgrade_checked
-            .lock()
-            .expect("升级时间被污染")
-            .insert(room_id.to_string(), Instant::now());
 
         let snapshot = {
             let inner = self.inner.lock().expect("录制状态被污染");
@@ -2312,7 +2294,7 @@ impl Recorder {
                     "凭据恢复，检查是否可升级画质"
                 );
                 recorder
-                    .recheck_quality(&app, &broker, &recording.room_id, true)
+                    .recheck_quality(&app, &broker, &recording.room_id)
                     .await;
             });
         }
