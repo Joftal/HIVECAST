@@ -351,6 +351,8 @@ struct WriterInner {
     /// 与本文件第一条时间轴对应的 Unix 毫秒；用于把整场 JSONL 按片段切分。
     started_wall_ms: i64,
     count: u64,
+    /// 写失败次数。磁盘满/权限异常时不能静默少行，至少要在日志里留下证据。
+    write_errors: u64,
     /// 上次落盘时刻：慢速聊天室可能几分钟都攒不满 50 条，不能只靠条数触发。
     flushed_at: Instant,
 }
@@ -373,6 +375,7 @@ impl RecordWriter {
                 started: Instant::now(),
                 started_wall_ms,
                 count: 0,
+                write_errors: 0,
                 flushed_at: Instant::now(),
             }),
         }))
@@ -395,11 +398,33 @@ impl RecordWriter {
             "c": message.content,
             "col": message.color,
         });
-        if writeln!(file, "{line}").is_ok() {
-            inner.count += 1;
-            if inner.count % 50 == 0 || inner.flushed_at.elapsed() >= Duration::from_secs(1) {
-                let _ = file.flush();
-                inner.flushed_at = Instant::now();
+        match writeln!(file, "{line}") {
+            Ok(()) => {
+                inner.count += 1;
+                if inner.count % 50 == 0 || inner.flushed_at.elapsed() >= Duration::from_secs(1) {
+                    if let Err(err) = file.flush() {
+                        inner.write_errors += 1;
+                        tracing::warn!(
+                            file = %inner.path.display(),
+                            %err,
+                            errors = inner.write_errors,
+                            "弹幕文件落盘失败，可能有弹幕未写入"
+                        );
+                    }
+                    inner.flushed_at = Instant::now();
+                }
+            }
+            Err(err) => {
+                let first = inner.write_errors == 0;
+                inner.write_errors += 1;
+                if first || inner.write_errors % 100 == 0 {
+                    tracing::warn!(
+                        file = %inner.path.display(),
+                        %err,
+                        errors = inner.write_errors,
+                        "弹幕写入失败，可能有弹幕未写入"
+                    );
+                }
             }
         }
         inner.file = Some(file);
@@ -417,7 +442,15 @@ impl RecordWriter {
     pub fn flush_pending(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             if let Some(file) = inner.file.as_mut() {
-                let _ = file.flush();
+                if let Err(err) = file.flush() {
+                    inner.write_errors += 1;
+                    tracing::warn!(
+                        file = %inner.path.display(),
+                        %err,
+                        errors = inner.write_errors,
+                        "弹幕文件 flush 失败"
+                    );
+                }
             }
         }
     }
@@ -425,7 +458,23 @@ impl RecordWriter {
     pub fn finish(&self) -> (PathBuf, u64) {
         let mut inner = self.inner.lock().expect("弹幕文件被污染");
         if let Some(mut file) = inner.file.take() {
-            let _ = file.flush();
+            if let Err(err) = file.flush() {
+                inner.write_errors += 1;
+                tracing::warn!(
+                    file = %inner.path.display(),
+                    %err,
+                    errors = inner.write_errors,
+                    "弹幕文件收尾 flush 失败"
+                );
+            }
+        }
+        if inner.write_errors > 0 {
+            tracing::warn!(
+                file = %inner.path.display(),
+                errors = inner.write_errors,
+                lines = inner.count,
+                "本场弹幕存在写入失败，文件可能不完整"
+            );
         }
         // 没有事件就不要在媒体目录里留一个 0 字节的 .jsonl。
         if inner.count == 0 {
@@ -478,6 +527,9 @@ struct DanmuSession {
     token: String,
     hosts: Vec<HostEntry>,
     room_id: i64,
+    /// 登录态弹幕必须同时带 uid 与 buvid；匿名连接两者为空。
+    uid: u64,
+    buvid: String,
 }
 
 #[derive(Deserialize)]
@@ -616,7 +668,40 @@ async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
             format!("房间不存在或已失效（code={} {detail}）", init.code)
         })?;
 
-    // 主接口：网页版 getDanmuInfo（需要 WBI 签名）。风控命中时会返回 -352，
+    // B 站对匿名 WS 做明显降采样：同一个高人气房间，登录态 60 秒能收到
+    // 60+ 条聊天，匿名只有个位数。token 必须用带 Cookie 的请求换取，认证包
+    // 再带上同一个 uid/buvid；WS 握手本身不需要 Cookie。
+    if let Some(cookie) = crate::credential::get("bilibili") {
+        if let Some(uid) = uid_from_cookie(&cookie) {
+            // 扫码登录写回的 Cookie 不一定带 buvid3；没有就向 B 站申请一个
+            // 设备指纹。token 由 Cookie 绑定 uid，buvid 只用于 auth 包。
+            let buvid = match crate::credential::value(&cookie, "buvid3")
+                .or_else(|| crate::credential::value(&cookie, "buvid4"))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+            {
+                Some(value) => Some(value),
+                None => fetch_buvid().await,
+            };
+            if let Some(buvid) = buvid {
+                match fetch_danmu_info_authed(real_id, &buvid).await {
+                    Ok(mut session) => {
+                        session.uid = uid;
+                        session.buvid = buvid;
+                        tracing::debug!(room = real_id, uid, "使用登录态获取弹幕 token");
+                        return Ok(session);
+                    }
+                    Err(err) => {
+                        tracing::warn!(room = real_id, uid, %err, "登录态弹幕 token 获取失败，回退匿名");
+                    }
+                }
+            } else {
+                tracing::warn!(room = real_id, uid, "无法取得 buvid，弹幕回退匿名");
+            }
+        }
+    }
+
+    // 匿名主接口：网页版 getDanmuInfo（需要 WBI 签名）。风控命中时会返回 -352，
     // 此时退到老的 getConf（无需签名，字段名不同但内容等价）。
     let primary = fetch_danmu_info(real_id).await;
     match primary {
@@ -629,6 +714,43 @@ async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
             Err(conf_err) => Err(format!("{primary_err}；备用接口：{conf_err}")),
         },
     }
+}
+
+/// 从 B 站 Cookie 里取登录态弹幕需要的 uid。
+fn uid_from_cookie(cookie: &str) -> Option<u64> {
+    crate::credential::value(cookie, "DedeUserID")?
+        .parse::<u64>()
+        .ok()
+        .filter(|uid| *uid > 0)
+}
+
+#[derive(Deserialize)]
+struct FingerData {
+    #[serde(default)]
+    b_3: String,
+    #[serde(default)]
+    b_4: String,
+}
+
+/// 申请一个匿名设备指纹；只在 Cookie 里没有 buvid3/buvid4 时调用。
+async fn fetch_buvid() -> Option<String> {
+    static BUVID: tokio::sync::Mutex<Option<String>> = tokio::sync::Mutex::const_new(None);
+    let mut cached = BUVID.lock().await;
+    if let Some(value) = cached.as_ref() {
+        return Some(value.clone());
+    }
+    let url = "https://api.bilibili.com/x/frontend/finger/spi";
+    let envelope: Envelope<FingerData> = http::get_json_anon(url, WWW_REFERER, &[]).await.ok()?;
+    let data = envelope.data?;
+    let value = if !data.b_3.is_empty() {
+        data.b_3
+    } else if !data.b_4.is_empty() {
+        data.b_4
+    } else {
+        return None;
+    };
+    *cached = Some(value.clone());
+    Some(value)
 }
 
 async fn fetch_danmu_info(real_id: i64) -> Result<DanmuSession, String> {
@@ -648,6 +770,45 @@ async fn fetch_danmu_info(real_id: i64) -> Result<DanmuSession, String> {
         token: info.token,
         hosts: info.host_list,
         room_id: real_id,
+        uid: 0,
+        buvid: String::new(),
+    })
+}
+
+/// 登录态 getDanmuInfo：WBI 签名不变，但请求要带 Cookie，服务端才会
+/// 下发与 uid 绑定的 token。token 拿到后 WS 握手不需要再带 Cookie。
+async fn fetch_danmu_info_authed(real_id: i64, buvid: &str) -> Result<DanmuSession, String> {
+    let info_url = format!("{API}/xlive/web-room/v1/index/getDanmuInfo?id={real_id}&type=0");
+    let signed = sign_url(&info_url).await?;
+    // 只带 SESSDATA 没有 buvid3 时 B 站风控仍会判成匿名甚至 -352，所以把
+    // 设备指纹一起塞进本次请求的 Cookie（不写回凭据）。
+    let mut cookie = crate::credential::get("bilibili").unwrap_or_default();
+    if crate::credential::value(&cookie, "buvid3").is_none()
+        && crate::credential::value(&cookie, "buvid4").is_none()
+    {
+        cookie.push_str("; buvid3=");
+        cookie.push_str(buvid);
+    }
+    let headers = [("Cookie", cookie.as_str())];
+    let envelope: Envelope<DanmuInfo> = http::get_json(&signed, REFERER, &headers)
+        .await
+        .map_err(|err| format!("取登录态弹幕服务器失败：{err}"))?;
+    let info = envelope.data.ok_or_else(|| {
+        let detail = envelope.message.unwrap_or_default();
+        format!(
+            "登录态 getDanmuInfo 返回空数据（code={} {detail}）",
+            envelope.code
+        )
+    })?;
+    if info.token.is_empty() {
+        return Err("登录态 getDanmuInfo 下发的 token 为空".into());
+    }
+    Ok(DanmuSession {
+        token: info.token,
+        hosts: info.host_list,
+        room_id: real_id,
+        uid: 0,
+        buvid: String::new(),
     })
 }
 
@@ -668,6 +829,8 @@ async fn fetch_conf(real_id: i64) -> Result<DanmuSession, String> {
         token: info.token,
         hosts: info.host_server_list,
         room_id: real_id,
+        uid: 0,
+        buvid: String::new(),
     })
 }
 
@@ -794,6 +957,21 @@ async fn run_once(
     session: &DanmuSession,
     backoff: &mut Duration,
 ) -> Result<(), String> {
+    let mut batch: Vec<DanmakuMessage> = Vec::new();
+    let result = run_once_inner(app, conn, session, backoff, &mut batch).await;
+    // 任何退出路径（认证失败、服务端关闭、假死、主动 release）都先把
+    // 最后一批已经解析出来的消息发给前端，避免 UI 丢掉最后 200ms 的弹幕。
+    flush(app, conn, &mut batch);
+    result
+}
+
+async fn run_once_inner(
+    app: &AppHandle,
+    conn: &Arc<RoomConn>,
+    session: &DanmuSession,
+    backoff: &mut Duration,
+    batch: &mut Vec<DanmakuMessage>,
+) -> Result<(), String> {
     let mut ws = connect(session).await?;
     send_packet(&mut ws, 7, &auth_body(session)).await?;
 
@@ -804,7 +982,10 @@ async fn run_once(
     let mut last_rx = Instant::now();
     let mut window_start = Instant::now();
     let mut count = 0u32;
-    let mut batch: Vec<DanmakuMessage> = Vec::new();
+    // 固定节拍，不能用 select! 里每轮新建 sleep：消息连续不断时定时器会被
+    // 反复取消，flush 永远轮不到，batch 会一直涨到断线才丢。
+    let mut batch_tick = tokio::time::interval(BATCH_WINDOW);
+    batch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -832,7 +1013,7 @@ async fn run_once(
                             *backoff = Duration::from_secs(1);
                         }
                         for message in outcome.messages {
-                            accept(conn, &mut window_start, &mut count, &mut batch, message);
+                            accept(conn, &mut window_start, &mut count, batch, message);
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) => return Err("弹幕连接被服务端关闭".into()),
@@ -841,8 +1022,8 @@ async fn run_once(
                     None => return Err("弹幕连接结束".into()),
                 }
             }
-            _ = tokio::time::sleep(BATCH_WINDOW) => {
-                flush(app, conn, &mut batch);
+            _ = batch_tick.tick() => {
+                flush(app, conn, batch);
             }
         }
 
@@ -913,8 +1094,8 @@ async fn try_connect(url: &str) -> Result<WsStream, String> {
 
 fn auth_body(session: &DanmuSession) -> Vec<u8> {
     json!({
-        "uid": 0,
-        "buvid": "",
+        "uid": session.uid,
+        "buvid": session.buvid,
         "roomid": session.room_id,
         "protover": 3,
         "platform": "web",
@@ -1245,6 +1426,43 @@ fn parse_message(body: &[u8]) -> Option<DanmakuMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uid_from_cookie_requires_a_positive_numeric_id() {
+        assert_eq!(
+            uid_from_cookie("SESSDATA=x; DedeUserID=352130563; buvid3=8E1A-test"),
+            Some(352130563)
+        );
+        assert!(uid_from_cookie("DedeUserID=0; buvid3=A").is_none());
+        assert!(uid_from_cookie("DedeUserID=abc; buvid3=A").is_none());
+        assert!(uid_from_cookie("buvid3=A").is_none());
+    }
+
+    #[test]
+    fn auth_body_carries_login_identity_or_zero() {
+        let authed = DanmuSession {
+            token: "t".into(),
+            hosts: Vec::new(),
+            room_id: 732,
+            uid: 352130563,
+            buvid: "buvid".into(),
+        };
+        let body: Value = serde_json::from_slice(&auth_body(&authed)).expect("json");
+        assert_eq!(body["uid"], 352130563);
+        assert_eq!(body["buvid"], "buvid");
+        assert_eq!(body["roomid"], 732);
+
+        let anon = DanmuSession {
+            token: "t".into(),
+            hosts: Vec::new(),
+            room_id: 732,
+            uid: 0,
+            buvid: String::new(),
+        };
+        let body: Value = serde_json::from_slice(&auth_body(&anon)).expect("json");
+        assert_eq!(body["uid"], 0);
+        assert_eq!(body["buvid"], "");
+    }
 
     fn record_message(kind: &str) -> DanmakuMessage {
         DanmakuMessage {

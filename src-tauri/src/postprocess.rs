@@ -247,6 +247,56 @@ pub async fn merge(
     })
 }
 
+/// 合并录像时按顺序拼接各段弹幕；t 按前一段的时长整体后移。
+///
+/// 某段没有弹幕文件时仍然推进时间轴，保证后续弹幕不会错位。
+pub struct DanmakuSource {
+    pub jsonl: Option<PathBuf>,
+    pub duration_ms: i64,
+}
+
+pub fn merge_danmaku(
+    sources: &[DanmakuSource],
+    out_video: &Path,
+) -> std::io::Result<Option<PathBuf>> {
+    use std::io::Write;
+    let out = out_video.with_extension("jsonl");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&out)?);
+    let mut offset = 0i64;
+    let mut count = 0u64;
+    for source in sources {
+        if let Some(jsonl) = source.jsonl.as_ref().filter(|path| path.is_file()) {
+            if let Ok(raw) = std::fs::read_to_string(jsonl) {
+                for line in raw.lines() {
+                    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let Some(t) = value.get("t").and_then(serde_json::Value::as_i64) else {
+                        continue;
+                    };
+                    value["t"] = serde_json::json!(t + offset);
+                    writeln!(writer, "{value}")?;
+                    count += 1;
+                }
+            }
+        }
+        offset += source.duration_ms.max(0);
+    }
+    writer.flush()?;
+    if count == 0 {
+        let _ = std::fs::remove_file(&out);
+        return Ok(None);
+    }
+    tracing::info!(
+        target: "hivecast_lib::postprocess",
+        task = "merge-danmaku",
+        out = %out.display(),
+        count,
+        "合并弹幕完成"
+    );
+    Ok(Some(out))
+}
+
 /// 按时间区间从整场 JSONL 切出单个片段，并把 t 归零到片段起点。
 ///
 /// 分割录制只维护一条 RecordWriter；收尾时用它给每个片段生成独立 JSONL，
@@ -359,7 +409,10 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
         let lane = pick_lane(&lane_free, at);
         let y = LANE_TOP + lane as i64 * LANE_HEIGHT;
         let duration = ((PLAY_RES_X as f64 + width as f64) / SCROLL_SPEED * 1000.0) as i64;
-        lane_free[lane] = at + duration.min(4000);
+        // 下一条要等上一条的尾巴完全进入画面（再留 24px 间隙）才能复用轨道。
+        // 固定 4 秒会让长弹幕还在屏幕右侧时就被下一条压住。
+        let lane_ms = ((width as f64 + 24.0) / SCROLL_SPEED * 1000.0) as i64;
+        lane_free[lane] = at + lane_ms.max(1);
         ass.push_str(&format!(
             "Dialogue: 0,{},{},Danmaku,,0,0,0,,{{\\move({PLAY_RES_X},{y},-{width},{y})\\c{colour}}}{body}\n",
             ass_time(at),
@@ -485,6 +538,39 @@ mod tests {
         assert!(text.contains("\"c\":\"b\""));
         assert_eq!(slice_danmaku(&src, &out, 9000, None).unwrap(), 0);
         assert!(!out.exists(), "空片段不留 0 字节 JSONL");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merges_danmaku_with_cumulative_offsets() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.jsonl");
+        let third = dir.join("c.jsonl");
+        std::fs::write(&first, "{\"t\":100,\"k\":\"chat\",\"c\":\"a\"}\n").unwrap();
+        std::fs::write(&third, "{\"t\":50,\"k\":\"chat\",\"c\":\"c\"}\n").unwrap();
+        let sources = vec![
+            DanmakuSource {
+                jsonl: Some(first),
+                duration_ms: 1_000,
+            },
+            DanmakuSource {
+                jsonl: None,
+                duration_ms: 1_000,
+            },
+            DanmakuSource {
+                jsonl: Some(third),
+                duration_ms: 2_000,
+            },
+        ];
+        let out = dir.join("merged.mp4");
+        let jsonl = merge_danmaku(&sources, &out).unwrap().unwrap();
+        let text = std::fs::read_to_string(&jsonl).unwrap();
+        assert!(text.contains("\"t\":100"));
+        assert!(text.contains("\"t\":2050"));
+        let empty = dir.join("empty.mp4");
+        assert!(merge_danmaku(&[], &empty).unwrap().is_none());
+        assert!(!empty.with_extension("jsonl").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

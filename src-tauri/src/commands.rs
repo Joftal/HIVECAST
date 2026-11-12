@@ -1268,6 +1268,7 @@ pub async fn room_merge_sessions(
         .filter(|session| session.status != "recording" && session.file_path.is_some())
         .collect();
     sessions.sort_by_key(|session| session.started_at);
+    let danmaku_sources = danmaku_sources(&sessions);
     let files: Vec<PathBuf> = sessions
         .into_iter()
         .filter_map(|session| session.file_path.map(PathBuf::from))
@@ -1284,7 +1285,10 @@ pub async fn room_merge_sessions(
     tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, files = files.len(), "开始合并房间录像");
     let result = postprocess::merge(&files, None).await;
     match &result {
-        Ok(_) => job.finish("done", None),
+        Ok(merged) => {
+            merge_danmaku_files(&danmaku_sources, &merged.path);
+            job.finish("done", None);
+        }
         Err(err) => job.finish("failed", Some(&err.to_string())),
     }
     result
@@ -1312,6 +1316,7 @@ pub async fn sessions_merge(
         .iter()
         .map(|session| session.duration_ms.max(0))
         .sum();
+    let danmaku_sources = danmaku_sources(&sessions);
     let files = merge_files_in_order(sessions);
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
@@ -1325,10 +1330,45 @@ pub async fn sessions_merge(
     };
     let result = postprocess::merge(&files, Some(&progress)).await;
     match &result {
-        Ok(_) => job.finish("done", None),
+        Ok(merged) => {
+            merge_danmaku_files(&danmaku_sources, &merged.path);
+            job.finish("done", None);
+        }
         Err(err) => job.finish("failed", Some(&err.to_string())),
     }
     result
+}
+
+/// 合并成功后把各段 JSONL 拼成一条，并导出同名 ASS。
+/// 弹幕失败只记日志，不影响已经成功的视频合并。
+fn merge_danmaku_files(sources: &[postprocess::DanmakuSource], merged: &str) {
+    let path = std::path::Path::new(merged);
+    match postprocess::merge_danmaku(sources, path) {
+        Ok(Some(jsonl)) => match postprocess::danmaku_to_ass(&jsonl) {
+            Ok(result) => {
+                tracing::info!(target: "hivecast_lib::commands", ass = %result.path, "合并弹幕字幕完成")
+            }
+            Err(err) => {
+                tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕转 ASS 失败")
+            }
+        },
+        Ok(None) => tracing::info!(target: "hivecast_lib::commands", "合并的录像没有弹幕文件"),
+        Err(err) => tracing::warn!(target: "hivecast_lib::commands", %err, "合并弹幕失败"),
+    }
+}
+
+fn danmaku_sources(sessions: &[RecordSession]) -> Vec<postprocess::DanmakuSource> {
+    sessions
+        .iter()
+        .map(|session| postprocess::DanmakuSource {
+            jsonl: session
+                .danmaku_path
+                .as_ref()
+                .map(PathBuf::from)
+                .filter(|path| path.is_file()),
+            duration_ms: session.duration_ms.max(0),
+        })
+        .collect()
 }
 
 /// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的跳过。

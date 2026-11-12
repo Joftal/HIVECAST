@@ -38,6 +38,9 @@ function fontOf(scale: number, family: keyof typeof FONT_FAMILIES, bold: boolean
 }
 
 function colorOf(value: number): string {
+  // B 站把白色存成 0xFFFFFF，也有房间/旧客户端下发 0；ASS 导出把 0 当白色，
+  // Canvas 如果按位取色会变成黑字，叠在黑边上直接看不见。
+  if (value === 0) return "#ffffff";
   const rgb = (value & 0xffffff).toString(16).padStart(6, "0");
   return "#" + rgb;
 }
@@ -131,9 +134,13 @@ export default function DanmakuCanvas({ roomId, enabled }: Props) {
           }
         }
         if (lane < 0) {
-          // 轨道全满就丢掉这条：宁可少一条，也不让画面叠字。
-          if (queue.length > maxItems) queue.length = 0;
-          continue;
+          // 轨道暂时全满：把这条放回队首等下一帧，不能整队清空。
+          // 队列超过上限时只丢最旧的，保留最近的弹幕。
+          queue.unshift(message);
+          if (queue.length > maxItems) {
+            queue.splice(0, queue.length - maxItems);
+          }
+          break;
         }
 
         const speed = (width + textWidth) / duration;
