@@ -637,6 +637,8 @@ struct StatusItem {
     #[serde(default)]
     live_status: i64,
     #[serde(default)]
+    live_time: Option<LiveTime>,
+    #[serde(default)]
     online: i64,
 }
 
@@ -649,7 +651,9 @@ fn positive_id(value: i64) -> Option<String> {
 }
 
 /// 批量接口返回的是以 UID 为键的对象；个别条目缺 uid 时才用键兜底。
-/// live_time 不是可靠的 Unix 开播时间，因此这里不映射 started_at。
+///
+/// live_time 在状态接口里是 Unix 秒（实测与 get_info 一致），0 表示没有开播时间；
+/// 这里保留为 started_at，快速下播重开时监控才能识别出新一场。
 fn status_from_item(key: String, item: StatusItem) -> LiveStatus {
     let uid = if item.uid > 0 {
         item.uid.to_string()
@@ -666,6 +670,13 @@ fn status_from_item(key: String, item: StatusItem) -> LiveStatus {
         cover_url: non_empty(item.cover_from_user).or_else(|| non_empty(item.keyframe)),
         area_name: non_empty(item.area_name),
         is_live: item.live_status == 1,
+        // 只有本场正在直播时，live_time 才是本场开播时间；离线房间即使
+        // 返回了上一次的开播时间，也不能把它当成当前场次。
+        started_at: if item.live_status == 1 {
+            item.live_time.as_ref().and_then(LiveTime::unix)
+        } else {
+            None
+        },
         online: (item.online >= 0).then_some(item.online as u64),
     }
 }
@@ -924,6 +935,7 @@ mod tests {
                 area_name: "虚拟主播".into(),
                 live_status: 1,
                 online: -1,
+                live_time: Some(LiveTime::Number(1_792_050_615)),
             },
         );
         assert_eq!(status.uid, "352130563");
@@ -935,6 +947,7 @@ mod tests {
         );
         assert_eq!(status.avatar_url, None);
         assert_eq!(status.online, None);
+        assert_eq!(status.started_at, Some(1_792_050_615));
         assert!(status.is_live);
 
         let explicit = status_from_item(
@@ -951,6 +964,7 @@ mod tests {
                 area_name: String::new(),
                 live_status: 0,
                 online: 12345,
+                live_time: Some(LiveTime::Number(1_700_000_000)),
             },
         );
         assert_eq!(explicit.uid, "1794315001");
@@ -960,6 +974,10 @@ mod tests {
             Some("https://i0.hdslb.com/cover.jpg")
         );
         assert_eq!(explicit.online, Some(12345));
+        assert_eq!(
+            explicit.started_at, None,
+            "离线房间的 live_time 可能是上一场，不能当成本场开播时间"
+        );
         assert!(!explicit.is_live);
     }
 

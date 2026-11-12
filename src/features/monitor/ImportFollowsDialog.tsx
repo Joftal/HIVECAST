@@ -254,6 +254,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
       coverUrl: status.coverUrl,
       areaName: status.areaName,
       isLive: status.isLive,
+      startedAt: status.startedAt,
       online: status.online,
     }));
     setImporting(true);

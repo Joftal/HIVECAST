@@ -3,4 +3,8 @@
 /**
  * 导入一条关注主播所需的快照；由前端从关注列表与批量状态拼出来。
  */
-export type ImportRoomInput = { uid: string, roomId: string, shortId: string | null, uname: string, title: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean, online: number | null, };
+export type ImportRoomInput = { uid: string, roomId: string, shortId: string | null, uname: string, title: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean,
+/**
+ * 平台给出的本场开播时间；导入时带上，避免沿用上一次的开播时间。
+ */
+startedAt: number | null, online: number | null, };

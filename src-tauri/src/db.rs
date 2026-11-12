@@ -391,7 +391,10 @@ impl Db {
     ) -> Result<Option<RoomRecord>, AppError> {
         let conn = self.lock();
         conn.query_row(
-            &format!("{ROOM_SELECT} WHERE platform = ?1 AND platform_uid = ?2"),
+            &format!(
+                "{ROOM_SELECT} WHERE platform = ?1 AND platform_uid = ?2 \
+                 ORDER BY (removed_at IS NULL) DESC, created_at ASC LIMIT 1"
+            ),
             params![platform, platform_uid],
             map_room,
         )
@@ -429,7 +432,19 @@ impl Db {
                 tags = CASE WHEN COALESCE(tags, '') = '' THEN
                     COALESCE((SELECT tags FROM room WHERE id = ?2), '') ELSE tags END,
                 auto_record = MAX(auto_record, COALESCE((SELECT auto_record FROM room WHERE id = ?2), 0)),
-                monitor_paused = MIN(monitor_paused, COALESCE((SELECT monitor_paused FROM room WHERE id = ?2), 0))
+                monitor_paused = MIN(monitor_paused, COALESCE((SELECT monitor_paused FROM room WHERE id = ?2), 0)),
+                platform_uid = COALESCE(platform_uid, (SELECT platform_uid FROM room WHERE id = ?2)),
+                record_qn = CASE WHEN COALESCE(record_qn, 0) = 0 THEN
+                    COALESCE((SELECT record_qn FROM room WHERE id = ?2), 0) ELSE record_qn END,
+                view_qn = CASE WHEN COALESCE(view_qn, 0) = 0 THEN
+                    COALESCE((SELECT view_qn FROM room WHERE id = ?2), 0) ELSE view_qn END,
+                record_line = COALESCE(record_line, (SELECT record_line FROM room WHERE id = ?2)),
+                title_include = COALESCE(title_include, (SELECT title_include FROM room WHERE id = ?2)),
+                title_exclude = COALESCE(title_exclude, (SELECT title_exclude FROM room WHERE id = ?2)),
+                split_max_duration_sec = COALESCE(split_max_duration_sec, (SELECT split_max_duration_sec FROM room WHERE id = ?2)),
+                split_max_size_mb = COALESCE(split_max_size_mb, (SELECT split_max_size_mb FROM room WHERE id = ?2)),
+                notify_live = COALESCE(notify_live, (SELECT notify_live FROM room WHERE id = ?2)),
+                notify_error = COALESCE(notify_error, (SELECT notify_error FROM room WHERE id = ?2))
               WHERE id = ?1",
             params![keep_id, drop_id],
         )
@@ -484,7 +499,7 @@ impl Db {
                     room.id,
                     room.platform,
                     room.room_key,
-                    platform_uid_of(info),
+                    platform_uid_of(info).or_else(|| room.platform_uid.clone()),
                     room.canonical_url,
                     info.room_name,
                     info.host_name,
@@ -2241,11 +2256,15 @@ const SESSION_SELECT: &str = "SELECT
 
 /// 从平台 extra 里取账号 UID；只有 B 站会填，其它平台为 None。
 pub(crate) fn platform_uid_of(info: &RoomInfo) -> Option<String> {
-    info.extra
-        .get("uid")
-        .and_then(|value| value.as_i64())
-        .filter(|uid| *uid > 0)
-        .map(|uid| uid.to_string())
+    let value = info.extra.get("uid")?;
+    if let Some(uid) = value.as_i64() {
+        return (uid > 0).then(|| uid.to_string());
+    }
+    // 批量导入把 uid 作为字符串放进 extra；如果只认数字，
+    // 导入的房间会没有 platform_uid，首轮进不了批量状态接口。
+    let text = value.as_str()?.trim();
+    let uid = text.parse::<i64>().ok()?;
+    (uid > 0).then(|| text.to_string())
 }
 
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
@@ -2394,10 +2413,13 @@ mod tests {
         db.lock()
             .execute_batch(
                 "INSERT INTO room
-                    (id, platform, room_key, canonical_url, host_name, title, note, tags, auto_record, monitor_paused, created_at, updated_at)
+                    (id, platform, room_key, platform_uid, canonical_url, host_name, title, note, tags, auto_record, monitor_paused,
+                     record_qn, view_qn, record_line, title_include, title_exclude, split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
+                     created_at, updated_at)
                  VALUES
-                    ('keep', 'bilibili', '6', 'https://live.bilibili.com/6', '主播', '短号', '', 'LOL', 0, 1, 0, 0),
-                    ('drop', 'bilibili', '7734200', 'https://live.bilibili.com/7734200', '主播', '真号', '备注', '', 1, 0, 0, 0);
+                    ('keep', 'bilibili', '6', NULL, 'https://live.bilibili.com/6', '主播', '短号', '', 'LOL', 0, 1, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0),
+                    ('drop', 'bilibili', '7734200', '42', 'https://live.bilibili.com/7734200', '主播', '真号', '备注', '', 1, 0,
+                     15000, 250, 'line-b', '仅标题', '排除', 3600, 2048, 1, 0, 0, 0);
                  INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, quality)
                  VALUES ('s-drop', 'drop', 100, 'finished', '/tmp/drop.flv', 10, 1000, '原画 · FLV · H.264');",
             )
@@ -2421,7 +2443,36 @@ mod tests {
             room.last_session_quality.as_deref(),
             Some("原画 · FLV · H.264")
         );
+        assert_eq!(room.platform_uid.as_deref(), Some("42"));
+        assert_eq!(room.record_qn, 15000, "保留行未设置画质时继承被合并行");
+        assert_eq!(room.view_qn, 250);
+        assert_eq!(room.record_line.as_deref(), Some("line-b"));
+        assert_eq!(room.title_include.as_deref(), Some("仅标题"));
+        assert_eq!(room.title_exclude.as_deref(), Some("排除"));
+        assert_eq!(room.split_max_duration_sec, Some(3600));
+        assert_eq!(room.split_max_size_mb, Some(2048));
+        assert_eq!(room.notify_live, Some(true));
+        assert_eq!(room.notify_error, Some(false));
         assert!(db.get_room("drop").expect("查询失败").is_none());
+    }
+
+    #[test]
+    fn find_room_by_uid_prefers_active_row() {
+        let (db, _path) = temp_db("find-room-by-uid");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room
+                    (id, platform, room_key, platform_uid, canonical_url, host_name, title, removed_at, created_at, updated_at)
+                 VALUES
+                    ('removed', 'bilibili', '6', '42', 'https://live.bilibili.com/6', '主播', '已删', 100, 0, 0),
+                    ('active', 'bilibili', '7734200', '42', 'https://live.bilibili.com/7734200', '主播', '在库', NULL, 1, 1);",
+            )
+            .expect("播种房间失败");
+        let room = db
+            .find_room_by_uid("bilibili", "42")
+            .expect("查询失败")
+            .expect("应命中");
+        assert_eq!(room.id, "active", "同 UID 多条时优先仍在库的房间");
     }
 
     #[test]
@@ -2861,6 +2912,61 @@ mod tests {
         db.insert_room(&existing, &info).expect("恢复房间失败");
         assert!(!db.room_removed("rm-a").expect("读标记失败"));
         assert_eq!(db.list_rooms().expect("列表失败").len(), 2);
+    }
+
+    #[test]
+    fn platform_uid_accepts_numeric_and_string_forms() {
+        let mut info = crate::platform::RoomInfo {
+            host_name: String::new(),
+            room_name: String::new(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: false,
+            started_at: None,
+            online: None,
+            stable_id: None,
+            extra: serde_json::json!({ "uid": "42" }),
+        };
+        assert_eq!(platform_uid_of(&info).as_deref(), Some("42"));
+        info.extra = serde_json::json!({ "uid": 42 });
+        assert_eq!(platform_uid_of(&info).as_deref(), Some("42"));
+        info.extra = serde_json::json!({ "uid": " 43 " });
+        assert_eq!(platform_uid_of(&info).as_deref(), Some("43"));
+        info.extra = serde_json::json!({ "uid": "0" });
+        assert_eq!(platform_uid_of(&info), None);
+        info.extra = serde_json::json!({ "uid": "" });
+        assert_eq!(platform_uid_of(&info), None);
+    }
+
+    #[test]
+    fn insert_room_uses_string_uid_then_draft_fallback() {
+        let (db, _path) = temp_db("insert-uid");
+        seed_media(&db);
+        let room = db.get_room("rm-a").expect("读失败").expect("房间缺失");
+        let mut info = crate::platform::RoomInfo {
+            host_name: "主播甲".into(),
+            room_name: "房间甲".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: Some(5000),
+            online: Some(1),
+            stable_id: None,
+            extra: serde_json::json!({ "uid": "123" }),
+        };
+        db.insert_room(&room, &info).expect("写入失败");
+        let saved = db.get_room("rm-a").expect("读失败").expect("房间缺失");
+        assert_eq!(saved.platform_uid.as_deref(), Some("123"));
+
+        // 平台信息里没有 uid 时，至少要用调用方已经解析好的 draft uid。
+        info.extra = serde_json::Value::Null;
+        let mut fallback = saved;
+        fallback.platform_uid = Some("456".into());
+        db.insert_room(&fallback, &info).expect("写入失败");
+        let saved = db.get_room("rm-a").expect("读失败").expect("房间缺失");
+        assert_eq!(saved.platform_uid.as_deref(), Some("456"));
     }
 
     fn row(platform: &str, cookie: &str) -> CredentialRow {

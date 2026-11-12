@@ -245,6 +245,9 @@ pub struct LiveStatus {
     pub cover_url: Option<String>,
     pub area_name: Option<String>,
     pub is_live: bool,
+    /// 平台给出的本场开播时间（Unix 秒）；0/缺失表示平台没有可用的开播时间。
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
     #[ts(type = "number | null")]
     pub online: Option<u64>,
 }
@@ -263,6 +266,10 @@ pub struct ImportRoomInput {
     pub cover_url: Option<String>,
     pub area_name: Option<String>,
     pub is_live: bool,
+    /// 平台给出的本场开播时间；导入时带上，避免沿用上一次的开播时间。
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
     #[ts(type = "number | null")]
     pub online: Option<u64>,
 }

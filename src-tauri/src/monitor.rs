@@ -137,6 +137,8 @@ pub fn spawn(
         // B 站批量状态的自有节奏：所有可批量的房间共用一次请求，
         // 不能跟着每个房间错开的 next_at 走，否则一拍一个请求反而更多。
         let mut batch_at: Option<Instant> = None;
+        // 记住 batch_at 是按哪个间隔排的；用户改监控间隔后要按新间隔重排。
+        let mut batch_interval: Option<i64> = None;
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -163,6 +165,7 @@ pub fn spawn(
                 &tx,
                 &mut rooms_cache,
                 &mut batch_at,
+                &mut batch_interval,
                 base_secs,
             );
             snapshot_statuses(&schedule, &statuses);
@@ -356,6 +359,7 @@ fn tick(
     tx: &mpsc::UnboundedSender<(String, Outcome)>,
     rooms_cache: &mut Option<(Instant, Vec<hivecast_ipc::RoomRecord>)>,
     batch_at: &mut Option<Instant>,
+    batch_interval: &mut Option<i64>,
     base: i64,
 ) {
     // 应用正在退出：监控每秒一拍，若继续检测就会在收尾窗口里再拉起一路，
@@ -432,6 +436,9 @@ fn tick(
     }
 
     if base <= 0 {
+        // 关闭自动检测时丢掉批量节奏；重新开启后按新间隔重新散开，
+        // 不沿用关闭前的旧 batch_at。
+        *batch_interval = None;
         return;
     }
 
@@ -441,7 +448,12 @@ fn tick(
 
     let now = Instant::now();
     // 批量节奏独立于单房间排期：首次按平台散开，之后严格每间隔一次。
-    // 关闭自动检测时 base=0 已在上面返回，不会留下不可用的 0 秒节奏。
+    // 间隔被用户改过（30s → 5m 或反过来）时不能继续按旧节奏：否则调大后
+    // 仍会按旧间隔打接口，调小后房间要等旧的长间隔才被查。
+    if *batch_interval != Some(base) {
+        *batch_interval = Some(base);
+        *batch_at = Some(now + Duration::from_secs(spread("batch:bilibili", base) as u64));
+    }
     let first_batch = *batch_at
         .get_or_insert_with(|| now + Duration::from_secs(spread("batch:bilibili", base) as u64));
     let batch_due = now >= first_batch;
@@ -450,6 +462,9 @@ fn tick(
         .or_insert_with(|| Arc::new(Semaphore::new(PLATFORM_CONCURRENCY)))
         .clone();
     let mut batch_rooms: Vec<hivecast_ipc::RoomRecord> = Vec::new();
+    // 已经有一批还在跑时，不要在空批次的每一拍把 batch_at 往后推；
+    // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
+    let mut batch_inflight = false;
 
     for room in rooms {
         // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
@@ -494,6 +509,7 @@ fn tick(
                 .is_some_and(|uid| !uid.trim().is_empty());
         if batchable {
             if !batch_due || entry.inflight {
+                batch_inflight |= entry.inflight;
                 continue;
             }
             entry.inflight = true;
@@ -536,7 +552,7 @@ fn tick(
         });
     }
 
-    if batch_due {
+    if batch_due && (!batch_rooms.is_empty() || !batch_inflight) {
         *batch_at = Some(
             add_jitter(
                 now + Duration::from_secs(base as u64),
@@ -546,6 +562,12 @@ fn tick(
             .max(now + Duration::from_secs(1)),
         );
         if !batch_rooms.is_empty() {
+            tracing::info!(
+                target: "hivecast_lib::monitor",
+                rooms = batch_rooms.len(),
+                interval_sec = base,
+                "B 站批量状态检查开始"
+            );
             let ids: Vec<String> = batch_rooms.iter().map(|room| room.id.clone()).collect();
             let app = app.clone();
             let db = db.clone();
@@ -553,8 +575,11 @@ fn tick(
             let recorder = recorder.clone();
             let global = global.clone();
             let tx = tx.clone();
+            let completed = Arc::new(Mutex::new(HashSet::new()));
+            let completed_for_task = completed.clone();
             tokio::spawn(async move {
-                // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死。
+                // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死；
+                // 但只补没回传的，已经成功的房间不能因 panic 再吃一次 Failed。
                 let inner_tx = tx.clone();
                 let guard = tokio::spawn(async move {
                     run_batch_check(
@@ -566,18 +591,45 @@ fn tick(
                         batch_permits,
                         global,
                         inner_tx,
+                        completed_for_task,
                     )
                     .await;
                 });
                 if let Err(err) = guard.await {
                     tracing::warn!(%err, "B 站批量检测任务异常退出");
+                    let sent = completed_ids(&completed);
                     for id in ids {
-                        let _ = tx.send((id, Outcome::Failed));
+                        if !sent.contains(&id) {
+                            let _ = tx.send((id, Outcome::Failed));
+                        }
                     }
                 }
             });
         }
     }
+}
+
+/// 记录已经回传结果的房间，批量任务 panic 时只补没回传的。
+///
+/// 直接给整批所有 id 补 Failed 会把已经正常落库的房间再算一次失败，
+/// 连带把退避计数翻倍，所以成功发送前先记一笔。
+fn send_batch_outcome(
+    tx: &mpsc::UnboundedSender<(String, Outcome)>,
+    completed: &Mutex<HashSet<String>>,
+    id: String,
+    outcome: Outcome,
+) {
+    completed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id.clone());
+    let _ = tx.send((id, outcome));
+}
+
+fn completed_ids(completed: &Mutex<HashSet<String>>) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    completed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 一次 B 站批量状态请求，服务所有到期房间。
@@ -595,13 +647,19 @@ async fn run_batch_check(
     permits: Arc<Semaphore>,
     global: Arc<Semaphore>,
     tx: mpsc::UnboundedSender<(String, Outcome)>,
+    completed: Arc<Mutex<HashSet<String>>>,
 ) {
+    let started = Instant::now();
+    let total = rooms.len();
     let uids: Vec<String> = rooms
         .iter()
         .filter_map(|room| room.platform_uid.clone())
         .collect();
     match crate::platform::bilibili::fetch_live_statuses(&uids).await {
         Ok(statuses) => {
+            let returned = statuses.len();
+            let live = statuses.iter().filter(|status| status.is_live).count();
+            let mut missing = 0usize;
             let by_uid: HashMap<String, hivecast_ipc::LiveStatus> = statuses
                 .into_iter()
                 .map(|status| (status.uid.clone(), status))
@@ -615,6 +673,14 @@ async fn run_batch_check(
                     // 批量没返回这个 UID：可能是没有直播间/接口字段缺失，
                     // 不能按离线处理，回落到单房间接口拿准确状态。
                     None => {
+                        missing += 1;
+                        tracing::debug!(
+                            target: "hivecast_lib::monitor",
+                            room = %room.host_name,
+                            room_id = %room.id,
+                            uid = room.platform_uid.as_deref().unwrap_or_default(),
+                            "批量状态缺少该 UID，回退单房间检查"
+                        );
                         run_check(
                             app,
                             db,
@@ -627,8 +693,18 @@ async fn run_batch_check(
                         .await
                     }
                 };
-                let _ = tx.send((room.id, outcome));
+                send_batch_outcome(&tx, &completed, room.id, outcome);
             }
+            tracing::info!(
+                target: "hivecast_lib::monitor",
+                rooms = total,
+                uids = uids.len(),
+                returned,
+                live,
+                missing,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "B 站批量状态检查完成"
+            );
         }
         Err(err) => {
             let critical: Vec<_> = rooms
@@ -640,6 +716,7 @@ async fn run_batch_check(
                 error = %err,
                 rooms = rooms.len(),
                 critical = critical.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "B 站批量状态失败，降级单房间检查"
             );
             let critical_ids: HashSet<String> =
@@ -655,12 +732,17 @@ async fn run_batch_check(
                     global.clone(),
                 )
                 .await;
-                let _ = tx.send((room.id, outcome));
+                send_batch_outcome(&tx, &completed, room.id, outcome);
             }
             for room in rooms {
                 if !critical_ids.contains(&room.id) {
                     // 不更新状态，也不退避成小时级；下个批量拍继续尝试。
-                    let _ = tx.send((room.id, Outcome::Retry(base_batch_retry())));
+                    send_batch_outcome(
+                        &tx,
+                        &completed,
+                        room.id,
+                        Outcome::Retry(base_batch_retry()),
+                    );
                 }
             }
         }
@@ -674,8 +756,8 @@ fn base_batch_retry() -> i64 {
 
 /// 把批量状态映射成监控统一使用的房间信息。
 ///
-/// 批量接口的 live_time 不可信，这里不改 started_at：在播房间沿用原值，
-/// 从离线翻到在播时置空，交给录制侧按「新一场」处理。
+/// 批量状态里的 live_time 是 Unix 秒；优先用平台真实开播时间，缺失时才沿用
+/// 本地上一轮的值。这样快速下播重开能识别成新一场，不会沿用旧开播时间。
 fn batch_room_info(
     status: &hivecast_ipc::LiveStatus,
     room: &hivecast_ipc::RoomRecord,
@@ -697,7 +779,9 @@ fn batch_room_info(
         cover_url: status.cover_url.clone().or_else(|| room.cover_url.clone()),
         area_name: status.area_name.clone().or_else(|| room.area_name.clone()),
         is_live: status.is_live,
-        started_at: if room.is_live { room.started_at } else { None },
+        started_at: status
+            .started_at
+            .or_else(|| if room.is_live { room.started_at } else { None }),
         online: status.online,
         stable_id: status
             .room_id
@@ -1038,6 +1122,7 @@ mod tests {
             area_name: None,
             is_live: true,
             online: Some(9),
+            started_at: Some(200),
         };
         let info = batch_room_info(&status, &room);
         assert_eq!(info.host_name, "旧主播");
@@ -1047,8 +1132,19 @@ mod tests {
         assert_eq!(info.stable_id.as_deref(), Some("7734200"));
         assert_eq!(
             info.started_at,
+            Some(200),
+            "批量状态带回新的开播时间时必须覆盖本地旧值"
+        );
+
+        let no_time = hivecast_ipc::LiveStatus {
+            started_at: None,
+            ..status.clone()
+        };
+        let info = batch_room_info(&no_time, &room);
+        assert_eq!(
+            info.started_at,
             Some(100),
-            "房间上一轮在播时沿用已知开播时间"
+            "批量没有给出开播时间时沿用本地上一轮"
         );
 
         let offline_room = hivecast_ipc::RoomRecord {
@@ -1060,13 +1156,11 @@ mod tests {
             is_live: false,
             online: None,
             cover_url: None,
+            started_at: None,
             ..status
         };
         let info = batch_room_info(&offline, &offline_room);
-        assert_eq!(
-            info.started_at, None,
-            "批量 live_time 不可信，不能伪造开播时间"
-        );
+        assert_eq!(info.started_at, None, "离线房间不能沿用上一场的开播时间");
         assert_eq!(info.cover_url.as_deref(), Some("https://old/cover.jpg"));
         assert_eq!(info.online, None);
     }

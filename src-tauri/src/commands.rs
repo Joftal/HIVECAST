@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use hivecast_ipc::{
     ActiveTask, AddRoomResult, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview,
@@ -294,6 +295,26 @@ pub async fn bilibili_follow_statuses(uids: Vec<String>) -> Result<Vec<LiveStatu
 ///
 /// 已经存在的房间只刷新展示字段，不覆盖用户设置的画质/线路/备注/自动录制；
 /// 没有直播间的关注记为失败，而不是当成离线房间加进来。
+fn import_room_info(item: &ImportRoomInput, uid: &str, uname: &str) -> crate::platform::RoomInfo {
+    crate::platform::RoomInfo {
+        host_name: uname.to_string(),
+        room_name: item.title.clone(),
+        avatar_url: item.avatar_url.clone(),
+        cover_url: item.cover_url.clone(),
+        area_name: item.area_name.clone(),
+        is_live: item.is_live,
+        started_at: item.started_at,
+        online: item.online,
+        stable_id: Some(item.room_id.trim().to_string()),
+        extra: serde_json::json!({
+            "uid": uid,
+            "roomId": item.room_id.trim(),
+            "shortId": item.short_id,
+            "liveStatus": if item.is_live { 1 } else { 0 },
+        }),
+    }
+}
+
 #[tauri::command]
 pub async fn rooms_import(
     app: AppHandle,
@@ -307,8 +328,13 @@ pub async fn rooms_import(
     let settings = crate::settings::load(&state.db);
     let timestamp = now_ts();
 
+    let import_started = Instant::now();
+    let total = items.len();
     let mut added = 0u32;
     let mut existing = 0u32;
+    let mut restored = 0u32;
+    let mut merged = 0u32;
+    let mut rekeyed = 0u32;
     let mut failed = Vec::new();
     let mut started: Vec<RoomRecord> = Vec::new();
 
@@ -338,14 +364,42 @@ pub async fn rooms_import(
                 match known.take() {
                     None => {
                         state.db.rekey_room(&alias.id, room_id, &canonical_url)?;
+                        rekeyed += 1;
+                        tracing::info!(
+                            target: "hivecast_lib::commands",
+                            room_id = %alias.id,
+                            room_key = room_id,
+                            uid,
+                            "导入关注：短号行改挂真实房间号"
+                        );
                         known = state.db.get_room(&alias.id)?;
                     }
                     Some(primary) => {
-                        state.db.merge_room(&primary.id, &alias.id)?;
-                        if primary.room_key != room_id {
-                            state.db.rekey_room(&primary.id, room_id, &canonical_url)?;
+                        // 短号行可能已经软删、而 UID 行还在用：这时保留仍在
+                        // 使用的那条，把它的设置当作 keep，不能反过来吞掉。
+                        let primary_active = !state.db.room_removed(&primary.id)?;
+                        let alias_active = !state.db.room_removed(&alias.id)?;
+                        let (keep, drop) = if !primary_active && alias_active {
+                            (&alias, &primary)
+                        } else {
+                            (&primary, &alias)
+                        };
+                        state.db.merge_room(&keep.id, &drop.id)?;
+                        merged += 1;
+                        tracing::info!(
+                            target: "hivecast_lib::commands",
+                            keep = %keep.id,
+                            keep_key = %keep.room_key,
+                            drop = %drop.id,
+                            drop_key = %drop.room_key,
+                            uid,
+                            "导入关注：合并重复房间"
+                        );
+                        if keep.room_key != room_id {
+                            state.db.rekey_room(&keep.id, room_id, &canonical_url)?;
+                            rekeyed += 1;
                         }
-                        known = state.db.get_room(&primary.id)?;
+                        known = state.db.get_room(&keep.id)?;
                     }
                 }
             }
@@ -353,24 +407,9 @@ pub async fn rooms_import(
         if let Some(room) = known {
             if room.room_key != room_id {
                 state.db.rekey_room(&room.id, room_id, &canonical_url)?;
+                rekeyed += 1;
             }
-            let info = RoomInfo {
-                host_name: uname.clone(),
-                room_name: item.title.clone(),
-                avatar_url: item.avatar_url.clone(),
-                cover_url: item.cover_url.clone(),
-                area_name: item.area_name.clone(),
-                is_live: item.is_live,
-                started_at: if room.is_live { room.started_at } else { None },
-                online: item.online,
-                stable_id: Some(room_id.to_string()),
-                extra: serde_json::json!({
-                    "uid": uid,
-                    "roomId": room_id,
-                    "shortId": item.short_id,
-                    "liveStatus": if item.is_live { 1 } else { 0 },
-                }),
-            };
+            let info = import_room_info(&item, uid, &uname);
             // 软删除的行不在界面上，导入时必须恢复，否则会误报「已存在」。
             if state.db.room_removed(&room.id)? {
                 let draft = RoomRecord {
@@ -383,10 +422,18 @@ pub async fn rooms_import(
                     ..room
                 };
                 match state.db.insert_room(&draft, &info) {
-                    Ok(restored) => {
+                    Ok(restored_room) => {
                         added += 1;
-                        if restored.is_live && restored.auto_record {
-                            started.push(restored);
+                        restored += 1;
+                        tracing::info!(
+                            target: "hivecast_lib::commands",
+                            room_id = %restored_room.id,
+                            room_key = %restored_room.room_key,
+                            uid,
+                            "导入关注：恢复已移除房间"
+                        );
+                        if restored_room.is_live && restored_room.auto_record {
+                            started.push(restored_room);
                         }
                     }
                     Err(err) => failed.push(ImportFailure {
@@ -396,8 +443,15 @@ pub async fn rooms_import(
                     }),
                 }
             } else {
-                state.db.update_room_info(&room.id, &info)?;
-                existing += 1;
+                // 单行刷新失败不应该让整批导入停在半路。
+                match state.db.update_room_info(&room.id, &info) {
+                    Ok(()) => existing += 1,
+                    Err(err) => failed.push(ImportFailure {
+                        uid: uid.to_string(),
+                        uname,
+                        message: err.to_string(),
+                    }),
+                }
             }
             continue;
         }
@@ -412,7 +466,7 @@ pub async fn rooms_import(
             cover_url: item.cover_url.clone(),
             area_name: item.area_name.clone(),
             is_live: item.is_live,
-            started_at: None,
+            started_at: item.started_at,
             online: item.online,
             auto_record,
             monitor_paused: !monitor,
@@ -439,23 +493,7 @@ pub async fn rooms_import(
             updated_at: timestamp,
             platform_uid: Some(uid.to_string()),
         };
-        let info = RoomInfo {
-            host_name: uname.clone(),
-            room_name: item.title.clone(),
-            avatar_url: item.avatar_url.clone(),
-            cover_url: item.cover_url.clone(),
-            area_name: item.area_name.clone(),
-            is_live: item.is_live,
-            started_at: None,
-            online: item.online,
-            stable_id: Some(room_id.to_string()),
-            extra: serde_json::json!({
-                "uid": uid,
-                "roomId": room_id,
-                "shortId": item.short_id,
-                "liveStatus": if item.is_live { 1 } else { 0 },
-            }),
-        };
+        let info = import_room_info(&item, uid, &uname);
         match state.db.insert_room(&draft, &info) {
             Ok(room) => {
                 added += 1;
@@ -474,11 +512,27 @@ pub async fn rooms_import(
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     tracing::info!(
         target: "hivecast_lib::commands",
+        total,
         added,
         existing,
+        restored,
+        merged,
+        rekeyed,
         failed = failed.len(),
+        monitor,
+        auto_record,
+        elapsed_ms = import_started.elapsed().as_millis() as u64,
         "批量导入关注"
     );
+    for failure in &failed {
+        tracing::warn!(
+            target: "hivecast_lib::commands",
+            uid = %failure.uid,
+            uname = %failure.uname,
+            error = %failure.message,
+            "导入关注跳过"
+        );
+    }
     for room in started {
         if let Err(err) = state
             .recorder
@@ -1395,6 +1449,28 @@ mod tests {
             assert!(!sidecar.exists(), "{} 应被清理", sidecar.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_room_info_keeps_started_at() {
+        let item = ImportRoomInput {
+            uid: "42".into(),
+            room_id: " 7734200 ".into(),
+            short_id: Some("6".into()),
+            uname: "主播".into(),
+            title: "标题".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: Some(1_792_050_615),
+            online: Some(10),
+        };
+        let info = import_room_info(&item, "42", "主播");
+        assert_eq!(info.started_at, Some(1_792_050_615));
+        assert_eq!(info.stable_id.as_deref(), Some("7734200"));
+        assert_eq!(info.extra["liveStatus"], 1);
+        assert_eq!(info.extra["roomId"], "7734200");
     }
 }
 
