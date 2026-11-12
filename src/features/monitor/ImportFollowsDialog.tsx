@@ -297,7 +297,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
       <DialogContent
         title={t("monitor.importFollow.title")}
         description={t("monitor.importFollow.description")}
-        size="md"
+        size="lg"
       >
         <div className="flex h-[min(560px,calc(100dvh-200px))] min-h-[360px] flex-col">
           <div className="flex items-start gap-3 rounded-[8px] border border-line bg-raised/40 px-3 py-2.5">
@@ -427,7 +427,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                   <div
                     key={user.uid}
                     className={cx(
-                      "flex items-center gap-3 rounded-[8px] px-2 py-2 transition-colors",
+                      "flex min-w-0 items-center gap-3 rounded-[8px] px-2 py-2 transition-colors",
                       selectable ? "hover:bg-raised/60" : "opacity-60",
                     )}
                   >
@@ -438,9 +438,11 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                       aria-label={user.uname}
                     />
                     <FollowAvatar user={user} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-[12.5px] font-medium text-ink">{user.uname}</span>
+                    <div className="min-w-0 flex-1 overflow-hidden">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="min-w-0 truncate text-[12.5px] font-medium text-ink" title={user.uname}>
+                          {user.uname}
+                        </span>
                         {status?.isLive ? (
                           <Chip tone="live" dot>
                             {t("monitor.importFollow.live")}
@@ -456,13 +458,13 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                           : t("monitor.importFollow.noRoom")}
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
                       {status?.areaName ? (
-                        <span className="hidden max-w-[74px] truncate text-[11px] text-faint sm:block">
+                        <span className="hidden max-w-[84px] truncate text-[11px] text-faint sm:block">
                           {status.areaName}
                         </span>
                       ) : null}
-                      <span className="tnum w-[52px] text-right text-[11px] text-faint">
+                      <span className="tnum min-w-[52px] whitespace-nowrap text-right text-[11px] text-faint">
                         {status?.isLive && (status.online ?? 0) > 0
                           ? t("monitor.importFollow.online", { n: status.online })
                           : status?.roomId

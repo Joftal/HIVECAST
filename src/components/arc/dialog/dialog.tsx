@@ -26,8 +26,8 @@ export interface DialogContentProps extends ComponentPropsWithoutRef<typeof Dial
   title: string;
   description?: string;
   children: ReactNode;
-  /** HIVECAST：sm 保持 Arc 的 440px，md 给添加房间这类较宽的表单。 */
-  size?: "sm" | "md";
+  /** HIVECAST：sm 保持 Arc 的 440px，md 给添加房间这类较宽的表单，lg 给关注导入这类多列表格。 */
+  size?: "sm" | "md" | "lg";
 }
 
 const fade: Transition = { duration: motionTokens.duration.instant };
@@ -52,7 +52,7 @@ export function DialogContent({ title, description, children, className, size = 
     onPointerDownOutside?.(event);
     if (open !== null && (!change.current.open || event.detail.originalEvent.timeStamp < change.current.at)) event.preventDefault();
   };
-  const classes = [styles.content, size === "md" ? styles.md : "", className].filter(Boolean).join(" ");
+  const classes = [styles.content, size === "md" ? styles.md : size === "lg" ? styles.lg : "", className].filter(Boolean).join(" ");
   const inner = <>
     <div className={styles.header}><div><DialogPrimitive.Title className={styles.title}><SwapText text={title}/></DialogPrimitive.Title>{description ? <DialogPrimitive.Description className={styles.description}><SwapText text={description}/></DialogPrimitive.Description> : null}</div><DialogPrimitive.Close className={styles.close} aria-label="Close dialog"><X size={16} strokeWidth={1.75} aria-hidden="true"/></DialogPrimitive.Close></div>
     <div className={styles.body}>{children}</div>
