@@ -15,6 +15,7 @@ import TagBadge from "../../components/ui/TagBadge";
 import { PageChip, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import { LayoutGlyph, type LayoutKind } from "../../components/ui/LayoutGlyph";
 import AddRoomDialog from "./AddRoomDialog";
+import ImportFollowsDialog from "./ImportFollowsDialog";
 import RoomRules from "./RoomRules";
 import InlineNote from "./InlineNote";
 import InlineTags from "./InlineTags";
@@ -503,6 +504,7 @@ export default function MonitorPage({
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"watch" | "record" | null>(null);
   const notify = useNotify();
@@ -1654,6 +1656,12 @@ export default function MonitorPage({
         onOpenChange={setAddOpen}
         onAdded={() => load()}
       />
+      <ImportFollowsDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        rooms={views}
+        onImported={() => load()}
+      />
 
       <PageToolbar className="pt-4">
         <PageChip
@@ -1709,6 +1717,13 @@ export default function MonitorPage({
             placeholder={t("monitor.searchPlaceholder")}
             clearLabel={t("common.clear")}
           />
+          <Button
+            size="lg"
+            variant="secondary"
+            onClick={() => setImportOpen(true)}
+          >
+            {t("monitor.importFollow.entry")}
+          </Button>
           <Button
             size="lg"
             variant="primary"

@@ -351,6 +351,32 @@ pub async fn post_form_json<T: DeserializeOwned>(
     Ok(Fetched { data, date })
 }
 
+/// 以 JSON body POST 并解析 JSON（B 站批量直播状态走这条路）。
+pub async fn post_json<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    origin: &str,
+    body: &impl serde::Serialize,
+    extra_headers: &[(&str, &str)],
+) -> Result<Fetched<T>, PlatformError> {
+    let mut request = client()
+        .post(url)
+        .header("Referer", referer)
+        .header("Origin", origin)
+        .json(body);
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+
+    let response = send(request, url).await?;
+    let date = parse_date(response.headers());
+    let data = response
+        .json::<T>()
+        .await
+        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+    Ok(Fetched { data, date })
+}
+
 /// 表单 POST，显式指定 Origin/Cookie，并读回 Set-Cookie（B 站 Cookie 续期走这条路）。
 ///
 /// 与 post_form_json 的区别：不硬编码斗鱼的 Origin，也不依赖全局凭据注入；

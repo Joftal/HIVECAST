@@ -6,6 +6,11 @@ import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
+import type { FollowingPage } from "./bindings/FollowingPage";
+import type { FollowingUser } from "./bindings/FollowingUser";
+import type { ImportRoomInput } from "./bindings/ImportRoomInput";
+import type { ImportRoomsResult } from "./bindings/ImportRoomsResult";
+import type { LiveStatus } from "./bindings/LiveStatus";
 import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
 import type { RefreshStatus } from "./bindings/RefreshStatus";
@@ -43,6 +48,11 @@ export type {
   CredentialInfo,
   FfmpegStatus,
   FilenamePreview,
+  FollowingPage,
+  FollowingUser,
+  ImportRoomInput,
+  ImportRoomsResult,
+  LiveStatus,
   QrPoll,
   QrTicket,
   RefreshStatus,
@@ -113,6 +123,25 @@ export async function roomAdd(
   autoRecord = true,
 ): Promise<AddRoomResult> {
   return invoke<AddRoomResult>("room_add", { input, monitor, autoRecord });
+}
+
+/** B 站关注列表；关注列表每页最多 50 条。 */
+export async function bilibiliFollowings(page = 1): Promise<FollowingPage> {
+  return invoke<FollowingPage>("bilibili_followings", { page });
+}
+
+/** 按 UID 批量查询直播状态；没有返回的 UID 表示该用户没有直播间。 */
+export async function bilibiliFollowStatuses(uids: string[]): Promise<LiveStatus[]> {
+  return invoke<LiveStatus[]>("bilibili_follow_statuses", { uids });
+}
+
+/** 把关注列表里选中的主播导入监控列表；已存在的房间只刷新展示信息。 */
+export async function roomsImport(
+  items: ImportRoomInput[],
+  monitor = true,
+  autoRecord = false,
+): Promise<ImportRoomsResult> {
+  return invoke<ImportRoomsResult>("rooms_import", { items, monitor, autoRecord });
 }
 
 export async function roomRemove(id: string): Promise<void> {

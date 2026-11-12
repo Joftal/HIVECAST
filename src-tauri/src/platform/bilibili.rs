@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
-use hivecast_ipc::QualityInfo;
+use hivecast_ipc::{FollowingPage, FollowingUser, LiveStatus, QualityInfo};
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
@@ -591,6 +591,152 @@ fn is_short_link(url: &Url) -> bool {
     url.host_str() == Some("b23.tv")
 }
 
+const FOLLOW_API: &str = "https://api.bilibili.com";
+const CENTER_REFERER: &str = "https://space.bilibili.com/";
+const FOLLOW_PAGE_SIZE: u32 = 50;
+const STATUS_CHUNK: usize = 200;
+
+#[derive(Debug, Deserialize)]
+struct FollowingData {
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    list: Vec<FollowingItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FollowingItem {
+    #[serde(default)]
+    mid: i64,
+    #[serde(default)]
+    uname: String,
+    #[serde(default)]
+    face: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusItem {
+    #[serde(default)]
+    uid: i64,
+    #[serde(default)]
+    room_id: i64,
+    #[serde(default)]
+    short_id: i64,
+    #[serde(default)]
+    uname: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    face: String,
+    #[serde(default)]
+    cover_from_user: String,
+    #[serde(default)]
+    keyframe: String,
+    #[serde(default)]
+    area_name: String,
+    #[serde(default)]
+    live_status: i64,
+    #[serde(default)]
+    online: i64,
+}
+
+fn non_empty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn positive_id(value: i64) -> Option<String> {
+    (value > 0).then(|| value.to_string())
+}
+
+/// 批量接口返回的是以 UID 为键的对象；个别条目缺 uid 时才用键兜底。
+/// live_time 不是可靠的 Unix 开播时间，因此这里不映射 started_at。
+fn status_from_item(key: String, item: StatusItem) -> LiveStatus {
+    let uid = if item.uid > 0 {
+        item.uid.to_string()
+    } else {
+        key
+    };
+    LiveStatus {
+        uid,
+        room_id: positive_id(item.room_id),
+        short_id: positive_id(item.short_id),
+        uname: item.uname,
+        title: item.title,
+        avatar_url: non_empty(item.face),
+        cover_url: non_empty(item.cover_from_user).or_else(|| non_empty(item.keyframe)),
+        area_name: non_empty(item.area_name),
+        is_live: item.live_status == 1,
+        online: (item.online >= 0).then_some(item.online as u64),
+    }
+}
+
+/// 拉取一页关注列表。B 站每页最多 50 条，调用方负责翻页。
+pub async fn fetch_followings(uid: &str, page: u32) -> Result<FollowingPage, PlatformError> {
+    let page = page.max(1);
+    let url = format!(
+        "{FOLLOW_API}/x/relation/followings?vmid={uid}&pn={page}&ps={FOLLOW_PAGE_SIZE}&order=desc&order_type=attention"
+    );
+    let envelope: Envelope<FollowingData> = http::get_json(&url, CENTER_REFERER, &[]).await?;
+    let data = unwrap_envelope(envelope, "关注列表")?;
+    Ok(FollowingPage {
+        total: data.total,
+        page,
+        page_size: FOLLOW_PAGE_SIZE,
+        items: data
+            .list
+            .into_iter()
+            .filter(|item| item.mid > 0)
+            .map(|item| FollowingUser {
+                uid: item.mid.to_string(),
+                uname: item.uname,
+                avatar_url: non_empty(item.face),
+            })
+            .collect(),
+    })
+}
+
+async fn fetch_status_chunk(uids: &[String]) -> Result<Vec<LiveStatus>, PlatformError> {
+    let url = format!("{API}/room/v1/Room/get_status_info_by_uids");
+    let body = json!({ "uids": uids });
+    let envelope: Envelope<BTreeMap<String, StatusItem>> =
+        http::post_json(&url, REFERER, "https://live.bilibili.com", &body, &[])
+            .await?
+            .data;
+    let data = unwrap_envelope(envelope, "直播状态")?;
+    Ok(data
+        .into_iter()
+        .map(|(key, item)| status_from_item(key, item))
+        .collect())
+}
+
+/// 按 UID 批量查询直播状态；单次最多 200 个，失败重试一次。
+///
+/// 返回里缺失某个 UID 只表示「没有可用的直播间信息」，不能当成离线。
+pub async fn fetch_live_statuses(uids: &[String]) -> Result<Vec<LiveStatus>, PlatformError> {
+    let mut unique: Vec<String> = uids
+        .iter()
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .collect();
+    unique.sort();
+    unique.dedup();
+
+    let mut out = Vec::with_capacity(unique.len());
+    for chunk in unique.chunks(STATUS_CHUNK) {
+        match fetch_status_chunk(chunk).await {
+            Ok(mut statuses) => out.append(&mut statuses),
+            Err(first) => {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                match fetch_status_chunk(chunk).await {
+                    Ok(mut statuses) => out.append(&mut statuses),
+                    Err(_) => return Err(first),
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn extract_room_number(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -760,6 +906,61 @@ mod tests {
         assert!(by_qn(25_000).available);
         assert!(by_qn(15_000).available);
         assert_eq!(by_qn(10_000).codec.as_deref(), Some("h264"));
+    }
+
+    #[test]
+    fn maps_batch_status_and_falls_back_to_the_uid_key() {
+        let status = status_from_item(
+            "352130563".into(),
+            StatusItem {
+                uid: 0,
+                room_id: 0,
+                short_id: 42,
+                uname: "执事只食芝士".into(),
+                title: "测试直播".into(),
+                face: String::new(),
+                cover_from_user: String::new(),
+                keyframe: "https://i0.hdslb.com/keyframe.jpg".into(),
+                area_name: "虚拟主播".into(),
+                live_status: 1,
+                online: -1,
+            },
+        );
+        assert_eq!(status.uid, "352130563");
+        assert_eq!(status.room_id, None);
+        assert_eq!(status.short_id.as_deref(), Some("42"));
+        assert_eq!(
+            status.cover_url.as_deref(),
+            Some("https://i0.hdslb.com/keyframe.jpg")
+        );
+        assert_eq!(status.avatar_url, None);
+        assert_eq!(status.online, None);
+        assert!(status.is_live);
+
+        let explicit = status_from_item(
+            "fallback".into(),
+            StatusItem {
+                uid: 1794315001,
+                room_id: 7734200,
+                short_id: 6,
+                uname: "LPL".into(),
+                title: String::new(),
+                face: "https://i0.hdslb.com/face.jpg".into(),
+                cover_from_user: "https://i0.hdslb.com/cover.jpg".into(),
+                keyframe: "https://i0.hdslb.com/keyframe.jpg".into(),
+                area_name: String::new(),
+                live_status: 0,
+                online: 12345,
+            },
+        );
+        assert_eq!(explicit.uid, "1794315001");
+        assert_eq!(explicit.room_id.as_deref(), Some("7734200"));
+        assert_eq!(
+            explicit.cover_url.as_deref(),
+            Some("https://i0.hdslb.com/cover.jpg")
+        );
+        assert_eq!(explicit.online, Some(12345));
+        assert!(!explicit.is_live);
     }
 
     #[test]

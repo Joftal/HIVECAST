@@ -111,6 +111,8 @@ pub struct RoomRecord {
     pub created_at: i64,
     #[ts(type = "number")]
     pub updated_at: i64,
+    /// 平台账号 UID；B 站批量状态接口按 UID 查询，关注导入时写入。
+    pub platform_uid: Option<String>,
 }
 
 /// 正在进行的录制快照。
@@ -205,6 +207,84 @@ pub struct AddRoomResult {
     pub recording: Option<RecordingInfo>,
     pub error: Option<String>,
     pub created: bool,
+}
+
+/// B 站关注列表中的一位主播。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct FollowingUser {
+    pub uid: String,
+    pub uname: String,
+    pub avatar_url: Option<String>,
+}
+
+/// 关注列表的一页；B 站每页最多返回 50 条。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct FollowingPage {
+    #[ts(type = "number")]
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub items: Vec<FollowingUser>,
+}
+
+/// 一位关注主播的直播状态；room_id 为空表示该用户没有直播间。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct LiveStatus {
+    pub uid: String,
+    pub room_id: Option<String>,
+    pub short_id: Option<String>,
+    pub uname: String,
+    pub title: String,
+    pub avatar_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub area_name: Option<String>,
+    pub is_live: bool,
+    #[ts(type = "number | null")]
+    pub online: Option<u64>,
+}
+
+/// 导入一条关注主播所需的快照；由前端从关注列表与批量状态拼出来。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ImportRoomInput {
+    pub uid: String,
+    pub room_id: String,
+    pub short_id: Option<String>,
+    pub uname: String,
+    pub title: String,
+    pub avatar_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub area_name: Option<String>,
+    pub is_live: bool,
+    #[ts(type = "number | null")]
+    pub online: Option<u64>,
+}
+
+/// 单条导入失败的原因；不阻断其他条目。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ImportFailure {
+    pub uid: String,
+    pub uname: String,
+    pub message: String,
+}
+
+/// 批量导入结果：新增、已存在与失败分开计数，前端可逐条提示。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ImportRoomsResult {
+    pub added: u32,
+    pub existing: u32,
+    pub failed: Vec<ImportFailure>,
 }
 
 /// 一场录制内的一个实际画质区间。

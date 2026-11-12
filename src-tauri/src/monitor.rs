@@ -134,6 +134,9 @@ pub fn spawn(
         let mut settings_at = Instant::now();
         // 房间列表缓存：单独的 Option 而不是包在 tick 里，跨拍复用（B7）。
         let mut rooms_cache: Option<(Instant, Vec<hivecast_ipc::RoomRecord>)> = None;
+        // B 站批量状态的自有节奏：所有可批量的房间共用一次请求，
+        // 不能跟着每个房间错开的 next_at 走，否则一拍一个请求反而更多。
+        let mut batch_at: Option<Instant> = None;
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -159,6 +162,7 @@ pub fn spawn(
                 &global,
                 &tx,
                 &mut rooms_cache,
+                &mut batch_at,
                 base_secs,
             );
             snapshot_statuses(&schedule, &statuses);
@@ -351,6 +355,7 @@ fn tick(
     global: &Arc<Semaphore>,
     tx: &mpsc::UnboundedSender<(String, Outcome)>,
     rooms_cache: &mut Option<(Instant, Vec<hivecast_ipc::RoomRecord>)>,
+    batch_at: &mut Option<Instant>,
     base: i64,
 ) {
     // 应用正在退出：监控每秒一拍，若继续检测就会在收尾窗口里再拉起一路，
@@ -435,6 +440,17 @@ fn tick(
     schedule.retain(|id, _| alive.contains(id.as_str()));
 
     let now = Instant::now();
+    // 批量节奏独立于单房间排期：首次按平台散开，之后严格每间隔一次。
+    // 关闭自动检测时 base=0 已在上面返回，不会留下不可用的 0 秒节奏。
+    let first_batch = *batch_at
+        .get_or_insert_with(|| now + Duration::from_secs(spread("batch:bilibili", base) as u64));
+    let batch_due = now >= first_batch;
+    let batch_permits = platforms
+        .entry("bilibili".into())
+        .or_insert_with(|| Arc::new(Semaphore::new(PLATFORM_CONCURRENCY)))
+        .clone();
+    let mut batch_rooms: Vec<hivecast_ipc::RoomRecord> = Vec::new();
+
     for room in rooms {
         // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
         if room.monitor_paused {
@@ -468,6 +484,23 @@ fn tick(
                 entry.interval_secs = base;
             }
         }
+
+        // B 站且已知 UID 的房间走批量状态：所有房间共用一次请求，
+        // 不在批量拍上时保持排期但不单独出门。
+        let batchable = room.platform == "bilibili"
+            && room
+                .platform_uid
+                .as_deref()
+                .is_some_and(|uid| !uid.trim().is_empty());
+        if batchable {
+            if !batch_due || entry.inflight {
+                continue;
+            }
+            entry.inflight = true;
+            batch_rooms.push(room.clone());
+            continue;
+        }
+
         if entry.inflight || entry.next_at > now {
             continue;
         }
@@ -501,6 +534,181 @@ fn tick(
             };
             let _ = tx.send((id, outcome));
         });
+    }
+
+    if batch_due {
+        *batch_at = Some(
+            add_jitter(
+                now + Duration::from_secs(base as u64),
+                "batch:bilibili",
+                Duration::from_secs(base as u64).mul_f64(JITTER_PCT as f64 / 100.0),
+            )
+            .max(now + Duration::from_secs(1)),
+        );
+        if !batch_rooms.is_empty() {
+            let ids: Vec<String> = batch_rooms.iter().map(|room| room.id.clone()).collect();
+            let app = app.clone();
+            let db = db.clone();
+            let broker = broker.clone();
+            let recorder = recorder.clone();
+            let global = global.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死。
+                let inner_tx = tx.clone();
+                let guard = tokio::spawn(async move {
+                    run_batch_check(
+                        &app,
+                        &db,
+                        &broker,
+                        &recorder,
+                        batch_rooms,
+                        batch_permits,
+                        global,
+                        inner_tx,
+                    )
+                    .await;
+                });
+                if let Err(err) = guard.await {
+                    tracing::warn!(%err, "B 站批量检测任务异常退出");
+                    for id in ids {
+                        let _ = tx.send((id, Outcome::Failed));
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// 一次 B 站批量状态请求，服务所有到期房间。
+///
+/// 批量接口只覆盖「有直播间的关注」：某个 UID 没返回时不能当离线，
+/// 必须回落到单房间检查；整批失败时优先保住正在录制/上次在播的房间，
+/// 其余房间只延后重试，绝不凭一次失败改状态。
+#[allow(clippy::too_many_arguments)]
+async fn run_batch_check(
+    app: &AppHandle,
+    db: &Db,
+    broker: &StreamBroker,
+    recorder: &Arc<Recorder>,
+    rooms: Vec<hivecast_ipc::RoomRecord>,
+    permits: Arc<Semaphore>,
+    global: Arc<Semaphore>,
+    tx: mpsc::UnboundedSender<(String, Outcome)>,
+) {
+    let uids: Vec<String> = rooms
+        .iter()
+        .filter_map(|room| room.platform_uid.clone())
+        .collect();
+    match crate::platform::bilibili::fetch_live_statuses(&uids).await {
+        Ok(statuses) => {
+            let by_uid: HashMap<String, hivecast_ipc::LiveStatus> = statuses
+                .into_iter()
+                .map(|status| (status.uid.clone(), status))
+                .collect();
+            for room in rooms {
+                let outcome = match room.platform_uid.as_ref().and_then(|uid| by_uid.get(uid)) {
+                    Some(status) => {
+                        let info = Arc::new(batch_room_info(status, &room));
+                        check_room_info(app, db, broker, recorder, &room, info).await
+                    }
+                    // 批量没返回这个 UID：可能是没有直播间/接口字段缺失，
+                    // 不能按离线处理，回落到单房间接口拿准确状态。
+                    None => {
+                        run_check(
+                            app,
+                            db,
+                            broker,
+                            recorder,
+                            &room,
+                            permits.clone(),
+                            global.clone(),
+                        )
+                        .await
+                    }
+                };
+                let _ = tx.send((room.id, outcome));
+            }
+        }
+        Err(err) => {
+            let critical: Vec<_> = rooms
+                .iter()
+                .filter(|room| room.is_live || recorder.is_recording(&room.id))
+                .cloned()
+                .collect();
+            tracing::warn!(
+                error = %err,
+                rooms = rooms.len(),
+                critical = critical.len(),
+                "B 站批量状态失败，降级单房间检查"
+            );
+            let critical_ids: HashSet<String> =
+                critical.iter().map(|room| room.id.clone()).collect();
+            for room in critical {
+                let outcome = run_check(
+                    app,
+                    db,
+                    broker,
+                    recorder,
+                    &room,
+                    permits.clone(),
+                    global.clone(),
+                )
+                .await;
+                let _ = tx.send((room.id, outcome));
+            }
+            for room in rooms {
+                if !critical_ids.contains(&room.id) {
+                    // 不更新状态，也不退避成小时级；下个批量拍继续尝试。
+                    let _ = tx.send((room.id, Outcome::Retry(base_batch_retry())));
+                }
+            }
+        }
+    }
+}
+
+/// 批量失败后的普通房间延后时间：给接口恢复留一点时间，又不至于拖过一个检测周期。
+fn base_batch_retry() -> i64 {
+    10
+}
+
+/// 把批量状态映射成监控统一使用的房间信息。
+///
+/// 批量接口的 live_time 不可信，这里不改 started_at：在播房间沿用原值，
+/// 从离线翻到在播时置空，交给录制侧按「新一场」处理。
+fn batch_room_info(
+    status: &hivecast_ipc::LiveStatus,
+    room: &hivecast_ipc::RoomRecord,
+) -> crate::platform::RoomInfo {
+    let text = |value: &str, fallback: &str| {
+        if value.trim().is_empty() {
+            fallback.to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    crate::platform::RoomInfo {
+        host_name: text(&status.uname, &room.host_name),
+        room_name: text(&status.title, &room.title),
+        avatar_url: status
+            .avatar_url
+            .clone()
+            .or_else(|| room.avatar_url.clone()),
+        cover_url: status.cover_url.clone().or_else(|| room.cover_url.clone()),
+        area_name: status.area_name.clone().or_else(|| room.area_name.clone()),
+        is_live: status.is_live,
+        started_at: if room.is_live { room.started_at } else { None },
+        online: status.online,
+        stable_id: status
+            .room_id
+            .clone()
+            .or_else(|| Some(room.room_key.clone())),
+        extra: serde_json::json!({
+            "uid": status.uid,
+            "roomId": status.room_id,
+            "shortId": status.short_id,
+            "liveStatus": if status.is_live { 1 } else { 0 },
+        }),
     }
 }
 
@@ -586,174 +794,282 @@ async fn check_room(
 ) -> Outcome {
     let reference = room_ref(room);
     match broker.room_info_fresh(&reference).await {
-        Ok(info) => {
-            // 这一拍查通了：之前那条检测错误已经过时，清掉再推一次事件，
-            // 否则监控页会一直挂着「房间不存在」之类的旧提示（F1）。
-            if recorder.clear_detect_error(&room.id) {
-                recorder.clear_error(&room.id);
-                let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-            }
-            // 只有结构性字段变化才整行写库并推前端（G2）。
-            // 在线人数这类数字每次检测都在跳，以前会让每个房间每秒一次整行 UPDATE，
-            // WAL 被持续推大；现在它们 10 秒才落一次，界面最多滞后 10 秒。
-            let structural = info.is_live != room.is_live
-                || info.room_name != room.title
-                || info.host_name != room.host_name
-                || info.avatar_url != room.avatar_url
-                || info.cover_url != room.cover_url
-                || info.area_name != room.area_name
-                || info.started_at != room.started_at;
-            if structural {
-                // 在播/离线翻转是用户最关心的状态变化，留一条 INFO 方便回溯。
-                if info.is_live != room.is_live {
-                    tracing::info!(
-                        room = %room.host_name,
-                        room_id = %room.id,
-                        live = info.is_live,
-                        started_at = info.started_at,
-                        "房间开播状态变化"
-                    );
-                }
-                if let Err(err) = db.update_room_info(&room.id, &info) {
-                    tracing::warn!(%err, "更新房间信息失败");
-                }
-                let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-            } else {
-                // 在线人数这类高频字段走节流写库；但写进去了就得推事件，
-                // 否则监控页的数字会一直冻在打开那一刻（H1）。
-                match db.touch_room_throttled(&room.id, info.online, ROOM_TOUCH_INTERVAL) {
-                    Ok(changed) => {
-                        if changed && room.online != info.online {
-                            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-                        }
-                    }
-                    Err(err) => tracing::debug!(%err, "节流更新房间信息失败"),
-                }
-            }
+        Ok(info) => check_room_info(app, db, broker, recorder, room, info).await,
+        Err(err) => check_room_error(app, db, recorder, room, err).await,
+    }
+}
 
-            if info.is_live {
-                recorder.clear_offline(&room.id);
-                // 上一拍确认过离线、这一拍又报在播：是新一场，解掉上一场的
-                // 结束静默与手动停录抑制。没有开播时间的平台全靠这个信号（H7）。
-                if recorder.new_session_after_offline(&room.id) {
-                    tracing::info!(room = %room.host_name, "离线后又报在播，按新一场处理");
+/// 已经拿到平台房间信息后的统一收尾：写库、自动开录、离线确认。
+///
+/// 单房间轮询和 B 站批量状态都走这里，避免两条路径对「在播/离线」的判断分叉。
+async fn check_room_info(
+    app: &AppHandle,
+    db: &Db,
+    broker: &StreamBroker,
+    recorder: &Arc<Recorder>,
+    room: &hivecast_ipc::RoomRecord,
+    info: Arc<crate::platform::RoomInfo>,
+) -> Outcome {
+    // 这一拍查通了：之前那条检测错误已经过时，清掉再推一次事件，
+    // 否则监控页会一直挂着「房间不存在」之类的旧提示（F1）。
+    if recorder.clear_detect_error(&room.id) {
+        recorder.clear_error(&room.id);
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    }
+    // 只有结构性字段变化才整行写库并推前端（G2）。
+    // 在线人数这类数字每次检测都在跳，以前会让每个房间每秒一次整行 UPDATE，
+    // WAL 被持续推大；现在它们 10 秒才落一次，界面最多滞后 10 秒。
+    let structural = info.is_live != room.is_live
+        || info.room_name != room.title
+        || info.host_name != room.host_name
+        || info.avatar_url != room.avatar_url
+        || info.cover_url != room.cover_url
+        || info.area_name != room.area_name
+        || info.started_at != room.started_at;
+    if structural {
+        // 在播/离线翻转是用户最关心的状态变化，留一条 INFO 方便回溯。
+        if info.is_live != room.is_live {
+            tracing::info!(
+                room = %room.host_name,
+                room_id = %room.id,
+                live = info.is_live,
+                started_at = info.started_at,
+                "房间开播状态变化"
+            );
+        }
+        if let Err(err) = db.update_room_info(&room.id, &info) {
+            tracing::warn!(%err, "更新房间信息失败");
+        }
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    } else {
+        // 在线人数这类高频字段走节流写库；但写进去了就得推事件，
+        // 否则监控页的数字会一直冻在打开那一刻（H1）。
+        match db.touch_room_throttled(&room.id, info.online, ROOM_TOUCH_INTERVAL) {
+            Ok(changed) => {
+                if changed && room.online != info.online {
+                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
                 }
-                // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位；
-                // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
-                if room.auto_record
-                    && !room.monitor_paused
-                    && auto_record_allowed(&room, &info.room_name)
-                    && !recorder.is_recording(&room.id)
-                    && !recorder.auto_suppressed(&room.id, info.started_at)
-                    && !recorder.auto_blocked(&room.id, info.started_at)
-                    && !recorder.in_failure_cooldown(&room.id)
-                    && !recorder.in_start_cooldown(&room.id)
-                    && !recorder.is_finalizing(&room.id)
-                {
-                    let media_root = recorder.media_root();
-                    if !disk::can_start(&media_root) {
-                        // 磁盘不够时以前是「静默不录」，用户只看到一直没开始。
-                        // 现在把原因写进房间行内错误（同一个原因不重复刷）。
-                        let message = disk::start_blocked_message(&media_root);
-                        if recorder.last_error(&room.id).as_deref() != Some(message.as_str()) {
-                            // 掉盘和真的没空间是两回事，日志前缀分开写。
-                            let reason = if disk::status(&media_root) == disk::DiskStatus::Missing {
-                                "录制目录不可用，暂不自动开录"
-                            } else {
-                                "空间不足，暂不自动开录"
-                            };
-                            tracing::warn!(room = %room.host_name, %message, "{reason}");
-                            recorder.set_error(&room.id, message);
-                            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-                        }
-                    } else if let Err(err) = recorder.start_checked(app, broker, room).await {
-                        // 并发已满会每个检测周期失败一次：只在原因变化时告警 + 推送，
-                        // 否则间隔 10 秒就是每 10 秒一条 WARN（C7）。
-                        let message = err.to_string();
-                        let changed =
-                            recorder.last_error(&room.id).as_deref() != Some(message.as_str());
-                        if changed {
-                            tracing::warn!(room = %room.host_name, %err, "自动开录失败");
-                            recorder.set_error(&room.id, message);
-                            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
-                        } else {
-                            tracing::debug!(room = %room.host_name, %err, "自动开录仍失败");
-                        }
-                    }
-                }
-                if recorder.is_recording(&room.id) {
-                    // 兜底重检：凭据恢复时通常已经事件驱动地查过一次，
-                    // 这里只处理漏掉的路径（例如手动改库、外部登录），300 秒冷却。
-                    // 每个房间的检查本来就跑在独立任务里，升级最多阻塞这一路几秒。
-                    recorder.recheck_quality(app, broker, &room.id, false).await;
-                }
-            } else {
-                // 一次离线可能只是接口抖动 / 字段缺失，连续两次才认（S1）。
-                let confirmed = recorder.confirm_offline(&room.id);
-                if !confirmed {
-                    // 还没攒够两次：什么都别改。尤其是不能 resume_auto ——
-                    // 单次假离线会清掉「用户手动停录」的抑制，同一场直播里
-                    // 刚停的录就会被下一拍自动拉起（B2）。
-                    return Outcome::Ok;
-                }
-                // 确认下播才复位自动开录：下一场直播可以重新自动录。
-                // 同时留个「见过离线」的记号，给下一次在播判断新一场用（H7）。
-                recorder.note_offline_seen(&room.id);
-                recorder.resume_auto(&room.id);
-                if recorder.is_recording(&room.id) {
-                    // 确认了吗，还要看文件是不是仍在增长（R2）。
-                    if should_stop_for_offline(true, recorder.flowing(&room.id)) {
-                        // 告诉录制侧「这次是平台确认离线」，它才不会把收尾
-                        // 当成误停、也不会挡住紧接着的下一场开播（A8）。
-                        recorder.note_offline_stop(&room.id);
-                        let _ = recorder.stop(app, &room.id, "stream_ended").await;
+            }
+            Err(err) => tracing::debug!(%err, "节流更新房间信息失败"),
+        }
+    }
+
+    if info.is_live {
+        recorder.clear_offline(&room.id);
+        // 上一拍确认过离线、这一拍又报在播：是新一场，解掉上一场的
+        // 结束静默与手动停录抑制。没有开播时间的平台全靠这个信号（H7）。
+        if recorder.new_session_after_offline(&room.id) {
+            tracing::info!(room = %room.host_name, "离线后又报在播，按新一场处理");
+        }
+        // 手动停录过的房间在本次直播内不再自动拉起，等主播下播后复位；
+        // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
+        if room.auto_record
+            && !room.monitor_paused
+            && auto_record_allowed(&room, &info.room_name)
+            && !recorder.is_recording(&room.id)
+            && !recorder.auto_suppressed(&room.id, info.started_at)
+            && !recorder.auto_blocked(&room.id, info.started_at)
+            && !recorder.in_failure_cooldown(&room.id)
+            && !recorder.in_start_cooldown(&room.id)
+            && !recorder.is_finalizing(&room.id)
+        {
+            let media_root = recorder.media_root();
+            if !disk::can_start(&media_root) {
+                // 磁盘不够时以前是「静默不录」，用户只看到一直没开始。
+                // 现在把原因写进房间行内错误（同一个原因不重复刷）。
+                let message = disk::start_blocked_message(&media_root);
+                if recorder.last_error(&room.id).as_deref() != Some(message.as_str()) {
+                    // 掉盘和真的没空间是两回事，日志前缀分开写。
+                    let reason = if disk::status(&media_root) == disk::DiskStatus::Missing {
+                        "录制目录不可用，暂不自动开录"
                     } else {
-                        // 平台说下播、文件却还在写：更像是状态接口误报。
-                        // 计数已清零，下一轮重新确认，不切断健康录像。
-                        tracing::warn!(
-                            room = %room.host_name,
-                            "平台报离线，但录像仍在增长，暂不停录"
-                        );
-                    }
+                        "空间不足，暂不自动开录"
+                    };
+                    tracing::warn!(room = %room.host_name, %message, "{reason}");
+                    recorder.set_error(&room.id, message);
+                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                }
+            } else if let Err(err) = recorder.start_checked(app, broker, room).await {
+                // 并发已满会每个检测周期失败一次：只在原因变化时告警 + 推送，
+                // 否则间隔 10 秒就是每 10 秒一条 WARN（C7）。
+                let message = err.to_string();
+                let changed = recorder.last_error(&room.id).as_deref() != Some(message.as_str());
+                if changed {
+                    tracing::warn!(room = %room.host_name, %err, "自动开录失败");
+                    recorder.set_error(&room.id, message);
+                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                } else {
+                    tracing::debug!(room = %room.host_name, %err, "自动开录仍失败");
                 }
             }
-            Outcome::Ok
         }
-        Err(err) => {
-            let _ = db.touch_room(&room.id);
-            // 未开播是正常状态，不算失败，也不该退避。
-            if matches!(err, PlatformError::NotLive) {
-                return Outcome::Ok;
-            }
-            // broker 冷却期内这次请求根本没出门，按它给的秒数重排即可。
-            if let Some(secs) = err.retry_after() {
-                return Outcome::Retry(secs as i64);
-            }
-            let hint = match &err {
-                PlatformError::RoomNotFound(_) => "房间不存在或已注销".to_string(),
-                other => other.to_string(),
-            };
-            // 同一句失败只告警、只推一次事件：坏房间会被退避到几分钟一次，
-            // 但两次失败之间间隔可能很久，期间不该反复让前端全量重拉（F1）。
-            if recorder.note_detect_error(&room.id, &hint) {
-                tracing::warn!(room = %room.host_name, %hint, "刷新房间失败");
-                recorder.set_error(&room.id, hint);
-                let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        if recorder.is_recording(&room.id) {
+            // 兜底重检：凭据恢复时通常已经事件驱动地查过一次，
+            // 这里只处理漏掉的路径（例如手动改库、外部登录），300 秒冷却。
+            // 每个房间的检查本来就跑在独立任务里，升级最多阻塞这一路几秒。
+            recorder.recheck_quality(app, broker, &room.id, false).await;
+        }
+    } else {
+        // 一次离线可能只是接口抖动 / 字段缺失，连续两次才认（S1）。
+        let confirmed = recorder.confirm_offline(&room.id);
+        if !confirmed {
+            // 还没攒够两次：什么都别改。尤其是不能 resume_auto ——
+            // 单次假离线会清掉「用户手动停录」的抑制，同一场直播里
+            // 刚停的录就会被下一拍自动拉起（B2）。
+            return Outcome::Ok;
+        }
+        // 确认下播才复位自动开录：下一场直播可以重新自动录。
+        // 同时留个「见过离线」的记号，给下一次在播判断新一场用（H7）。
+        recorder.note_offline_seen(&room.id);
+        recorder.resume_auto(&room.id);
+        if recorder.is_recording(&room.id) {
+            // 确认了吗，还要看文件是不是仍在增长（R2）。
+            if should_stop_for_offline(true, recorder.flowing(&room.id)) {
+                // 告诉录制侧「这次是平台确认离线」，它才不会把收尾
+                // 当成误停、也不会挡住紧接着的下一场开播（A8）。
+                recorder.note_offline_stop(&room.id);
+                let _ = recorder.stop(app, &room.id, "stream_ended").await;
             } else {
-                tracing::debug!(room = %room.host_name, %hint, "刷新房间仍失败");
-            }
-            if err.is_throttle() {
-                Outcome::Throttled
-            } else {
-                Outcome::Failed
+                // 平台说下播、文件却还在写：更像是状态接口误报。
+                // 计数已清零，下一轮重新确认，不切断健康录像。
+                tracing::warn!(
+                    room = %room.host_name,
+                    "平台报离线，但录像仍在增长，暂不停录"
+                );
             }
         }
+    }
+    Outcome::Ok
+}
+
+/// 平台请求失败：只更新提示与排期分类，不猜测开播状态。
+async fn check_room_error(
+    app: &AppHandle,
+    db: &Db,
+    recorder: &Arc<Recorder>,
+    room: &hivecast_ipc::RoomRecord,
+    err: PlatformError,
+) -> Outcome {
+    let _ = db.touch_room(&room.id);
+    // 未开播是正常状态，不算失败，也不该退避。
+    if matches!(err, PlatformError::NotLive) {
+        return Outcome::Ok;
+    }
+    // broker 冷却期内这次请求根本没出门，按它给的秒数重排即可。
+    if let Some(secs) = err.retry_after() {
+        return Outcome::Retry(secs as i64);
+    }
+    let hint = match &err {
+        PlatformError::RoomNotFound(_) => "房间不存在或已注销".to_string(),
+        other => other.to_string(),
+    };
+    // 同一句失败只告警、只推一次事件：坏房间会被退避到几分钟一次，
+    // 但两次失败之间间隔可能很久，期间不该反复让前端全量重拉（F1）。
+    if recorder.note_detect_error(&room.id, &hint) {
+        tracing::warn!(room = %room.host_name, %hint, "刷新房间失败");
+        recorder.set_error(&room.id, hint);
+        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    } else {
+        tracing::debug!(room = %room.host_name, %hint, "刷新房间仍失败");
+    }
+    if err.is_throttle() {
+        Outcome::Throttled
+    } else {
+        Outcome::Failed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch_room() -> hivecast_ipc::RoomRecord {
+        hivecast_ipc::RoomRecord {
+            id: "room-1".into(),
+            platform: "bilibili".into(),
+            room_key: "old-key".into(),
+            canonical_url: "https://live.bilibili.com/old-key".into(),
+            title: "旧标题".into(),
+            host_name: "旧主播".into(),
+            avatar_url: None,
+            cover_url: Some("https://old/cover.jpg".into()),
+            area_name: Some("旧分区".into()),
+            is_live: true,
+            started_at: Some(100),
+            online: Some(1),
+            auto_record: true,
+            monitor_paused: false,
+            record_qn: 0,
+            view_qn: 0,
+            record_line: None,
+            last_checked_at: None,
+            last_session_id: None,
+            last_session_started_at: Some(0),
+            last_session_duration_ms: 0,
+            last_session_status: None,
+            last_session_reason: None,
+            last_session_file_size: 0,
+            last_session_quality: None,
+            note: String::new(),
+            tags: String::new(),
+            title_include: None,
+            title_exclude: None,
+            split_max_duration_sec: None,
+            split_max_size_mb: None,
+            notify_live: None,
+            notify_error: None,
+            created_at: 0,
+            updated_at: 0,
+            platform_uid: Some("42".into()),
+        }
+    }
+
+    #[test]
+    fn batch_status_keeps_local_fallbacks_and_only_reuses_a_known_start_time() {
+        let room = batch_room();
+        let status = hivecast_ipc::LiveStatus {
+            uid: "42".into(),
+            room_id: Some("7734200".into()),
+            short_id: Some("6".into()),
+            uname: String::new(),
+            title: String::new(),
+            avatar_url: None,
+            cover_url: Some("https://new/cover.jpg".into()),
+            area_name: None,
+            is_live: true,
+            online: Some(9),
+        };
+        let info = batch_room_info(&status, &room);
+        assert_eq!(info.host_name, "旧主播");
+        assert_eq!(info.room_name, "旧标题");
+        assert_eq!(info.cover_url.as_deref(), Some("https://new/cover.jpg"));
+        assert_eq!(info.area_name.as_deref(), Some("旧分区"));
+        assert_eq!(info.stable_id.as_deref(), Some("7734200"));
+        assert_eq!(
+            info.started_at,
+            Some(100),
+            "房间上一轮在播时沿用已知开播时间"
+        );
+
+        let offline_room = hivecast_ipc::RoomRecord {
+            is_live: false,
+            started_at: None,
+            ..batch_room()
+        };
+        let offline = hivecast_ipc::LiveStatus {
+            is_live: false,
+            online: None,
+            cover_url: None,
+            ..status
+        };
+        let info = batch_room_info(&offline, &offline_room);
+        assert_eq!(
+            info.started_at, None,
+            "批量 live_time 不可信，不能伪造开播时间"
+        );
+        assert_eq!(info.cover_url.as_deref(), Some("https://old/cover.jpg"));
+        assert_eq!(info.online, None);
+    }
 
     fn entry(offset_secs: u64) -> Schedule {
         Schedule {

@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    platform_uid TEXT,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -384,6 +384,21 @@ impl Db {
         .map_err(db_err)
     }
 
+    pub fn find_room_by_uid(
+        &self,
+        platform: &str,
+        platform_uid: &str,
+    ) -> Result<Option<RoomRecord>, AppError> {
+        let conn = self.lock();
+        conn.query_row(
+            &format!("{ROOM_SELECT} WHERE platform = ?1 AND platform_uid = ?2"),
+            params![platform, platform_uid],
+            map_room,
+        )
+        .optional()
+        .map_err(db_err)
+    }
+
     /// 把旧短号行改挂到平台稳定 ID 上；保留主键，历史 session 不受影响。
     pub fn rekey_room(
         &self,
@@ -443,11 +458,12 @@ impl Db {
             let conn = self.lock();
             conn.execute(
                 "INSERT INTO room (
-                    id, platform, room_key, canonical_url, title, host_name, avatar_url,
-                    cover_url, area_name, is_live, started_at, online, auto_record,
+                    id, platform, room_key, platform_uid, canonical_url, title, host_name,
+                    avatar_url, cover_url, area_name, is_live, started_at, online, auto_record,
                     monitor_paused, record_qn, view_qn, last_checked_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT (platform, room_key) DO UPDATE SET
+                    platform_uid = COALESCE(excluded.platform_uid, platform_uid),
                     canonical_url = excluded.canonical_url,
                     title = excluded.title,
                     host_name = excluded.host_name,
@@ -468,6 +484,7 @@ impl Db {
                     room.id,
                     room.platform,
                     room.room_key,
+                    platform_uid_of(info),
                     room.canonical_url,
                     info.room_name,
                     info.host_name,
@@ -500,6 +517,7 @@ impl Db {
                 "UPDATE room SET
                     title = ?2, host_name = ?3, avatar_url = ?4, cover_url = ?5,
                     area_name = ?6, is_live = ?7, started_at = ?8, online = ?9,
+                    platform_uid = COALESCE(?11, platform_uid),
                     last_checked_at = ?10, updated_at = ?10
                   WHERE id = ?1",
                 params![
@@ -513,6 +531,7 @@ impl Db {
                     info.started_at,
                     info.online,
                     now,
+                    platform_uid_of(info),
                 ],
             )
             .map_err(db_err)?;
@@ -2027,6 +2046,11 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             .map_err(db_err)?;
         tracing::info!(column = "room.removed_at", "数据库迁移：新增列");
     }
+    if !room_columns.iter().any(|name| name == "platform_uid") {
+        conn.execute("ALTER TABLE room ADD COLUMN platform_uid TEXT", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.platform_uid", "数据库迁移：新增列");
+    }
     let mut backfill_last_session = false;
     for (name, ddl) in [
         (
@@ -2205,7 +2229,7 @@ const ROOM_SELECT: &str = "SELECT
     last_session_status, last_session_reason, last_session_file_size,
     note, tags, title_include, title_exclude,
     split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
-    created_at, updated_at, last_session_quality
+    created_at, updated_at, last_session_quality, platform_uid
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -2214,6 +2238,15 @@ const SESSION_SELECT: &str = "SELECT
     source_path, post_mode, post_state, source_deleted, post_error,
     quality_history
   FROM record_session";
+
+/// 从平台 extra 里取账号 UID；只有 B 站会填，其它平台为 None。
+pub(crate) fn platform_uid_of(info: &RoomInfo) -> Option<String> {
+    info.extra
+        .get("uid")
+        .and_then(|value| value.as_i64())
+        .filter(|uid| *uid > 0)
+        .map(|uid| uid.to_string())
+}
 
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
     Ok(RoomRecord {
@@ -2254,6 +2287,7 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         created_at: row.get(32)?,
         updated_at: row.get(33)?,
         last_session_quality: row.get(34)?,
+        platform_uid: row.get(35)?,
     })
 }
 

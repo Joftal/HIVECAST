@@ -54,4 +54,8 @@ splitMaxDurationSec: number, splitMaxSizeMb: number,
 /**
  * 单房间通知覆盖；None = 跟随全局设置。
  */
-notifyLive: boolean | null, notifyError: boolean | null, createdAt: number, updatedAt: number, };
+notifyLive: boolean | null, notifyError: boolean | null, createdAt: number, updatedAt: number,
+/**
+ * 平台账号 UID；B 站批量状态接口按 UID 查询，关注导入时写入。
+ */
+platformUid: string | null, };

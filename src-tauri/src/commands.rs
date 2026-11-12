@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use hivecast_ipc::{
-    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview, LineInfo,
+    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, FfmpegStatus, FilenamePreview,
+    FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo, LiveStatus,
     LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
     QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView,
     SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo,
@@ -219,6 +220,7 @@ pub async fn room_add(
         notify_error: None,
         created_at: timestamp,
         updated_at: timestamp,
+        platform_uid: crate::db::platform_uid_of(&info),
     };
 
     let room = state.db.insert_room(&draft, &info)?;
@@ -245,6 +247,253 @@ pub async fn room_add(
         error: state.recorder.last_error(&room.id),
         room,
         created: true,
+    })
+}
+
+/// 当前登录的 B 站账号 UID；关注列表只能用自己的账号拉。
+fn bilibili_uid(state: &AppState) -> Result<String, AppError> {
+    state
+        .db
+        .credentials()?
+        .into_iter()
+        .find(|row| row.platform == "bilibili" && !row.uid.trim().is_empty())
+        .map(|row| row.uid)
+        .ok_or_else(|| AppError::User("未登录 B 站，请先在设置中登录".into()))
+}
+
+/// B 站接口的 -101 统一翻译成「重新登录」，其余错误保持原样。
+fn map_bilibili_error(err: crate::platform::PlatformError) -> AppError {
+    match err {
+        crate::platform::PlatformError::Upstream { code: -101, .. } => {
+            AppError::User("B 站登录已失效，请重新扫码登录".into())
+        }
+        other => other.into(),
+    }
+}
+
+#[tauri::command]
+pub async fn bilibili_followings(
+    state: State<'_, AppState>,
+    page: Option<u32>,
+) -> Result<FollowingPage, AppError> {
+    // 关注列表的分页状态由前端持有，这里只负责转成稳定 ID。
+    let uid = bilibili_uid(&state)?;
+    crate::platform::bilibili::fetch_followings(&uid, page.unwrap_or(1))
+        .await
+        .map_err(map_bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_follow_statuses(uids: Vec<String>) -> Result<Vec<LiveStatus>, AppError> {
+    crate::platform::bilibili::fetch_live_statuses(&uids)
+        .await
+        .map_err(map_bilibili_error)
+}
+
+/// 批量导入关注的主播：只写本地库，不逐房间请求平台。
+///
+/// 已经存在的房间只刷新展示字段，不覆盖用户设置的画质/线路/备注/自动录制；
+/// 没有直播间的关注记为失败，而不是当成离线房间加进来。
+#[tauri::command]
+pub async fn rooms_import(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    items: Vec<ImportRoomInput>,
+    monitor: Option<bool>,
+    auto_record: Option<bool>,
+) -> Result<ImportRoomsResult, AppError> {
+    let monitor = monitor.unwrap_or(true);
+    let auto_record = monitor && auto_record.unwrap_or(false);
+    let settings = crate::settings::load(&state.db);
+    let timestamp = now_ts();
+
+    let mut added = 0u32;
+    let mut existing = 0u32;
+    let mut failed = Vec::new();
+    let mut started: Vec<RoomRecord> = Vec::new();
+
+    for item in items {
+        let uid = item.uid.trim();
+        let uname = if item.uname.trim().is_empty() {
+            uid.to_string()
+        } else {
+            item.uname.trim().to_string()
+        };
+        let room_id = item.room_id.trim();
+        if room_id.is_empty() {
+            failed.push(ImportFailure {
+                uid: uid.to_string(),
+                uname,
+                message: "没有可用的直播间".into(),
+            });
+            continue;
+        };
+
+        // 同一个主播可能已经用短号加过：先按真实房间号查，再按 UID 兜底。
+        // 两边都命中时合并，避免导入后又留下两条指向同一直播间的记录。
+        let canonical_url = format!("https://live.bilibili.com/{room_id}");
+        let mut known = state.db.find_room("bilibili", room_id)?;
+        if let Some(alias) = state.db.find_room_by_uid("bilibili", uid)? {
+            if known.as_ref().map_or(true, |room| room.id != alias.id) {
+                match known.take() {
+                    None => {
+                        state.db.rekey_room(&alias.id, room_id, &canonical_url)?;
+                        known = state.db.get_room(&alias.id)?;
+                    }
+                    Some(primary) => {
+                        state.db.merge_room(&primary.id, &alias.id)?;
+                        if primary.room_key != room_id {
+                            state.db.rekey_room(&primary.id, room_id, &canonical_url)?;
+                        }
+                        known = state.db.get_room(&primary.id)?;
+                    }
+                }
+            }
+        }
+        if let Some(room) = known {
+            if room.room_key != room_id {
+                state.db.rekey_room(&room.id, room_id, &canonical_url)?;
+            }
+            let info = RoomInfo {
+                host_name: uname.clone(),
+                room_name: item.title.clone(),
+                avatar_url: item.avatar_url.clone(),
+                cover_url: item.cover_url.clone(),
+                area_name: item.area_name.clone(),
+                is_live: item.is_live,
+                started_at: if room.is_live { room.started_at } else { None },
+                online: item.online,
+                stable_id: Some(room_id.to_string()),
+                extra: serde_json::json!({
+                    "uid": uid,
+                    "roomId": room_id,
+                    "shortId": item.short_id,
+                    "liveStatus": if item.is_live { 1 } else { 0 },
+                }),
+            };
+            // 软删除的行不在界面上，导入时必须恢复，否则会误报「已存在」。
+            if state.db.room_removed(&room.id)? {
+                let draft = RoomRecord {
+                    room_key: room_id.to_string(),
+                    canonical_url: canonical_url.clone(),
+                    auto_record,
+                    monitor_paused: !monitor,
+                    platform_uid: Some(uid.to_string()),
+                    updated_at: timestamp,
+                    ..room
+                };
+                match state.db.insert_room(&draft, &info) {
+                    Ok(restored) => {
+                        added += 1;
+                        if restored.is_live && restored.auto_record {
+                            started.push(restored);
+                        }
+                    }
+                    Err(err) => failed.push(ImportFailure {
+                        uid: uid.to_string(),
+                        uname,
+                        message: err.to_string(),
+                    }),
+                }
+            } else {
+                state.db.update_room_info(&room.id, &info)?;
+                existing += 1;
+            }
+            continue;
+        }
+        let draft = RoomRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            platform: "bilibili".into(),
+            room_key: room_id.to_string(),
+            canonical_url,
+            title: item.title.clone(),
+            host_name: uname.clone(),
+            avatar_url: item.avatar_url.clone(),
+            cover_url: item.cover_url.clone(),
+            area_name: item.area_name.clone(),
+            is_live: item.is_live,
+            started_at: None,
+            online: item.online,
+            auto_record,
+            monitor_paused: !monitor,
+            record_qn: 0,
+            view_qn: settings.default_view_qn,
+            record_line: None,
+            last_checked_at: Some(timestamp),
+            last_session_id: None,
+            last_session_started_at: None,
+            last_session_duration_ms: 0,
+            last_session_status: None,
+            last_session_reason: None,
+            last_session_file_size: 0,
+            last_session_quality: None,
+            note: String::new(),
+            tags: String::new(),
+            title_include: None,
+            title_exclude: None,
+            split_max_duration_sec: None,
+            split_max_size_mb: None,
+            notify_live: None,
+            notify_error: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            platform_uid: Some(uid.to_string()),
+        };
+        let info = RoomInfo {
+            host_name: uname.clone(),
+            room_name: item.title.clone(),
+            avatar_url: item.avatar_url.clone(),
+            cover_url: item.cover_url.clone(),
+            area_name: item.area_name.clone(),
+            is_live: item.is_live,
+            started_at: None,
+            online: item.online,
+            stable_id: Some(room_id.to_string()),
+            extra: serde_json::json!({
+                "uid": uid,
+                "roomId": room_id,
+                "shortId": item.short_id,
+                "liveStatus": if item.is_live { 1 } else { 0 },
+            }),
+        };
+        match state.db.insert_room(&draft, &info) {
+            Ok(room) => {
+                added += 1;
+                if room.is_live && room.auto_record {
+                    started.push(room);
+                }
+            }
+            Err(err) => failed.push(ImportFailure {
+                uid: uid.to_string(),
+                uname,
+                message: err.to_string(),
+            }),
+        }
+    }
+
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    tracing::info!(
+        target: "hivecast_lib::commands",
+        added,
+        existing,
+        failed = failed.len(),
+        "批量导入关注"
+    );
+    for room in started {
+        if let Err(err) = state
+            .recorder
+            .start_checked(&app, &state.broker, &room)
+            .await
+        {
+            tracing::warn!(target: "hivecast_lib::commands", room_id = %room.id, error = %err, "导入后自动开录失败");
+            state.recorder.set_error(&room.id, err.to_string());
+        }
+    }
+
+    Ok(ImportRoomsResult {
+        added,
+        existing,
+        failed,
     })
 }
 
