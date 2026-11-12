@@ -12,8 +12,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use hivecast_ipc::{DanmakuBatch, DanmakuMessage, RoomRecord};
 use serde::Deserialize;
@@ -38,6 +39,9 @@ const BATCH_WINDOW: Duration = Duration::from_millis(200);
 /// 弹幕批次日志的汇总周期。每 200ms 一批，逐批打印会轻易写满当日日志额度。
 const BATCH_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PER_SECOND: u32 = 200;
+/// 读空闲超过 90 秒即判定连接假死：TCP 半开时 ws.next() 可能永远不返回。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const IDLE_CHECK: Duration = Duration::from_secs(15);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 /// 连续失败这么多次就丢弃 token，重新向平台申请。
 const TOKEN_FAILURES: u32 = 5;
@@ -135,6 +139,13 @@ impl RoomConn {
         let writers = self.writers.lock().expect("弹幕写入器被污染");
         for writer in writers.iter() {
             writer.push(message);
+        }
+    }
+
+    fn flush_writers(&self) {
+        let writers = self.writers.lock().expect("弹幕写入器被污染");
+        for writer in writers.iter() {
+            writer.flush_pending();
         }
     }
 }
@@ -337,6 +348,8 @@ struct WriterInner {
     file: Option<std::io::BufWriter<std::fs::File>>,
     path: PathBuf,
     started: Instant,
+    /// 与本文件第一条时间轴对应的 Unix 毫秒；用于把整场 JSONL 按片段切分。
+    started_wall_ms: i64,
     count: u64,
     /// 上次落盘时刻：慢速聊天室可能几分钟都攒不满 50 条，不能只靠条数触发。
     flushed_at: Instant,
@@ -348,12 +361,17 @@ impl RecordWriter {
             std::fs::create_dir_all(parent)?;
         }
         let file = std::fs::File::create(path)?;
+        let started_wall_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
         Ok(Arc::new(Self {
             rules,
             inner: Mutex::new(WriterInner {
                 file: Some(std::io::BufWriter::new(file)),
                 path: path.to_path_buf(),
                 started: Instant::now(),
+                started_wall_ms,
                 count: 0,
                 flushed_at: Instant::now(),
             }),
@@ -385,6 +403,23 @@ impl RecordWriter {
             }
         }
         inner.file = Some(file);
+    }
+
+    /// 本文件 t=0 对应的 Unix 毫秒，供分割录制按时间切片。
+    pub fn started_epoch_ms(&self) -> i64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.started_wall_ms)
+            .unwrap_or(0)
+    }
+
+    /// 把 BufWriter 里的残余行立刻落盘；批次 flush 每 200ms 调一次。
+    pub fn flush_pending(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(file) = inner.file.as_mut() {
+                let _ = file.flush();
+            }
+        }
     }
 
     pub fn finish(&self) -> (PathBuf, u64) {
@@ -507,7 +542,7 @@ async fn wbi_mixin_key() -> Result<String, String> {
         }
     }
 
-    let envelope: Envelope<NavData> = http::get_json(NAV_URL, WWW_REFERER, &[])
+    let envelope: Envelope<NavData> = http::get_json_anon(NAV_URL, WWW_REFERER, &[])
         .await
         .map_err(|err| format!("取 WBI 密钥失败：{err}"))?;
     let img = envelope
@@ -569,7 +604,7 @@ async fn sign_url(raw: &str) -> Result<String, String> {
 
 async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
     let init_url = format!("{API}/room/v1/Room/room_init?id={room_key}");
-    let init: Envelope<RoomInitData> = http::get_json(&init_url, REFERER, &[])
+    let init: Envelope<RoomInitData> = http::get_json_anon(&init_url, REFERER, &[])
         .await
         .map_err(|err| format!("解析真实房间号失败：{err}"))?;
     let real_id = init
@@ -599,7 +634,7 @@ async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
 async fn fetch_danmu_info(real_id: i64) -> Result<DanmuSession, String> {
     let info_url = format!("{API}/xlive/web-room/v1/index/getDanmuInfo?id={real_id}&type=0");
     let signed = sign_url(&info_url).await?;
-    let envelope: Envelope<DanmuInfo> = http::get_json(&signed, REFERER, &[])
+    let envelope: Envelope<DanmuInfo> = http::get_json_anon(&signed, REFERER, &[])
         .await
         .map_err(|err| format!("取弹幕服务器失败：{err}"))?;
     let info = envelope.data.ok_or_else(|| {
@@ -619,7 +654,7 @@ async fn fetch_danmu_info(real_id: i64) -> Result<DanmuSession, String> {
 /// 老接口 room/v1/Danmu/getConf：不需要 WBI 签名，仍能拿到 token 与服务器列表。
 async fn fetch_conf(real_id: i64) -> Result<DanmuSession, String> {
     let url = format!("{API}/room/v1/Danmu/getConf?room_id={real_id}&platform=pc&player=web");
-    let envelope: Envelope<ConfInfo> = http::get_json(&url, REFERER, &[])
+    let envelope: Envelope<ConfInfo> = http::get_json_anon(&url, REFERER, &[])
         .await
         .map_err(|err| format!("取弹幕配置失败：{err}"))?;
     let info = envelope.data.ok_or_else(|| {
@@ -648,17 +683,20 @@ fn accept(
         *window_start = Instant::now();
         *count = 0;
     }
+    message.offset_ms = conn.started.elapsed().as_millis() as i64;
+    // 录制落盘先于限流：爆发房间也要留下完整弹幕文件。
+    conn.fan_out(&message);
     if *count >= MAX_PER_SECOND {
         conn.dropped.fetch_add(1, Ordering::Relaxed);
         return;
     }
     *count += 1;
-    message.offset_ms = conn.started.elapsed().as_millis() as i64;
-    conn.fan_out(&message);
     batch.push(message);
 }
 
 fn flush(app: &AppHandle, conn: &RoomConn, batch: &mut Vec<DanmakuMessage>) {
+    // 即使这一批没有新消息，也把上一条残留在 BufWriter 里的行落盘。
+    conn.flush_writers();
     if batch.is_empty() {
         return;
     }
@@ -698,7 +736,7 @@ async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
                 Err(err) => {
                     tracing::warn!(room = %conn.room.room_key, %err, "弹幕服务器解析失败");
                     conn.set_error(err);
-                    sleep_interruptible(&conn, backoff).await;
+                    sleep_interruptible(&conn, retry_delay(backoff, &conn.room.room_key)).await;
                     backoff = (backoff * 2).min(RETRY_MAX);
                     continue;
                 }
@@ -716,7 +754,7 @@ async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
                     session = None;
                     failures = 0;
                 }
-                sleep_interruptible(&conn, backoff).await;
+                sleep_interruptible(&conn, retry_delay(backoff, &conn.room.room_key)).await;
                 backoff = (backoff * 2).min(RETRY_MAX);
             }
         }
@@ -726,6 +764,18 @@ async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
     for writer in writers.iter() {
         writer.finish();
     }
+}
+
+/// 退避加 0–400ms jitter，避免同一平台所有房间在同一秒重连。
+fn retry_delay(base: Duration, room_key: &str) -> Duration {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as u64)
+        .unwrap_or(0)
+        ^ room_key
+            .bytes()
+            .fold(0u64, |acc, byte| acc.wrapping_mul(31) + byte as u64);
+    base + Duration::from_millis(seed % 400)
 }
 
 async fn sleep_interruptible(conn: &RoomConn, duration: Duration) {
@@ -749,6 +799,9 @@ async fn run_once(
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut idle_check = tokio::time::interval(IDLE_CHECK);
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_rx = Instant::now();
     let mut window_start = Instant::now();
     let mut count = 0u32;
     let mut batch: Vec<DanmakuMessage> = Vec::new();
@@ -758,7 +811,16 @@ async fn run_once(
             _ = heartbeat.tick() => {
                 send_packet(&mut ws, 2, b"[object Object]").await?;
             }
+            _ = idle_check.tick() => {
+                if last_rx.elapsed() >= IDLE_TIMEOUT {
+                    return Err(format!(
+                        "弹幕连接 {} 秒无任何数据，判定假死",
+                        last_rx.elapsed().as_secs()
+                    ));
+                }
+            }
             incoming = ws.next() => {
+                last_rx = Instant::now();
                 match incoming {
                     Some(Ok(WsMessage::Binary(data))) => {
                         let outcome = parse_frame(&data);
@@ -958,6 +1020,147 @@ fn brotli_decode(body: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     Ok(out)
 }
 
+/// protobuf 的最小读取器：只处理 varint 与 length-delimited，足够解礼物 pb。
+enum PbValue<'a> {
+    Num(u64),
+    Data(&'a [u8]),
+}
+
+fn pb_varint(buf: &[u8], offset: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    while *offset < buf.len() {
+        let byte = buf[*offset];
+        *offset += 1;
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn pb_fields(buf: &[u8]) -> Option<Vec<(u64, PbValue<'_>)>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while offset < buf.len() {
+        let key = pb_varint(buf, &mut offset)?;
+        let field = key >> 3;
+        let wire = key & 7;
+        let value = match wire {
+            0 => PbValue::Num(pb_varint(buf, &mut offset)?),
+            2 => {
+                let len = pb_varint(buf, &mut offset)? as usize;
+                let end = offset.checked_add(len)?;
+                if end > buf.len() {
+                    return None;
+                }
+                let data = &buf[offset..end];
+                offset = end;
+                PbValue::Data(data)
+            }
+            1 => {
+                let end = offset.checked_add(8)?;
+                if end > buf.len() {
+                    return None;
+                }
+                offset = end;
+                continue;
+            }
+            5 => {
+                let end = offset.checked_add(4)?;
+                if end > buf.len() {
+                    return None;
+                }
+                offset = end;
+                continue;
+            }
+            _ => return None,
+        };
+        out.push((field, value));
+    }
+    Some(out)
+}
+
+fn pb_string(fields: &[(u64, PbValue<'_>)], field: u64) -> Option<String> {
+    fields.iter().find_map(|(id, value)| {
+        if *id != field {
+            return None;
+        }
+        match value {
+            PbValue::Data(data) => String::from_utf8(data.to_vec()).ok(),
+            PbValue::Num(_) => None,
+        }
+    })
+}
+
+fn pb_number(fields: &[(u64, PbValue<'_>)], field: u64) -> Option<u64> {
+    fields.iter().find_map(|(id, value)| {
+        if *id != field {
+            return None;
+        }
+        match value {
+            PbValue::Num(number) => Some(*number),
+            PbValue::Data(_) => None,
+        }
+    })
+}
+
+fn parse_gift_v2(data: &Value) -> Option<DanmakuMessage> {
+    let mut user = None;
+    let mut gift = None;
+    let mut num = 1u64;
+    if let Some(pb) = data.get("pb").and_then(Value::as_str) {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(pb) {
+            if let Some(fields) = pb_fields(&bytes) {
+                user = pb_string(&fields, 2);
+                if let Some(inner) = fields.iter().find_map(|(id, value)| {
+                    if *id != 10 {
+                        return None;
+                    }
+                    match value {
+                        PbValue::Data(data) => Some(*data),
+                        PbValue::Num(_) => None,
+                    }
+                }) {
+                    if let Some(gift_fields) = pb_fields(inner) {
+                        gift = pb_string(&gift_fields, 2);
+                        num = pb_number(&gift_fields, 3).unwrap_or(1).max(1);
+                    }
+                }
+            }
+        }
+    }
+    // 兼容未来 pb 缺失但 JSON 仍带旧字段的包。
+    let user = user.or_else(|| {
+        data.get("uname")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let gift = gift.or_else(|| {
+        data.get("giftName")
+            .or_else(|| data.get("gift_name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })?;
+    let num = data
+        .get("num")
+        .and_then(Value::as_u64)
+        .unwrap_or(num)
+        .max(1);
+    Some(DanmakuMessage {
+        offset_ms: 0,
+        kind: "gift".into(),
+        user,
+        content: format!("赠送 {gift} × {num}"),
+        color: 0xFFB027,
+    })
+}
+
 fn parse_message(body: &[u8]) -> Option<DanmakuMessage> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let cmd = value.get("cmd")?.as_str()?;
@@ -989,6 +1192,7 @@ fn parse_message(body: &[u8]) -> Option<DanmakuMessage> {
                 color,
             })
         }
+        "SEND_GIFT_V2" => parse_gift_v2(&data),
         "SEND_GIFT" => {
             let gift = data.get("giftName").and_then(Value::as_str)?;
             let num = data.get("num").and_then(Value::as_u64).unwrap_or(1);
@@ -1143,6 +1347,30 @@ mod tests {
         let outcome = parse_frame(&danmu_packet(sc));
         assert_eq!(outcome.messages[0].kind, "super_chat");
         assert_eq!(outcome.messages[0].content, "[30 元] 加油");
+    }
+
+    #[test]
+    fn parses_gift_v2_protobuf() {
+        // 2026-11-12 从房间 545068 抓到的真实 SEND_GIFT_V2：橘子入雨 / 人气票 / 1 个。
+        let json = format!(
+            r#"{{"cmd":"SEND_GIFT_V2","data":{{"pb":"{}"}}}}"#,
+            "CMDhjwMSDOapmOWtkOWFpembqBpJaHR0cDovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS8xYzFmNWVjZDBiYjcwOTBkYTI2NTE1MmIxZGVkZDk0NmM0ZjJlYzRmLmpwZ0IAUtsFCMSJAhIJ5Lq65rCU56WoGAEgAShkMGQ4ZEIEZ29sZEoTNDgzODI2MjY2NjU2NzAzNTM5MlDtkNbXBlgBYjliYXRjaDpnaWZ0OmNvbWJvX2lkOjY1NDk2OTY6ODczOTQ3NzozMzk4ODoxNzk0NDc2MTQxLjMyOThoCnBkeAWFAQAAgD+IAQGSAQbmipXlloLAAcbltK8B6gEcChXogIHlrp7mhqjljprnmoTnrJHnrJEQlbWVBIoCswIIlbWVBBKrAgoV6ICB5a6e5oao5Y6a55qE56yR56yREkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS81OWRhMzI5YTUzNmIxNDhiMGU4ZDE5MTQzYjY4NmQyZGEwNmRhZDkzLmpwZzJjChXogIHlrp7mhqjljprnmoTnrJHnrJESSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlLzU5ZGEzMjlhNTM2YjE0OGIwZThkMTkxNDNiNjg2ZDJkYTA2ZGFkOTMuanBnOmEIAhJdYmlsaWJpbGkgMjAyMueZvuWkp1VQ5Li744CBMjAyMuebtOaSreW5tOW6puW8ueW5leS6uuawlOWlllVQ5Li744CB6IGM5Lia5ri45oiP6Kej6K+05a2Z5Lqa6b6ZkgIAmgLlAQpKaHR0cHM6Ly9zMS5oZHNsYi5jb20vYmZzL2xpdmUvN2Q3ODY0NmVlNGVjYzkwMGNlYmJlNDZjYjk2M2Y0MjEwNzk1NDhmMC5wbmcSS2h0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9saXZlLzRkNTIxNWRhNDdkMjViM2RiNzg3ZDJiYTU0NDkwMTZlZTE0MmRjODAud2VicCpKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvNzBkOTJhZjBhODM3YWU2NmUyNWYyMzQ5M2E1NmUxNjkwZjc2ZWJiYS5naWaqAgBYAWoCCBZ6sAIIwOGPAxLBAQoM5qmY5a2Q5YWl6ZuoEklodHRwOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlLzFjMWY1ZWNkMGJiNzA5MGRhMjY1MTUyYjFkZWRkOTQ2YzRmMmVjNGYuanBnMlkKDOapmOWtkOWFpembqBJJaHR0cDovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS8xYzFmNWVjZDBiYjcwOTBkYTI2NTE1MmIxZGVkZDk0NmM0ZjJlYzRmLmpwZzoLIP///////////wEaZQoJ5b635LqR6ImyEB8Y1ZC0ASD/t/YEKNWQtAEw1ZC0AUgBUJW1lQRg1Z8CegkjNEM3REZGOTmCAQkjNEM3REZGOTmKAQkjNEM3REZGOTmSAQcjRkZGRkZGmgEJIzRDN0RGRkU2"
+        );
+        let outcome = parse_frame(&danmu_packet(&json));
+        assert_eq!(outcome.messages.len(), 1);
+        let message = &outcome.messages[0];
+        assert_eq!(message.kind, "gift");
+        assert_eq!(message.user.as_deref(), Some("橘子入雨"));
+        assert_eq!(message.content, "赠送 人气票 × 1");
+    }
+
+    #[test]
+    fn parses_guard_buy() {
+        let json = r#"{"cmd":"GUARD_BUY","data":{"gift_name":"舰长","num":1,"username":"丙"}}"#;
+        let outcome = parse_frame(&danmu_packet(json));
+        assert_eq!(outcome.messages[0].kind, "guard");
+        assert_eq!(outcome.messages[0].content, "开通了 舰长 × 1");
+        assert_eq!(outcome.messages[0].user.as_deref(), Some("丙"));
     }
 
     #[test]

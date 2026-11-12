@@ -204,12 +204,32 @@ async fn send(
     request: reqwest::RequestBuilder,
     url: &str,
 ) -> Result<reqwest::Response, PlatformError> {
+    send_inner(request, url, true).await
+}
+
+/// 发匿名请求：不注入本地登录 Cookie。
+///
+/// 弹幕接口（room_init / getDanmuInfo / getConf）只依赖 WBI 签名与房间 token，
+/// 带上登录 Cookie 反而可能触发风控或拿到与匿名链路不同的 token；WS 握手本身
+/// 也不带 Cookie，所以 REST 阶段保持一致。
+async fn send_anon(
+    request: reqwest::RequestBuilder,
+    url: &str,
+) -> Result<reqwest::Response, PlatformError> {
+    send_inner(request, url, false).await
+}
+
+async fn send_inner(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    inject_cookie: bool,
+) -> Result<reqwest::Response, PlatformError> {
     // 统一在这里挂登录态：调用方没显式给 Cookie（扫码校验、登录接口）才用本地存的，
     // 这样既不会把同一个 Cookie 头发两遍，也避免每个适配器都去查一次凭据。
     let mut request = request
         .build()
         .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
-    if request.headers().get(reqwest::header::COOKIE).is_none() {
+    if inject_cookie && request.headers().get(reqwest::header::COOKIE).is_none() {
         if let Some(cookie) = crate::credential::cookie_for_url(url) {
             match reqwest::header::HeaderValue::from_str(&cookie) {
                 Ok(value) => {
@@ -261,12 +281,36 @@ pub async fn get_json_with_date<T: DeserializeOwned>(
     referer: &str,
     extra_headers: &[(&str, &str)],
 ) -> Result<Fetched<T>, PlatformError> {
+    get_json_fetched(url, referer, extra_headers, true).await
+}
+
+/// 匿名 JSON GET：不注入登录 Cookie，供弹幕 REST 接口使用。
+pub async fn get_json_anon<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<T, PlatformError> {
+    get_json_fetched(url, referer, extra_headers, false)
+        .await
+        .map(|fetched| fetched.data)
+}
+
+async fn get_json_fetched<T: DeserializeOwned>(
+    url: &str,
+    referer: &str,
+    extra_headers: &[(&str, &str)],
+    inject_cookie: bool,
+) -> Result<Fetched<T>, PlatformError> {
     let mut request = client().get(url).header("Referer", referer);
     for (name, value) in extra_headers {
         request = request.header(*name, *value);
     }
 
-    let response = send(request, url).await?;
+    let response = if inject_cookie {
+        send(request, url).await?
+    } else {
+        send_anon(request, url).await?
+    };
     let date = parse_date(response.headers());
     let data = response
         .json::<T>()

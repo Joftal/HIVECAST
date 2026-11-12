@@ -2601,6 +2601,10 @@ impl Recorder {
         // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
         // 没有 writer（总开关关闭或平台不支持）就是没有弹幕文件，绝不能回退到
         // active.danmaku_path：那条路径可能压根没创建，写进库就是假路径。
+        let writer_started_ms = active
+            .danmaku
+            .as_ref()
+            .map(|writer| writer.started_epoch_ms());
         let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
             (Some(hub), Some(writer)) => hub
                 .detach_record(room_id, writer)
@@ -2608,6 +2612,75 @@ impl Recorder {
                     (Some(path.display().to_string()), count as i64)
                 }),
             _ => (None, 0),
+        };
+
+        // 分割录制只有一条整场 JSONL。收尾时按片段区间切片并重设 t=0，
+        // 否则第二段起 danmaku_path 为空、ASS 也只覆盖第一段。
+        let mut clip_danmaku: Vec<Option<(String, i64)>> = vec![None; rendered.len()];
+        if rendered.len() > 1 {
+            if let (Some(master), Some(writer_started_ms)) =
+                (danmaku_path.as_deref(), writer_started_ms)
+            {
+                let recording_started_ms = active.recording.started_at * 1000;
+                let writer_shift = writer_started_ms - recording_started_ms;
+                // 原地切第一段会在下一段读取前截断母文件，先留一份只读副本。
+                let first_jsonl = rendered[0].path.with_extension("jsonl");
+                let source = Path::new(master).with_extension("split-src");
+                if let Err(err) = std::fs::copy(master, &source) {
+                    tracing::warn!(%err, file = %master, "复制整场弹幕失败，分割片段将没有弹幕");
+                } else {
+                    let mut first_sliced = false;
+                    for (index, clip) in rendered.iter().enumerate() {
+                        let start =
+                            (clip.started_at * 1000 - recording_started_ms - writer_shift).max(0);
+                        let end = if index + 1 == rendered.len() {
+                            None
+                        } else {
+                            Some(
+                                (clip.ended_at * 1000 - recording_started_ms - writer_shift)
+                                    .max(start),
+                            )
+                        };
+                        let out = if index == 0 {
+                            first_jsonl.clone()
+                        } else {
+                            clip.path.with_extension("jsonl")
+                        };
+                        match crate::postprocess::slice_danmaku(&source, &out, start, end) {
+                            Ok(0) => {
+                                if index == 0 {
+                                    first_sliced = true;
+                                }
+                            }
+                            Ok(count) => {
+                                if index == 0 {
+                                    first_sliced = true;
+                                }
+                                clip_danmaku[index] =
+                                    Some((out.display().to_string(), count as i64));
+                            }
+                            Err(err) => tracing::warn!(
+                                %err,
+                                clip = index,
+                                file = %out.display(),
+                                "切分片段弹幕失败"
+                            ),
+                        }
+                    }
+                    let _ = std::fs::remove_file(&source);
+                    if first_sliced && Path::new(master) != first_jsonl {
+                        let _ = std::fs::remove_file(master);
+                    }
+                }
+            }
+        }
+        let (db_danmaku_path, db_danmaku_count) = if rendered.len() > 1 {
+            clip_danmaku
+                .first()
+                .and_then(|entry| entry.as_ref())
+                .map_or((None, 0), |(path, count)| (Some(path.clone()), *count))
+        } else {
+            (danmaku_path.clone(), danmaku_count)
         };
 
         match self.db.finish_session_with_post(
@@ -2622,8 +2695,8 @@ impl Recorder {
             &first.post_state,
             false,
             first.post_error.as_deref(),
-            danmaku_path.as_deref(),
-            danmaku_count,
+            db_danmaku_path.as_deref(),
+            db_danmaku_count,
             error.as_deref(),
         ) {
             Ok(()) => {
@@ -2663,6 +2736,10 @@ impl Recorder {
                     .as_ref()
                     .map(|manifest| manifest.clips[index].id.clone())
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let (clip_danmaku_path, clip_danmaku_count) = clip_danmaku
+                    .get(index)
+                    .and_then(|entry| entry.as_ref())
+                    .map_or((None, 0), |(path, count)| (Some(path.clone()), *count));
                 let session = RecordSession {
                     id: clip_id.clone(),
                     room_id: active.recording.room_id.clone(),
@@ -2677,8 +2754,8 @@ impl Recorder {
                     quality_history: active.quality_history.clone(),
                     line: Some(active.recording.line.clone()),
                     error: error.clone(),
-                    danmaku_path: None,
-                    danmaku_count: 0,
+                    danmaku_path: clip_danmaku_path,
+                    danmaku_count: clip_danmaku_count,
                     source_path: Some(clip.source_path.display().to_string()),
                     post_mode: post_cfg.mode.clone(),
                     post_state: clip.post_state.clone(),
@@ -2750,10 +2827,24 @@ impl Recorder {
         }
 
         // 弹幕存档（.jsonl）随录随写；收尾时顺手导出一份 .ass，媒体目录里直接可用。
-        if let Some(path) = danmaku_path.as_deref().filter(|_| danmaku_count > 0) {
-            match crate::postprocess::danmaku_to_ass(std::path::Path::new(path)) {
+        // 分割录制要为每个片段各导一份，时间轴已随片段 JSONL 归零。
+        let ass_targets: Vec<(String, i64)> = if rendered.len() > 1 {
+            clip_danmaku
+                .iter()
+                .filter_map(|entry| entry.clone())
+                .collect()
+        } else {
+            db_danmaku_path
+                .clone()
+                .filter(|_| db_danmaku_count > 0)
+                .map(|path| (path, db_danmaku_count))
+                .into_iter()
+                .collect()
+        };
+        for (path, _) in ass_targets {
+            match crate::postprocess::danmaku_to_ass(std::path::Path::new(&path)) {
                 Ok(result) => tracing::info!(ass = %result.path, "已导出弹幕字幕"),
-                Err(err) => tracing::warn!(%err, "导出弹幕字幕失败"),
+                Err(err) => tracing::warn!(%err, file = %path, "导出弹幕字幕失败"),
             }
         }
 

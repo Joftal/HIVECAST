@@ -247,6 +247,49 @@ pub async fn merge(
     })
 }
 
+/// 按时间区间从整场 JSONL 切出单个片段，并把 t 归零到片段起点。
+///
+/// 分割录制只维护一条 RecordWriter；收尾时用它给每个片段生成独立 JSONL，
+/// 这样每段 ASS 的时间轴都与自己的视频对齐，媒体库也能逐段显示弹幕数量。
+/// 区间是 [start_ms, end_ms)，end 为 None 表示到文件末尾。
+pub fn slice_danmaku(
+    jsonl: &Path,
+    out: &Path,
+    start_ms: i64,
+    end_ms: Option<i64>,
+) -> std::io::Result<u64> {
+    use std::io::Write as _;
+
+    let raw = std::fs::read_to_string(jsonl)?;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(out)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut count = 0u64;
+    for line in raw.lines() {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(at) = value.get("t").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        if at < start_ms || end_ms.is_some_and(|end| at >= end) {
+            continue;
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.insert("t".into(), serde_json::Value::from((at - start_ms).max(0)));
+        }
+        writeln!(writer, "{value}")?;
+        count += 1;
+    }
+    writer.flush()?;
+    if count == 0 {
+        let _ = std::fs::remove_file(out);
+    }
+    Ok(count)
+}
+
 /// 弹幕 JSONL → ASS 字幕：聊天从右向左滚动，礼物/上舰固定在图上方居中。
 ///
 /// 直播里的礼物与上舰本来就是「悬停公告」，跟着聊天一起滚会看不清，
@@ -421,6 +464,31 @@ mod tests {
     }
 
     #[test]
+    fn slices_jsonl_and_rebases_time() {
+        let dir = std::env::temp_dir().join(format!("hivecast-slice-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("full.jsonl");
+        std::fs::write(
+            &src,
+            concat!(
+                "{\"t\":0,\"k\":\"chat\",\"c\":\"a\"}\n",
+                "{\"t\":1500,\"k\":\"chat\",\"c\":\"b\"}\n",
+                "{\"t\":3000,\"k\":\"gift\",\"c\":\"c\"}\n"
+            ),
+        )
+        .unwrap();
+        let out = dir.join("clip1.jsonl");
+        let count = slice_danmaku(&src, &out, 1000, Some(2500)).unwrap();
+        assert_eq!(count, 1);
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("\"t\":500"));
+        assert!(text.contains("\"c\":\"b\""));
+        assert_eq!(slice_danmaku(&src, &out, 9000, None).unwrap(), 0);
+        assert!(!out.exists(), "空片段不留 0 字节 JSONL");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lane_prefers_free_row_then_earliest() {
         let mut free = vec![0, 5_000, 0];
         assert_eq!(pick_lane(&free, 100), 0);
@@ -500,6 +568,8 @@ mod tests {
             r#"{"t":1200,"k":"chat","u":"小明","c":"哈哈哈","col":16711680}
 {"t":9000,"k":"chat","u":"小红","c":"{\\move(0,0)} 注入","col":0}
 {"t":2000,"k":"gift","u":"小刚","c":"赠送 辣条 ×3","col":16776960}
+{"t":3000,"k":"super_chat","u":"小蓝","c":"[30 元] 加油","col":123456}
+{"t":4000,"k":"guard","u":"小绿","c":"开通了 舰长 × 1","col":123456}
 "#,
         )
         .unwrap();
@@ -512,6 +582,8 @@ mod tests {
         // 礼物走固定公告：居中、an8 顶部对齐，不带 move。
         assert!(text.contains("\\an8\\pos(640,"));
         assert!(text.contains("赠送 辣条 ×3"));
+        assert!(text.contains("[30 元] 加油"), "SC 不能丢");
+        assert!(text.contains("开通了 舰长 × 1"), "舰长不能丢");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
