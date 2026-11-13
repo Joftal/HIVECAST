@@ -250,16 +250,32 @@ async fn send_inner(
         .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
         tracing::warn!(
             target: "hivecast_lib::platform",
             url = %redact_url(url),
-            status = response.status().as_u16(),
+            status = status.as_u16(),
+            retry_after = retry_after.unwrap_or_default(),
             "平台接口返回非 2xx"
         );
+        // 429/412 是平台明确在说「慢一点」：映射成带秒数的 Throttled，
+        // 批量检查才能整平台冷却，而不是把它当普通网络错误立刻重试。
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::PRECONDITION_FAILED
+        {
+            return Err(PlatformError::Throttled {
+                retry_after: retry_after.unwrap_or(30),
+            });
+        }
         return Err(PlatformError::Network(format!(
             "{} → HTTP {}",
             redact_url(url),
-            response.status()
+            status
         )));
     }
     Ok(response)

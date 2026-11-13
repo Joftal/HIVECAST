@@ -132,6 +132,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     let disposed = false;
     let offView: (() => void) | undefined;
     let offRooms: (() => void) | undefined;
+    let roomsTimer: number | undefined;
 
     void (async () => {
       // 先等上一次「离开观看页」的挂起跑完，避免读到还没清掉的旧槽位。
@@ -168,12 +169,18 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       setBooted(true);
       offView = await onViewChanged((next) => setSlots(next));
       offRooms = await onRoomsChanged(() => {
-        void roomsList().then(setRooms).catch(() => undefined);
+        // 监控一拍会为大量房间连续推事件；每次都拉一遍列表只会造成
+        // 几百个并发 IPC。和监控页一致，200ms 内合并成一次。
+        if (roomsTimer !== undefined) window.clearTimeout(roomsTimer);
+        roomsTimer = window.setTimeout(() => {
+          void roomsList().then(setRooms).catch(() => undefined);
+        }, 200);
       });
     })();
 
     return () => {
       disposed = true;
+      if (roomsTimer !== undefined) window.clearTimeout(roomsTimer);
       offView?.();
       offRooms?.();
     };

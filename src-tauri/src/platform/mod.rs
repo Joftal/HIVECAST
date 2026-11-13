@@ -182,6 +182,9 @@ impl PlatformError {
     }
 
     /// 限流或网络抖动：值得退避后再试，而不是当成房间本身出错。
+    ///
+    /// 这个判断比 [`Self::is_rate_limited`] 宽：单房间遇到网络错误时
+    /// 也应该退避，不要立刻把失败算到房间头上。
     pub fn is_throttle(&self) -> bool {
         match self {
             PlatformError::Network(_) => true,
@@ -191,6 +194,45 @@ impl PlatformError {
             PlatformError::Throttled { .. } => true,
             _ => false,
         }
+    }
+
+    /// 平台是否明确要求「慢一点」。
+    ///
+    /// 只认 429/412、B 站风控码和带秒数的 Throttled；普通超时、DNS、
+    /// 5xx 都不算。批量检查用它决定「整平台冷却」还是「降级单查」：
+    /// 普通网络故障不该让整个平台停 30 秒。
+    pub fn is_rate_limited(&self) -> bool {
+        match self {
+            PlatformError::Throttled { .. } => true,
+            PlatformError::Upstream { code, .. } => {
+                matches!(*code, -352 | -412 | -429 | 412 | 429)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlatformError;
+
+    #[test]
+    fn rate_limited_only_matches_explicit_platform_requests() {
+        assert!(PlatformError::Throttled { retry_after: 30 }.is_rate_limited());
+        assert!(PlatformError::Upstream {
+            code: -352,
+            message: "risk control".into()
+        }
+        .is_rate_limited());
+        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
+        assert!(!PlatformError::Parse("bad json".into()).is_rate_limited());
+        assert!(!PlatformError::RoomNotFound("42".into()).is_rate_limited());
+    }
+
+    #[test]
+    fn generic_network_errors_still_back_off_per_room() {
+        assert!(PlatformError::Network("timeout".into()).is_throttle());
+        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
     }
 }
 

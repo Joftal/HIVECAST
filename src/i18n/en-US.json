@@ -359,7 +359,7 @@
     "preventSleepHint": "While enabled, the computer will not go to idle sleep during recording or watching.",
     "sectionMonitor": "Monitoring",
     "monitorInterval": "Check interval",
-    "monitorIntervalHint": "How often to refresh room status. Set 0 to turn automatic checks off and refresh manually.",
+    "monitorIntervalHint": "How often to refresh room status, minimum 5 seconds. Set 0 to turn automatic checks off and refresh manually.",
     "unitSeconds": "sec",
     "monitorBackoff": "Back off after failures",
     "monitorBackoffHint": "When a room hits rate limits or network errors, its interval grows step by step and resets after a success.",

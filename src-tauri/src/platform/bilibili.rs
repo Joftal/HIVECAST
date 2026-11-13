@@ -770,18 +770,25 @@ pub async fn fetch_live_statuses(uids: &[String]) -> Result<Vec<LiveStatus>, Pla
     unique.sort();
     unique.dedup();
 
-    let mut out = Vec::with_capacity(unique.len());
-    for chunk in unique.chunks(STATUS_CHUNK) {
-        match fetch_status_chunk(chunk).await {
-            Ok(mut statuses) => out.append(&mut statuses),
-            Err(first) => {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                match fetch_status_chunk(chunk).await {
-                    Ok(mut statuses) => out.append(&mut statuses),
-                    Err(_) => return Err(first),
+    // 每一片都独立并发：5000 个 UID 是 25 片，串行时单片一次 400ms 重试
+    // 就会把整批拖成十几秒。片内仍然按接口要求最多 200 个。
+    let results =
+        futures_util::future::join_all(unique.chunks(STATUS_CHUNK).map(|chunk| async move {
+            match fetch_status_chunk(chunk).await {
+                Ok(statuses) => Ok(statuses),
+                Err(first) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    match fetch_status_chunk(chunk).await {
+                        Ok(statuses) => Ok(statuses),
+                        Err(_) => Err(first),
+                    }
                 }
             }
-        }
+        }))
+        .await;
+    let mut out = Vec::with_capacity(unique.len());
+    for result in results {
+        out.append(&mut result?);
     }
     Ok(out)
 }

@@ -13,11 +13,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 
 use crate::broker::StreamBroker;
 use crate::db::Db;
@@ -26,10 +27,6 @@ use crate::platform::{PlatformError, RoomRef};
 use crate::recorder::{Recorder, EVENT_ROOMS_CHANGED};
 use crate::settings;
 
-/// 全局在途上限：跨平台的总闸门，防止房间特别多时把本机连接数打满。
-const GLOBAL_CONCURRENCY: usize = 12;
-/// 单平台在途上限：限流是按平台算的，不同平台之间不该互相排队。
-const PLATFORM_CONCURRENCY: usize = 4;
 /// 连续限流时的最大退避倍数（相对基础间隔）。
 const BACKOFF_MAX_SHIFT: u32 = 5;
 /// 排期抖动幅度（占基础间隔的百分比）。
@@ -127,18 +124,22 @@ pub fn spawn(
         // 启动后先等 2 秒，避免和窗口首帧抢资源。
         tokio::time::sleep(Duration::from_secs(2)).await;
         let mut schedule: HashMap<String, Schedule> = HashMap::new();
-        let mut platforms: HashMap<String, Arc<Semaphore>> = HashMap::new();
-        let global = Arc::new(Semaphore::new(GLOBAL_CONCURRENCY));
         let (tx, mut rx) = mpsc::unbounded_channel::<(String, Outcome)>();
         let mut settings = settings::load(&db);
         let mut settings_at = Instant::now();
         // 房间列表缓存：单独的 Option 而不是包在 tick 里，跨拍复用（B7）。
         let mut rooms_cache: Option<(Instant, Vec<hivecast_ipc::RoomRecord>)> = None;
-        // B 站批量状态的自有节奏：所有可批量的房间共用一次请求，
-        // 不能跟着每个房间错开的 next_at 走，否则一拍一个请求反而更多。
+        // B 站批量状态的自有节奏：所有可批量房间共用一个拍点。
+        // 批量拍点只决定「什么时候发」，不替代每个房间的排期展示。
         let mut batch_at: Option<Instant> = None;
         // 记住 batch_at 是按哪个间隔排的；用户改监控间隔后要按新间隔重排。
         let mut batch_interval: Option<i64> = None;
+        // 批量任务是否还在路上。用原子量而不是从房间 inflight 推：
+        // 批量成功后还要做 DB 写入与自动开录，不能只看网络请求。
+        let batch_inflight = Arc::new(AtomicBool::new(false));
+        // 批量接口被风控后的平台级冷却截止时间。不是并发上限：
+        // 只是平台明确说「现在别打」时，别让下一拍又去撞一次。
+        let batch_not_before: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -160,12 +161,12 @@ pub fn spawn(
                 &broker,
                 &recorder,
                 &mut schedule,
-                &mut platforms,
-                &global,
                 &tx,
                 &mut rooms_cache,
                 &mut batch_at,
                 &mut batch_interval,
+                &batch_inflight,
+                &batch_not_before,
                 base_secs,
             );
             snapshot_statuses(&schedule, &statuses);
@@ -181,6 +182,18 @@ pub fn room_ref(room: &hivecast_ipc::RoomRecord) -> RoomRef {
         canonical_url: room.canonical_url.clone(),
         input: room.canonical_url.clone(),
     }
+}
+
+/// 这个房间能不能进 B 站批量状态接口：必须真的是 B 站，且已经解析出 UID。
+///
+/// 缺 UID 的房间继续走单房间接口，不能因为「平台是 bilibili」就硬塞进批量，
+/// 否则批量请求里会出现空 UID，接口返回的内容也对不上。
+fn is_batchable(room: &hivecast_ipc::RoomRecord) -> bool {
+    room.platform == "bilibili"
+        && room
+            .platform_uid
+            .as_deref()
+            .is_some_and(|uid| !uid.trim().is_empty())
 }
 
 /// 每秒把排期快照写给命令层；详情抽屉只读这一份，不直接碰调度内部。
@@ -354,12 +367,12 @@ fn tick(
     broker: &Arc<StreamBroker>,
     recorder: &Arc<Recorder>,
     schedule: &mut HashMap<String, Schedule>,
-    platforms: &mut HashMap<String, Arc<Semaphore>>,
-    global: &Arc<Semaphore>,
     tx: &mpsc::UnboundedSender<(String, Outcome)>,
     rooms_cache: &mut Option<(Instant, Vec<hivecast_ipc::RoomRecord>)>,
     batch_at: &mut Option<Instant>,
     batch_interval: &mut Option<i64>,
+    batch_inflight: &Arc<AtomicBool>,
+    batch_not_before: &Arc<Mutex<Option<Instant>>>,
     base: i64,
 ) {
     // 应用正在退出：监控每秒一拍，若继续检测就会在收尾窗口里再拉起一路，
@@ -437,8 +450,9 @@ fn tick(
 
     if base <= 0 {
         // 关闭自动检测时丢掉批量节奏；重新开启后按新间隔重新散开，
-        // 不沿用关闭前的旧 batch_at。
+        // 不沿用关闭前的旧 batch_at。在途批量仍会回传，inflight 标记照常清。
         *batch_interval = None;
+        *batch_at = None;
         return;
     }
 
@@ -454,17 +468,24 @@ fn tick(
         *batch_interval = Some(base);
         *batch_at = Some(now + Duration::from_secs(spread("batch:bilibili", base) as u64));
     }
-    let first_batch = *batch_at
+    let batch_at_now = *batch_at
         .get_or_insert_with(|| now + Duration::from_secs(spread("batch:bilibili", base) as u64));
-    let batch_due = now >= first_batch;
-    let batch_permits = platforms
-        .entry("bilibili".into())
-        .or_insert_with(|| Arc::new(Semaphore::new(PLATFORM_CONCURRENCY)))
-        .clone();
+    let mut batch_due = now >= batch_at_now;
+    // 上一批被平台明确限流：冷却没结束前不发下一批，也不把拍点往后推，
+    // 冷却一结束就能立刻补上，而不是再白等一个完整间隔。
+    let cooldown = *batch_not_before
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(at) = cooldown {
+        if now < at {
+            batch_due = false;
+        } else {
+            *batch_not_before
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
     let mut batch_rooms: Vec<hivecast_ipc::RoomRecord> = Vec::new();
-    // 已经有一批还在跑时，不要在空批次的每一拍把 batch_at 往后推；
-    // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
-    let mut batch_inflight = false;
 
     for room in rooms {
         // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
@@ -500,20 +521,17 @@ fn tick(
             }
         }
 
-        // B 站且已知 UID 的房间走批量状态：所有房间共用一次请求，
-        // 不在批量拍上时保持排期但不单独出门。
-        let batchable = room.platform == "bilibili"
-            && room
-                .platform_uid
-                .as_deref()
-                .is_some_and(|uid| !uid.trim().is_empty());
+        // B 站且已知 UID 的房间走批量状态：每个批量拍检查全部可批量房间，
+        // 而不是「谁刚好在拍点上到期才带谁」。后一种做法会让拍点前几秒
+        // 到期的房间白等一个完整间隔，实测 30 秒会拖成 60 秒。
+        let batchable = is_batchable(room);
         if batchable {
-            if !batch_due || entry.inflight {
-                batch_inflight |= entry.inflight;
-                continue;
+            // 上一批还在路上时整批跳过；不要在每一拍把拍点往后推，
+            // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
+            if batch_due && !batch_inflight.load(Ordering::Acquire) && !entry.inflight {
+                entry.inflight = true;
+                batch_rooms.push(room.clone());
             }
-            entry.inflight = true;
-            batch_rooms.push(room.clone());
             continue;
         }
 
@@ -522,15 +540,10 @@ fn tick(
         }
         entry.inflight = true;
 
-        let permits = platforms
-            .entry(room.platform.clone())
-            .or_insert_with(|| Arc::new(Semaphore::new(PLATFORM_CONCURRENCY)))
-            .clone();
         let app = app.clone();
         let db = db.clone();
         let broker = broker.clone();
         let recorder = recorder.clone();
-        let global = global.clone();
         let tx = tx.clone();
         let id = room.id.clone();
         // 快照是借来的（缓存里的切片），扔进后台任务要自己的副本。
@@ -538,9 +551,8 @@ fn tick(
         tokio::spawn(async move {
             // 再套一层 spawn：检测任务 panic 时也要把结果发回去，否则 inflight
             // 永远清不掉，这个房间从此不再被检测（B8）。
-            let check = tokio::spawn(async move {
-                run_check(&app, &db, &broker, &recorder, &room, permits, global).await
-            });
+            let check =
+                tokio::spawn(async move { run_check(&app, &db, &broker, &recorder, &room).await });
             let outcome = match check.await {
                 Ok(outcome) => outcome,
                 Err(err) => {
@@ -552,60 +564,56 @@ fn tick(
         });
     }
 
-    if batch_due && (!batch_rooms.is_empty() || !batch_inflight) {
-        *batch_at = Some(
-            add_jitter(
-                now + Duration::from_secs(base as u64),
-                "batch:bilibili",
-                Duration::from_secs(base as u64).mul_f64(JITTER_PCT as f64 / 100.0),
-            )
-            .max(now + Duration::from_secs(1)),
+    if batch_due && !batch_inflight.load(Ordering::Acquire) {
+        // 无论这一拍有没有可批量房间都推进拍点：没有 B 站房间时不能每秒
+        // 重复走一遍「到期但没有批次」的分支。
+        *batch_at =
+            Some((now + Duration::from_secs(base as u64)).max(now + Duration::from_secs(1)));
+        if batch_rooms.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "hivecast_lib::monitor",
+            rooms = batch_rooms.len(),
+            interval_sec = base,
+            "B 站批量状态检查开始"
         );
-        if !batch_rooms.is_empty() {
-            tracing::info!(
-                target: "hivecast_lib::monitor",
-                rooms = batch_rooms.len(),
-                interval_sec = base,
-                "B 站批量状态检查开始"
-            );
-            let ids: Vec<String> = batch_rooms.iter().map(|room| room.id.clone()).collect();
-            let app = app.clone();
-            let db = db.clone();
-            let broker = broker.clone();
-            let recorder = recorder.clone();
-            let global = global.clone();
-            let tx = tx.clone();
-            let completed = Arc::new(Mutex::new(HashSet::new()));
-            let completed_for_task = completed.clone();
-            tokio::spawn(async move {
-                // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死；
-                // 但只补没回传的，已经成功的房间不能因 panic 再吃一次 Failed。
-                let inner_tx = tx.clone();
-                let guard = tokio::spawn(async move {
-                    run_batch_check(
-                        &app,
-                        &db,
-                        &broker,
-                        &recorder,
-                        batch_rooms,
-                        batch_permits,
-                        global,
-                        inner_tx,
-                        completed_for_task,
-                    )
-                    .await;
-                });
-                if let Err(err) = guard.await {
-                    tracing::warn!(%err, "B 站批量检测任务异常退出");
-                    let sent = completed_ids(&completed);
-                    for id in ids {
-                        if !sent.contains(&id) {
-                            let _ = tx.send((id, Outcome::Failed));
-                        }
+        let ids: Vec<String> = batch_rooms.iter().map(|room| room.id.clone()).collect();
+        let app = app.clone();
+        let db = db.clone();
+        let broker = broker.clone();
+        let recorder = recorder.clone();
+        let tx = tx.clone();
+        let completed = Arc::new(Mutex::new(HashSet::new()));
+        let completed_for_task = completed.clone();
+        let inflight = batch_inflight.clone();
+        let not_before = batch_not_before.clone();
+        batch_inflight.store(true, Ordering::Release);
+        tokio::spawn(async move {
+            // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死；
+            // 但只补没回传的，已经成功的房间不能因 panic 再吃一次 Failed。
+            let guard = tokio::spawn(run_batch_check(
+                app,
+                db,
+                broker,
+                recorder,
+                batch_rooms,
+                tx.clone(),
+                completed_for_task,
+                not_before,
+            ));
+            if let Err(err) = guard.await {
+                tracing::warn!(%err, "B 站批量检测任务异常退出");
+                let sent = completed_ids(&completed);
+                for id in ids {
+                    if !sent.contains(&id) {
+                        let _ = tx.send((id, Outcome::Failed));
                     }
                 }
-            });
-        }
+            }
+            // 放在最后：批量结果都回传、panic 兜底也补完，下一拍才能再发。
+            inflight.store(false, Ordering::Release);
+        });
     }
 }
 
@@ -632,22 +640,22 @@ fn completed_ids(completed: &Mutex<HashSet<String>>) -> std::sync::MutexGuard<'_
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 一次 B 站批量状态请求，服务所有到期房间。
+/// 一次 B 站批量状态请求，服务这一拍的全部可批量房间。
 ///
 /// 批量接口只覆盖「有直播间的关注」：某个 UID 没返回时不能当离线，
-/// 必须回落到单房间检查；整批失败时优先保住正在录制/上次在播的房间，
-/// 其余房间只延后重试，绝不凭一次失败改状态。
+/// 必须回落到单房间检查；整批失败时所有房间并发兜底，绝不凭一次失败
+/// 改状态。真正的风控（429/-352/-412）不降级成几百个单房间请求，
+/// 而是整平台短时冷却，等接口恢复后再发下一批。
 #[allow(clippy::too_many_arguments)]
 async fn run_batch_check(
-    app: &AppHandle,
-    db: &Db,
-    broker: &StreamBroker,
-    recorder: &Arc<Recorder>,
+    app: AppHandle,
+    db: Arc<Db>,
+    broker: Arc<StreamBroker>,
+    recorder: Arc<Recorder>,
     rooms: Vec<hivecast_ipc::RoomRecord>,
-    permits: Arc<Semaphore>,
-    global: Arc<Semaphore>,
     tx: mpsc::UnboundedSender<(String, Outcome)>,
     completed: Arc<Mutex<HashSet<String>>>,
+    not_before: Arc<Mutex<Option<Instant>>>,
 ) {
     let started = Instant::now();
     let total = rooms.len();
@@ -659,21 +667,25 @@ async fn run_batch_check(
         Ok(statuses) => {
             let returned = statuses.len();
             let live = statuses.iter().filter(|status| status.is_live).count();
-            let mut missing = 0usize;
+            let mut missing_rooms = Vec::new();
             let by_uid: HashMap<String, hivecast_ipc::LiveStatus> = statuses
                 .into_iter()
                 .map(|status| (status.uid.clone(), status))
                 .collect();
             for room in rooms {
-                let outcome = match room.platform_uid.as_ref().and_then(|uid| by_uid.get(uid)) {
+                match room.platform_uid.as_ref().and_then(|uid| by_uid.get(uid)) {
                     Some(status) => {
                         let info = Arc::new(batch_room_info(status, &room));
-                        check_room_info(app, db, broker, recorder, &room, info).await
+                        // 先写状态、推事件，再把开录/停录扔到独立任务：
+                        // 第 50 个房间不该等前 49 个 ffmpeg 启动完才更新。
+                        let outcome =
+                            check_room_info_deferred(&app, &db, &broker, &recorder, &room, info)
+                                .await;
+                        send_batch_outcome(&tx, &completed, room.id, outcome);
                     }
                     // 批量没返回这个 UID：可能是没有直播间/接口字段缺失，
                     // 不能按离线处理，回落到单房间接口拿准确状态。
                     None => {
-                        missing += 1;
                         tracing::debug!(
                             target: "hivecast_lib::monitor",
                             room = %room.host_name,
@@ -681,19 +693,22 @@ async fn run_batch_check(
                             uid = room.platform_uid.as_deref().unwrap_or_default(),
                             "批量状态缺少该 UID，回退单房间检查"
                         );
-                        run_check(
-                            app,
-                            db,
-                            broker,
-                            recorder,
-                            &room,
-                            permits.clone(),
-                            global.clone(),
-                        )
-                        .await
+                        missing_rooms.push(room);
                     }
-                };
-                send_batch_outcome(&tx, &completed, room.id, outcome);
+                }
+            }
+            // 缺失 UID 的单查并发跑：它们本来就互不依赖，串行只会让
+            // 一个慢接口拖住整批结果。
+            let missing = missing_rooms.len();
+            let results = futures_util::future::join_all(missing_rooms.iter().map(|room| async {
+                (
+                    room.id.clone(),
+                    run_check(&app, &db, &broker, &recorder, room).await,
+                )
+            }))
+            .await;
+            for (id, outcome) in results {
+                send_batch_outcome(&tx, &completed, id, outcome);
             }
             tracing::info!(
                 target: "hivecast_lib::monitor",
@@ -706,52 +721,45 @@ async fn run_batch_check(
                 "B 站批量状态检查完成"
             );
         }
-        Err(err) => {
-            let critical: Vec<_> = rooms
-                .iter()
-                .filter(|room| room.is_live || recorder.is_recording(&room.id))
-                .cloned()
-                .collect();
+        Err(err) if err.is_rate_limited() => {
+            // 整批被风控时再发 N 个单房间请求只会把冷却越拉越长。
+            // 平台级短时冷却：这一拍所有房间统一按 retry_after 重排，
+            // 下一批也至少等到冷却结束。
+            let wait = err.retry_after().unwrap_or(30).max(5);
+            *not_before
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(Instant::now() + Duration::from_secs(wait));
             tracing::warn!(
                 error = %err,
                 rooms = rooms.len(),
-                critical = critical.len(),
+                retry_after = wait,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "B 站批量状态失败，降级单房间检查"
+                "B 站批量状态被限流，整平台冷却"
             );
-            let critical_ids: HashSet<String> =
-                critical.iter().map(|room| room.id.clone()).collect();
-            for room in critical {
-                let outcome = run_check(
-                    app,
-                    db,
-                    broker,
-                    recorder,
-                    &room,
-                    permits.clone(),
-                    global.clone(),
-                )
-                .await;
-                send_batch_outcome(&tx, &completed, room.id, outcome);
-            }
             for room in rooms {
-                if !critical_ids.contains(&room.id) {
-                    // 不更新状态，也不退避成小时级；下个批量拍继续尝试。
-                    send_batch_outcome(
-                        &tx,
-                        &completed,
-                        room.id,
-                        Outcome::Retry(base_batch_retry()),
-                    );
-                }
+                send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait as i64));
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                rooms = rooms.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "B 站批量状态失败，全量降级单房间检查"
+            );
+            let results = futures_util::future::join_all(rooms.iter().map(|room| async {
+                (
+                    room.id.clone(),
+                    run_check(&app, &db, &broker, &recorder, room).await,
+                )
+            }))
+            .await;
+            for (id, outcome) in results {
+                send_batch_outcome(&tx, &completed, id, outcome);
             }
         }
     }
-}
-
-/// 批量失败后的普通房间延后时间：给接口恢复留一点时间，又不至于拖过一个检测周期。
-fn base_batch_retry() -> i64 {
-    10
 }
 
 /// 把批量状态映射成监控统一使用的房间信息。
@@ -796,23 +804,17 @@ fn batch_room_info(
     }
 }
 
-/// 先拿平台名额再拿全局名额：平台名额才是真正的瓶颈，
-/// 反过来的话一个平台的请求会占着全局名额等自己人。
+/// 单房间检查入口。
+///
+/// 这里故意没有信号量：平台的请求节流交给 broker（同房间 1.5 秒闸门、
+/// 平台失败退避）和房间自己的排期，不再用固定并发池把几百个房间串成队列。
 async fn run_check(
     app: &AppHandle,
     db: &Db,
     broker: &StreamBroker,
     recorder: &Arc<Recorder>,
     room: &hivecast_ipc::RoomRecord,
-    permits: Arc<Semaphore>,
-    global: Arc<Semaphore>,
 ) -> Outcome {
-    let Ok(_platform) = permits.acquire_owned().await else {
-        return Outcome::Failed;
-    };
-    let Ok(_global) = global.acquire_owned().await else {
-        return Outcome::Failed;
-    };
     check_room(app, db, broker, recorder, room).await
 }
 
@@ -883,9 +885,16 @@ async fn check_room(
     }
 }
 
-/// 已经拿到平台房间信息后的统一收尾：写库、自动开录、离线确认。
+/// 拿到平台信息后要做的「动作」，和写库分开。
 ///
-/// 单房间轮询和 B 站批量状态都走这里，避免两条路径对「在播/离线」的判断分叉。
+/// 批量检查时先落库、推事件，再把动作扔到独立任务；单房间检查仍同步等待。
+#[derive(Clone, Copy)]
+enum RoomAction {
+    Start,
+    Stop,
+}
+
+/// 单房间检查：先应用状态，再同步执行开录/停录。
 async fn check_room_info(
     app: &AppHandle,
     db: &Db,
@@ -894,6 +903,49 @@ async fn check_room_info(
     room: &hivecast_ipc::RoomRecord,
     info: Arc<crate::platform::RoomInfo>,
 ) -> Outcome {
+    let (outcome, action) = apply_room_info(app, db, recorder, room, info).await;
+    if let Some(action) = action {
+        run_room_action(app, broker, recorder, room, action).await;
+    }
+    outcome
+}
+
+/// 批量检查专用：应用状态后立刻返回，开录/停录在后台独立执行。
+///
+/// 一个批次可能有几百个房间，如果每个都在循环里等 ffmpeg 拉起，
+/// 后面的房间要等前面几十路开录完才轮到，状态数据就失真了。
+async fn check_room_info_deferred(
+    app: &AppHandle,
+    db: &Db,
+    broker: &Arc<StreamBroker>,
+    recorder: &Arc<Recorder>,
+    room: &hivecast_ipc::RoomRecord,
+    info: Arc<crate::platform::RoomInfo>,
+) -> Outcome {
+    let (outcome, action) = apply_room_info(app, db, recorder, room, info).await;
+    if let Some(action) = action {
+        let app = app.clone();
+        let broker = broker.clone();
+        let recorder = recorder.clone();
+        let room = room.clone();
+        tokio::spawn(async move {
+            run_room_action(&app, &broker, &recorder, &room, action).await;
+        });
+    }
+    outcome
+}
+
+/// 已经拿到平台房间信息后的统一收尾：写库、判断是否需要开录/停录。
+///
+/// 单房间轮询和 B 站批量状态都走这里，避免两条路径对「在播/离线」的判断分叉。
+async fn apply_room_info(
+    app: &AppHandle,
+    db: &Db,
+    recorder: &Arc<Recorder>,
+    room: &hivecast_ipc::RoomRecord,
+    info: Arc<crate::platform::RoomInfo>,
+) -> (Outcome, Option<RoomAction>) {
+    let mut action = None;
     // 这一拍查通了：之前那条检测错误已经过时，清掉再推一次事件，
     // 否则监控页会一直挂着「房间不存在」之类的旧提示（F1）。
     if recorder.clear_detect_error(&room.id) {
@@ -957,6 +1009,51 @@ async fn check_room_info(
             && !recorder.in_start_cooldown(&room.id)
             && !recorder.is_finalizing(&room.id)
         {
+            action = Some(RoomAction::Start);
+        }
+    } else {
+        // 一次离线可能只是接口抖动 / 字段缺失，连续两次才认（S1）。
+        let confirmed = recorder.confirm_offline(&room.id);
+        if !confirmed {
+            // 还没攒够两次：什么都别改。尤其是不能 resume_auto ——
+            // 单次假离线会清掉「用户手动停录」的抑制，同一场直播里
+            // 刚停的录就会被下一拍自动拉起（B2）。
+            return (Outcome::Ok, None);
+        }
+        // 确认下播才复位自动开录：下一场直播可以重新自动录。
+        // 同时留个「见过离线」的记号，给下一次在播判断新一场用（H7）。
+        recorder.note_offline_seen(&room.id);
+        recorder.resume_auto(&room.id);
+        if recorder.is_recording(&room.id) {
+            // 确认了吗，还要看文件是不是仍在增长（R2）。
+            if should_stop_for_offline(true, recorder.flowing(&room.id)) {
+                // 告诉录制侧「这次是平台确认离线」，它才不会把收尾
+                // 当成误停、也不会挡住紧接着的下一场开播（A8）。
+                recorder.note_offline_stop(&room.id);
+                action = Some(RoomAction::Stop);
+            } else {
+                // 平台说下播、文件却还在写：更像是状态接口误报。
+                // 计数已清零，下一轮重新确认，不切断健康录像。
+                tracing::warn!(
+                    room = %room.host_name,
+                    "平台报离线，但录像仍在增长，暂不停录"
+                );
+            }
+        }
+    }
+    (Outcome::Ok, action)
+}
+
+/// 执行开录/停录。批量路径在独立任务里跑，单房间路径原地等。
+async fn run_room_action(
+    app: &AppHandle,
+    broker: &StreamBroker,
+    recorder: &Arc<Recorder>,
+    room: &hivecast_ipc::RoomRecord,
+    action: RoomAction,
+) {
+    match action {
+        RoomAction::Start => {
             let media_root = recorder.media_root();
             if !disk::can_start(&media_root) {
                 // 磁盘不够时以前是「静默不录」，用户只看到一直没开始。
@@ -973,7 +1070,9 @@ async fn check_room_info(
                     recorder.set_error(&room.id, message);
                     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
                 }
-            } else if let Err(err) = recorder.start_checked(app, broker, room).await {
+                return;
+            }
+            if let Err(err) = recorder.start_checked(app, broker, room).await {
                 // 自动开录可能每个检测周期失败一次：只在原因变化时告警 + 推送，
                 // 否则间隔 10 秒就是每 10 秒一条 WARN（C7）。
                 let message = err.to_string();
@@ -987,37 +1086,12 @@ async fn check_room_info(
                 }
             }
         }
-    } else {
-        // 一次离线可能只是接口抖动 / 字段缺失，连续两次才认（S1）。
-        let confirmed = recorder.confirm_offline(&room.id);
-        if !confirmed {
-            // 还没攒够两次：什么都别改。尤其是不能 resume_auto ——
-            // 单次假离线会清掉「用户手动停录」的抑制，同一场直播里
-            // 刚停的录就会被下一拍自动拉起（B2）。
-            return Outcome::Ok;
-        }
-        // 确认下播才复位自动开录：下一场直播可以重新自动录。
-        // 同时留个「见过离线」的记号，给下一次在播判断新一场用（H7）。
-        recorder.note_offline_seen(&room.id);
-        recorder.resume_auto(&room.id);
-        if recorder.is_recording(&room.id) {
-            // 确认了吗，还要看文件是不是仍在增长（R2）。
-            if should_stop_for_offline(true, recorder.flowing(&room.id)) {
-                // 告诉录制侧「这次是平台确认离线」，它才不会把收尾
-                // 当成误停、也不会挡住紧接着的下一场开播（A8）。
-                recorder.note_offline_stop(&room.id);
-                let _ = recorder.stop(app, &room.id, "stream_ended").await;
-            } else {
-                // 平台说下播、文件却还在写：更像是状态接口误报。
-                // 计数已清零，下一轮重新确认，不切断健康录像。
-                tracing::warn!(
-                    room = %room.host_name,
-                    "平台报离线，但录像仍在增长，暂不停录"
-                );
+        RoomAction::Stop => {
+            if let Err(err) = recorder.stop(app, &room.id, "stream_ended").await {
+                tracing::debug!(room = %room.host_name, %err, "平台确认离线后停止录制失败");
             }
         }
     }
-    Outcome::Ok
 }
 
 /// 平台请求失败：只更新提示与排期分类，不猜测开播状态。
@@ -1100,6 +1174,22 @@ mod tests {
             updated_at: 0,
             platform_uid: Some("42".into()),
         }
+    }
+
+    #[test]
+    fn batchable_requires_bilibili_and_a_real_uid() {
+        let mut room = batch_room();
+        assert!(is_batchable(&room));
+
+        room.platform_uid = None;
+        assert!(!is_batchable(&room), "缺 UID 的房间必须走单房间接口");
+
+        room.platform_uid = Some("   ".into());
+        assert!(!is_batchable(&room), "空白 UID 不能塞进批量");
+
+        room.platform_uid = Some("42".into());
+        room.platform = "douyu".into();
+        assert!(!is_batchable(&room), "只有 B 站有批量状态接口");
     }
 
     #[test]

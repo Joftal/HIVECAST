@@ -93,6 +93,12 @@ pub const MAX_SPLIT_DURATION_SEC: u32 = 86_400;
 pub const MAX_SPLIT_SIZE_MB: u32 = 1_048_576;
 /// 监控间隔上限：一天。再大就没有「监控」的意义了。
 pub const MAX_MONITOR_INTERVAL: u32 = 86_400;
+/// 监控间隔下限（0 仍表示关闭自动检测）。
+///
+/// 以前没有下限，1 秒也能填；房间一多，监控会一直追着平台打，
+/// 状态还没回来就到了下一拍。下限只约束「填了值」的情况，
+/// 不用并发上限去偷偷拉长别人的间隔。
+pub const MIN_MONITOR_INTERVAL: u32 = 5;
 /// 回退上限的取值范围。
 pub const MIN_BACKOFF_CAP: u32 = 60;
 pub const MAX_BACKOFF_CAP: u32 = 3_600;
@@ -242,7 +248,7 @@ pub fn load(db: &Db) -> Settings {
         settings.prevent_sleep = value;
     }
     if let Some(value) = read(KEY_MONITOR_INTERVAL).and_then(|v| v.parse::<u32>().ok()) {
-        settings.monitor_interval_sec = value.min(MAX_MONITOR_INTERVAL);
+        settings.monitor_interval_sec = sanitize_monitor_interval(value);
     }
     if let Some(value) = read(KEY_MONITOR_BACKOFF).and_then(|v| parse_bool(&v)) {
         settings.monitor_backoff_enabled = value;
@@ -335,7 +341,7 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         crate::post::validate_custom_command(&settings.post_custom_command)
             .map_err(|reason| AppError::User(format!("自定义后处理命令不可用：{reason}")))?;
     }
-    settings.monitor_interval_sec = settings.monitor_interval_sec.min(MAX_MONITOR_INTERVAL);
+    settings.monitor_interval_sec = sanitize_monitor_interval(settings.monitor_interval_sec);
     settings.monitor_backoff_cap_sec = settings
         .monitor_backoff_cap_sec
         .clamp(MIN_BACKOFF_CAP, MAX_BACKOFF_CAP);
@@ -535,6 +541,15 @@ fn normalize_view_qn(qn: u32) -> u32 {
     }
 }
 
+/// 监控间隔：0 = 关闭自动检测；否则夹在 5 秒..24 小时。
+fn sanitize_monitor_interval(value: u32) -> u32 {
+    if value == 0 {
+        0
+    } else {
+        value.clamp(MIN_MONITOR_INTERVAL, MAX_MONITOR_INTERVAL)
+    }
+}
+
 /// 分割时长：0 = 关闭；否则夹在 60 秒..24 小时。
 fn sanitize_split_duration(value: u32) -> u32 {
     if value == 0 {
@@ -675,6 +690,49 @@ mod tests {
         assert!(loaded.record_danmaku_gift);
         assert!(loaded.record_danmaku_super_chat);
         assert!(loaded.record_danmaku_guard);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn monitor_interval_floor_keeps_zero_as_disabled() {
+        let dir = std::env::temp_dir().join(format!("hivecast-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Db::open(&dir.join("test.db")).expect("open db");
+        let media = dir.join("media");
+
+        let saved = save(
+            &db,
+            &Settings {
+                monitor_interval_sec: 3,
+                media_root: media.display().to_string(),
+                ..defaults()
+            },
+        )
+        .expect("save settings");
+        assert_eq!(saved.monitor_interval_sec, MIN_MONITOR_INTERVAL);
+
+        let saved = save(
+            &db,
+            &Settings {
+                monitor_interval_sec: 0,
+                media_root: media.display().to_string(),
+                ..defaults()
+            },
+        )
+        .expect("save settings");
+        assert_eq!(saved.monitor_interval_sec, 0, "0 仍然表示关闭自动检测");
+
+        let saved = save(
+            &db,
+            &Settings {
+                monitor_interval_sec: MAX_MONITOR_INTERVAL + 1,
+                media_root: media.display().to_string(),
+                ..defaults()
+            },
+        )
+        .expect("save settings");
+        assert_eq!(saved.monitor_interval_sec, MAX_MONITOR_INTERVAL);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
