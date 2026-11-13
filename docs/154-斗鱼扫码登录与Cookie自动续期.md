@@ -164,12 +164,13 @@ Referer: https://www.douyu.com/directory/myFollow
 | 续期成功 | 3 天后 |
 | 临时失败（网络/风控/不完整 Cookie） | 6 小时后 |
 | LTP0 明确失效（401/403/业务 error） | 24 小时后，并提示重新扫码 |
+| Cookie 提前过期但 LTP0 仍可用 | 下一轮维护立即尝试恢复，不受 3 天限制 |
 | 手动 Cookie（无 LTP0） | 只写一次 `not_refreshable`，不反复刷新检查时间 |
 
 `maintenance_loop` 启动后等 30 秒，然后每 30 分钟：
 
 1. 先 `revalidate`：用当前 Cookie 打 `follow/top3`，5 分钟内已检查则跳过；失败只标记过期，不删凭据；
-2. 再 `refresh_once`：按上面的节奏决定是否 safeAuth。
+2. 再 `refresh_once`：按上面的节奏决定是否 safeAuth；若 `credential.status=expired` 且上次续期不是 `failed`，则忽略 3 天周期，立即用 LTP0 尝试恢复。失败后仍按 6 小时/24 小时退避，避免风控期间每 30 分钟重试。
 
 顺序不能反：`refresh_once` 对手动 Cookie 会写 `checked_at`，如果先跑，`revalidate` 的 5 分钟闸门会永远跳过手动 Cookie 的探活。
 
@@ -290,7 +291,7 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 5. **风控页不当失效**：HTML、非 JSON、5xx 都归为临时失败，6 小时后重试；只有明确的 401/403 或业务 `error != 0` 才标记过期。
 6. **手动 Cookie 的「上次检查」不空转**：`not_refreshable` 只写一次，避免每 30 分钟刷新时间、掩盖真实过期。
 7. **B 站独立**：斗鱼使用独立模块、独立锁、独立维护循环；B 站的 `refresh_loop`、扫码、Cookie 校验未改。
-8. **先探测再续期的瞬时误报**：维护循环先 `revalidate` 再 `refresh_once`；若短效 Cookie 已过期但 LTP0 仍有效，可能先标记一次「登录失效」，随后同一轮续期恢复为 ok。
+8. **短效 Cookie 提前过期**：维护循环先 `revalidate` 再 `refresh_once`；若短效 Cookie 已过期但 LTP0 仍有效，会先标记一次「登录失效」，同一轮立即续期并恢复为 ok。若续期本身失败，才按 6 小时/24 小时退避。
 9. **手动 Cookie 的「立即检查」不探测**：没有 LTP0 时只返回「不可续期」，不会用当前 Cookie 请求接口；这是为了避免把无长期凭证的账号误报成可自动续期。
 10. **扫码回调落库前不再探测**：7 个必填 Cookie 齐全即落库，回调来源可信；若账号恰好被风控，要等下一次 5 分钟探测才会转为失效。
 11. **斗鱼账号无头像**：界面用「DY」缩写占位；平台接口未返回稳定头像地址，暂不伪造。
@@ -299,7 +300,7 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 
 ## 9. 测试
 
-- `cargo test --lib`：**313 passed / 0 failed / 17 ignored**；
+- `cargo test --lib`：**315 passed / 0 failed / 17 ignored**；
 - 斗鱼新增单测覆盖：轮询状态映射、`Set-Cookie` 属性过滤与空值、7 个必填 Cookie、三种设备号、昵称 URL 解码、3 天/6 小时/24 小时节奏、回调只允许斗鱼 HTTPS、风控页不判失效、续期保留旧设备号；
 - `db.rs` 新增 `credential_secret_is_sealed_and_deleted_with_the_credential`：secret 落库加密、读回明文、删除凭据后 secret 一并删除；
 - 前端：`tsc -b` 通过，`check:i18n` 807 keys，`check:docs` 155 files，`pnpm build` 通过；release bundle 31.68 MiB；

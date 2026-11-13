@@ -573,6 +573,25 @@ fn next_refresh_at(status: &RefreshStatus, updated_at: i64) -> i64 {
     }
 }
 
+/// 到期续期之外，还有一个必须立即处理的场景：Cookie 在 3 天周期内先失效，
+/// revalidate 已把账号标记为 expired。此时不能继续等 next_refresh_at，否则
+/// 要再等满 3 天才会尝试用 LTP0 恢复。失败的续期仍按 6 小时/24 小时退避。
+fn refresh_due(
+    force: bool,
+    expired: bool,
+    before: &RefreshStatus,
+    updated_at: i64,
+    now: i64,
+) -> bool {
+    if force {
+        return true;
+    }
+    if expired && before.outcome != "failed" {
+        return true;
+    }
+    now >= next_refresh_at(before, updated_at)
+}
+
 fn refreshed_status(message: &str, last_refreshed_at: i64, key_stale: bool) -> RefreshStatus {
     RefreshStatus {
         checked_at: now_ts(),
@@ -728,7 +747,13 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
         return RefreshOutcome::NotRefreshable;
     }
     let before = crate::account::load_refresh_status(db, "douyu");
-    if !force && now_ts() < next_refresh_at(&before, row.updated_at) {
+    if !refresh_due(
+        force,
+        row.status == "expired",
+        &before,
+        row.updated_at,
+        now_ts(),
+    ) {
         return RefreshOutcome::Refreshed;
     }
 
@@ -919,6 +944,21 @@ mod tests {
             key_stale: false,
             last_refreshed_at: last,
         }
+    }
+
+    #[test]
+    fn expired_credential_refreshes_before_the_three_day_cycle() {
+        let fresh = probe_status("refreshed", 100, 100);
+        assert!(refresh_due(false, true, &fresh, 100, 200));
+        assert!(!refresh_due(false, false, &fresh, 100, 200));
+    }
+
+    #[test]
+    fn failed_refresh_keeps_backoff_even_when_expired() {
+        let mut failed = probe_status("failed", 100, 100);
+        failed.key_stale = true;
+        assert!(!refresh_due(false, true, &failed, 100, 200));
+        assert!(refresh_due(true, true, &failed, 100, 200));
     }
 
     #[test]
