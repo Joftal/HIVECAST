@@ -841,6 +841,7 @@
     "qrExpiresIn": "{{time}} 后失效",
     "qrExpired": "二维码已过期，请刷新",
     "autoRefreshOn": "自动续期可用（每 12 小时检查，失效时自动轮换 Cookie）",
+    "autoRefreshOnDouyu": "自动续期可用（每 3 天自动续期，失败后自动重试）",
     "autoRefreshOff": "自动续期不可用：缺少 refresh_token，建议重新扫码",
     "refreshNow": "立即检查",
     "refreshChecking": "检查中…",

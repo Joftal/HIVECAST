@@ -841,6 +841,7 @@
     "qrExpiresIn": "Expires in {{time}}",
     "qrExpired": "QR code expired, please refresh",
     "autoRefreshOn": "Auto refresh available (checked every 12 hours)",
+    "autoRefreshOnDouyu": "Auto refresh available (renews every 3 days, retries on failure)",
     "autoRefreshOff": "Auto refresh unavailable: refresh_token missing. Scan again to enable it.",
     "refreshNow": "Check now",
     "refreshChecking": "Checking…",

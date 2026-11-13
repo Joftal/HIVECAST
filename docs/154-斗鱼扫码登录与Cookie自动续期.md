@@ -2,7 +2,8 @@
 
 > 范围：`src-tauri/src/douyu_auth.rs`、`src-tauri/src/account.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/state.rs`、`src-tauri/src/db.rs`，以及设置页账号卡与 `src/lib/ipc.ts`。
 > 结论：**斗鱼现在有三条账号路径：扫码登录（带 LTP0，可自动续期）、手动粘贴 Cookie（只校验、不续期）、过期后的重新扫码。** 斗鱼不再接受任意非空 Cookie；B 站原有扫码/续期链路未改动。
-> 时间：2026-11-13；基线：`9e2713d` + 本次改动。
+> 时间：2026-11-13；基线：`cabe840` + 真实账号验收与文案修正。
+> 真机：真实扫码登录、强制续期、原画 2K60 录制均通过（见 §7.5）。
 
 ---
 
@@ -254,25 +255,45 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 - B 站卡片仍显示 7 个 Cookie、已登录、自动续期可用；
 - 未出现斗鱼凭据导致的 B 站状态串台。
 
-### 7.5 未完成的验证
+### 7.5 真实扫码登录与续期
 
-**没有用真实斗鱼账号完成「手机扫码 → 手机确认 → 回调写入凭据」的最后一跳。** 这需要用户手机配合，当前只能验证到二维码生成、等待扫码和取消。代码侧已覆盖回调链、必填 Cookie、LTP0 持久化与后续续期；首次真实登录后应再确认：
+2026-11-13 由用户手机真实扫码完成「生成二维码 → 手机确认 → 回调写入凭据」全链路，随后在 release bundle 上验证：
 
-- 卡片显示真实昵称与「自动续期可用」；
-- DB `credential_secret` 有 LTP0，普通 Cookie 串不含 LTP0；
-- 3 天后的自动续期或「立即检查」能换出新 `acf_*`。
+- 斗鱼卡显示真实昵称「番茄炒芝士」、已登录、18 个 Cookie、自动续期可用（每 3 天自动续期，失败后自动重试）；
+- DB `credential`：`platform=douyu`、`uid=100921751`、`status=ok`、Cookie 长度 1791；
+- DB `credential_secret`：LTP0 长度 327、设备号长度 87，两列均以 `enc:v1` 加密落库；普通 Cookie 串由 `merge_login_cookies` 主动跳过 LTP0；
+- DB `credential_refresh`：`outcome=refreshed`、`key_stale=0`、`message=已自动续期`。
+
+真实续期：22:51 首次登录后，22:59 点击「立即检查」：
+
+- Cookie 密文 SHA-256 从 `aef8ab5a…` 变为 `acb78133…`，证明 `acf_*` 已实际轮换；
+- LTP0 密文 SHA-256 保持 `ec29669c…`，证明长期凭证未丢失；
+- 日志 `DEBUG hivecast_lib::broker: 账号凭据变更，已清空取流与房间信息缓存`、`INFO hivecast_lib::douyu_auth: 斗鱼 Cookie 自动续期完成`；
+- 卡片更新为「上次检查 11/13 22:59 · 已轮换 Cookie」。
+
+真实录制：添加 `https://www.douyu.com/9999` 并开启自动录制：
+
+- 取流 `qn=40000`，实际 `actual_qn=10000`，画质 `原画2K60 · FLV`，线路 13；
+- ffmpeg 请求头只带 `dy_did`，因为 CDN 域是 `huos1a.douyucdn2.cn`，账号 Cookie 不跨域发送；登录态在签名 URL 的 token 中（含 `uid 100921751`），这是预期设计，不是漏带 Cookie；
+- 录制 42 秒后退出应用：`status=aborted`、`reason=app_exit`、23,260,607 B、78 条弹幕、ASS 78 行，分片合并成功。
+
+尚未等待 3 天让定时任务自然触发；本次「立即检查」与定时任务共用 `refresh_once`，已验证换票、合并写回、缓存失效与状态更新。
 
 ---
 
 ## 8. 边界与限制
 
-1. **完整扫码需要用户手机确认**：自动化只能验证到二维码与轮询，不能代替手机端确认。
+1. **完整扫码需要用户手机确认**：自动化只能验证到二维码与轮询，不能代替手机端确认；本次已由用户真实扫码完成并验证。
 2. **手动 Cookie 不自动续期**：这是明确降级路径；卡片会说明「没有长期凭证」，不会假装可续期。
 3. **LTP0 与账号绑定**：保存新手动 Cookie 时会清空旧 secret，避免旧账号票据污染新账号。
 4. **设备号不主动轮换**：续期时优先保留旧设备号，减少平台侧设备变化；只有旧 Cookie 没有设备号时才补写。
 5. **风控页不当失效**：HTML、非 JSON、5xx 都归为临时失败，6 小时后重试；只有明确的 401/403 或业务 `error != 0` 才标记过期。
 6. **手动 Cookie 的「上次检查」不空转**：`not_refreshable` 只写一次，避免每 30 分钟刷新时间、掩盖真实过期。
 7. **B 站独立**：斗鱼使用独立模块、独立锁、独立维护循环；B 站的 `refresh_loop`、扫码、Cookie 校验未改。
+8. **先探测再续期的瞬时误报**：维护循环先 `revalidate` 再 `refresh_once`；若短效 Cookie 已过期但 LTP0 仍有效，可能先标记一次「登录失效」，随后同一轮续期恢复为 ok。
+9. **手动 Cookie 的「立即检查」不探测**：没有 LTP0 时只返回「不可续期」，不会用当前 Cookie 请求接口；这是为了避免把无长期凭证的账号误报成可自动续期。
+10. **扫码回调落库前不再探测**：7 个必填 Cookie 齐全即落库，回调来源可信；若账号恰好被风控，要等下一次 5 分钟探测才会转为失效。
+11. **斗鱼账号无头像**：界面用「DY」缩写占位；平台接口未返回稳定头像地址，暂不伪造。
 
 ---
 
@@ -281,16 +302,17 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 - `cargo test --lib`：**313 passed / 0 failed / 17 ignored**；
 - 斗鱼新增单测覆盖：轮询状态映射、`Set-Cookie` 属性过滤与空值、7 个必填 Cookie、三种设备号、昵称 URL 解码、3 天/6 小时/24 小时节奏、回调只允许斗鱼 HTTPS、风控页不判失效、续期保留旧设备号；
 - `db.rs` 新增 `credential_secret_is_sealed_and_deleted_with_the_credential`：secret 落库加密、读回明文、删除凭据后 secret 一并删除；
-- 前端：`tsc -b` 通过，`check:i18n` 806 keys，`check:docs` 154 files，`pnpm build` 通过，release bundle 31 MB 级。
+- 前端：`tsc -b` 通过，`check:i18n` 807 keys，`check:docs` 155 files，`pnpm build` 通过；release bundle 31.68 MiB；
+- 真实账号验收：扫码登录、强制续期、原画 2K60 录制、78 条弹幕全部通过。
 
 ---
 
 ## 10. 测试数据清理
 
-真机验证使用了临时斗鱼凭据（含伪造 LTP0），结束时应：
+早期伪造 LTP0 的测试库已用 `/tmp/hivecast-before-douyu.db` 恢复，随后才进行真实扫码；真实凭据必须保留，不能用旧备份覆盖。真实账号验收结束后的清理：
 
-1. 退出 app；
-2. 用 `/tmp/hivecast-before-douyu.db` 覆盖真实 DB；
-3. 删除 `hivecast.db-wal` / `hivecast.db-shm`；
-4. 确认无 `hivecast` / `ffmpeg` 进程；
-5. 确认 DB 只剩 B 站凭据，斗鱼无凭据、无 secret。
+1. 退出 app，确认无 `hivecast` / `ffmpeg` 进程；
+2. 删除测试房间 `douyu:9999` 与对应 `record_session`；
+3. 删除 `Recording/斗鱼/yyfyyf` 下的测试 flv/jsonl/ass 与空目录；
+4. 保留 `credential`、`credential_secret`、`credential_refresh` 中的真实斗鱼与 B 站记录；
+5. 确认 `room=0`、`record_session=0`，DB 无 `-wal` / `-shm` 残留。

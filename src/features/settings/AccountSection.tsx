@@ -461,7 +461,9 @@ export default function AccountSection() {
                         )}
                       />
                       {item.refreshable
-                        ? t("account.autoRefreshOn")
+                        ? platform === "douyu"
+                          ? t("account.autoRefreshOnDouyu")
+                          : t("account.autoRefreshOn")
                         : platform === "douyu"
                           ? t("account.douyuNoRefresh")
                           : t("account.autoRefreshOff")}
