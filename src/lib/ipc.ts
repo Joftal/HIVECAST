@@ -346,8 +346,9 @@ export async function filenamePreview(
   template: string,
   stripEmoji: boolean,
   groupDirs: boolean,
+  ext: string,
 ): Promise<FilenamePreview> {
-  return invoke<FilenamePreview>("filename_preview", { template, stripEmoji, groupDirs });
+  return invoke<FilenamePreview>("filename_preview", { template, stripEmoji, groupDirs, ext });
 }
 
 /** 媒体库筛选条件：字段全部可选，未传就走后端的默认值。 */

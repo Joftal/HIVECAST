@@ -66,6 +66,44 @@ fn unwrap_envelope<T>(response: Envelope<T>, what: &str) -> Result<T, PlatformEr
     }
 }
 
+/// get_info 在房间不存在时返回 HTTP 200 + { code: 1, data: [] }，
+/// data 不是对象。用宽松的 Value 接住再判断，否则会在反序列化阶段
+/// 变成「响应解析失败」，既掩盖了真实原因，也把内部 URL 暴露给用户。
+#[derive(Debug, Deserialize)]
+struct RoomInfoEnvelope {
+    code: i64,
+    message: Option<String>,
+    data: Option<serde_json::Value>,
+}
+
+fn parse_room_info(
+    envelope: RoomInfoEnvelope,
+    room_key: &str,
+) -> Result<RoomInfoData, PlatformError> {
+    let message = envelope.message.unwrap_or_default();
+    if envelope.code != 0 {
+        let missing = matches!(envelope.code, -400 | -404)
+            || message.contains("未找到")
+            || message.contains("不存在");
+        return if missing {
+            Err(PlatformError::RoomNotFound(room_key.to_string()))
+        } else {
+            Err(PlatformError::Upstream {
+                code: envelope.code,
+                message,
+            })
+        };
+    }
+    let Some(value) = envelope.data else {
+        return Err(PlatformError::Parse(format!("房间 {room_key} 返回空数据")));
+    };
+    if value.is_null() || value.as_array().is_some_and(|items| items.is_empty()) {
+        return Err(PlatformError::RoomNotFound(room_key.to_string()));
+    }
+    serde_json::from_value(value)
+        .map_err(|err| PlatformError::Parse(format!("房间信息格式异常：{err}")))
+}
+
 #[derive(Debug, Deserialize)]
 struct RoomInfoData {
     room_id: i64,
@@ -237,8 +275,8 @@ impl PlatformAdapter for BilibiliAdapter {
 
     async fn room_info(&self, room: &RoomRef) -> Result<RoomInfo, PlatformError> {
         let url = format!("{API}/room/v1/Room/get_info?room_id={}", room.room_key);
-        let envelope: Envelope<RoomInfoData> = http::get_json(&url, REFERER, &[]).await?;
-        let data = unwrap_envelope(envelope, &room.room_key)?;
+        let envelope: RoomInfoEnvelope = http::get_json(&url, REFERER, &[]).await?;
+        let data = parse_room_info(envelope, &room.room_key)?;
 
         // 主播名单独取；失败不影响房间信息，降级成 UID。
         let anchor_url = format!(
@@ -866,6 +904,32 @@ mod tests {
         assert_eq!(map_format("flv"), StreamFormat::Flv);
         assert_eq!(map_format("fmp4"), StreamFormat::Hls);
         assert_eq!(map_format("ts"), StreamFormat::HttpTs);
+    }
+
+    #[test]
+    fn missing_room_maps_to_room_not_found() {
+        // 真实接口：房间不存在时 HTTP 200，code=1，data=[]。
+        let envelope: RoomInfoEnvelope =
+            serde_json::from_str(r#"{"code":1,"message":"未找到该房间","data":[]}"#)
+                .expect("应能反序列化");
+        let err = parse_room_info(envelope, "999999999").expect_err("应判定房间不存在");
+        assert!(matches!(err, PlatformError::RoomNotFound(_)));
+        assert_eq!(err.code(), "room_not_found");
+        assert!(
+            !err.to_string().contains("http"),
+            "用户错误文案不应带内部接口 URL"
+        );
+    }
+
+    #[test]
+    fn room_info_accepts_object_payload() {
+        let envelope: RoomInfoEnvelope = serde_json::from_str(
+            r#"{"code":0,"message":"0","data":{"room_id":7734200,"uid":1794315001,"title":"测试"}}"#,
+        )
+        .expect("应能反序列化");
+        let info = parse_room_info(envelope, "6").expect("正常房间应解析成功");
+        assert_eq!(info.room_id, 7734200);
+        assert_eq!(info.uid, 1794315001);
     }
 
     #[test]

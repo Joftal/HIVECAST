@@ -177,9 +177,19 @@ mod imp {
     }
 }
 
-/// 开/关防休眠；重复调用是幂等的。
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 开/关防休眠；重复调用是幂等的，只有状态真的变化才碰系统 API。
 pub fn apply(enabled: bool) -> Result<(), String> {
-    imp::set(enabled)?;
+    use std::sync::atomic::Ordering;
+    let previous = HELD.swap(enabled, Ordering::SeqCst);
+    if previous == enabled {
+        return Ok(());
+    }
+    if let Err(err) = imp::set(enabled) {
+        HELD.store(previous, Ordering::SeqCst);
+        return Err(err);
+    }
     tracing::info!(enabled, "更新防休眠状态");
     Ok(())
 }

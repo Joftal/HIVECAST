@@ -896,10 +896,17 @@ pub async fn recording_usage(
         .get_session(&session_id)?
         .ok_or_else(|| AppError::User("录像不存在".into()))?;
     let path = session.file_path.map(std::path::PathBuf::from);
+    // 录制中 ffmpeg 用 segment 封装，落盘的是 .partNNNN.ts，主文件要等收尾合并后才出现；
+    // 只 stat 主文件会让详情抽屉在整场录制期间一直显示「已写入 —」。两边取较大值，收尾后互不重复。
     let bytes = path
         .as_deref()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len() as i64)
+        .map(|path| {
+            let master = std::fs::metadata(path)
+                .map(|meta| meta.len() as i64)
+                .unwrap_or(0);
+            let parts = crate::segment::parts_total(path) as i64;
+            master.max(parts)
+        })
         .unwrap_or(0);
     let dir = path
         .as_deref()
@@ -1661,6 +1668,7 @@ pub fn filename_preview(
     template: String,
     strip_emoji: bool,
     group_dirs: bool,
+    ext: Option<String>,
 ) -> FilenamePreview {
     let template = template.trim().to_string();
     if let Err(error) = crate::filename::validate(&template) {
@@ -1686,13 +1694,15 @@ pub fn filename_preview(
         strip_emoji,
         group_dirs,
     };
-    let path = crate::recorder::session_path(
-        &state.recorder.media_root(),
-        &parts,
-        now_ts(),
-        "mp4",
-        &naming,
-    );
+    // 扩展名跟随当前后处理设置：保留源封装时用 flv 作代表，转封装/自定义用各自目标格式。
+    let ext = ext
+        .as_deref()
+        .map(str::trim)
+        .map(|value| value.trim_start_matches('.'))
+        .filter(|value| !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("flv");
+    let path =
+        crate::recorder::session_path(&state.recorder.media_root(), &parts, now_ts(), ext, &naming);
     FilenamePreview {
         name: path
             .file_name()

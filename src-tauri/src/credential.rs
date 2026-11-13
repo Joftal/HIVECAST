@@ -63,6 +63,7 @@ pub fn set_status(platform: &str, status: &str) {
 }
 
 /// 只有 Cookie 存在且状态为 ok 才算登录态可用。
+#[cfg(test)]
 pub fn is_ok(platform: &str) -> bool {
     if get(platform).is_none() {
         return false;

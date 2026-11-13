@@ -401,6 +401,17 @@ mod tests {
     }
 
     #[test]
+    fn parts_total_sums_every_remaining_part() {
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        std::fs::write(part_name(&final_path, 0), vec![0u8; 128]).unwrap();
+        std::fs::write(part_name(&final_path, 1), vec![0u8; 256]).unwrap();
+        assert_eq!(parts_total(&final_path), 384);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn next_part_index_continues_after_the_highest_remaining_part() {
         let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

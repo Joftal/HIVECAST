@@ -147,6 +147,31 @@ pub fn run() {
                 }
             });
 
+            // 防休眠只在真正录制/观看时持有电源断言。2 秒轮询覆盖自动开录、手动开录、
+            // 观看开关、后处理等所有入口，避免只改设置却忘了同步实际状态。
+            let power_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let Some(state) = power_handle.try_state::<AppState>() else {
+                        continue;
+                    };
+                    let wanted = state
+                        .db
+                        .get_setting(crate::settings::KEY_PREVENT_SLEEP)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some("true");
+                    let busy = state.recorder.active_count() > 0
+                        || state.recorder.starting_count() > 0
+                        || !state.view.snapshot().is_empty();
+                    if let Err(err) = crate::power::apply(wanted && busy) {
+                        tracing::warn!(error = %err, "设置防休眠失败");
+                    }
+                }
+            });
+
             // 托盘：关闭窗口只隐藏，录制与监控继续跑。托盘建不出来就退回「关窗即退出」。
             let tray_ready = match crate::tray::build(&handle) {
                 Ok(()) => true,

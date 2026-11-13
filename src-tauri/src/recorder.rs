@@ -399,7 +399,7 @@ impl Recorder {
     }
 
     /// 正在开录、但还没挂进 active 的会话数。用来在并发上限前占位（C2）。
-    fn starting_count(&self) -> usize {
+    pub(crate) fn starting_count(&self) -> usize {
         self.starting.lock().expect("开录标记被污染").len()
     }
 

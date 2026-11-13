@@ -57,7 +57,7 @@ const PLATFORM_DOT: Record<string, string> = {
 };
 
 /** 全表只有一套尺寸：行 76、缩略图 120x68，右侧详情固定 320。*/
-const COLUMNS = "120px 58px 60px 58px minmax(0,1fr) 104px 104px 74px 120px 140px";
+const COLUMNS = "120px 58px 80px 58px minmax(0,1fr) 104px 104px 74px 120px 140px";
 // 搜索时把平台中文名与常见别名一起算进去，输入「B站」也能命中。
 const PLATFORM_ALIASES: Record<string, string> = {
   bilibili: "b站 bilibili 哔哩哔哩",

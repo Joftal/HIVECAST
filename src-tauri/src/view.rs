@@ -748,6 +748,11 @@ impl ViewManager {
             .arg("0:a:0?")
             .arg("-c")
             .arg("copy")
+            // B 站 HLS/TS 线路的音频是 AAC-ADTS；直接 copy 进 fMP4 会报
+            // "Malformed AAC bitstream detected"，一个分片都写不出来。
+            // 对 FLV 的 AAC 源该 bsf 是空操作，统一加上即可。
+            .arg("-bsf:a")
+            .arg("aac_adtstoasc")
             .arg("-f")
             .arg("hls")
             .arg("-hls_time")

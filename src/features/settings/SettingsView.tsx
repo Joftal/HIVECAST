@@ -519,11 +519,19 @@ export default function SettingsView({
   // 文件名预览跟着输入实时算；防抖 200ms，避免每敲一个字都过一次 IPC。
   useEffect(() => {
     if (!settings || !isTauri()) return;
+    // 预览扩展名跟着后处理模式走，避免「保留源封装」时仍显示 .mp4。
+    const ext =
+      settings.postMode === "convert"
+        ? settings.postConvertFormat
+        : settings.postMode === "custom"
+          ? settings.postCustomOutputExt
+          : "flv";
     const timer = window.setTimeout(() => {
       void filenamePreview(
         settings.mediaFilenameTemplate,
         settings.mediaStripEmoji,
         settings.mediaGroupDirs,
+        ext,
       )
         .then(setPreview)
         .catch(() => setPreview(null));
@@ -533,6 +541,9 @@ export default function SettingsView({
     settings?.mediaFilenameTemplate,
     settings?.mediaStripEmoji,
     settings?.mediaGroupDirs,
+    settings?.postMode,
+    settings?.postConvertFormat,
+    settings?.postCustomOutputExt,
   ]);
 
   const chooseFolder = async (target: "mediaRoot" | "logDir" = "mediaRoot") => {
@@ -1350,11 +1361,13 @@ export default function SettingsView({
             <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
               {trash ? (
                 <>
-                  <p className="break-all font-mono">{trash.location}</p>
+                  <p className="break-all font-mono">
+                    {trash.platform === "windows" ? t("settings.trashLocationWindows") : trash.location}
+                  </p>
                   <p className={trash.canRestore ? "" : "text-warn"}>
                     {trash.canRestore ? t("settings.trashRestoreYes") : t("settings.trashRestoreNo")}
                   </p>
-                  <p>{trash.note}</p>
+                  <p>{t("settings.trashNote")}</p>
                 </>
               ) : (
                 <p>{t("settings.trashUnavailable")}</p>
@@ -1484,9 +1497,6 @@ export default function SettingsView({
               onChange={(next) => patch({ language: next })}
             />
           </Row>
-          <div className="px-4 py-3">
-            <p className="text-[11px] leading-4 text-faint">{t("settings.trayHint")}</p>
-          </div>
         </Section>
       );
     }
@@ -1510,6 +1520,9 @@ export default function SettingsView({
                 onChange={(next) => patch({ closeAction: next })}
               />
             </Row>
+            <div className="px-4 py-3">
+              <p className="text-[11px] leading-4 text-faint">{t("settings.trayHint")}</p>
+            </div>
           </Section>
 
           <Section title={t("settings.sectionPower")}>

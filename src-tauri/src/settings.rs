@@ -479,10 +479,8 @@ pub fn apply(settings: &Settings, recorder: &Recorder) {
         prevent_sleep = settings.prevent_sleep,
         "应用运行时设置"
     );
-    // 电源断言与界面无关，启动和保存都走同一条路径，避免两处状态不一致。
-    if let Err(err) = crate::power::apply(settings.prevent_sleep) {
-        tracing::warn!(error = %err, "设置防休眠失败");
-    }
+    // 电源断言由后台同步任务按「开关 + 当前是否在录制/观看」计算；
+    // 这里不能直接按开关置位，否则空闲挂着也会阻止系统休眠。
 }
 
 /// 校验日志目录：必须是绝对路径、不能是根目录、不能塞进 macOS .app 包内，
