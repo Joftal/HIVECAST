@@ -2279,7 +2279,7 @@ impl Recorder {
         stop_reason: Option<String>,
         confirmed_end: bool,
     ) {
-        let _finalizing = FinalizeGuard {
+        let finalizing_guard = FinalizeGuard {
             recorder: self,
             room_id: room_id.to_string(),
         };
@@ -2321,7 +2321,6 @@ impl Recorder {
 
         // 分割只在收尾做：录制期间始终是一个连续 ffmpeg，不存在停旧起新的空窗。
         let plans = clip_plans(&active);
-        let mut rendered: Vec<RenderedClip> = Vec::new();
         // 即使只有一段也写清单：收尾失败（磁盘满、合并/拼接失败）时
         // 它能保留「分片还在、成品未落定」的现场，启动后按清单重试。
         // 成功后清单会被删除，正常录制不会留下额外文件。
@@ -2388,17 +2387,13 @@ impl Recorder {
         } else {
             None
         };
+        // 阶段一（封口）：只做分片合并/按边界切片段，不跑后处理。
+        // 后处理可能转码几分钟，不能把同房间的新一场挡在 finalizing 外面。
+        let mut prepared: Vec<PreparedClip> = Vec::new();
         for (index, plan) in plans.iter().enumerate() {
-            let output = if !plans.is_empty() {
-                PathBuf::from(&manifest.as_ref().expect("有清单").clips[index].output)
-            } else {
-                source_path.clone()
-            };
-            let (source_clip, source_size) = if !plans.is_empty() {
-                finish_range(&source_path, &output, plan.start, plan.end).await
-            } else {
-                finish_file(&source_path).await
-            };
+            let output = PathBuf::from(&manifest.as_ref().expect("有清单").clips[index].output);
+            let (source_clip, source_size) =
+                finish_range(&source_path, &output, plan.start, plan.end).await;
             if source_size <= 0 {
                 tracing::warn!(
                     room_id,
@@ -2406,13 +2401,9 @@ impl Recorder {
                     file = %source_clip.display(),
                     "源封装母带缺失，跳过该片段的后处理"
                 );
-                rendered.push(RenderedClip {
+                prepared.push(PreparedClip {
                     source_path: source_clip.clone(),
-                    path: source_clip.clone(),
-                    size: 0,
-                    post_state: crate::post::STATE_FAILED.to_string(),
-                    post_error: Some("分片合并失败，保留现场等待恢复".into()),
-                    delete_source: None,
+                    source_size: 0,
                     reason: plan.reason.clone(),
                     started_at: plan.started_at,
                     ended_at: plan.ended_at,
@@ -2427,11 +2418,110 @@ impl Recorder {
                 }
                 continue;
             }
+            prepared.push(PreparedClip {
+                source_path: source_clip.clone(),
+                source_size,
+                reason: plan.reason.clone(),
+                started_at: plan.started_at,
+                ended_at: plan.ended_at,
+            });
+            if let Some(manifest) = manifest.as_mut() {
+                manifest.clips[index].path = source_clip.display().to_string();
+                manifest.rendered = index + 1;
+                let file = manifest_path(&source_path);
+                if let Err(err) = write_manifest(&file, manifest) {
+                    tracing::warn!(%err, file = %file.display(), "更新分割清单失败");
+                }
+            }
+        }
+
+        // 0 字节不能算「录制完成」：在释放 finalizing 之前就定案，
+        // 否则成功计数会先清掉失败冷却，库里却是一条空录像。
+        let sealed_size = prepared.first().map_or(0, |clip| clip.source_size);
+        if final_status == "finished" {
+            if let Some((empty_reason, empty_error)) = empty_recording_failure(sealed_size) {
+                tracing::warn!(room_id, "录制没有产生任何数据，标记为失败");
+                final_status = "failed";
+                reason = empty_reason;
+                error = empty_error;
+            }
+        }
+
+        // 房间级副作用必须在释放 finalizing 之前结算：新一场可能几秒后就开始，
+        // 旧场的成功/失败/静默不能落到新场的计数上。
+        if final_status == "finished" && reason == "stream_ended" && confirmed_end {
+            self.mark_ended(room_id, active.live_started_at);
+        }
+        let unconfirmed = unconfirmed_end(final_status, reason, confirmed_end);
+        let failed_streak = if final_status == "failed" {
+            let streak = self.note_hard_failure(room_id);
+            if streak == FAILED_STREAK_LIMIT {
+                tracing::warn!(room_id, "连续录制失败，暂停自动重试 5 分钟");
+            }
+            streak
+        } else if unconfirmed {
+            let streak = self.note_hard_failure(room_id);
+            if streak == FAILED_STREAK_LIMIT {
+                tracing::warn!(room_id, "连续未确认收尾，暂停自动重试 5 分钟");
+            }
+            streak
+        } else {
+            0
+        };
+
+        // 弹幕 writer 也要在封口阶段摘掉：新一场会挂新的 writer，
+        // 旧场的 flush/计数不能等后处理跑完再做。
+        let writer_started_ms = active
+            .danmaku
+            .as_ref()
+            .map(|writer| writer.started_epoch_ms());
+        let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
+            (Some(hub), Some(writer)) => hub
+                .detach_record(room_id, writer)
+                .map_or((None, 0), |(path, count)| {
+                    (Some(path.display().to_string()), count as i64)
+                }),
+            _ => (None, 0),
+        };
+
+        if final_status == "finished" {
+            // 未确认收尾刚刚记了一次失败，别在这里又清掉，否则永远攒不到阈值。
+            if failed_streak == 0 {
+                self.clear_failure(room_id);
+                self.clear_hard_failure(room_id);
+            }
+        }
+
+        drop(finalizing_guard);
+        tracing::info!(
+            room_id,
+            session_id = %active.recording.session_id,
+            clips = prepared.len(),
+            "封口完成，释放收尾标记并转入后台后处理"
+        );
+
+        // 阶段二（后处理）：源封装母带已经落定，转封装/自定义命令慢慢跑。
+        let mut rendered: Vec<RenderedClip> = Vec::new();
+        for (index, clip) in prepared.iter().enumerate() {
+            if clip.source_size <= 0 {
+                rendered.push(RenderedClip {
+                    source_path: clip.source_path.clone(),
+                    path: clip.source_path.clone(),
+                    size: 0,
+                    post_state: crate::post::STATE_FAILED.to_string(),
+                    post_error: Some("分片合并失败，保留现场等待恢复".into()),
+                    delete_source: None,
+                    reason: clip.reason.clone(),
+                    started_at: clip.started_at,
+                    ended_at: clip.ended_at,
+                });
+                continue;
+            }
             let task_id = format!("auto:{}:{index}", active.recording.session_id);
             let outcome = crate::post::run(
                 &task_id,
                 &active.recording.session_id,
-                &source_clip,
+                &clip.source_path,
                 &post_cfg,
                 Some(app),
             )
@@ -2442,7 +2532,7 @@ impl Recorder {
                 tracing::warn!(
                     room_id,
                     clip = index,
-                    source = %source_clip.display(),
+                    source = %clip.source_path.display(),
                     state = %outcome.state,
                     error = %err,
                     "片段后处理失败，保留源封装母带"
@@ -2455,16 +2545,14 @@ impl Recorder {
                 post_state: outcome.state,
                 post_error: outcome.error,
                 delete_source: outcome.delete_source,
-                reason: plan.reason.clone(),
-                started_at: plan.started_at,
-                ended_at: plan.ended_at,
+                reason: clip.reason.clone(),
+                started_at: clip.started_at,
+                ended_at: clip.ended_at,
             });
             if let Some(manifest) = manifest.as_mut() {
-                manifest.clips[index].path = source_clip.display().to_string();
                 manifest.clips[index].final_path = Some(outcome.path.display().to_string());
                 manifest.clips[index].post_state = Some(clip_state);
                 manifest.clips[index].post_error = clip_error;
-                manifest.rendered = index + 1;
                 let file = manifest_path(&source_path);
                 if let Err(err) = write_manifest(&file, manifest) {
                     tracing::warn!(%err, file = %file.display(), "更新分割清单失败");
@@ -2510,50 +2598,6 @@ impl Recorder {
                 tracing::warn!(room_id, tail = %tail, "ffmpeg 错误输出");
             }
         }
-
-        // 自然结束（下播 / 断流收尾）后先静默一会儿：平台状态常滞后一两轮，
-        // 不挡住的话监控会立刻再开一条秒退的会话（S2）。
-        if final_status == "finished" && reason == "stream_ended" && confirmed_end {
-            self.mark_ended(room_id, active.live_started_at);
-        }
-
-        // 平台在播、却只能以「自然结束」收尾（B1）：没有确认凭据就不能算成功。
-        // 既不能弹结束通知、也不能写 10 分钟静默，但也不能让监控每隔一轮就重开
-        // 一条秒退会话——把它计入连续失败，攒够阈值进长冷却。
-        let unconfirmed = unconfirmed_end(final_status, reason, confirmed_end);
-
-        // 连续非正常收尾：攒到阈值就进长冷却，避免源不可用时每分钟一条会话（R6/R7）。
-        let failed_streak = if final_status == "failed" {
-            let streak = self.note_hard_failure(room_id);
-            if streak == FAILED_STREAK_LIMIT {
-                tracing::warn!(room_id, "连续录制失败，暂停自动重试 5 分钟");
-            }
-            streak
-        } else if unconfirmed {
-            let streak = self.note_hard_failure(room_id);
-            if streak == FAILED_STREAK_LIMIT {
-                tracing::warn!(room_id, "连续未确认收尾，暂停自动重试 5 分钟");
-            }
-            streak
-        } else {
-            0
-        };
-
-        // 先收弹幕再写库：detach 会 flush 并返回真实条数，历史页才有准确数字。
-        // 没有 writer（总开关关闭或平台不支持）就是没有弹幕文件，绝不能回退到
-        // active.danmaku_path：那条路径可能压根没创建，写进库就是假路径。
-        let writer_started_ms = active
-            .danmaku
-            .as_ref()
-            .map(|writer| writer.started_epoch_ms());
-        let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
-            (Some(hub), Some(writer)) => hub
-                .detach_record(room_id, writer)
-                .map_or((None, 0), |(path, count)| {
-                    (Some(path.display().to_string()), count as i64)
-                }),
-            _ => (None, 0),
-        };
 
         // 分割录制只有一条整场 JSONL。收尾时按片段区间切片并重设 t=0，
         // 否则第二段起 danmaku_path 为空、ASS 也只覆盖第一段。
@@ -2790,11 +2834,6 @@ impl Recorder {
         }
 
         if final_status == "finished" {
-            // 未确认收尾刚刚记了一次失败，别在这里又清掉，否则永远攒不到阈值。
-            if failed_streak == 0 {
-                self.clear_failure(room_id);
-                self.clear_hard_failure(room_id);
-            }
             self.queue_thumb(app, &active.recording.session_id);
         }
 
@@ -3313,6 +3352,19 @@ struct ManifestClip {
 struct ClipPlan {
     start: u32,
     end: Option<u32>,
+    reason: Option<String>,
+    started_at: i64,
+    ended_at: i64,
+}
+
+/// 封口阶段已经合并落盘的片段：源封装母带 + 元数据。
+///
+/// 后处理在 finalizing 释放之后才跑：合并/切片段已经完成，源文件不会再变，
+/// 但转封装/自定义命令可能持续几分钟，不该继续挡住同房间的新一场录制。
+#[derive(Debug, Clone)]
+struct PreparedClip {
+    source_path: PathBuf,
+    source_size: i64,
     reason: Option<String>,
     started_at: i64,
     ended_at: i64,
