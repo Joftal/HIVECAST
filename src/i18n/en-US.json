@@ -834,6 +834,8 @@
     "saving": "Checking…",
     "qrTitle": "Scan with the Bilibili mobile app",
     "qrHint": "Signing in unlocks 1080P and above.",
+    "qrTitleDouyu": "Scan with the Douyu app",
+    "qrHintDouyu": "Signing in enables automatic cookie refresh and HD recording.",
     "qrWaiting": "Generating QR code…",
     "qrRefresh": "Refresh QR code",
     "qrExpiresIn": "Expires in {{time}}",
@@ -856,7 +858,9 @@
       "discarded": "Result discarded",
       "keyStale": "Sign in again"
     },
-    "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording."
+    "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording.",
+    "douyuHint": "Scan with the Douyu app to sign in; the session can then refresh automatically and record in HD.",
+    "douyuNoRefresh": "Auto refresh unavailable: a pasted cookie has no long-lived credential. Scan to enable it."
   },
   "close": {
     "title": "Tasks are still running",

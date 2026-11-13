@@ -136,6 +136,14 @@ impl AppState {
             }
         });
 
+        // 斗鱼的续期/复验单独一条循环：LTP0 每 3 天才需要换票，并带 6h/24h 退避；
+        // 不复用 B 站的 refresh_loop，避免两个平台的节奏互相影响。
+        let db_for_douyu = db.clone();
+        let app_for_douyu = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::douyu_auth::maintenance_loop(db_for_douyu, app_for_douyu).await;
+        });
+
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut media_root = PathBuf::from(&settings.media_root);
         let mut media_fallback = None;

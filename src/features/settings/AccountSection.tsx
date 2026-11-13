@@ -5,6 +5,9 @@ import {
   bilibiliQrStart,
   bilibiliRefreshNow,
   credentialDelete,
+  douyuQrPoll,
+  douyuQrStart,
+  douyuRefreshNow,
   credentialSave,
   credentialsList,
   describeError,
@@ -41,6 +44,7 @@ const REFRESH_OUTCOME_KEY: Record<string, string> = {
 };
 
 type QrState = {
+  platform: Platform;
   ticket: QrTicket;
   poll: QrPoll | null;
   error: string | null;
@@ -110,12 +114,13 @@ export default function AccountSection() {
       hour12: false,
     });
 
-  const checkRefresh = async () => {
+  const checkRefresh = async (platform: Platform) => {
     if (checkingRef.current) return;
     checkingRef.current = true;
     setChecking(true);
     try {
-      const status = await bilibiliRefreshNow();
+      const status =
+        platform === "douyu" ? await douyuRefreshNow() : await bilibiliRefreshNow();
       await load();
       notify.success(t("account.refreshDone", { result: refreshOutcomeLabel(status) }));
     } catch (err) {
@@ -167,15 +172,16 @@ export default function AccountSection() {
     setBusy(false);
   };
 
-  const openQr = async () => {
+  const openQr = async (platform: Platform) => {
     const seq = ++qrSeq.current;
     setQr(null);
     setBusy(true);
     try {
-      const ticket = await bilibiliQrStart();
+      const ticket = platform === "douyu" ? await douyuQrStart() : await bilibiliQrStart();
       // 关闭面板或重新打开后，旧请求的响应必须丢弃。
       if (seq !== qrSeq.current) return;
       setQr({
+        platform,
         ticket,
         poll: null,
         error: null,
@@ -225,7 +231,10 @@ export default function AccountSection() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const poll = await bilibiliQrPoll(qr.ticket.qrcodeKey);
+        const poll =
+          qr.platform === "douyu"
+            ? await douyuQrPoll(qr.ticket.qrcodeKey)
+            : await bilibiliQrPoll(qr.ticket.qrcodeKey);
         if (cancelled) return;
         setQr((current) =>
           current
@@ -260,7 +269,7 @@ export default function AccountSection() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [qr?.ticket.qrcodeKey, qrState, load]);
+  }, [qr?.platform, qr?.ticket.qrcodeKey, qrState, load]);
 
   if (!isTauri()) return null;
 
@@ -309,7 +318,7 @@ export default function AccountSection() {
     <div className="animate-fade-rise mt-3 space-y-2.5 rounded-[9px] border border-line bg-raised/40 p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[10.5px] font-medium text-muted">
-          {t("account.qrTitle")}
+          {qr.platform === "douyu" ? t("account.qrTitleDouyu") : t("account.qrTitle")}
         </span>
         <button
           type="button"
@@ -348,9 +357,11 @@ export default function AccountSection() {
               {t("account.qrExpiresIn", { time: formatCountdown(secondsLeft) })}
             </p>
           ) : null}
-          <p className="text-[10px] leading-4 text-faint">{t("account.qrHint")}</p>
+          <p className="text-[10px] leading-4 text-faint">
+            {qr.platform === "douyu" ? t("account.qrHintDouyu") : t("account.qrHint")}
+          </p>
           {qrState === "expired" || qr?.error ? (
-            <Button size="sm" variant="secondary" onClick={() => void openQr()}>
+            <Button size="sm" variant="secondary" onClick={() => void openQr(qr.platform)}>
               {t("account.qrRefresh")}
             </Button>
           ) : null}
@@ -431,9 +442,11 @@ export default function AccountSection() {
                       : t("account.cookieHint")
                     : platform === "bilibili"
                       ? t("account.bilibiliHint")
-                      : t("account.cookieHint")}
+                      : platform === "douyu"
+                        ? t("account.douyuHint")
+                        : t("account.cookieHint")}
                 </p>
-                {platform === "bilibili" && item ? (
+                {(platform === "bilibili" || platform === "douyu") && item ? (
                   <div className="mt-1.5">
                     <p
                       className={cx(
@@ -449,7 +462,9 @@ export default function AccountSection() {
                       />
                       {item.refreshable
                         ? t("account.autoRefreshOn")
-                        : t("account.autoRefreshOff")}
+                        : platform === "douyu"
+                          ? t("account.douyuNoRefresh")
+                          : t("account.autoRefreshOff")}
                     </p>
                     {item.refreshable ? (
                       <div className="mt-1 flex items-start justify-between gap-2">
@@ -494,7 +509,7 @@ export default function AccountSection() {
                           variant="ghost"
                           className="shrink-0"
                           disabled={busy || checking}
-                          onClick={() => void checkRefresh()}
+                          onClick={() => void checkRefresh(platform)}
                         >
                           {checking ? t("account.refreshChecking") : t("account.refreshNow")}
                         </Button>
@@ -505,7 +520,7 @@ export default function AccountSection() {
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-1 border-t border-line/80 pt-2.5">
-                {platform === "bilibili" ? (
+                {platform === "bilibili" || platform === "douyu" ? (
                   <Button
                     size="sm"
                     variant={connected ? "ghost" : "secondary"}
@@ -513,7 +528,7 @@ export default function AccountSection() {
                     onClick={() => {
                       setEditing(null);
                       setDraft("");
-                      void openQr();
+                      void openQr(platform);
                     }}
                   >
                     {t("account.qrLogin")}
@@ -546,7 +561,7 @@ export default function AccountSection() {
               </div>
 
               {editing === platform ? cookieEditor(platform) : null}
-              {platform === "bilibili" ? qrPanel : null}
+              {qr?.platform === platform ? qrPanel : null}
             </article>
           );
         })}

@@ -1976,6 +1976,35 @@ pub async fn bilibili_refresh_now(
     crate::account::refresh_now(&state.db, &app).await
 }
 
+#[tauri::command]
+pub async fn douyu_qr_start() -> Result<QrTicket, AppError> {
+    crate::douyu_auth::qr_start().await
+}
+
+#[tauri::command]
+pub async fn douyu_qr_poll(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    qrcode_key: String,
+) -> Result<QrPoll, AppError> {
+    let poll = crate::douyu_auth::qr_poll(&state.db, &app, &qrcode_key).await?;
+    if poll.state == "confirmed" {
+        state.broker.clear_groups();
+        state
+            .recorder
+            .recheck_all_quality(&app, state.broker.clone(), "douyu_qr_confirmed");
+    }
+    Ok(poll)
+}
+
+#[tauri::command]
+pub async fn douyu_refresh_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshStatus, AppError> {
+    crate::douyu_auth::refresh_now(&state.db, &app).await
+}
+
 // ---- 媒体库 ----
 
 /// 媒体库列表：筛选/排序/分页在 SQL 里做，返回本页 + 总数。

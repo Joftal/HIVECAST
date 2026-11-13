@@ -76,7 +76,16 @@ CREATE TABLE IF NOT EXISTS media_file (
 CREATE INDEX IF NOT EXISTS idx_media_file_session
     ON media_file (session_id, role);
 
--- B 站 Cookie 自动续期的最近一次检查结果：只存状态，不重复存 Cookie。
+-- 平台长期凭证（目前只有斗鱼用）：LTP0 与配套设备号单独加密存放，
+-- 不混进主站 Cookie，避免被带到所有 douyu.com 请求与界面字段列表里。
+CREATE TABLE IF NOT EXISTS credential_secret (
+    platform TEXT PRIMARY KEY,
+    refresh_token TEXT NOT NULL DEFAULT '',
+    device_id TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+);
+
+-- Cookie 自动续期的最近一次检查结果：只存状态，不重复存 Cookie。
 CREATE TABLE IF NOT EXISTS credential_refresh (
     platform TEXT PRIMARY KEY,
     checked_at INTEGER NOT NULL DEFAULT 0,
@@ -1881,6 +1890,96 @@ impl Db {
             params![platform],
         )
         .map_err(db_err)?;
+        conn.execute(
+            "DELETE FROM credential_secret WHERE platform = ?1",
+            params![platform],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 读取平台长期凭证（LTP0 / 设备号）；解密失败时当作没有，避免拿坏值去换票。
+    pub fn credential_secret(
+        &self,
+        platform: &str,
+    ) -> Result<Option<CredentialSecretRow>, AppError> {
+        let raw = self
+            .lock()
+            .query_row(
+                "SELECT platform, refresh_token, device_id, updated_at
+                   FROM credential_secret WHERE platform = ?1",
+                params![platform],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some((platform, refresh_token, device_id, updated_at)) = raw else {
+            return Ok(None);
+        };
+        let refresh_token = match self.secret.open(&refresh_token) {
+            Some(plain) => plain,
+            None => {
+                tracing::warn!(platform = %platform, "长期凭证解密失败，已跳过");
+                return Ok(None);
+            }
+        };
+        let device_id = if device_id.is_empty() {
+            String::new()
+        } else {
+            match self.secret.open(&device_id) {
+                Some(plain) => plain,
+                None => {
+                    tracing::warn!(platform = %platform, "设备号解密失败，已忽略");
+                    String::new()
+                }
+            }
+        };
+        Ok(Some(CredentialSecretRow {
+            platform,
+            refresh_token,
+            device_id,
+            updated_at,
+        }))
+    }
+
+    pub fn save_credential_secret(&self, row: &CredentialSecretRow) -> Result<(), AppError> {
+        let seal = |value: &str| -> Result<String, AppError> {
+            if value.is_empty() {
+                Ok(String::new())
+            } else {
+                self.secret.seal(value)
+            }
+        };
+        let refresh_token = seal(&row.refresh_token)?;
+        let device_id = seal(&row.device_id)?;
+        self.lock()
+            .execute(
+                "INSERT INTO credential_secret (platform, refresh_token, device_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (platform) DO UPDATE SET
+                    refresh_token = excluded.refresh_token,
+                    device_id = excluded.device_id,
+                    updated_at = excluded.updated_at",
+                params![row.platform, refresh_token, device_id, row.updated_at],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn clear_credential_secret(&self, platform: &str) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "DELETE FROM credential_secret WHERE platform = ?1",
+                params![platform],
+            )
+            .map_err(db_err)?;
         Ok(())
     }
 
@@ -1949,7 +2048,16 @@ impl Db {
     }
 }
 
-/// B 站 Cookie 续期的检查结果（只用于持久化，不直接进 IPC）。
+/// 平台长期凭证（目前只有斗鱼的 LTP0 与设备号）；字段在库里都是密文。
+#[derive(Debug, Clone)]
+pub struct CredentialSecretRow {
+    pub platform: String,
+    pub refresh_token: String,
+    pub device_id: String,
+    pub updated_at: i64,
+}
+
+/// Cookie 续期的检查结果（只用于持久化，不直接进 IPC）。
 #[derive(Debug, Clone)]
 pub struct CredentialRefreshRow {
     pub platform: String,
@@ -3057,6 +3165,40 @@ mod tests {
         let rows = db.credentials().expect("读凭据失败");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cookie, "SESSDATA=secret; bili_jct=abc");
+    }
+
+    #[test]
+    fn credential_secret_is_sealed_and_deleted_with_the_credential() {
+        let (db, _path) = temp_db("secret");
+        db.save_credential(&row("douyu", "acf_uid=1"))
+            .expect("写凭据失败");
+        db.save_credential_secret(&crate::db::CredentialSecretRow {
+            platform: "douyu".into(),
+            refresh_token: "LTP0-plain".into(),
+            device_id: "dy-did-plain".into(),
+            updated_at: 7,
+        })
+        .expect("写长期凭证失败");
+        let raw: String = db
+            .lock()
+            .query_row(
+                "SELECT refresh_token || '|' || device_id FROM credential_secret WHERE platform = 'douyu'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("读原始长期凭证失败");
+        assert!(crate::secret::Secret::is_sealed(
+            raw.split('|').next().unwrap()
+        ));
+        assert!(!raw.contains("plain"));
+        let secret = db
+            .credential_secret("douyu")
+            .expect("读长期凭证失败")
+            .expect("长期凭证不存在");
+        assert_eq!(secret.refresh_token, "LTP0-plain");
+        assert_eq!(secret.device_id, "dy-did-plain");
+        db.delete_credential("douyu").expect("删凭据失败");
+        assert!(db.credential_secret("douyu").expect("读失败").is_none());
     }
 
     #[test]

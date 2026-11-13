@@ -6,6 +6,7 @@ mod danmaku;
 mod db;
 mod disk;
 mod douyin_ws;
+mod douyu_auth;
 mod error;
 mod ffmpeg;
 mod filename;
@@ -310,6 +311,9 @@ pub fn run() {
             commands::bilibili_qr_start,
             commands::bilibili_qr_poll,
             commands::bilibili_refresh_now,
+            commands::douyu_qr_start,
+            commands::douyu_qr_poll,
+            commands::douyu_refresh_now,
             commands::bilibili_followings,
             commands::bilibili_follow_statuses,
             commands::rooms_import,

@@ -45,7 +45,7 @@ static CREDENTIAL_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 账号凭据或续期状态发生变化时通知前端重新拉取，替代靠猜时间的 setTimeout。
 pub const EVENT_ACCOUNT_REFRESH: &str = "account://refresh";
 
-fn credential_write_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn credential_write_guard() -> std::sync::MutexGuard<'static, ()> {
     CREDENTIAL_WRITE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -118,10 +118,25 @@ pub struct Account {
 }
 
 pub fn info_from_row(row: &CredentialRow) -> CredentialInfo {
-    info_with_refresh(row, RefreshStatus::default())
+    let refreshable = row.platform == "bilibili" && credential::has_refresh_token(&row.cookie);
+    info_with_refresh(row, refreshable, RefreshStatus::default())
 }
 
-fn info_with_refresh(row: &CredentialRow, refresh_status: RefreshStatus) -> CredentialInfo {
+/// 读库后组装界面条目：续期能力与最近一次检查结果都按平台取。
+pub(crate) fn info_for_row(db: &Db, row: &CredentialRow) -> CredentialInfo {
+    let refreshable = match row.platform.as_str() {
+        "bilibili" => credential::has_refresh_token(&row.cookie),
+        "douyu" => crate::douyu_auth::has_refresh_token(db),
+        _ => false,
+    };
+    info_with_refresh(row, refreshable, load_refresh_status(db, &row.platform))
+}
+
+fn info_with_refresh(
+    row: &CredentialRow,
+    refreshable: bool,
+    refresh_status: RefreshStatus,
+) -> CredentialInfo {
     CredentialInfo {
         platform: row.platform.clone(),
         account_id: row.account_id.clone(),
@@ -130,7 +145,7 @@ fn info_with_refresh(row: &CredentialRow, refresh_status: RefreshStatus) -> Cred
         avatar: row.avatar.clone(),
         cookie_names: credential::names(&row.cookie),
         status: row.status.clone(),
-        refreshable: row.platform == "bilibili" && credential::has_refresh_token(&row.cookie),
+        refreshable,
         refresh_status,
         updated_at: row.updated_at,
     }
@@ -147,7 +162,7 @@ fn refresh_status_from_row(row: CredentialRefreshRow) -> RefreshStatus {
 }
 
 /// 读取某平台最近一次续期结果；没有记录时返回 never。
-fn load_refresh_status(db: &Db, platform: &str) -> RefreshStatus {
+pub(crate) fn load_refresh_status(db: &Db, platform: &str) -> RefreshStatus {
     match db.credential_refresh(platform) {
         Ok(Some(row)) => refresh_status_from_row(row),
         Ok(None) => RefreshStatus::default(),
@@ -158,7 +173,7 @@ fn load_refresh_status(db: &Db, platform: &str) -> RefreshStatus {
     }
 }
 
-fn save_refresh_status(db: &Db, platform: &str, status: &RefreshStatus) {
+pub(crate) fn save_refresh_status(db: &Db, platform: &str, status: &RefreshStatus) {
     let row = CredentialRefreshRow {
         platform: platform.to_string(),
         checked_at: status.checked_at,
@@ -172,7 +187,7 @@ fn save_refresh_status(db: &Db, platform: &str, status: &RefreshStatus) {
     }
 }
 
-fn short_error(message: &str) -> String {
+pub(crate) fn short_error(message: &str) -> String {
     let mut out: String = message.chars().take(180).collect();
     if message.chars().count() > 180 {
         out.push('…');
@@ -240,7 +255,7 @@ pub async fn bilibili_qr_start() -> Result<QrTicket, AppError> {
     })
 }
 
-fn render_qr(content: &str) -> Result<String, AppError> {
+pub(crate) fn render_qr(content: &str) -> Result<String, AppError> {
     use qrcode::render::svg;
     let code = qrcode::QrCode::new(content.as_bytes())
         .map_err(|err| AppError::Internal(format!("二维码编码失败：{err}")))?;
@@ -577,7 +592,7 @@ pub async fn refresh_bilibili_cookie(
     result
 }
 
-fn emit_account_refresh(app: &tauri::AppHandle) {
+pub(crate) fn emit_account_refresh(app: &tauri::AppHandle) {
     if let Err(err) = app.emit(EVENT_ACCOUNT_REFRESH, ()) {
         tracing::warn!(error = %err, "账号刷新事件发送失败");
     }
@@ -979,7 +994,7 @@ pub async fn bilibili_nav(cookie: &str) -> Result<Account, AppError> {
     })
 }
 
-fn store_account(
+pub(crate) fn store_account(
     db: &Db,
     platform: &str,
     cookie: &str,
@@ -1023,6 +1038,8 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
 
     let account = if platform == "bilibili" {
         bilibili_nav(&cookie).await?
+    } else if platform == "douyu" {
+        crate::douyu_auth::validate_cookie(&cookie).await?
     } else {
         Account {
             uid: String::new(),
@@ -1034,9 +1051,15 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
     let row = store_account(db, platform, &cookie, &account)?;
     if platform == "bilibili" {
         wake_refresh_loop("保存 Cookie");
+    } else if platform == "douyu" {
+        // 手动粘贴的 Cookie 没有 LTP0：旧凭据留下的长期凭证必须清掉，
+        // 否则续期循环会拿旧账号的 LTP0 去换票，可能把新 Cookie 污染成旧账号。
+        if let Err(err) = db.clear_credential_secret("douyu") {
+            tracing::warn!(error = %err, "清理斗鱼长期凭证失败");
+        }
     }
     tracing::info!(platform, account = %row.account_name, "Cookie 已保存");
-    Ok(info_from_row(&row))
+    Ok(info_for_row(db, &row))
 }
 
 pub fn delete(db: &Db, platform: &str) -> Result<(), AppError> {
@@ -1051,24 +1074,16 @@ pub fn delete(db: &Db, platform: &str) -> Result<(), AppError> {
 }
 
 pub fn list(db: &Db) -> Result<Vec<CredentialInfo>, AppError> {
-    let bilibili_refresh = load_refresh_status(db, "bilibili");
     Ok(db
         .credentials()?
         .iter()
-        .map(|row| {
-            let status = if row.platform == "bilibili" {
-                bilibili_refresh.clone()
-            } else {
-                RefreshStatus::default()
-            };
-            info_with_refresh(row, status)
-        })
+        .map(|row| info_for_row(db, row))
         .collect())
 }
 
 /// 启动时与运行中定期复验 B 站登录态：过期就标 expired，设置页会提示重新扫码。
 /// 登录态变化后清空取流缓存，避免继续使用旧画质/旧 Cookie 换来的候选地址。
-fn clear_stream_cache(app: &tauri::AppHandle) {
+pub(crate) fn clear_stream_cache(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         state.broker.clear_groups();
     }

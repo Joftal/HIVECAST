@@ -530,6 +530,19 @@ export async function bilibiliRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("bilibili_refresh_now");
 }
 
+export async function douyuQrStart(): Promise<QrTicket> {
+  return invoke<QrTicket>("douyu_qr_start");
+}
+
+export async function douyuQrPoll(qrcodeKey: string): Promise<QrPoll> {
+  return invoke<QrPoll>("douyu_qr_poll", { qrcodeKey });
+}
+
+/** 立即检查一次斗鱼 Cookie 续期；结果同时写入账号的 refreshStatus。 */
+export async function douyuRefreshNow(): Promise<RefreshStatus> {
+  return invoke<RefreshStatus>("douyu_refresh_now");
+}
+
 /** 账号凭据或续期状态变化（登录、保存、过期、续期结果写入）。 */
 export const EVENT_ACCOUNT_REFRESH = "account://refresh";
 
