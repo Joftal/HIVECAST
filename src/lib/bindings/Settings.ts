@@ -44,10 +44,6 @@ mediaRoot: string,
  */
 ffmpegPath: string,
 /**
- * 同时录制的上限
- */
-maxConcurrentRecords: number,
-/**
  * 录制开始/结束时是否发系统通知
  */
 notifyEnabled: boolean,

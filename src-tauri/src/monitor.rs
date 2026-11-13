@@ -974,7 +974,7 @@ async fn check_room_info(
                     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
                 }
             } else if let Err(err) = recorder.start_checked(app, broker, room).await {
-                // 并发已满会每个检测周期失败一次：只在原因变化时告警 + 推送，
+                // 自动开录可能每个检测周期失败一次：只在原因变化时告警 + 推送，
                 // 否则间隔 10 秒就是每 10 秒一条 WARN（C7）。
                 let message = err.to_string();
                 let changed = recorder.last_error(&room.id).as_deref() != Some(message.as_str());

@@ -166,7 +166,6 @@ const SEARCH_INDEX: SearchEntry[] = [
   { page: "danmaku", id: "set-danmaku-gift", titleKey: "settings.danmakuGift", descKey: "settings.danmakuGiftHint", extra: "礼物 gift 辣条 免费 连击" },
   { page: "danmaku", id: "set-danmaku-super-chat", titleKey: "settings.danmakuSuperChat", descKey: "settings.danmakuSuperChatHint", extra: "醒目留言 sc super chat 付费" },
   { page: "danmaku", id: "set-danmaku-guard", titleKey: "settings.danmakuGuard", descKey: "settings.danmakuGuardHint", extra: "舰长 提督 总督 guard 上舰" },
-  { page: "record", id: "set-max-concurrent", titleKey: "settings.maxConcurrent", descKey: "settings.maxConcurrentHint", extra: "并发 同时录制 concurrent" },
   { page: "record", id: "set-post-mode", titleKey: "settings.postMode", descKey: "settings.postModeHint", extra: "后处理 源封装 转换 自定义 source convert custom" },
     { page: "record", id: "set-post-convert-format", titleKey: "settings.postConvertFormat", descKey: "settings.postConvertFormatHint", extra: "转封装 mp4 mkv ts 容器" },
     { page: "record", id: "set-post-delete-source", titleKey: "settings.postDeleteSource", descKey: "settings.postDeleteSourceHint", extra: "删除源 回收站 source trash" },
@@ -892,27 +891,6 @@ export default function SettingsView({
                     className="w-full justify-between"
                   />
                 </div>
-              </div>
-            </Row>
-          </Section>
-
-          <Section title={t("settings.sectionConcurrency")}>
-            <Row
-              id="set-max-concurrent"
-              focus={focusId === "set-max-concurrent"}
-              title={t("settings.maxConcurrent")}
-              desc={t("settings.maxConcurrentHint")}
-              tip={t("settings.maxConcurrentHint")}
-            >
-              <div className="w-[120px]">
-              <input
-                type="number"
-                min={1}
-                max={8}
-                value={settings.maxConcurrentRecords}
-                onChange={(event) => patch({ maxConcurrentRecords: Number(event.target.value) })}
-                className={FIELD + " font-mono tabular-nums"}
-              />
               </div>
             </Row>
           </Section>

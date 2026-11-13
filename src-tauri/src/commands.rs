@@ -1660,7 +1660,7 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppError> {
     Ok(crate::settings::load(&state.db))
 }
 
-/// 保存设置；返回规范化后的值（并发数夹到 1..=8、目录会被创建）。
+/// 保存设置；返回规范化后的值（目录会被创建）。
 /// 文件名模板预览：用一份固定的示例房间渲染，保证与真正落盘时同一套逻辑。
 #[tauri::command]
 pub fn filename_preview(

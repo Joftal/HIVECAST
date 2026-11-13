@@ -518,8 +518,6 @@ pub struct Settings {
     pub media_root: String,
     /// 手动指定的 ffmpeg 可执行文件（绝对路径）；空串表示自动检测
     pub ffmpeg_path: String,
-    /// 同时录制的上限
-    pub max_concurrent_records: u32,
     /// 录制开始/结束时是否发系统通知
     pub notify_enabled: bool,
     /// 播放与录制异常（取流失败、磁盘写满）是否发系统通知

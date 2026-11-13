@@ -8,7 +8,7 @@ type PageKey = "account" | "record" | "storage" | "notify" | "appearance" | "abo
 
 const PAGES: Array<{ key: PageKey; label: string; hint: string }> = [
   { key: "account", label: "账号", hint: "登录各直播平台，录制与观看都用这里的凭据" },
-  { key: "record", label: "录制与观看", hint: "默认画质与同时录制的路数" },
+  { key: "record", label: "录制与观看", hint: "默认画质与录制偏好" },
   { key: "storage", label: "存储", hint: "录像保存在哪、保留多久" },
   { key: "notify", label: "通知", hint: "录制与播放异常时是否提醒" },
   { key: "appearance", label: "外观与语言", hint: "主题、语言与托盘" },
@@ -124,9 +124,6 @@ function RecordPage() {
         <Row title="默认录制画质" desc="房间没有单独设置时使用"><Field value="原画（10000）" /></Row>
         <Row title="默认观看画质" desc="分屏观看时的起播档位"><Field value="蓝光 4M（400）" /></Row>
         <Row title="自动降级" desc="平台不提供该档位时自动选最接近的一档"><Switch checked onChange={() => undefined} label="自动降级" /></Row>
-      </Section>
-      <Section title="并发">
-        <Row title="同时录制路数" desc="超出的房间会排队，等待前面的录制结束"><Field value="3 路" width={120} /></Row>
       </Section>
       <Section title="文件后处理">
         <Row title="录制结束自动转 MP4" desc="把分段 FLV 合并为一个 MP4，失败时保留原始分段"><Switch checked onChange={() => undefined} label="自动转 MP4" /></Row>

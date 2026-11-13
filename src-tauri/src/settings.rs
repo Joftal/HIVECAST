@@ -22,7 +22,6 @@ const KEY_SPLIT_MAX_SIZE_MB: &str = "record.split_max_size_mb";
 const KEY_MEDIA_ROOT: &str = "media.root";
 /// 手动指定的 ffmpeg；空串表示自动检测（PATH + 平台常见安装位置）。
 pub const KEY_FFMPEG_PATH: &str = "ffmpeg.path";
-const KEY_MAX_CONCURRENT: &str = "record.max_concurrent";
 const KEY_NOTIFY: &str = "ui.notify";
 /// 播放/录制异常（取流失败、磁盘写满）是否通知。
 pub const KEY_NOTIFY_ERROR: &str = "ui.notify_error";
@@ -82,7 +81,6 @@ const KEY_RECORD_DANMAKU_GUARD: &str = "record.danmaku_guard";
 pub const CLOSE_TRAY: &str = "tray";
 pub const CLOSE_QUIT: &str = "quit";
 
-pub const MAX_CONCURRENT_LIMIT: u32 = 8;
 pub const MAX_RETENTION_DAYS: u32 = 3650;
 pub const MAX_TOTAL_GB: u32 = 100_000;
 pub const MAX_LOG_RETENTION_DAYS: u32 = 3650;
@@ -111,7 +109,6 @@ pub fn defaults() -> Settings {
         split_max_size_mb: 0,
         media_root: default_media_root().display().to_string(),
         ffmpeg_path: String::new(),
-        max_concurrent_records: 4,
         notify_enabled: true,
         notify_error: true,
         notify_auth: true,
@@ -186,9 +183,6 @@ pub fn load(db: &Db) -> Settings {
     }
     if let Some(value) = read(KEY_FFMPEG_PATH).filter(|v| !v.trim().is_empty()) {
         settings.ffmpeg_path = value;
-    }
-    if let Some(value) = read(KEY_MAX_CONCURRENT).and_then(|v| v.parse::<u32>().ok()) {
-        settings.max_concurrent_records = value.clamp(1, MAX_CONCURRENT_LIMIT);
     }
     if let Some(value) = read(KEY_NOTIFY).and_then(|v| parse_bool(&v)) {
         settings.notify_enabled = value;
@@ -296,7 +290,7 @@ pub fn persist_media_root(db: &Db, path: &str) -> Result<(), AppError> {
     db.set_setting(KEY_MEDIA_ROOT, path)
 }
 
-/// 校验并落库；返回纠正过的值（例如并发数被夹到 1..=8），前端据此回填输入框。
+/// 校验并落库；返回纠正过的值（例如数值越界被夹到合法区间），前端据此回填输入框。
 pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let mut settings = input.clone();
     settings.default_record_qn = normalize_record_qn(settings.default_record_qn);
@@ -312,9 +306,6 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     }
     settings.split_max_duration_sec = sanitize_split_duration(settings.split_max_duration_sec);
     settings.split_max_size_mb = sanitize_split_size(settings.split_max_size_mb);
-    settings.max_concurrent_records = settings
-        .max_concurrent_records
-        .clamp(1, MAX_CONCURRENT_LIMIT);
     if !matches!(settings.language.as_str(), "zh-CN" | "en-US" | "system") {
         settings.language = "system".into();
     }
@@ -392,10 +383,6 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     )?;
     db.set_setting(KEY_MEDIA_ROOT, &settings.media_root)?;
     db.set_setting(KEY_FFMPEG_PATH, &settings.ffmpeg_path)?;
-    db.set_setting(
-        KEY_MAX_CONCURRENT,
-        &settings.max_concurrent_records.to_string(),
-    )?;
     db.set_setting(KEY_NOTIFY, &settings.notify_enabled.to_string())?;
     db.set_setting(KEY_NOTIFY_ERROR, &settings.notify_error.to_string())?;
     db.set_setting(KEY_NOTIFY_AUTH, &settings.notify_auth.to_string())?;
@@ -463,11 +450,10 @@ pub fn apply_ffmpeg_path(raw: &str) {
     crate::ffmpeg::set_configured_path(path);
 }
 
-/// 应用到运行时对象：目录与并发上限立即生效，语言由前端负责。
+/// 应用到运行时对象：目录立即生效，语言由前端负责。
 pub fn apply(settings: &Settings, recorder: &Recorder) {
     apply_ffmpeg_path(&settings.ffmpeg_path);
     recorder.set_media_root(PathBuf::from(&settings.media_root));
-    recorder.set_max_concurrent(settings.max_concurrent_records as usize);
     recorder.set_naming(
         settings.media_filename_template.clone(),
         settings.media_strip_emoji,
@@ -475,7 +461,6 @@ pub fn apply(settings: &Settings, recorder: &Recorder) {
     );
     tracing::debug!(
         media_root = %settings.media_root,
-        max_concurrent = settings.max_concurrent_records,
         prevent_sleep = settings.prevent_sleep,
         "应用运行时设置"
     );
@@ -712,7 +697,6 @@ mod tests {
                 split_max_duration_sec: 30,
                 split_max_size_mb: 10,
                 media_root: media.display().to_string(),
-                max_concurrent_records: 99,
                 notify_enabled: false,
                 notify_error: false,
                 notify_auth: false,
@@ -741,7 +725,6 @@ mod tests {
         assert!(saved.split_on_title);
         assert_eq!(saved.split_max_duration_sec, MIN_SPLIT_DURATION_SEC);
         assert_eq!(saved.split_max_size_mb, MIN_SPLIT_SIZE_MB);
-        assert_eq!(saved.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert_eq!(saved.language, "system", "未知语言回落到跟随系统");
         assert_eq!(saved.theme, "light", "未知主题回落到浅色");
         assert_eq!(
@@ -762,7 +745,6 @@ mod tests {
         assert!(loaded.split_on_title);
         assert_eq!(loaded.split_max_duration_sec, MIN_SPLIT_DURATION_SEC);
         assert_eq!(loaded.split_max_size_mb, MIN_SPLIT_SIZE_MB);
-        assert_eq!(loaded.max_concurrent_records, MAX_CONCURRENT_LIMIT);
         assert!(!loaded.notify_enabled);
         assert!(!loaded.notify_error, "异常通知开关应原样保存");
         assert!(!loaded.notify_auth, "登录失效通知开关应原样保存");

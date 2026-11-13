@@ -260,15 +260,13 @@ pub struct Recorder {
     media_root: std::sync::RwLock<PathBuf>,
     /// 文件名模板与清洗开关，同样开录时现取。
     naming: std::sync::RwLock<Naming>,
-    /// 同时录制上限；0 表示不限。
-    max_concurrent: std::sync::atomic::AtomicUsize,
     inner: Mutex<HashMap<String, Active>>,
     failures: Mutex<HashMap<String, (u32, Instant)>>,
     /// 最近一次失败原因，展示在监控页行内
     errors: Mutex<HashMap<String, String>>,
     /// 最近一次「检测失败」的文案：同一句失败只告警/推事件一次，
     /// 平台一直挂着坏房间时不该每拍都刷前端（F1）。
-    /// 与 errors 分开记：开录失败（例如并发已满）也写 errors，
+    /// 与 errors 分开记：开录失败（例如磁盘不足）也写 errors，
     /// 成功检测不能顺手把它清掉，否则那条告警会重新变成每拍一条（C7）。
     detect_errors: Mutex<HashMap<String, String>>,
     /// 每房间一把开录锁：监控循环、添加房间、手动开录可能同时触发 start，
@@ -318,7 +316,6 @@ impl Recorder {
             db,
             media_root: std::sync::RwLock::new(media_root),
             naming: std::sync::RwLock::new(Naming::default()),
-            max_concurrent: std::sync::atomic::AtomicUsize::new(4),
             inner: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
@@ -383,22 +380,12 @@ impl Recorder {
         };
     }
 
-    pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn set_max_concurrent(&self, value: usize) {
-        self.max_concurrent
-            .store(value, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// 当前正在录制的路数。
     pub fn active_count(&self) -> usize {
         self.inner.lock().expect("录制状态被污染").len()
     }
 
-    /// 正在开录、但还没挂进 active 的会话数。用来在并发上限前占位（C2）。
+    /// 正在开录、但还没挂进 active 的会话数。退出流程用它判断是否还有开录在途。
     pub(crate) fn starting_count(&self) -> usize {
         self.starting.lock().expect("开录标记被污染").len()
     }
@@ -915,18 +902,6 @@ impl Recorder {
         // 从这里开始算「开录在途」：停录请求要能穿过解析线路、拉起 ffmpeg 这段窗口（C5）。
         let mut slot = self.begin_start(&room.id);
 
-        // 并发上限：4 路 1080p 已经能吃掉一块 SSD 的写入带宽，默认不再往上加。
-        // 计数要把「开录在途」也算上：两路同时开播时只看 active 会双双通过（C2），
-        // 各自拉一个 ffmpeg 再挤掉一个。自己已占了一个在途名额，所以是 > 而不是 >=。
-        let limit = self.max_concurrent();
-        let occupied = self.active_count() + self.starting_count();
-        if limit > 0 && occupied > limit {
-            tracing::warn!(limit, occupied, "拒绝开录：同时录制已达上限");
-            return Err(AppError::User(format!(
-                "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
-            )));
-        }
-
         // 磁盘写满会让 ffmpeg 直接退出，还会把系统拖死，所以先拦一道。
         // can_start 是开录门槛，is_low 是录制红线：两个都得过，
         // 否则「已有录制被红线停掉、监控又立刻重新开录」会变成反复起停。
@@ -1190,45 +1165,11 @@ impl Recorder {
             notify_live: room.notify_live.unwrap_or(true),
             notify_error: room.notify_error.unwrap_or(true),
         };
-        let mut entry = Some(entry);
-        let over_limit = {
-            let mut inner = self.inner.lock().expect("录制状态被污染");
-            // 再查一次并发上限：上面那次在网络解析之前，两路同时开录都会看到
-            // 「还没满」，各自拉起一个 ffmpeg（C2）。这里和 insert 在同一把锁里，
-            // 后到的这一路会看到前一路已经占住名额。
-            if limit > 0 && inner.len() >= limit {
-                true
-            } else {
-                inner.insert(room.id.clone(), entry.take().expect("本次录制尚未挂载"));
-                false
-            }
-        };
-        if over_limit {
-            // 锁已经释放：等子进程退出需要 await，不能在上面的 MutexGuard 作用域里做。
-            let mut entry = entry.take().expect("本次录制尚未挂载");
-            let _ = entry.child.start_kill();
-            // 同样等进程退出并回收句柄，否则 Windows 删不掉占位/分片。
-            let _ = wait_exit(&mut entry.child, Duration::from_secs(2)).await;
-            remove_pid_file(&path);
-            if let (Some(hub), Some(writer)) = (self.danmaku.as_ref(), entry.danmaku.as_ref()) {
-                hub.detach_record(&room.id, writer);
-            }
-            // ffmpeg 可能已经建了空分片，弹幕文件也建好了：都清掉，别留垃圾。
-            let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(&danmaku_path);
-            for part in segment::collect_parts(&path) {
-                let _ = std::fs::remove_file(part);
-            }
-            let _ = self.db.delete_session(&entry.recording.session_id);
-            tracing::warn!(
-                room = %room.host_name,
-                limit,
-                "并发已满，放弃本次开录（已清理会话与进程）"
-            );
-            return Err(AppError::User(format!(
-                "同时录制已达上限（{limit} 路），先停掉一路或到设置里调高上限"
-            )));
-        }
+        // 录制数量由用户控制：这里只把会话挂进 active，不再做全局并发上限检查。
+        self.inner
+            .lock()
+            .expect("录制状态被污染")
+            .insert(room.id.clone(), entry);
         slot.mark_inserted();
         drop(slot);
 
@@ -1490,7 +1431,7 @@ impl Recorder {
                 // 标题变化要切片段：只在收尾时按时间点找分片边界，录制过程不打断。
                 rec.track_title(&room_id);
                 // 房间在录制过程中被删掉：删除流程自己会先停录，但那一步可能
-                // 因为并发/异常丢掉。这里兜底按「用户停录」收尾——不续录、
+                // 因为异常丢掉。这里兜底按「用户停录」收尾——不续录、
                 // 不弹结束通知，也不给已删房间写静默窗口（F2）。
                 if rec.room_removed(&room_id) {
                     tracing::info!(room_id, "房间已删除，结束本次录制");
@@ -2968,7 +2909,7 @@ impl Recorder {
 
 /// 这次开录失败该不该计入连续失败（G5）。
 ///
-/// 用户意图 / 并发上限 / 房间已移除这类失败，重试也不会变好，每拍重试只是刷日志；
+/// 用户意图 / 房间已移除这类失败，重试也不会变好，每拍重试只是刷日志；
 /// 鉴权、取流地址、文件写入这些才值得冷却之后再试。
 fn start_failure_is_counted(err: &AppError) -> bool {
     match err {
@@ -2978,7 +2919,6 @@ fn start_failure_is_counted(err: &AppError) -> bool {
             "房间不存在",
             "应用正在退出",
             "上一场正在收尾",
-            "同时录制已达上限",
             "该房间连续录制失败",
             "连续开录失败",
         ]
@@ -5111,10 +5051,7 @@ mod tests {
 
     #[test]
     fn start_failure_classification_skips_user_intent() {
-        // 并发上限 / 房间没了：重试也不会变好，不该算进「连续开录失败」。
-        assert!(!start_failure_is_counted(&AppError::User(
-            "同时录制已达上限（1 路），先停掉一路或到设置里调高上限".into()
-        )));
+        // 房间没了：重试也不会变好，不该算进「连续开录失败」。
         assert!(!start_failure_is_counted(&AppError::User(
             "房间已移除或监控已暂停".into()
         )));
