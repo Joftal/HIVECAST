@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use crate::broker::StreamBroker;
 use crate::db::Db;
 use crate::disk;
-use crate::platform::{PlatformError, RoomRef};
+use crate::platform::{PlatformError, RoomInfo, RoomRef};
 use crate::recorder::{Recorder, EVENT_ROOMS_CHANGED};
 use crate::settings;
 
@@ -935,6 +935,23 @@ async fn check_room_info_deferred(
     outcome
 }
 
+/// 这次成功检查是否需要整行写库。
+///
+/// 除了标题/主播/封面/开播状态这些用户可见字段，平台 UID 变化也要写：
+/// 缺 UID 的房间进不了 B 站批量状态接口，如果只在 `touch_room_throttled`
+/// 里更新在线人数，UID 永远补不上。
+fn needs_room_write(room: &hivecast_ipc::RoomRecord, info: &RoomInfo) -> bool {
+    info.is_live != room.is_live
+        || info.room_name != room.title
+        || info.host_name != room.host_name
+        || info.avatar_url != room.avatar_url
+        || info.cover_url != room.cover_url
+        || info.area_name != room.area_name
+        || info.started_at != room.started_at
+        || crate::db::platform_uid_of(info)
+            .is_some_and(|uid| room.platform_uid.as_deref() != Some(uid.as_str()))
+}
+
 /// 已经拿到平台房间信息后的统一收尾：写库、判断是否需要开录/停录。
 ///
 /// 单房间轮询和 B 站批量状态都走这里，避免两条路径对「在播/离线」的判断分叉。
@@ -955,13 +972,9 @@ async fn apply_room_info(
     // 只有结构性字段变化才整行写库并推前端（G2）。
     // 在线人数这类数字每次检测都在跳，以前会让每个房间每秒一次整行 UPDATE，
     // WAL 被持续推大；现在它们 10 秒才落一次，界面最多滞后 10 秒。
-    let structural = info.is_live != room.is_live
-        || info.room_name != room.title
-        || info.host_name != room.host_name
-        || info.avatar_url != room.avatar_url
-        || info.cover_url != room.cover_url
-        || info.area_name != room.area_name
-        || info.started_at != room.started_at;
+    // UID 也算结构性字段：缺 UID 的旧房间如果只走 touch_room_throttled，
+    // 平台返回的 UID 永远不会落库，也就永远进不了 B 站批量状态接口。
+    let structural = needs_room_write(room, &info);
     if structural {
         // 在播/离线翻转是用户最关心的状态变化，留一条 INFO 方便回溯。
         if info.is_live != room.is_live {
@@ -1190,6 +1203,49 @@ mod tests {
         room.platform_uid = Some("42".into());
         room.platform = "douyu".into();
         assert!(!is_batchable(&room), "只有 B 站有批量状态接口");
+    }
+
+    fn room_info_for(
+        room: &hivecast_ipc::RoomRecord,
+        uid: Option<&str>,
+    ) -> crate::platform::RoomInfo {
+        crate::platform::RoomInfo {
+            host_name: room.host_name.clone(),
+            room_name: room.title.clone(),
+            avatar_url: room.avatar_url.clone(),
+            cover_url: room.cover_url.clone(),
+            area_name: room.area_name.clone(),
+            is_live: room.is_live,
+            started_at: room.started_at,
+            online: room.online,
+            stable_id: None,
+            extra: match uid {
+                Some(uid) => serde_json::json!({ "uid": uid }),
+                None => serde_json::json!({}),
+            },
+        }
+    }
+
+    #[test]
+    fn uid_change_forces_a_room_write() {
+        // 缺 UID 的存量房间：平台返回 UID 后必须走整行写库，
+        // 否则 touch_room_throttled 不会写 platform_uid，房间永远进不了批量。
+        let mut room = batch_room();
+        room.platform_uid = None;
+        assert!(needs_room_write(
+            &room,
+            &room_info_for(&room, Some("50329118"))
+        ));
+
+        // UID 相同、其他字段也相同：不制造额外写库。
+        room.platform_uid = Some("42".into());
+        assert!(!needs_room_write(&room, &room_info_for(&room, Some("42"))));
+
+        // UID 变了：按最新值写回。
+        assert!(needs_room_write(&room, &room_info_for(&room, Some("43"))));
+
+        // 平台这次没给 UID：保留本地旧值，不因为空值反复写库。
+        assert!(!needs_room_write(&room, &room_info_for(&room, None)));
     }
 
     #[test]

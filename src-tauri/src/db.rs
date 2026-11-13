@@ -2972,6 +2972,57 @@ mod tests {
         assert_eq!(saved.platform_uid.as_deref(), Some("456"));
     }
 
+    #[test]
+    fn update_room_info_persists_uid_for_a_legacy_row() {
+        let (db, _path) = temp_db("update-uid");
+        seed_media(&db);
+        db.exec_batch_for_test("UPDATE room SET platform_uid = NULL WHERE id = 'rm-a'")
+            .expect("清空 UID 失败");
+        assert_eq!(
+            db.get_room("rm-a")
+                .expect("读失败")
+                .expect("房间缺失")
+                .platform_uid,
+            None
+        );
+
+        let info = crate::platform::RoomInfo {
+            host_name: "主播甲".into(),
+            room_name: "房间甲".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: Some(5000),
+            online: Some(1),
+            stable_id: None,
+            extra: serde_json::json!({ "uid": 50329118 }),
+        };
+        db.update_room_info("rm-a", &info).expect("更新失败");
+        assert_eq!(
+            db.get_room("rm-a")
+                .expect("读失败")
+                .expect("房间缺失")
+                .platform_uid
+                .as_deref(),
+            Some("50329118")
+        );
+
+        let mut no_uid = info;
+        no_uid.extra = serde_json::json!({});
+        db.update_room_info("rm-a", &no_uid)
+            .expect("无 UID 更新失败");
+        assert_eq!(
+            db.get_room("rm-a")
+                .expect("读失败")
+                .expect("房间缺失")
+                .platform_uid
+                .as_deref(),
+            Some("50329118"),
+            "平台这次没给 UID 时不能把已有值清空"
+        );
+    }
+
     fn row(platform: &str, cookie: &str) -> CredentialRow {
         CredentialRow {
             platform: platform.into(),
