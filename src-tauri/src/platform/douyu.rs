@@ -305,6 +305,15 @@ impl PlatformAdapter for DouyuAdapter {
             lines.push((data.rtmp_cdn.clone(), label("", &data.rtmp_cdn)));
         }
 
+        // 平台返回的 rate 才是当前账号真正拿到的档位；未登录请求原画时
+        // 斗鱼会把 rate 降成 4（蓝光 4M），但 multirates 仍列出原画。
+        // 用实际档位限制可选画质，避免 UI 让用户选一个会静默降级的档位。
+        //
+        // 登录态不能按本次响应的 rate 限制：用户从原画切到蓝光后再拉流，
+        // 平台返回的 rate 就是 4，若据此封顶会把原画永久标成不可用，
+        // 反而把用户锁在低画质。登录态只信任账号能力表。
+        let authed = crate::credential::is_ok("douyu");
+        let mut best_qn = if authed { 0 } else { qn_for_rate(data.rate) };
         let mut groups: Vec<StreamGroup> = Vec::new();
         for (cdn, line_name) in lines {
             let payload = if cdn == data.rtmp_cdn {
@@ -334,6 +343,9 @@ impl PlatformAdapter for DouyuAdapter {
             let Some(url) = join_url(&payload.rtmp_url, &payload.rtmp_live) else {
                 continue;
             };
+            if !authed {
+                best_qn = best_qn.max(qn_for_rate(payload.rate));
+            }
             let rate_name = payload
                 .multirates
                 .iter()
@@ -399,12 +411,19 @@ impl PlatformAdapter for DouyuAdapter {
             } else {
                 item.name.clone()
             };
-            let hint = (item.bit > 0).then(|| format!("{} kbps", item.bit));
+            let available = quality_available(qn, best_qn);
+            // 不可用时不再展示码率，交给前端统一显示「当前不可用」；
+            // 否则用户只会看到「20176 kbps」而不知道这一档拿不到。
+            let hint = if available {
+                (item.bit > 0).then(|| format!("{} kbps", item.bit))
+            } else {
+                None
+            };
             let info = QualityInfo {
                 qn,
                 label,
                 hint,
-                available: true,
+                available,
                 codec: Some("h264".into()),
             };
             match quality_map.get(&qn) {
@@ -538,6 +557,12 @@ pub fn qn_for_rate(rate: i64) -> u32 {
         value if (1..=8999).contains(&value) => 1000 + value as u32,
         _ => 0,
     }
+}
+
+/// 画质是否真的可选：平台实际返回的档位才是上限。
+/// `best_qn == 0` 表示平台没有给出可判定档位，此时不要误伤全部画质。
+fn quality_available(qn: u32, best_qn: u32) -> bool {
+    best_qn == 0 || qn <= best_qn
 }
 
 fn map_play_error(code: i64, message: &str) -> PlatformError {
@@ -713,6 +738,22 @@ mod tests {
             let qn = qn_for_rate(rate);
             assert_eq!(rate_for_qn(qn), rate, "rate {rate} 的 qn {qn} 无法回选");
         }
+    }
+
+    #[test]
+    fn quality_available_follows_actual_rate() {
+        // 登录态拿到原画时，全档可选。
+        assert!(quality_available(10000, qn_for_rate(0)));
+        assert!(quality_available(401, qn_for_rate(0)));
+        // 未登录请求原画只拿到蓝光 4M 时，原画/蓝光 8M 必须不可选。
+        let anon = qn_for_rate(4);
+        assert!(!quality_available(10000, anon));
+        assert!(!quality_available(401, anon));
+        assert!(quality_available(400, anon));
+        assert!(quality_available(250, anon));
+        assert!(quality_available(80, anon));
+        // 平台没有给出可判定档位时，不能把所有画质都判死。
+        assert!(quality_available(10000, 0));
     }
 
     #[test]
