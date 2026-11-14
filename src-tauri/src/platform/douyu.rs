@@ -649,12 +649,14 @@ impl DouyuAdapter {
     }
 }
 
-/// 按 docs/06 §2.1 的四条正则顺序从页面里找 room_id。
+/// 按 docs/06 §2.1 的五条正则顺序从页面里找 room_id。
 fn extract_room_id(body: &str) -> Option<String> {
-    const PATTERNS: [&str; 4] = [
+    const PATTERNS: [&str; 5] = [
         "$ROOM.room_id",
         "room_id =",
         "\"room_id\":",
+        // 房间页把配置塞进 JS 字符串时，引号会转义成 \"room_id\":。
+        "room_id\\\":",
         "data-onlineid=",
     ];
     for pattern in PATTERNS {
@@ -764,6 +766,8 @@ mod tests {
         assert_eq!(extract_room_id(body).as_deref(), Some("123456"));
         let body2 = "<div data-onlineid=8888888>";
         assert_eq!(extract_room_id(body2).as_deref(), Some("8888888"));
+        let escaped = r#"window.__CONFIG__ = "{\"room_id\":45977,\"title\":\"x\"}";"#;
+        assert_eq!(extract_room_id(escaped).as_deref(), Some("45977"));
         assert!(extract_room_id("<html>nothing</html>").is_none());
     }
 
