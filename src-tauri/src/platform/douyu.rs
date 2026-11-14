@@ -236,7 +236,9 @@ impl PlatformAdapter for DouyuAdapter {
             is_live: data.show_status == 1 && data.video_loop == 0,
             started_at: None,
             online: None,
-            stable_id: None,
+            // 别名房间（/xxkk）也要归一到真实数字房间号：监控用别名查状态，
+            // 导入关注拿到的却是数字 room_id，没有稳定 ID 会留下两条重复记录。
+            stable_id: Some(data.room_id.to_string()),
             extra: json!({
                 "roomId": data.room_id,
                 "showStatus": data.show_status,

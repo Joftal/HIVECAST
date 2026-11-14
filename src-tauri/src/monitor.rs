@@ -89,6 +89,15 @@ impl Default for Schedule {
     }
 }
 
+/// 批量拍里这一路要不要带上。
+///
+/// 批量拍本身是整平台统一节奏，所以不能要求 `entry.next_at <= now`：成功排期
+/// 带 ±10% 抖动，抖到拍点之后会让房间白等一整拍。但失败/限流退避必须尊重，
+/// 否则单房兜底失败后仍会被下一拍重新塞进批量，退避形同虚设。
+fn batch_room_ready(entry: &Schedule, batch_due: bool, batch_inflight: bool, now: Instant) -> bool {
+    batch_due && !batch_inflight && !entry.inflight && (!entry.backoff || entry.next_at <= now)
+}
+
 /// 一个平台的批量状态节奏。
 ///
 /// 每个平台各自持有拍点、间隔、在途标记与限流冷却：斗鱼的关注列表接口
@@ -585,7 +594,7 @@ fn tick(
             let inflight = batches
                 .get(platform)
                 .is_some_and(|state| state.inflight.load(Ordering::Acquire));
-            if due && !inflight && !entry.inflight {
+            if batch_room_ready(entry, due, inflight, now) {
                 entry.inflight = true;
                 batch_rooms.entry(platform).or_default().push(room.clone());
             }
@@ -726,6 +735,7 @@ async fn run_batch_check(
 ) {
     let started = Instant::now();
     let total = rooms.len();
+    let authed = crate::credential::is_ok(platform);
     // B 站按账号 UID 映射；斗鱼没有独立 UID，房间号就是键。
     let keys: Vec<String> = if platform == "douyu" {
         rooms
@@ -761,7 +771,7 @@ async fn run_batch_check(
                 };
                 match key.and_then(|key| by_key.get(key)) {
                     Some(status) => {
-                        let info = Arc::new(batch_room_info(status, &room));
+                        let info = Arc::new(batch_room_info(status, &room, platform));
                         // 先写状态、推事件，再把开录/停录扔到独立任务：
                         // 第 50 个房间不该等前 49 个 ffmpeg 启动完才更新。
                         let outcome =
@@ -804,6 +814,7 @@ async fn run_batch_check(
             tracing::info!(
                 target: "hivecast_lib::monitor",
                 platform,
+                authed,
                 rooms = total,
                 keys = keys.len(),
                 returned,
@@ -863,6 +874,7 @@ async fn run_batch_check(
 fn batch_room_info(
     status: &hivecast_ipc::LiveStatus,
     room: &hivecast_ipc::RoomRecord,
+    platform: &str,
 ) -> crate::platform::RoomInfo {
     let text = |value: &str, fallback: &str| {
         if value.trim().is_empty() {
@@ -889,13 +901,20 @@ fn batch_room_info(
             .room_id
             .clone()
             .or_else(|| Some(room.room_key.clone())),
-        extra: serde_json::json!({
-            "uid": status.uid,
-            "roomId": status.room_id,
-            "shortId": status.short_id,
-            "liveStatus": if status.is_live { 1 } else { 0 },
-            "videoLoop": status.video_loop,
-        }),
+        extra: {
+            // 只有 B 站有账号 UID；斗鱼的 status.uid 就是房间号，写进 extra
+            // 会被 platform_uid_of 当成账号 UID 落库，污染「斗鱼没有 UID」的约束。
+            let mut extra = serde_json::json!({
+                "roomId": status.room_id,
+                "shortId": status.short_id,
+                "liveStatus": if status.is_live { 1 } else { 0 },
+                "videoLoop": status.video_loop,
+            });
+            if platform == "bilibili" {
+                extra["uid"] = serde_json::Value::String(status.uid.clone());
+            }
+            extra
+        },
     }
 }
 
@@ -1057,6 +1076,12 @@ async fn apply_room_info(
     room: &hivecast_ipc::RoomRecord,
     info: Arc<crate::platform::RoomInfo>,
 ) -> (Outcome, Option<RoomAction>) {
+    // 批量/单查从快照到真正落库之间用户可能已经移除房间：软删行不再写状态，
+    // 更不能再触发开录（start_checked 也会复查，这里是第一道闸）。
+    if db.room_removed(&room.id).unwrap_or(false) {
+        tracing::debug!(room_id = %room.id, "房间已移除，忽略本轮状态");
+        return (Outcome::Ok, None);
+    }
     let mut action = None;
     // 这一拍查通了：之前那条检测错误已经过时，清掉再推一次事件，
     // 否则监控页会一直挂着「房间不存在」之类的旧提示（F1）。
@@ -1406,7 +1431,7 @@ mod tests {
             online: Some(9),
             started_at: Some(200),
         };
-        let info = batch_room_info(&status, &room);
+        let info = batch_room_info(&status, &room, "bilibili");
         assert_eq!(info.host_name, "旧主播");
         assert_eq!(info.room_name, "旧标题");
         assert_eq!(info.cover_url.as_deref(), Some("https://new/cover.jpg"));
@@ -1423,7 +1448,7 @@ mod tests {
             started_at: None,
             ..status.clone()
         };
-        let info = batch_room_info(&no_time, &room);
+        let info = batch_room_info(&no_time, &room, "bilibili");
         assert_eq!(
             info.started_at,
             Some(100),
@@ -1442,10 +1467,83 @@ mod tests {
             started_at: None,
             ..status
         };
-        let info = batch_room_info(&offline, &offline_room);
+        let info = batch_room_info(&offline, &offline_room, "bilibili");
         assert_eq!(info.started_at, None, "离线房间不能沿用上一场的开播时间");
         assert_eq!(info.cover_url.as_deref(), Some("https://old/cover.jpg"));
         assert_eq!(info.online, None);
+    }
+
+    #[test]
+    fn douyu_batch_status_does_not_pollute_platform_uid() {
+        let mut room = batch_room();
+        room.platform = "douyu".into();
+        room.room_key = "9999".into();
+        room.platform_uid = None;
+        let status = hivecast_ipc::LiveStatus {
+            uid: "9999".into(),
+            room_id: Some("9999".into()),
+            short_id: None,
+            uname: "斗鱼主播".into(),
+            title: "斗鱼标题".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            video_loop: false,
+            online: Some(10),
+            started_at: None,
+        };
+        let info = batch_room_info(&status, &room, "douyu");
+        assert!(
+            crate::db::platform_uid_of(&info).is_none(),
+            "斗鱼的 status.uid 是房间号，不能当成账号 UID 落库"
+        );
+        assert!(info.extra.get("uid").is_none());
+        assert_eq!(info.extra["roomId"], "9999");
+        assert_eq!(info.stable_id.as_deref(), Some("9999"));
+
+        let bili = batch_room_info(&status, &batch_room(), "bilibili");
+        assert_eq!(
+            crate::db::platform_uid_of(&bili).as_deref(),
+            Some("9999"),
+            "B 站批量仍要写账号 UID"
+        );
+    }
+
+    #[test]
+    fn batch_skips_rooms_that_are_still_backing_off() {
+        let now = Instant::now();
+        let backing_off = Schedule {
+            next_at: now + Duration::from_secs(30),
+            backoff: true,
+            ..Default::default()
+        };
+        assert!(
+            !batch_room_ready(&backing_off, true, false, now),
+            "退避未结束的房间不能被下一拍重新塞进批量"
+        );
+
+        let expired = Schedule {
+            next_at: now.checked_sub(Duration::from_secs(1)).unwrap(),
+            backoff: true,
+            ..Default::default()
+        };
+        assert!(
+            batch_room_ready(&expired, true, false, now),
+            "退避结束后应重新参与批量"
+        );
+
+        let healthy = Schedule {
+            next_at: now + Duration::from_secs(30),
+            backoff: false,
+            ..Default::default()
+        };
+        assert!(
+            batch_room_ready(&healthy, true, false, now),
+            "成功排期的抖动不能把房间挤出整平台批量拍"
+        );
+        assert!(!batch_room_ready(&healthy, true, true, now));
+        assert!(!batch_room_ready(&healthy, false, false, now));
     }
 
     fn entry(offset_secs: u64) -> Schedule {

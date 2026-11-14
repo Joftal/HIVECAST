@@ -93,10 +93,11 @@ fn canonical_reference(reference: &RoomRef, info: &RoomInfo) -> RoomRef {
     if stable == reference.room_key {
         return reference.clone();
     }
-    let canonical_url = if reference.platform == "bilibili" {
-        format!("https://live.bilibili.com/{stable}")
-    } else {
-        reference.canonical_url.clone()
+    let canonical_url = match reference.platform.as_str() {
+        "bilibili" => format!("https://live.bilibili.com/{stable}"),
+        // 斗鱼别名同样归一到数字房间号，后续导入数字 room_id 才能命中同一行。
+        "douyu" => format!("https://www.douyu.com/{stable}"),
+        _ => reference.canonical_url.clone(),
     };
     RoomRef {
         platform: reference.platform.clone(),
@@ -1583,6 +1584,34 @@ mod tests {
         no_stable.stable_id = None;
         let unchanged = canonical_reference(&reference, &no_stable);
         assert_eq!(unchanged.room_key, "6");
+    }
+
+    #[test]
+    fn canonical_reference_promotes_douyu_alias_to_numeric_room() {
+        let reference = RoomRef {
+            platform: "douyu".into(),
+            room_key: "yyfyyf".into(),
+            canonical_url: "https://www.douyu.com/yyfyyf".into(),
+            input: "https://www.douyu.com/yyfyyf".into(),
+        };
+        let info = RoomInfo {
+            host_name: "主播".into(),
+            room_name: "标题".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: None,
+            online: None,
+            stable_id: Some("9999".into()),
+            extra: serde_json::Value::Null,
+        };
+        let canonical = canonical_reference(&reference, &info);
+        assert_eq!(canonical.room_key, "9999");
+        assert_eq!(
+            canonical.canonical_url, "https://www.douyu.com/9999",
+            "别名房间归一后，导入数字 room_id 才能命中同一行"
+        );
     }
 
     #[test]
