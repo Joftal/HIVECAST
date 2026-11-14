@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use hivecast_ipc::{
-    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, FfmpegStatus,
-    FilenamePreview, FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo,
-    LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback,
-    PostResult, QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord,
-    RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord,
-    TrashInfo, ViewSlotInfo,
+    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, DouyuFollowingPage,
+    FfmpegStatus, FilenamePreview, FollowingPage, ImportFailure, ImportRoomInput,
+    ImportRoomsResult, LineInfo, LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem,
+    MediaPage, MonitorStatus, Playback, PostResult, QrPoll, QrTicket, RecordSession,
+    RecordingUsage, RefreshStatus, RoomRecord, RoomView, SessionSummary, Settings,
+    StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -291,11 +291,49 @@ pub async fn bilibili_follow_statuses(uids: Vec<String>) -> Result<Vec<LiveStatu
         .map_err(map_bilibili_error)
 }
 
+/// 斗鱼接口的 -1 通常表示登录态失效；其余错误保持原样。
+fn map_douyu_error(err: crate::platform::PlatformError) -> AppError {
+    match err {
+        crate::platform::PlatformError::Upstream { code: -1, .. } => {
+            AppError::User("斗鱼登录已失效，请重新扫码登录".into())
+        }
+        other => other.into(),
+    }
+}
+
+#[tauri::command]
+pub async fn douyu_follow_page(page: Option<u32>) -> Result<DouyuFollowingPage, AppError> {
+    crate::platform::douyu_follow::fetch_follow_page(page.unwrap_or(1))
+        .await
+        .map_err(map_douyu_error)
+}
+
 /// 批量导入关注的主播：只写本地库，不逐房间请求平台。
 ///
 /// 已经存在的房间只刷新展示字段，不覆盖用户设置的画质/线路/备注/自动录制；
 /// 没有直播间的关注记为失败，而不是当成离线房间加进来。
-fn import_room_info(item: &ImportRoomInput, uid: &str, uname: &str) -> crate::platform::RoomInfo {
+fn import_room_info(
+    item: &ImportRoomInput,
+    platform: &str,
+    uid: &str,
+    uname: &str,
+) -> crate::platform::RoomInfo {
+    // 两个平台的 extra 是刷新时回填状态的缓存，键不能混用：
+    // 斗鱼没有 UID，轮播标记必须保留；B 站继续用 UID 做批量状态映射。
+    let extra = if platform == "douyu" {
+        serde_json::json!({
+            "roomId": item.room_id.trim(),
+            "liveStatus": if item.is_live { 1 } else { 0 },
+            "videoLoop": item.video_loop.unwrap_or(false),
+        })
+    } else {
+        serde_json::json!({
+            "uid": uid,
+            "roomId": item.room_id.trim(),
+            "shortId": item.short_id,
+            "liveStatus": if item.is_live { 1 } else { 0 },
+        })
+    };
     crate::platform::RoomInfo {
         host_name: uname.to_string(),
         room_name: item.title.clone(),
@@ -306,12 +344,7 @@ fn import_room_info(item: &ImportRoomInput, uid: &str, uname: &str) -> crate::pl
         started_at: item.started_at,
         online: item.online,
         stable_id: Some(item.room_id.trim().to_string()),
-        extra: serde_json::json!({
-            "uid": uid,
-            "roomId": item.room_id.trim(),
-            "shortId": item.short_id,
-            "liveStatus": if item.is_live { 1 } else { 0 },
-        }),
+        extra,
     }
 }
 
@@ -339,67 +372,86 @@ pub async fn rooms_import(
     let mut started: Vec<RoomRecord> = Vec::new();
 
     for item in items {
+        // 缺省按 B 站处理，兼容旧前端；斗鱼没有独立 UID，房间号就是稳定键。
+        let platform = item.platform.as_deref().unwrap_or("bilibili");
+        let is_bilibili = platform == "bilibili";
         let uid = item.uid.trim();
+        let room_id = item.room_id.trim();
+        let identity = if is_bilibili && !uid.is_empty() {
+            uid
+        } else {
+            room_id
+        };
         let uname = if item.uname.trim().is_empty() {
-            uid.to_string()
+            if uid.is_empty() {
+                room_id.to_string()
+            } else {
+                uid.to_string()
+            }
         } else {
             item.uname.trim().to_string()
         };
-        let room_id = item.room_id.trim();
         if room_id.is_empty() {
             failed.push(ImportFailure {
-                uid: uid.to_string(),
+                uid: identity.to_string(),
                 uname,
                 message: "没有可用的直播间".into(),
             });
             continue;
         };
 
-        // 同一个主播可能已经用短号加过：先按真实房间号查，再按 UID 兜底。
+        // B 站同一个主播可能已经用短号加过：先按真实房间号查，再按 UID 兜底。
         // 两边都命中时合并，避免导入后又留下两条指向同一直播间的记录。
-        let canonical_url = format!("https://live.bilibili.com/{room_id}");
-        let mut known = state.db.find_room("bilibili", room_id)?;
-        if let Some(alias) = state.db.find_room_by_uid("bilibili", uid)? {
-            if known.as_ref().map_or(true, |room| room.id != alias.id) {
-                match known.take() {
-                    None => {
-                        state.db.rekey_room(&alias.id, room_id, &canonical_url)?;
-                        rekeyed += 1;
-                        tracing::info!(
-                            target: "hivecast_lib::commands",
-                            room_id = %alias.id,
-                            room_key = room_id,
-                            uid,
-                            "导入关注：短号行改挂真实房间号"
-                        );
-                        known = state.db.get_room(&alias.id)?;
-                    }
-                    Some(primary) => {
-                        // 短号行可能已经软删、而 UID 行还在用：这时保留仍在
-                        // 使用的那条，把它的设置当作 keep，不能反过来吞掉。
-                        let primary_active = !state.db.room_removed(&primary.id)?;
-                        let alias_active = !state.db.room_removed(&alias.id)?;
-                        let (keep, drop) = if !primary_active && alias_active {
-                            (&alias, &primary)
-                        } else {
-                            (&primary, &alias)
-                        };
-                        state.db.merge_room(&keep.id, &drop.id)?;
-                        merged += 1;
-                        tracing::info!(
-                            target: "hivecast_lib::commands",
-                            keep = %keep.id,
-                            keep_key = %keep.room_key,
-                            drop = %drop.id,
-                            drop_key = %drop.room_key,
-                            uid,
-                            "导入关注：合并重复房间"
-                        );
-                        if keep.room_key != room_id {
-                            state.db.rekey_room(&keep.id, room_id, &canonical_url)?;
+        // 斗鱼没有短号别名，直接按房间号查。
+        let canonical_url = if is_bilibili {
+            format!("https://live.bilibili.com/{room_id}")
+        } else {
+            format!("https://www.douyu.com/{room_id}")
+        };
+        let mut known = state.db.find_room(platform, room_id)?;
+        if is_bilibili {
+            if let Some(alias) = state.db.find_room_by_uid(platform, uid)? {
+                if known.as_ref().map_or(true, |room| room.id != alias.id) {
+                    match known.take() {
+                        None => {
+                            state.db.rekey_room(&alias.id, room_id, &canonical_url)?;
                             rekeyed += 1;
+                            tracing::info!(
+                                target: "hivecast_lib::commands",
+                                room_id = %alias.id,
+                                room_key = room_id,
+                                uid,
+                                "导入关注：短号行改挂真实房间号"
+                            );
+                            known = state.db.get_room(&alias.id)?;
                         }
-                        known = state.db.get_room(&keep.id)?;
+                        Some(primary) => {
+                            // 短号行可能已经软删、而 UID 行还在用：这时保留仍在
+                            // 使用的那条，把它的设置当作 keep，不能反过来吞掉。
+                            let primary_active = !state.db.room_removed(&primary.id)?;
+                            let alias_active = !state.db.room_removed(&alias.id)?;
+                            let (keep, drop) = if !primary_active && alias_active {
+                                (&alias, &primary)
+                            } else {
+                                (&primary, &alias)
+                            };
+                            state.db.merge_room(&keep.id, &drop.id)?;
+                            merged += 1;
+                            tracing::info!(
+                                target: "hivecast_lib::commands",
+                                keep = %keep.id,
+                                keep_key = %keep.room_key,
+                                drop = %drop.id,
+                                drop_key = %drop.room_key,
+                                uid,
+                                "导入关注：合并重复房间"
+                            );
+                            if keep.room_key != room_id {
+                                state.db.rekey_room(&keep.id, room_id, &canonical_url)?;
+                                rekeyed += 1;
+                            }
+                            known = state.db.get_room(&keep.id)?;
+                        }
                     }
                 }
             }
@@ -409,7 +461,7 @@ pub async fn rooms_import(
                 state.db.rekey_room(&room.id, room_id, &canonical_url)?;
                 rekeyed += 1;
             }
-            let info = import_room_info(&item, uid, &uname);
+            let info = import_room_info(&item, platform, uid, &uname);
             // 软删除的行不在界面上，导入时必须恢复，否则会误报「已存在」。
             if state.db.room_removed(&room.id)? {
                 let draft = RoomRecord {
@@ -417,7 +469,11 @@ pub async fn rooms_import(
                     canonical_url: canonical_url.clone(),
                     auto_record,
                     monitor_paused: !monitor,
-                    platform_uid: Some(uid.to_string()),
+                    platform_uid: if is_bilibili {
+                        Some(uid.to_string())
+                    } else {
+                        None
+                    },
                     updated_at: timestamp,
                     ..room
                 };
@@ -437,7 +493,7 @@ pub async fn rooms_import(
                         }
                     }
                     Err(err) => failed.push(ImportFailure {
-                        uid: uid.to_string(),
+                        uid: identity.to_string(),
                         uname,
                         message: err.to_string(),
                     }),
@@ -447,7 +503,7 @@ pub async fn rooms_import(
                 match state.db.update_room_info(&room.id, &info) {
                     Ok(()) => existing += 1,
                     Err(err) => failed.push(ImportFailure {
-                        uid: uid.to_string(),
+                        uid: identity.to_string(),
                         uname,
                         message: err.to_string(),
                     }),
@@ -457,7 +513,7 @@ pub async fn rooms_import(
         }
         let draft = RoomRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            platform: "bilibili".into(),
+            platform: platform.to_string(),
             room_key: room_id.to_string(),
             canonical_url,
             title: item.title.clone(),
@@ -491,9 +547,13 @@ pub async fn rooms_import(
             notify_error: None,
             created_at: timestamp,
             updated_at: timestamp,
-            platform_uid: Some(uid.to_string()),
+            platform_uid: if is_bilibili {
+                Some(uid.to_string())
+            } else {
+                None
+            },
         };
-        let info = import_room_info(&item, uid, &uname);
+        let info = import_room_info(&item, platform, uid, &uname);
         match state.db.insert_room(&draft, &info) {
             Ok(room) => {
                 added += 1;
@@ -502,7 +562,7 @@ pub async fn rooms_import(
                 }
             }
             Err(err) => failed.push(ImportFailure {
-                uid: uid.to_string(),
+                uid: identity.to_string(),
                 uname,
                 message: err.to_string(),
             }),
@@ -1578,6 +1638,7 @@ mod tests {
     #[test]
     fn import_room_info_keeps_started_at() {
         let item = ImportRoomInput {
+            platform: None,
             uid: "42".into(),
             room_id: " 7734200 ".into(),
             short_id: Some("6".into()),
@@ -1589,12 +1650,40 @@ mod tests {
             is_live: true,
             started_at: Some(1_792_050_615),
             online: Some(10),
+            video_loop: None,
         };
-        let info = import_room_info(&item, "42", "主播");
+        let info = import_room_info(&item, "bilibili", "42", "主播");
         assert_eq!(info.started_at, Some(1_792_050_615));
         assert_eq!(info.stable_id.as_deref(), Some("7734200"));
         assert_eq!(info.extra["liveStatus"], 1);
         assert_eq!(info.extra["roomId"], "7734200");
+    }
+
+    #[test]
+    fn douyu_import_keeps_video_loop_without_a_uid() {
+        let item = ImportRoomInput {
+            platform: Some("douyu".into()),
+            uid: String::new(),
+            room_id: "9999".into(),
+            short_id: None,
+            uname: "主播".into(),
+            title: "轮播".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: false,
+            started_at: None,
+            online: Some(0),
+            video_loop: Some(true),
+        };
+        let info = import_room_info(&item, "douyu", "", "主播");
+        assert_eq!(info.extra["roomId"], "9999");
+        assert_eq!(info.extra["liveStatus"], 0);
+        assert_eq!(
+            info.extra["videoLoop"], true,
+            "轮播标记必须写进 extra，刷新后不能再当直播"
+        );
+        assert!(info.extra.get("uid").is_none(), "斗鱼没有账号 UID");
     }
 
     #[test]

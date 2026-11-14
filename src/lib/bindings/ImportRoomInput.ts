@@ -3,8 +3,16 @@
 /**
  * 导入一条关注主播所需的快照；由前端从关注列表与批量状态拼出来。
  */
-export type ImportRoomInput = { uid: string, roomId: string, shortId: string | null, uname: string, title: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean,
+export type ImportRoomInput = {
+/**
+ * 关注来源平台；缺省按 B 站处理，兼容旧调用方。
+ */
+platform: string | null, uid: string, roomId: string, shortId: string | null, uname: string, title: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean,
 /**
  * 平台给出的本场开播时间；导入时带上，避免沿用上一次的开播时间。
  */
-startedAt: number | null, online: number | null, };
+startedAt: number | null, online: number | null,
+/**
+ * 斗鱼轮播标志；导入时写进房间 extra，避免刷新后误判。
+ */
+videoLoop: boolean | null, };

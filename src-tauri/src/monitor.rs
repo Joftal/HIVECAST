@@ -89,6 +89,32 @@ impl Default for Schedule {
     }
 }
 
+/// 一个平台的批量状态节奏。
+///
+/// 每个平台各自持有拍点、间隔、在途标记与限流冷却：斗鱼的关注列表接口
+/// 和 B 站的批量状态接口限流互不影响，不能共用一个拍点。
+struct BatchState {
+    at: Option<Instant>,
+    interval: Option<i64>,
+    inflight: Arc<AtomicBool>,
+    not_before: Arc<Mutex<Option<Instant>>>,
+}
+
+impl BatchState {
+    fn new() -> Self {
+        Self {
+            at: None,
+            interval: None,
+            inflight: Arc::new(AtomicBool::new(false)),
+            not_before: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+/// 斗鱼关注数达到这个量级才值得走批量：少量房间单查更准，也不会因为
+/// 关注列表里缺一个房间就整批回退。
+const DOUYU_BATCH_MIN_ROOMS: usize = 3;
+
 /// 监控排期快照：命令层读取，详情抽屉轮询显示下次检查与退避。
 pub type MonitorStatusMap = Arc<Mutex<HashMap<String, hivecast_ipc::MonitorStatus>>>;
 
@@ -129,17 +155,11 @@ pub fn spawn(
         let mut settings_at = Instant::now();
         // 房间列表缓存：单独的 Option 而不是包在 tick 里，跨拍复用（B7）。
         let mut rooms_cache: Option<(Instant, Vec<hivecast_ipc::RoomRecord>)> = None;
-        // B 站批量状态的自有节奏：所有可批量房间共用一个拍点。
-        // 批量拍点只决定「什么时候发」，不替代每个房间的排期展示。
-        let mut batch_at: Option<Instant> = None;
-        // 记住 batch_at 是按哪个间隔排的；用户改监控间隔后要按新间隔重排。
-        let mut batch_interval: Option<i64> = None;
-        // 批量任务是否还在路上。用原子量而不是从房间 inflight 推：
-        // 批量成功后还要做 DB 写入与自动开录，不能只看网络请求。
-        let batch_inflight = Arc::new(AtomicBool::new(false));
-        // 批量接口被风控后的平台级冷却截止时间。不是并发上限：
-        // 只是平台明确说「现在别打」时，别让下一拍又去撞一次。
-        let batch_not_before: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        // 每个平台各自的批量节奏：拍点只决定「什么时候发」，
+        // 不替代每个房间的排期展示，也互不影响。
+        let mut batches: HashMap<&'static str, BatchState> = HashMap::new();
+        batches.insert("bilibili", BatchState::new());
+        batches.insert("douyu", BatchState::new());
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -163,10 +183,7 @@ pub fn spawn(
                 &mut schedule,
                 &tx,
                 &mut rooms_cache,
-                &mut batch_at,
-                &mut batch_interval,
-                &batch_inflight,
-                &batch_not_before,
+                &mut batches,
                 base_secs,
             );
             snapshot_statuses(&schedule, &statuses);
@@ -194,6 +211,33 @@ fn is_batchable(room: &hivecast_ipc::RoomRecord) -> bool {
             .platform_uid
             .as_deref()
             .is_some_and(|uid| !uid.trim().is_empty())
+}
+
+/// 这个房间这一拍该走哪个平台的批量状态；None 表示单房间检查。
+fn batchable_platform(room: &hivecast_ipc::RoomRecord, douyu_ready: bool) -> Option<&'static str> {
+    if is_batchable(room) {
+        return Some("bilibili");
+    }
+    if douyu_ready && room.platform == "douyu" && !room.room_key.trim().is_empty() {
+        return Some("douyu");
+    }
+    None
+}
+
+/// 斗鱼批量门槛：已登录，且未暂停监控的斗鱼房间至少有 3 个。
+///
+/// 少量房间单查更准；关注列表缺房间时还要逐房回退，批量反而多一次请求。
+fn douyu_batch_ready(rooms: &[hivecast_ipc::RoomRecord], logged_in: bool) -> bool {
+    if !logged_in {
+        return false;
+    }
+    rooms
+        .iter()
+        .filter(|room| {
+            room.platform == "douyu" && !room.monitor_paused && !room.room_key.trim().is_empty()
+        })
+        .count()
+        >= DOUYU_BATCH_MIN_ROOMS
 }
 
 /// 每秒把排期快照写给命令层；详情抽屉只读这一份，不直接碰调度内部。
@@ -369,10 +413,7 @@ fn tick(
     schedule: &mut HashMap<String, Schedule>,
     tx: &mpsc::UnboundedSender<(String, Outcome)>,
     rooms_cache: &mut Option<(Instant, Vec<hivecast_ipc::RoomRecord>)>,
-    batch_at: &mut Option<Instant>,
-    batch_interval: &mut Option<i64>,
-    batch_inflight: &Arc<AtomicBool>,
-    batch_not_before: &Arc<Mutex<Option<Instant>>>,
+    batches: &mut HashMap<&'static str, BatchState>,
     base: i64,
 ) {
     // 应用正在退出：监控每秒一拍，若继续检测就会在收尾窗口里再拉起一路，
@@ -449,10 +490,12 @@ fn tick(
     }
 
     if base <= 0 {
-        // 关闭自动检测时丢掉批量节奏；重新开启后按新间隔重新散开，
-        // 不沿用关闭前的旧 batch_at。在途批量仍会回传，inflight 标记照常清。
-        *batch_interval = None;
-        *batch_at = None;
+        // 关闭自动检测时丢掉所有批量节奏；重新开启后按新间隔重新散开，
+        // 不沿用关闭前的旧拍点。在途批量仍会回传，inflight 标记照常清。
+        for state in batches.values_mut() {
+            state.interval = None;
+            state.at = None;
+        }
         return;
     }
 
@@ -461,31 +504,42 @@ fn tick(
     schedule.retain(|id, _| alive.contains(id.as_str()));
 
     let now = Instant::now();
-    // 批量节奏独立于单房间排期：首次按平台散开，之后严格每间隔一次。
+    // 批量节奏独立于单房间排期：每个平台首次按哈希散开，之后严格每间隔一次。
     // 间隔被用户改过（30s → 5m 或反过来）时不能继续按旧节奏：否则调大后
     // 仍会按旧间隔打接口，调小后房间要等旧的长间隔才被查。
-    if *batch_interval != Some(base) {
-        *batch_interval = Some(base);
-        *batch_at = Some(now + Duration::from_secs(spread("batch:bilibili", base) as u64));
-    }
-    let batch_at_now = *batch_at
-        .get_or_insert_with(|| now + Duration::from_secs(spread("batch:bilibili", base) as u64));
-    let mut batch_due = now >= batch_at_now;
-    // 上一批被平台明确限流：冷却没结束前不发下一批，也不把拍点往后推，
-    // 冷却一结束就能立刻补上，而不是再白等一个完整间隔。
-    let cooldown = *batch_not_before
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(at) = cooldown {
-        if now < at {
-            batch_due = false;
-        } else {
-            *batch_not_before
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    let mut batch_due: HashMap<&'static str, bool> = HashMap::new();
+    for platform in ["bilibili", "douyu"] {
+        let state = batches.get_mut(platform).expect("批量状态表缺少平台");
+        if state.interval != Some(base) {
+            state.interval = Some(base);
+            state.at =
+                Some(now + Duration::from_secs(spread(&format!("batch:{platform}"), base) as u64));
         }
+        let at = *state.at.get_or_insert_with(|| {
+            now + Duration::from_secs(spread(&format!("batch:{platform}"), base) as u64)
+        });
+        let mut due = now >= at;
+        // 上一批被平台明确限流：冷却没结束前不发下一批，也不把拍点往后推，
+        // 冷却一结束就能立刻补上，而不是再白等一个完整间隔。
+        let cooldown = *state
+            .not_before
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(at) = cooldown {
+            if now < at {
+                due = false;
+            } else {
+                *state
+                    .not_before
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            }
+        }
+        batch_due.insert(platform, due);
     }
-    let mut batch_rooms: Vec<hivecast_ipc::RoomRecord> = Vec::new();
+    // 斗鱼批量只覆盖关注列表；登录态失效或房间太少时全部退回单房检查。
+    let douyu_ready = douyu_batch_ready(rooms, crate::credential::is_ok("douyu"));
+    let mut batch_rooms: HashMap<&'static str, Vec<hivecast_ipc::RoomRecord>> = HashMap::new();
 
     for room in rooms {
         // 手动暂停监控的房间完全不参与轮询；已有录制继续，直到用户停止或平台断流。
@@ -521,16 +575,19 @@ fn tick(
             }
         }
 
-        // B 站且已知 UID 的房间走批量状态：每个批量拍检查全部可批量房间，
+        // 可批量房间走平台批量状态：每个批量拍检查全部可批量房间，
         // 而不是「谁刚好在拍点上到期才带谁」。后一种做法会让拍点前几秒
         // 到期的房间白等一个完整间隔，实测 30 秒会拖成 60 秒。
-        let batchable = is_batchable(room);
-        if batchable {
+        if let Some(platform) = batchable_platform(room, douyu_ready) {
             // 上一批还在路上时整批跳过；不要在每一拍把拍点往后推，
             // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
-            if batch_due && !batch_inflight.load(Ordering::Acquire) && !entry.inflight {
+            let due = batch_due.get(platform).copied().unwrap_or(false);
+            let inflight = batches
+                .get(platform)
+                .is_some_and(|state| state.inflight.load(Ordering::Acquire));
+            if due && !inflight && !entry.inflight {
                 entry.inflight = true;
-                batch_rooms.push(room.clone());
+                batch_rooms.entry(platform).or_default().push(room.clone());
             }
             continue;
         }
@@ -564,21 +621,29 @@ fn tick(
         });
     }
 
-    if batch_due && !batch_inflight.load(Ordering::Acquire) {
-        // 无论这一拍有没有可批量房间都推进拍点：没有 B 站房间时不能每秒
+    for platform in ["bilibili", "douyu"] {
+        if !batch_due.get(platform).copied().unwrap_or(false) {
+            continue;
+        }
+        let state = batches.get_mut(platform).expect("批量状态表缺少平台");
+        if state.inflight.load(Ordering::Acquire) {
+            continue;
+        }
+        // 无论这一拍有没有可批量房间都推进拍点：没有该平台房间时不能每秒
         // 重复走一遍「到期但没有批次」的分支。
-        *batch_at =
-            Some((now + Duration::from_secs(base as u64)).max(now + Duration::from_secs(1)));
-        if batch_rooms.is_empty() {
-            return;
+        state.at = Some((now + Duration::from_secs(base as u64)).max(now + Duration::from_secs(1)));
+        let rooms = batch_rooms.remove(platform).unwrap_or_default();
+        if rooms.is_empty() {
+            continue;
         }
         tracing::info!(
             target: "hivecast_lib::monitor",
-            rooms = batch_rooms.len(),
+            platform,
+            rooms = rooms.len(),
             interval_sec = base,
-            "B 站批量状态检查开始"
+            "批量状态检查开始"
         );
-        let ids: Vec<String> = batch_rooms.iter().map(|room| room.id.clone()).collect();
+        let ids: Vec<String> = rooms.iter().map(|room| room.id.clone()).collect();
         let app = app.clone();
         let db = db.clone();
         let broker = broker.clone();
@@ -586,9 +651,9 @@ fn tick(
         let tx = tx.clone();
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let completed_for_task = completed.clone();
-        let inflight = batch_inflight.clone();
-        let not_before = batch_not_before.clone();
-        batch_inflight.store(true, Ordering::Release);
+        let inflight = state.inflight.clone();
+        let not_before = state.not_before.clone();
+        inflight.store(true, Ordering::Release);
         tokio::spawn(async move {
             // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死；
             // 但只补没回传的，已经成功的房间不能因 panic 再吃一次 Failed。
@@ -597,13 +662,14 @@ fn tick(
                 db,
                 broker,
                 recorder,
-                batch_rooms,
+                platform,
+                rooms,
                 tx.clone(),
                 completed_for_task,
                 not_before,
             ));
             if let Err(err) = guard.await {
-                tracing::warn!(%err, "B 站批量检测任务异常退出");
+                tracing::warn!(%err, platform, "批量检测任务异常退出");
                 let sent = completed_ids(&completed);
                 for id in ids {
                     if !sent.contains(&id) {
@@ -652,6 +718,7 @@ async fn run_batch_check(
     db: Arc<Db>,
     broker: Arc<StreamBroker>,
     recorder: Arc<Recorder>,
+    platform: &'static str,
     rooms: Vec<hivecast_ipc::RoomRecord>,
     tx: mpsc::UnboundedSender<(String, Outcome)>,
     completed: Arc<Mutex<HashSet<String>>>,
@@ -659,21 +726,40 @@ async fn run_batch_check(
 ) {
     let started = Instant::now();
     let total = rooms.len();
-    let uids: Vec<String> = rooms
-        .iter()
-        .filter_map(|room| room.platform_uid.clone())
-        .collect();
-    match crate::platform::bilibili::fetch_live_statuses(&uids).await {
+    // B 站按账号 UID 映射；斗鱼没有独立 UID，房间号就是键。
+    let keys: Vec<String> = if platform == "douyu" {
+        rooms
+            .iter()
+            .map(|room| room.room_key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect()
+    } else {
+        rooms
+            .iter()
+            .filter_map(|room| room.platform_uid.clone())
+            .collect()
+    };
+    let fetched = if platform == "douyu" {
+        crate::platform::douyu_follow::fetch_live_statuses(&keys).await
+    } else {
+        crate::platform::bilibili::fetch_live_statuses(&keys).await
+    };
+    match fetched {
         Ok(statuses) => {
             let returned = statuses.len();
             let live = statuses.iter().filter(|status| status.is_live).count();
             let mut missing_rooms = Vec::new();
-            let by_uid: HashMap<String, hivecast_ipc::LiveStatus> = statuses
+            let by_key: HashMap<String, hivecast_ipc::LiveStatus> = statuses
                 .into_iter()
                 .map(|status| (status.uid.clone(), status))
                 .collect();
             for room in rooms {
-                match room.platform_uid.as_ref().and_then(|uid| by_uid.get(uid)) {
+                let key = if platform == "douyu" {
+                    Some(room.room_key.as_str())
+                } else {
+                    room.platform_uid.as_deref()
+                };
+                match key.and_then(|key| by_key.get(key)) {
                     Some(status) => {
                         let info = Arc::new(batch_room_info(status, &room));
                         // 先写状态、推事件，再把开录/停录扔到独立任务：
@@ -690,8 +776,13 @@ async fn run_batch_check(
                             target: "hivecast_lib::monitor",
                             room = %room.host_name,
                             room_id = %room.id,
-                            uid = room.platform_uid.as_deref().unwrap_or_default(),
-                            "批量状态缺少该 UID，回退单房间检查"
+                            platform,
+                            key = if platform == "douyu" {
+                                room.room_key.as_str()
+                            } else {
+                                room.platform_uid.as_deref().unwrap_or_default()
+                            },
+                            "批量状态缺少该房间，回退单房间检查"
                         );
                         missing_rooms.push(room);
                     }
@@ -712,13 +803,14 @@ async fn run_batch_check(
             }
             tracing::info!(
                 target: "hivecast_lib::monitor",
+                platform,
                 rooms = total,
-                uids = uids.len(),
+                keys = keys.len(),
                 returned,
                 live,
                 missing,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "B 站批量状态检查完成"
+                "批量状态检查完成"
             );
         }
         Err(err) if err.is_rate_limited() => {
@@ -732,10 +824,11 @@ async fn run_batch_check(
                 Some(Instant::now() + Duration::from_secs(wait));
             tracing::warn!(
                 error = %err,
+                platform,
                 rooms = rooms.len(),
                 retry_after = wait,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "B 站批量状态被限流，整平台冷却"
+                "批量状态被限流，整平台冷却"
             );
             for room in rooms {
                 send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait as i64));
@@ -744,9 +837,10 @@ async fn run_batch_check(
         Err(err) => {
             tracing::warn!(
                 error = %err,
+                platform,
                 rooms = rooms.len(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "B 站批量状态失败，全量降级单房间检查"
+                "批量状态失败，全量降级单房间检查"
             );
             let results = futures_util::future::join_all(rooms.iter().map(|room| async {
                 (
@@ -800,6 +894,7 @@ fn batch_room_info(
             "roomId": status.room_id,
             "shortId": status.short_id,
             "liveStatus": if status.is_live { 1 } else { 0 },
+            "videoLoop": status.video_loop,
         }),
     }
 }
@@ -1202,7 +1297,53 @@ mod tests {
 
         room.platform_uid = Some("42".into());
         room.platform = "douyu".into();
-        assert!(!is_batchable(&room), "只有 B 站有批量状态接口");
+        room.room_key = "9999".into();
+        assert!(!is_batchable(&room), "斗鱼不能复用 B 站的 UID 批量");
+        assert_eq!(
+            batchable_platform(&room, false),
+            None,
+            "未登录或房间不足时斗鱼必须走单房检查"
+        );
+        assert_eq!(
+            batchable_platform(&room, true),
+            Some("douyu"),
+            "登录且达到批量门槛后按房间号进批量"
+        );
+    }
+
+    #[test]
+    fn douyu_batch_requires_login_and_three_live_rooms() {
+        let mut first = batch_room();
+        first.platform = "douyu".into();
+        first.platform_uid = None;
+        first.room_key = "9999".into();
+        let second = hivecast_ipc::RoomRecord {
+            id: "room-2".into(),
+            room_key: "9998".into(),
+            ..first.clone()
+        };
+        let third = hivecast_ipc::RoomRecord {
+            id: "room-3".into(),
+            room_key: "9997".into(),
+            ..first.clone()
+        };
+        let two = vec![first.clone(), second.clone()];
+        assert!(!douyu_batch_ready(&two, true), "两个房间单查更准");
+
+        let mut three = two.clone();
+        three.push(third.clone());
+        assert!(
+            !douyu_batch_ready(&three, false),
+            "未登录时不能请求关注列表"
+        );
+        assert!(douyu_batch_ready(&three, true));
+
+        let mut paused = three;
+        paused[2].monitor_paused = true;
+        assert!(
+            !douyu_batch_ready(&paused, true),
+            "暂停监控的房间不参与批量门槛"
+        );
     }
 
     fn room_info_for(
@@ -1261,6 +1402,7 @@ mod tests {
             cover_url: Some("https://new/cover.jpg".into()),
             area_name: None,
             is_live: true,
+            video_loop: false,
             online: Some(9),
             started_at: Some(200),
         };
@@ -1270,6 +1412,7 @@ mod tests {
         assert_eq!(info.cover_url.as_deref(), Some("https://new/cover.jpg"));
         assert_eq!(info.area_name.as_deref(), Some("旧分区"));
         assert_eq!(info.stable_id.as_deref(), Some("7734200"));
+        assert_eq!(info.extra["videoLoop"], false);
         assert_eq!(
             info.started_at,
             Some(200),

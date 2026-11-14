@@ -316,6 +316,7 @@ pub fn run() {
             commands::douyu_refresh_now,
             commands::bilibili_followings,
             commands::bilibili_follow_statuses,
+            commands::douyu_follow_page,
             commands::rooms_import,
             commands::media_list,
             commands::media_group_clips,

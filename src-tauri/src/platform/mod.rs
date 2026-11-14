@@ -6,6 +6,7 @@ pub mod bilibili;
 pub mod douyin;
 pub mod douyin_sign;
 pub mod douyu;
+pub mod douyu_follow;
 pub mod http;
 pub mod huya;
 

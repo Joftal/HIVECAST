@@ -6,6 +6,7 @@ import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
+import type { DouyuFollowingPage } from "./bindings/DouyuFollowingPage";
 import type { FollowingPage } from "./bindings/FollowingPage";
 import type { FollowingUser } from "./bindings/FollowingUser";
 import type { ImportRoomInput } from "./bindings/ImportRoomInput";
@@ -48,6 +49,7 @@ export type {
   CredentialInfo,
   FfmpegStatus,
   FilenamePreview,
+  DouyuFollowingPage,
   FollowingPage,
   FollowingUser,
   ImportRoomInput,
@@ -133,6 +135,11 @@ export async function bilibiliFollowings(page = 1): Promise<FollowingPage> {
 /** 按 UID 批量查询直播状态；没有返回的 UID 表示该用户没有直播间。 */
 export async function bilibiliFollowStatuses(uids: string[]): Promise<LiveStatus[]> {
   return invoke<LiveStatus[]>("bilibili_follow_statuses", { uids });
+}
+
+/** 斗鱼关注列表；每页最多 120 条，条目已带直播状态，不需要再批量查一次。 */
+export async function douyuFollowPage(page = 1): Promise<DouyuFollowingPage> {
+  return invoke<DouyuFollowingPage>("douyu_follow_page", { page });
 }
 
 /** 把关注列表里选中的主播导入监控列表；已存在的房间只刷新展示信息。 */

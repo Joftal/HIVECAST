@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { Checkbox } from "../../components/arc/checkbox/checkbox";
-import { Button, Chip, Switch, cx } from "../../components/ui/Controls";
+import { Button, Chip, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { PageChip } from "../../components/ui/PageShell";
 import { useNotify } from "../../lib/notify";
 import {
   bilibiliFollowings,
   bilibiliFollowStatuses,
+  douyuFollowPage,
   roomsImport,
   type FollowingUser,
   type ImportRoomInput,
@@ -27,8 +28,10 @@ type Props = {
 
 type Filter = "all" | "live" | "room" | "new" | "existing";
 type Phase = "follows" | "status" | "ready" | "followError" | "statusError";
+type Source = "bilibili" | "douyu";
 
 const FILTERS: Filter[] = ["all", "live", "room", "new", "existing"];
+const SOURCES: Source[] = ["bilibili", "douyu"];
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -57,16 +60,17 @@ function FollowAvatar({ user }: { user: FollowingUser }) {
 }
 
 /**
- * B 站关注导入。
+ * 关注导入（B 站 / 斗鱼）。
  *
- * 关注列表只在打开弹窗时拉取（每页 50 条，页间留 180ms），随后用一次批量状态接口
- * 补齐直播间、在播与封面信息。导入本身只写本地库，不逐房间请求 B 站；已存在的房间
+ * B 站关注列表每页 50 条，拉完后用一次批量状态接口补齐直播间；斗鱼关注接口直接带
+ * 直播状态，每页 120 条，不再逐房间请求 betard。导入本身只写本地库；已存在的房间
  * 只刷新展示字段，不覆盖画质、线路、备注和标签。
  */
 export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImported }: Props) {
   const { t } = useTranslation();
   const notify = useNotify();
 
+  const [source, setSource] = useState<Source>("bilibili");
   const [phase, setPhase] = useState<Phase>("follows");
   const [users, setUsers] = useState<FollowingUser[]>([]);
   const [statuses, setStatuses] = useState<Map<string, LiveStatus>>(new Map());
@@ -80,6 +84,11 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportRoomsResult | null>(null);
   const [reload, setReload] = useState(0);
+
+  // 每次重新打开都从 B 站开始；切换平台由下面的加载 effect 负责重新拉取。
+  useEffect(() => {
+    if (open) setSource("bilibili");
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -98,56 +107,104 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     setResult(null);
 
     void (async () => {
-      let all: FollowingUser[] = [];
-      try {
-        const first = await bilibiliFollowings(1);
+      if (source === "bilibili") {
+        let all: FollowingUser[] = [];
+        try {
+          const first = await bilibiliFollowings(1);
+          if (cancelled) return;
+          all = [...first.items];
+          const count = first.total || all.length;
+          const pageSize = first.pageSize || 50;
+          const pages = Math.max(1, Math.ceil(count / pageSize));
+          setTotal(count);
+          setUsers(all);
+          setPageProgress({ done: 1, total: pages });
+          for (let page = 2; page <= pages; page += 1) {
+            await wait(180);
+            if (cancelled) return;
+            const next = await bilibiliFollowings(page);
+            if (cancelled) return;
+            all = [...all, ...next.items];
+            setUsers(all);
+            setPageProgress({ done: page, total: pages });
+          }
+        } catch {
+          if (!cancelled) setPhase("followError");
+          return;
+        }
         if (cancelled) return;
-        all = [...first.items];
-        const count = first.total || all.length;
-        const pageSize = first.pageSize || 50;
-        const pages = Math.max(1, Math.ceil(count / pageSize));
-        setTotal(count);
-        setUsers(all);
+        setPhase("status");
+        try {
+          const live = await bilibiliFollowStatuses(all.map((user) => user.uid));
+          if (cancelled) return;
+          setStatuses(new Map(live.map((item) => [item.uid, item])));
+          setPhase("ready");
+        } catch {
+          if (!cancelled) setPhase("statusError");
+        }
+        return;
+      }
+
+      // 斗鱼：关注接口已经带状态，按页累积成 LiveStatus，再用 roomId 作为稳定键。
+      const live = new Map<string, LiveStatus>();
+      const publish = () => {
+        if (cancelled) return;
+        const items = Array.from(live.values());
+        setUsers(
+          items.map((status) => ({
+            uid: status.roomId ?? status.uid,
+            uname: status.uname,
+            avatarUrl: status.avatarUrl,
+          })),
+        );
+        setStatuses(new Map(items.map((status) => [status.roomId ?? status.uid, status])));
+        setTotal(items.length);
+      };
+      const absorb = (items: LiveStatus[]) => {
+        for (const status of items) {
+          live.set(status.roomId ?? status.uid, status);
+        }
+      };
+      try {
+        const first = await douyuFollowPage(1);
+        if (cancelled) return;
+        absorb(first.items);
+        const pages = Math.max(
+          1,
+          first.pageCount || Math.ceil(Math.max(first.total, first.items.length) / (first.pageSize || 120)),
+        );
+        publish();
         setPageProgress({ done: 1, total: pages });
         for (let page = 2; page <= pages; page += 1) {
           await wait(180);
           if (cancelled) return;
-          const next = await bilibiliFollowings(page);
+          const next = await douyuFollowPage(page);
           if (cancelled) return;
-          all = [...all, ...next.items];
-          setUsers(all);
+          absorb(next.items);
+          publish();
           setPageProgress({ done: page, total: pages });
         }
       } catch {
         if (!cancelled) setPhase("followError");
         return;
       }
-      if (cancelled) return;
-      setPhase("status");
-      try {
-        const live = await bilibiliFollowStatuses(all.map((user) => user.uid));
-        if (cancelled) return;
-        setStatuses(new Map(live.map((item) => [item.uid, item])));
-        setPhase("ready");
-      } catch {
-        if (!cancelled) setPhase("statusError");
-      }
+      if (!cancelled) setPhase("ready");
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [open, reload]);
+  }, [open, reload, source]);
 
   const existing = useMemo(() => {
     const keys = new Set<string>();
     for (const view of rooms) {
-      if (view.room.platform !== "bilibili") continue;
+      if (view.room.platform !== source) continue;
       keys.add(view.room.roomKey);
       if (view.room.platformUid) keys.add(view.room.platformUid);
     }
     return keys;
-  }, [rooms]);
+  }, [rooms, source]);
 
   const isExisting = (user: FollowingUser, status?: LiveStatus) =>
     existing.has(user.uid) ||
@@ -221,6 +278,11 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
 
   async function retryStatuses() {
     if (phase === "status") return;
+    // 斗鱼没有独立的「关注 -> 状态」第二阶段，整页重载即可。
+    if (source === "douyu") {
+      setReload((value) => value + 1);
+      return;
+    }
     setPhase("status");
     try {
       const live = await bilibiliFollowStatuses(users.map((user) => user.uid));
@@ -245,6 +307,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
       return;
     }
     const items: ImportRoomInput[] = chosen.map(({ user, status }) => ({
+      platform: source,
       uid: user.uid,
       roomId: status.roomId as string,
       shortId: status.shortId,
@@ -256,6 +319,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
       isLive: status.isLive,
       startedAt: status.startedAt,
       online: status.online,
+      videoLoop: status.videoLoop,
     }));
     setImporting(true);
     try {
@@ -287,19 +351,44 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
   };
   const statusHint =
     phase === "follows"
-      ? t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
+      ? source === "douyu"
+        ? t("monitor.importFollow.loadingDouyu", { done: pageProgress.done, total: pageProgress.total })
+        : t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
       : phase === "status"
         ? t("monitor.importFollow.statusLoading", { n: users.length })
-        : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
+        : source === "douyu"
+          ? t("monitor.importFollow.summaryDouyu", { total: users.length, live: counts.live })
+          : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
+  const sourceLabel = {
+    bilibili: t("monitor.importFollow.platformBilibili"),
+    douyu: t("monitor.importFollow.platformDouyu"),
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={t("monitor.importFollow.title")}
-        description={t("monitor.importFollow.description")}
+        title={source === "douyu"
+          ? t("monitor.importFollow.titleDouyu")
+          : t("monitor.importFollow.title")}
+        description={source === "douyu"
+          ? t("monitor.importFollow.descriptionDouyu")
+          : t("monitor.importFollow.description")}
         size="lg"
       >
         <div className="flex h-[min(560px,calc(100dvh-200px))] min-h-[360px] flex-col">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <Segmented
+              items={SOURCES.map((key) => ({ key, label: sourceLabel[key] }))}
+              value={source}
+              onChange={(next) => setSource(next)}
+            />
+            <span className="min-w-0 truncate text-[11.5px] text-faint">
+              {source === "douyu"
+                ? t("monitor.importFollow.platformHintDouyu")
+                : t("monitor.importFollow.platformHintBilibili")}
+            </span>
+          </div>
+
           <div className="flex items-start gap-3 rounded-[8px] border border-line bg-raised/40 px-3 py-2.5">
             <div className="min-w-0 flex-1">
               <div className="text-[12.5px] text-ink">{statusHint}</div>
@@ -311,9 +400,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                       ? pageProgress.total > 0
                         ? Math.max(4, (pageProgress.done / pageProgress.total) * 100) + "%"
                         : "4%"
-                      : phase === "status"
-                        ? "100%"
-                        : "100%",
+                      : "100%",
                   }}
                 />
               </div>
@@ -334,7 +421,9 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
 
           {phase === "followError" ? (
             <div className="mt-3 rounded-[8px] border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-5 text-warn">
-              {t("monitor.importFollow.followFailed")}
+              {source === "douyu"
+                ? t("monitor.importFollow.followFailedDouyu")
+                : t("monitor.importFollow.followFailed")}
             </div>
           ) : null}
           {phase === "statusError" ? (

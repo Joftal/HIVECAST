@@ -5,6 +5,10 @@
  */
 export type LiveStatus = { uid: string, roomId: string | null, shortId: string | null, uname: string, title: string, avatarUrl: string | null, coverUrl: string | null, areaName: string | null, isLive: boolean,
 /**
+ * 斗鱼轮播录像：show_status 可能是 1，但 videoLoop=1 不算真正开播。
+ */
+videoLoop: boolean,
+/**
  * 平台给出的本场开播时间（Unix 秒）；0/缺失表示平台没有可用的开播时间。
  */
 startedAt: number | null, online: number | null, };

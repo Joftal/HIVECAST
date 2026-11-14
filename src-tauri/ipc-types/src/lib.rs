@@ -231,6 +231,22 @@ pub struct FollowingPage {
     pub items: Vec<FollowingUser>,
 }
 
+/// 斗鱼关注列表的一页。
+///
+/// 斗鱼接口没有独立的主播 UID，房间号就是稳定键；`items` 直接带直播状态，
+/// 导入弹窗不需要再逐房间请求 betard。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DouyuFollowingPage {
+    #[ts(type = "number")]
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub page_count: u32,
+    pub items: Vec<LiveStatus>,
+}
+
 /// 一位关注主播的直播状态；room_id 为空表示该用户没有直播间。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +261,9 @@ pub struct LiveStatus {
     pub cover_url: Option<String>,
     pub area_name: Option<String>,
     pub is_live: bool,
+    /// 斗鱼轮播录像：show_status 可能是 1，但 videoLoop=1 不算真正开播。
+    #[serde(default)]
+    pub video_loop: bool,
     /// 平台给出的本场开播时间（Unix 秒）；0/缺失表示平台没有可用的开播时间。
     #[ts(type = "number | null")]
     pub started_at: Option<i64>,
@@ -257,6 +276,9 @@ pub struct LiveStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/lib/bindings/")]
 pub struct ImportRoomInput {
+    /// 关注来源平台；缺省按 B 站处理，兼容旧调用方。
+    #[serde(default)]
+    pub platform: Option<String>,
     pub uid: String,
     pub room_id: String,
     pub short_id: Option<String>,
@@ -272,6 +294,9 @@ pub struct ImportRoomInput {
     pub started_at: Option<i64>,
     #[ts(type = "number | null")]
     pub online: Option<u64>,
+    /// 斗鱼轮播标志；导入时写进房间 extra，避免刷新后误判。
+    #[serde(default)]
+    pub video_loop: Option<bool>,
 }
 
 /// 单条导入失败的原因；不阻断其他条目。

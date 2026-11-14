@@ -708,6 +708,7 @@ fn status_from_item(key: String, item: StatusItem) -> LiveStatus {
         cover_url: non_empty(item.cover_from_user).or_else(|| non_empty(item.keyframe)),
         area_name: non_empty(item.area_name),
         is_live: item.live_status == 1,
+        video_loop: false,
         // 只有本场正在直播时，live_time 才是本场开播时间；离线房间即使
         // 返回了上一次的开播时间，也不能把它当成当前场次。
         started_at: if item.live_status == 1 {
