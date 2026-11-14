@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hivecast_ipc::{
@@ -1331,23 +1331,15 @@ pub async fn room_merge_sessions(
         }
         offset += count;
     }
-    let mut sessions: Vec<_> = all_sessions
+    let sessions: Vec<_> = all_sessions
         .into_iter()
         .filter(|session| session.status != "recording" && session.file_path.is_some())
         // 合并产物本身也是 finished 会话，再整房合并时跳过，避免越合越多。
         .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
-    sessions.sort_by_key(|session| session.started_at);
-    let danmaku_sources = danmaku_sources(&sessions);
-    let total_ms: i64 = sessions
-        .iter()
-        .map(|session| session.duration_ms.max(0))
-        .sum();
-    let files: Vec<PathBuf> = sessions
-        .into_iter()
-        .filter_map(|session| session.file_path.map(PathBuf::from))
-        .filter(|path| path.is_file())
-        .collect();
+    let plan = merge_plan(sessions);
+    let total_ms = plan.total_ms;
+    let files = plan.files;
     let title = state
         .db
         .get_room(&room_id)?
@@ -1360,7 +1352,7 @@ pub async fn room_merge_sessions(
     let result = postprocess::merge(&files, None).await;
     match &result {
         Ok(merged) => {
-            let danmaku = merge_danmaku_files(&danmaku_sources, &merged.path);
+            let danmaku = merge_danmaku_files(&plan.danmaku, &merged.path);
             register_merged_session(&state.db, &room_id, merged, danmaku.as_deref(), total_ms);
             job.finish("done", None);
         }
@@ -1387,18 +1379,12 @@ pub async fn sessions_merge(
         }
         sessions.push(session);
     }
-    let total_ms: i64 = sessions
-        .iter()
-        .map(|session| session.duration_ms.max(0))
-        .sum();
-    // 跨房间合并时沿用开录最早那段的房间，媒体库里仍能按房间归档。
-    let merged_room_id = sessions
-        .iter()
-        .min_by_key(|session| session.started_at)
-        .map(|session| session.room_id.clone())
-        .unwrap_or_default();
-    let danmaku_sources = danmaku_sources(&sessions);
-    let files = merge_files_in_order(sessions);
+    // 缺文件的片段必须与它的时长一起剔除。旧实现先按全部片段累加时长推进
+    // 弹幕偏移，再过滤视频，少一段就会让后面的弹幕整体错位。
+    let plan = merge_plan(sessions);
+    let total_ms = plan.total_ms;
+    let merged_room_id = plan.room_id.clone().unwrap_or_default();
+    let files = plan.files;
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
@@ -1412,7 +1398,7 @@ pub async fn sessions_merge(
     let result = postprocess::merge(&files, Some(&progress)).await;
     match &result {
         Ok(merged) => {
-            let danmaku = merge_danmaku_files(&danmaku_sources, &merged.path);
+            let danmaku = merge_danmaku_files(&plan.danmaku, &merged.path);
             register_merged_session(
                 &state.db,
                 &merged_room_id,
@@ -1502,8 +1488,30 @@ fn merge_danmaku_files(sources: &[postprocess::DanmakuSource], merged: &str) -> 
     }
 }
 
-fn danmaku_sources(sessions: &[RecordSession]) -> Vec<postprocess::DanmakuSource> {
-    sessions
+struct MergePlan {
+    files: Vec<PathBuf>,
+    danmaku: Vec<postprocess::DanmakuSource>,
+    total_ms: i64,
+    room_id: Option<String>,
+}
+
+/// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的片段整段跳过。
+/// 视频、弹幕、时长必须来自同一批片段，否则少一段视频就会让后续弹幕错位。
+fn merge_plan(mut sessions: Vec<RecordSession>) -> MergePlan {
+    sessions.sort_by_key(|session| session.started_at);
+    sessions.retain(|session| {
+        session
+            .file_path
+            .as_deref()
+            .map(|path| Path::new(path).is_file())
+            .unwrap_or(false)
+    });
+    let room_id = sessions.first().map(|session| session.room_id.clone());
+    let total_ms: i64 = sessions
+        .iter()
+        .map(|session| session.duration_ms.max(0))
+        .sum();
+    let danmaku = sessions
         .iter()
         .map(|session| postprocess::DanmakuSource {
             jsonl: session
@@ -1513,17 +1521,17 @@ fn danmaku_sources(sessions: &[RecordSession]) -> Vec<postprocess::DanmakuSource
                 .filter(|path| path.is_file()),
             duration_ms: session.duration_ms.max(0),
         })
-        .collect()
-}
-
-/// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的跳过。
-fn merge_files_in_order(mut sessions: Vec<RecordSession>) -> Vec<PathBuf> {
-    sessions.sort_by_key(|session| session.started_at);
-    sessions
+        .collect();
+    let files = sessions
         .into_iter()
         .filter_map(|session| session.file_path.map(PathBuf::from))
-        .filter(|path| path.is_file())
-        .collect()
+        .collect();
+    MergePlan {
+        files,
+        danmaku,
+        total_ms,
+        room_id,
+    }
 }
 
 #[cfg(test)]
@@ -1624,12 +1632,16 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         let missing = dir.join("gone.mp4");
         // 乱序传入，缺失文件在中间。
-        let files = merge_files_in_order(vec![
+        let plan = merge_plan(vec![
             session("2", 200, b.clone()),
             session("3", 300, missing),
             session("1", 100, a.clone()),
         ]);
-        assert_eq!(files, vec![a, b]);
+        assert_eq!(plan.files, vec![a, b]);
+        // 被删掉的那段既不贡献时长，也不推进弹幕偏移。
+        assert_eq!(plan.total_ms, 120_000);
+        assert_eq!(plan.danmaku.len(), 2);
+        assert_eq!(plan.room_id.as_deref(), Some("room"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

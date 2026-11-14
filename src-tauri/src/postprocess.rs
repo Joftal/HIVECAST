@@ -344,6 +344,18 @@ pub fn slice_danmaku(
 ///
 /// 直播里的礼物与上舰本来就是「悬停公告」，跟着聊天一起滚会看不清，
 /// 所以给它们单独的 `\an8\pos` 定位和 5 秒停留时间。
+/// ASS 只能声明一个字体。macOS 用苹方；Windows 必须换成雅黑，否则 libass
+/// 找不到 PingFang SC 会退到无中文字形的字体。Linux 用发行版常见的 Noto。
+fn danmaku_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "PingFang SC"
+    } else if cfg!(target_os = "windows") {
+        "Microsoft YaHei"
+    } else {
+        "Noto Sans CJK SC"
+    }
+}
+
 pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     ensure_file(jsonl)?;
     let raw = std::fs::read_to_string(jsonl)?;
@@ -377,7 +389,8 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     ass.push_str("[V4+ Styles]\n");
     ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
     ass.push_str(&format!(
-        "Style: Danmaku,PingFang SC,{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,7,0,0,0,1\n\n"
+        "Style: Danmaku,{},{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,7,0,0,0,1\n\n",
+        danmaku_font()
     ));
     ass.push_str("[Events]\n");
     ass.push_str(

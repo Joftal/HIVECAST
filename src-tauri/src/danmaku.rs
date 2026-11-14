@@ -1750,10 +1750,22 @@ fn douyu_fields(raw: &str) -> HashMap<&str, &str> {
     fields
 }
 
+/// 斗鱼的 col 是调色板索引，不是 RGB。网页聊天区把 0..=5 映射成红/蓝/绿/金/紫/粉，
+/// 6 是普通正文灰；更大的数值才是历史客户端直接下发的 RGB。
 fn douyu_color(raw: &str) -> u32 {
-    match raw.parse::<u32>() {
-        Ok(0) | Err(_) => 0xFF_FF_FF,
-        Ok(value) => value & 0xFF_FF_FF,
+    let Ok(value) = raw.trim().parse::<u32>() else {
+        return 0xFF_FF_FF;
+    };
+    match value {
+        0 => 0xFF_31_4E,
+        1 => 0x4A_94_EF,
+        2 => 0x70_C1_50,
+        3 => 0xD4_A1_13,
+        4 => 0x8A_5B_E9,
+        5 => 0xE0_4A_C0,
+        6 => 0x33_33_33,
+        7..=0x0F => 0xFF_FF_FF,
+        _ => value & 0xFF_FF_FF,
     }
 }
 
@@ -1770,12 +1782,18 @@ fn douyu_message(raw: &str) -> Option<DanmakuMessage> {
                 kind: "chat".into(),
                 user: fields.get("nn").map(|name| douyu_unescape(name)),
                 content,
-                color: douyu_color(fields.get("col").copied().unwrap_or("0")),
+                // 没有 col 字段时保持白色（发送端偶尔省略，不能按索引 0 当成红色）。
+                color: douyu_color(fields.get("col").copied().unwrap_or("")),
             })
         }
         Some("dgb") => {
             // 礼物：gfid 是礼物 id，gfcnt 是数量，hits 是连击。
-            let name = fields.get("gfn").map(|name| douyu_unescape(name))?;
+            // 个别客户端只下发 gfid 不下发 gfn，此时用 id 兜底，不能整条丢掉。
+            let name = fields
+                .get("gfn")
+                .map(|name| douyu_unescape(name))
+                .or_else(|| fields.get("gfid").map(|id| format!("礼物 {id}")))
+                .unwrap_or_else(|| "礼物".to_string());
             let count = fields.get("gfcnt").copied().unwrap_or("1");
             Some(DanmakuMessage {
                 offset_ms: 0,
@@ -1783,6 +1801,51 @@ fn douyu_message(raw: &str) -> Option<DanmakuMessage> {
                 user: fields.get("nn").map(|name| douyu_unescape(name)),
                 content: format!("{name} x{count}"),
                 color: 0xFF_C8_5C,
+            })
+        }
+        Some("spbc") => {
+            // 房间内礼物广播（火箭/飞机等大礼物）。与 dgb 是两条独立事件：
+            // dgb 给聊天区小条，spbc 给全房间横幅，两条都要留才不会漏礼物。
+            let name = fields.get("gn").map(|name| douyu_unescape(name))?;
+            let count = fields.get("gc").copied().unwrap_or("1");
+            Some(DanmakuMessage {
+                offset_ms: 0,
+                kind: "gift".into(),
+                user: fields.get("sn").map(|name| douyu_unescape(name)),
+                content: format!("{name} x{count}"),
+                color: 0xFF_C8_5C,
+            })
+        }
+        Some("bc_buy_deserve") => {
+            // 酬勤（付费粉丝团任务）是独立于 dgb/spbc 的第三条付费事件。
+            // 发送者放在嵌套序列化的 sui 字段里，需要先解一层转义再取 nn。
+            let nested = fields.get("sui").map(|raw| douyu_unescape(raw));
+            let user = nested
+                .as_deref()
+                .and_then(|raw| douyu_fields(raw).get("nn").copied())
+                .map(douyu_unescape);
+            let level = fields.get("lev").copied().unwrap_or("0");
+            let count = fields.get("cnt").copied().unwrap_or("1");
+            Some(DanmakuMessage {
+                offset_ms: 0,
+                kind: "gift".into(),
+                user,
+                content: format!("酬勤 Lv{level} x{count}"),
+                color: 0xFF_C8_5C,
+            })
+        }
+        Some("ssd") => {
+            // 超级弹幕（付费置顶弹幕）。协议只保证 content，没有发送者字段。
+            let content = douyu_unescape(fields.get("content")?);
+            if content.trim().is_empty() {
+                return None;
+            }
+            Some(DanmakuMessage {
+                offset_ms: 0,
+                kind: "super_chat".into(),
+                user: fields.get("sn").map(|name| douyu_unescape(name)),
+                content,
+                color: 0xFF_8A_00,
             })
         }
         _ => None,
@@ -1841,10 +1904,22 @@ async fn douyu_once(
 
     let mut heartbeat = tokio::time::interval(DOUYU_HEARTBEAT);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // 必须用固定 phase 的 interval。旧实现每轮重建 sleep，刷屏时每来一条消息
+    // 都会把 200ms 窗口重置，flush 可能很久不执行（B 站分支已用同样写法）。
+    let mut batch_tick = tokio::time::interval(BATCH_WINDOW);
+    batch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut idle_check = tokio::time::interval(IDLE_CHECK);
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut stats_tick = tokio::time::interval(Duration::from_secs(60));
+    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_rx = Instant::now();
     let mut window_start = Instant::now();
     let mut count = 0u32;
     let mut batch: Vec<DanmakuMessage> = Vec::new();
     let mut buffer: Vec<u8> = Vec::new();
+    let mut frames = 0u64;
+    let mut parsed = 0u64;
+    let mut batches = 0u64;
 
     loop {
         tokio::select! {
@@ -1856,21 +1931,47 @@ async fn douyu_once(
             incoming = ws.next() => {
                 match incoming {
                     Some(Ok(WsMessage::Binary(data))) => {
+                        last_rx = Instant::now();
                         buffer.extend_from_slice(&data);
                         for raw in douyu_drain(&mut buffer) {
+                            frames += 1;
                             if let Some(message) = douyu_message(&raw) {
+                                parsed += 1;
                                 accept(conn, &mut window_start, &mut count, &mut batch, message);
                             }
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) => return Err("斗鱼弹幕连接被服务端关闭".into()),
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => {
+                        last_rx = Instant::now();
+                    }
                     Some(Err(err)) => return Err(format!("斗鱼弹幕连接异常：{err}")),
                     None => return Err("斗鱼弹幕连接结束".into()),
                 }
             }
-            _ = tokio::time::sleep(BATCH_WINDOW) => {
+            _ = batch_tick.tick() => {
                 flush(app, conn, &mut batch);
+                batches += 1;
+            }
+            _ = idle_check.tick() => {
+                if last_rx.elapsed() >= IDLE_TIMEOUT {
+                    return Err(format!(
+                        "斗鱼弹幕 {} 秒没有收到任何数据，主动重连",
+                        IDLE_TIMEOUT.as_secs()
+                    ));
+                }
+            }
+            _ = stats_tick.tick() => {
+                tracing::info!(
+                    target: "hivecast_lib::danmaku",
+                    room = %conn.room.room_key,
+                    frames,
+                    parsed,
+                    ignored = frames.saturating_sub(parsed),
+                    batches,
+                    dropped = conn.dropped.load(Ordering::Relaxed),
+                    "斗鱼弹幕连接统计"
+                );
             }
         }
 
@@ -1949,6 +2050,61 @@ mod douyu_tests {
     fn ignores_unknown_types_and_blank_text() {
         assert!(douyu_message("type@=uenter/nn@=x/").is_none());
         assert!(douyu_message("type@=chatmsg/nn@=x/txt@=/").is_none());
+    }
+
+    #[test]
+    fn chat_colour_is_palette_index_not_rgb() {
+        // 斗鱼下发的 col 是调色板下标：2 是绿色 #70c150，不是 RGB 0x000002。
+        let green = douyu_message("type@=chatmsg/nn@=a/txt@=hi/col@=2/").unwrap();
+        assert_eq!(green.color, 0x70_C150);
+        let pink = douyu_message("type@=chatmsg/nn@=a/txt@=hi/col@=5/").unwrap();
+        assert_eq!(pink.color, 0xE0_4AC0);
+        // 缺字段时按默认白，不能当成 col=0 的红色。
+        let none = douyu_message("type@=chatmsg/nn@=a/txt@=hi/").unwrap();
+        assert_eq!(none.color, 0xFF_FF_FF);
+    }
+
+    #[test]
+    fn parses_gift_broadcast_and_super_danmaku() {
+        // spbc 是房间内的礼物广播：赠送者 sn、礼物 gn、数量 gc。
+        let gift = douyu_message("type@=spbc/sn@=神秘人/dn@=主播/gn@=时光宝座/gc@=2/gfid@=23716/")
+            .expect("应该解析礼物广播");
+        assert_eq!(gift.kind, "gift");
+        assert_eq!(gift.user.as_deref(), Some("神秘人"));
+        assert_eq!(gift.content, "时光宝座 x2");
+
+        // ssd 是超级弹幕，正文只有 content，没有发送者字段。
+        let super_chat = douyu_message("type@=ssd/rid@=138243/content@=这是一条超级弹幕/sdid@=1/")
+            .expect("应该解析超级弹幕");
+        assert_eq!(super_chat.kind, "super_chat");
+        assert_eq!(super_chat.content, "这是一条超级弹幕");
+    }
+
+    #[test]
+    fn gift_without_name_falls_back_to_gift_id() {
+        let gift =
+            douyu_message("type@=dgb/nn@=观众/gfid@=824/gfcnt@=2/").expect("缺 gfn 也要保留礼物");
+        assert_eq!(gift.content, "礼物 824 x2");
+    }
+
+    #[test]
+    fn parses_deserve_with_nested_user() {
+        let message = douyu_message(
+            "type@=bc_buy_deserve/rid@=138243/level@=12/cnt@=3/hits@=3/lev@=4/sui@=nn@A=测试观众@S/",
+        )
+        .expect("应该解析酬勤通知");
+        assert_eq!(message.kind, "gift");
+        assert_eq!(message.user.as_deref(), Some("测试观众"));
+        assert_eq!(message.content, "酬勤 Lv4 x3");
+    }
+
+    #[test]
+    fn keeps_combo_gift_count_from_server() {
+        let gift =
+            douyu_message("type@=dgb/nn@=观众/gfn@=粉丝荧光棒/gfcnt@=405/hits@=405/gfid@=824/")
+                .expect("应该解析礼物");
+        assert_eq!(gift.kind, "gift");
+        assert_eq!(gift.content, "粉丝荧光棒 x405");
     }
 
     #[tokio::test]
