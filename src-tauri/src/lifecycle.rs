@@ -19,6 +19,8 @@ use crate::state::AppState;
 pub const EVENT_CLOSE_BLOCKED: &str = "app://close-blocked";
 /// 任务已经全部结束，可以安全退出。
 pub const EVENT_CLOSE_READY: &str = "app://close-ready";
+/// 主窗口显示/隐藏：前端据此暂停只在界面上有意义的后台轮询（例如扫码登录）。
+pub const EVENT_WINDOW_VISIBILITY: &str = "app://window-visibility";
 
 static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
 static AUTO_QUIT: AtomicBool = AtomicBool::new(false);
@@ -81,6 +83,7 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Err(err) = window.set_focus() {
         tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "聚焦主窗口失败");
     }
+    emit_visibility(app, true);
 }
 
 fn hide_main<R: Runtime>(app: &AppHandle<R>) {
@@ -90,6 +93,14 @@ fn hide_main<R: Runtime>(app: &AppHandle<R>) {
     };
     if let Err(err) = window.hide() {
         tracing::warn!(target: "hivecast_lib::lifecycle", error = %err, "隐藏主窗口失败");
+    }
+    emit_visibility(app, false);
+}
+
+/// 窗口可能已经不在前台；事件发不出去也不能影响隐藏/显示本身。
+fn emit_visibility<R: Runtime>(app: &AppHandle<R>, visible: bool) {
+    if let Err(err) = app.emit(EVENT_WINDOW_VISIBILITY, visible) {
+        tracing::warn!(target: "hivecast_lib::lifecycle", visible, error = %err, "推送窗口可见性事件失败");
     }
 }
 

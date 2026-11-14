@@ -55,23 +55,6 @@ fn is_dark<R: Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(false)
 }
 
-fn show_main<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window) = app.get_webview_window("main") else {
-        tracing::warn!("托盘唤回主窗口失败：窗口不存在");
-        return;
-    };
-    tracing::debug!("托盘唤回主窗口");
-    if let Err(err) = window.show() {
-        tracing::warn!(error = %err, "显示主窗口失败");
-    }
-    if let Err(err) = window.unminimize() {
-        tracing::warn!(error = %err, "取消最小化主窗口失败");
-    }
-    if let Err(err) = window.set_focus() {
-        tracing::warn!(error = %err, "聚焦主窗口失败");
-    }
-}
-
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let (show, quit) = labels(&language(app));
     let show_item = MenuItem::with_id(app, MENU_SHOW, show, true, None::<&str>)?;
@@ -87,7 +70,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .icon(tray_image(app))
         .on_menu_event(|app, event| match event.id().as_ref() {
-            MENU_SHOW => show_main(app),
+            MENU_SHOW => crate::lifecycle::show_main(app),
             MENU_QUIT => crate::lifecycle::on_quit_requested(app),
             _ => {}
         })
@@ -98,7 +81,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main(tray.app_handle());
+                crate::lifecycle::show_main(tray.app_handle());
             }
         });
     // 模板图让 macOS 按菜单栏明暗自动反色，深色菜单栏下才不会看不见。

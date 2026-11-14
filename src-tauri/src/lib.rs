@@ -367,14 +367,7 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
             tracing::info!("收到 macOS Reopen，重新显示主窗口");
-            if let Some(window) = handle.get_webview_window("main") {
-                if let Err(err) = window.show() {
-                    tracing::warn!(error = %err, "重新显示主窗口失败");
-                }
-                if let Err(err) = window.set_focus() {
-                    tracing::warn!(error = %err, "主窗口聚焦失败");
-                }
-            }
+            crate::lifecycle::show_main(handle);
         }
         if let tauri::RunEvent::Exit = event {
             tracing::info!("应用开始退出收尾");

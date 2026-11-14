@@ -550,6 +550,13 @@ export function onAccountRefresh(handler: () => void): Promise<UnlistenFn> {
   return listen(EVENT_ACCOUNT_REFRESH, () => handler());
 }
 
+/** 主窗口显示/隐藏（关闭到托盘时隐藏）。界面级轮询应只在前台进行。 */
+export const EVENT_WINDOW_VISIBILITY = "app://window-visibility";
+
+export function onWindowVisibility(handler: (visible: boolean) => void): Promise<UnlistenFn> {
+  return listen<boolean>(EVENT_WINDOW_VISIBILITY, (event) => handler(event.payload));
+}
+
 // ---- 关闭与退出 ----
 
 /** 还没结束的录制与后处理任务。 */

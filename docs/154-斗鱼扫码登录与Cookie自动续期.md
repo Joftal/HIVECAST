@@ -2,8 +2,8 @@
 
 > 范围：`src-tauri/src/douyu_auth.rs`、`src-tauri/src/account.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/state.rs`、`src-tauri/src/db.rs`，以及设置页账号卡与 `src/lib/ipc.ts`。
 > 结论：**斗鱼现在有三条账号路径：扫码登录（带 LTP0，可自动续期）、手动粘贴 Cookie（只校验、不续期）、过期后的重新扫码。** 斗鱼不再接受任意非空 Cookie；B 站原有扫码/续期链路未改动。
-> 时间：2026-11-13；基线：`cabe840` + 真实账号验收与文案修正。
-> 真机：真实扫码登录、强制续期、原画 2K60 录制均通过（见 §7.5）。
+> 时间：2026-11-13；2026-11-14 补充扫码请求生命周期复审。基线：`cabe840` + 真实账号验收与文案修正。
+> 真机：真实扫码登录、强制续期、原画 2K60 录制均通过（见 §7.5）；二维码过期/刷新、隐藏窗口暂停轮询见 §11。
 
 ---
 
@@ -300,10 +300,10 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 
 ## 9. 测试
 
-- `cargo test --lib`：**315 passed / 0 failed / 17 ignored**；
-- 斗鱼新增单测覆盖：轮询状态映射、`Set-Cookie` 属性过滤与空值、7 个必填 Cookie、三种设备号、昵称 URL 解码、3 天/6 小时/24 小时节奏、回调只允许斗鱼 HTTPS、风控页不判失效、续期保留旧设备号；
+- `cargo test --lib`：**317 passed / 0 failed / 17 ignored**；
+- 斗鱼新增单测覆盖：轮询状态映射、二维码 code 白名单、`Set-Cookie` 属性过滤与空值、7 个必填 Cookie、三种设备号、昵称 URL 解码、3 天/6 小时/24 小时节奏、回调只允许斗鱼 HTTPS、风控页不判失效、续期保留旧设备号、确认 code 只处理一次；
 - `db.rs` 新增 `credential_secret_is_sealed_and_deleted_with_the_credential`：secret 落库加密、读回明文、删除凭据后 secret 一并删除；
-- 前端：`tsc -b` 通过，`check:i18n` 807 keys，`check:docs` 155 files，`pnpm build` 通过；release bundle 31.68 MiB；
+- 前端：`tsc -b` 通过，`check:i18n` 807 keys，`check:docs` 155 files，`pnpm build` 通过；release bundle 31.74 MiB；
 - 真实账号验收：扫码登录、强制续期、原画 2K60 录制、78 条弹幕全部通过。
 
 ---
@@ -317,3 +317,83 @@ credential_secret: refresh_token=fake-ltp0, device_id=dy_did=fake-device
 3. 删除 `Recording/斗鱼/yyfyyf` 下的测试 flv/jsonl/ass 与空目录；
 4. 保留 `credential`、`credential_secret`、`credential_refresh` 中的真实斗鱼与 B 站记录；
 5. 确认 `room=0`、`record_session=0`，DB 无 `-wal` / `-shm` 残留。
+
+---
+
+## 11. 扫码请求生命周期复审（2026-11-14）
+
+### 11.1 复审范围
+
+本轮只审查扫码登录的请求生命周期，不改变 B 站链路：
+
+- 打开二维码后，谁在轮询、多久一次、并发时会不会叠加；
+- 关闭窗口到托盘、离开账号页、取消二维码时，请求是否停止；
+- 二维码过期、刷新轮换后，旧 code 是否还会继续请求；
+- 手机确认后重复轮询同一个 code，会不会重复走回调、重复写账号；
+- 异常（网络错误、HTTP 429/5xx、回调失败）之后的停表与恢复。
+
+### 11.2 请求模型
+
+扫码轮询是**前端驱动**的，后端 `douyu_auth::qr_poll` 本身不保存定时器：
+
+- 打开二维码后，前端每 1.6 秒调用一次 `douyu_qr_poll`；
+- 单飞标志 `inFlight` 保证上一次没回来时不会叠出第二个请求；后端 `dy_client` 超时 15 秒，即使网络挂起，最多只有一个在途请求；
+- 每次请求约 615 B 入 / 423 B 出（`nettop -p <pid>` 实测），5 分钟二维码生命周期合计约 190 KB；
+- `confirmed`、`expired`、后端 `error` 三种终态会卸载定时器；网络异常不会立即停表，下一轮会自动重试。
+
+### 11.3 已修的三个生命周期问题
+
+**问题 1：关闭窗口后仍空转轮询。**
+
+关闭到托盘只调用 `window.hide()`，WebView 不卸载，React 的 `setInterval` 继续跑。修复：
+
+- `lifecycle::show_main` / `hide_main` 统一发送 `app://window-visibility` 事件；
+- macOS `RunEvent::Reopen` 不再自己 `show/set_focus`，与托盘一起走 `lifecycle::show_main`，避免两条唤回路径只有一条发事件；
+- `AccountSection` 订阅该事件，`!windowVisible` 时轮询 effect 直接返回；重新显示后 effect 重新挂载、自动续上。
+
+真机证据（pid 15463，二维码可见时）：
+
+- 可见时 `nettop` 1 秒增加约 615 B in / 423 B out；
+- 点窗口关闭后，6 次采样字节数完全不变（63,557 / 29,555），日志 `关闭窗口，继续后台运行`；
+- `open -a HIVECAST.app` 触发 Reopen 后，日志 `收到 macOS Reopen，重新显示主窗口`，字节数恢复增长，二维码面板与倒计时仍在。
+
+**问题 2：手机确认后的重复轮询会重复走回调。**
+
+前端在 confirmed 后立即 `setQr(null)`；如果第一次响应在网络上丢失，前端会继续轮询同一个 code。原实现每次 `error == 0` 都会重新跟随回调链、重新 `store_account`、重新写 LTP0。修复：
+
+- `QR_CONFIRM_LOCK` 串行化整个确认后处理（回调 → 7 个 `acf_*` 校验 → 落库 → secret）；
+- `QR_CONFIRMED` 记录最近 32 个已处理 code；重复请求直接返回 `state=confirmed`、`credential=None`，不再触网回调；
+- 只有完整成功后才 `remember_confirmed`；回调失败仍可重试，不会被错误地标记为已登录。
+
+**问题 3：过期二维码的「刷新二维码」可被连点。**
+
+`openQr` 会先 `qrSeq += 1` 并清空旧面板，但按钮未禁用时连续点击会并发调用 `generateCode`。现在刷新按钮加 `disabled={busy}`，与「扫码登录」共用同一个 busy 状态；旧响应仍由 `qrSeq` 代次丢弃。
+
+### 11.4 过期、刷新与取消的真机验证
+
+2026-11-14 08:03:13 生成二维码（`expires_in=300`）：
+
+| 时刻 | 界面 | 网络 | 结论 |
+| --- | --- | --- | --- |
+| 08:03–08:08 | 「等待扫码」+ 倒计时 | 每 1.6 秒稳定增长 | 正常轮询 |
+| 08:09:05 | 「二维码已过期，请刷新」+ 刷新按钮 | 5 次采样字节数不变 | 本地到点即停表 |
+| 08:10:01 点刷新 | 新二维码「等待扫码」 | 日志再次 `二维码已生成 expires_in=300`，字节数恢复增长 | 旧 code 被替换，新 code 正常轮询 |
+| 08:10 后点取消 | 二维码面板关闭，只剩「扫码登录」 | 5 次采样字节数不变 | 取消即卸载轮询 |
+| 关闭窗口再 Reopen | 面板与倒计时保留 | 隐藏期间不变，显示后恢复增长 | 可见性事件生效 |
+
+离开账号页到「关于」页同样会卸载 `AccountSection`，轮询停止；回到账号页二维码按设计不保留，需要重新扫码。
+
+### 11.5 仍保留的边界
+
+1. **HTTP 429 / 5xx 会停表**：后端把它们映射成 `state=error`，前端显示「请求过于频繁/接口异常」和刷新按钮，不会自动重试。这是有意保守：平台明确限流时继续 1.6 秒轮询只会加重风控，交给用户刷新更稳。
+2. **网络层异常仍按 1.6 秒重试**：连接失败、超时没有退避；单飞保证不会叠加，但长时间断网会持续产生失败请求。后续如需省电，可在前端加指数退避，不影响当前正确性。
+3. **重复确认只做了单测**：`confirmed_code_is_processed_only_once` 验证同一个 code 只记一次；真实「两次并发确认」需要手机在同一时刻重复确认，本轮未构造。锁与去重路径已在代码层覆盖。
+4. **去重表是进程内、无 TTL**：最多 32 条，按插入顺序淘汰；应用重启后清空。二维码本身只有 5 分钟，重启后旧 code 也不会再出现在界面上。
+5. **关闭瞬间仍在途的请求**：前端会丢弃迟到的响应，但后端可能已经完成登录并发出 `account://refresh`；账号卡仍会通过事件刷新，不会出现「已登录但界面不更新」。
+
+### 11.6 本轮验证
+
+- `cargo fmt`、`cargo check --all-targets` 通过；`cargo test --lib` **317 passed / 0 failed / 17 ignored**；
+- 新增 `qr_code_validation_rejects_unsafe_input`，覆盖合法 code、过短、空格、路径穿越、超长与非 ASCII；
+- 前端 `tsc -b`、`check:i18n` 807 keys、`check:docs` 155 files、`pnpm build` 通过；
+- release bundle 31.74 MiB，真机验证见 §11.3–§11.4。

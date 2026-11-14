@@ -12,6 +12,7 @@ import {
   credentialsList,
   describeError,
   onAccountRefresh,
+  onWindowVisibility,
   isTauri,
   type CredentialInfo,
   type QrPoll,
@@ -194,6 +195,25 @@ export default function AccountSection() {
     }
   };
 
+  // 关闭到托盘后 WebView 不会卸载；隐藏期间暂停扫码轮询，避免空跑网络请求。
+  const [windowVisible, setWindowVisible] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void onWindowVisibility((visible) => {
+      if (alive) setWindowVisible(visible);
+    })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
   const qrState = qr?.poll?.state ?? "pending";
   const qrMessage =
     qr?.error ??
@@ -221,11 +241,11 @@ export default function AccountSection() {
 
   // 扫码期间每 1.6 秒问一次；confirmed / expired / error 后停表。
   useEffect(() => {
-    if (!qr) return;
+    if (!qr || !windowVisible) return;
     const state = qr.poll?.state ?? "pending";
     if (state !== "pending" && state !== "scanned") return;
     let cancelled = false;
-    // 单飞：HTTP 超时 10s，若网络慢，setInterval 会叠出多个在途 poll。
+    // 单飞：后端 HTTP 超时 15s，若网络慢，setInterval 会叠出多个在途 poll。
     let inFlight = false;
     const timer = window.setInterval(async () => {
       if (cancelled || inFlight) return;
@@ -269,7 +289,7 @@ export default function AccountSection() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [qr?.platform, qr?.ticket.qrcodeKey, qrState, load]);
+  }, [qr?.platform, qr?.ticket.qrcodeKey, qrState, load, windowVisible]);
 
   if (!isTauri()) return null;
 
@@ -361,7 +381,12 @@ export default function AccountSection() {
             {qr.platform === "douyu" ? t("account.qrHintDouyu") : t("account.qrHint")}
           </p>
           {qrState === "expired" || qr?.error ? (
-            <Button size="sm" variant="secondary" onClick={() => void openQr(qr.platform)}>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void openQr(qr.platform)}
+            >
               {t("account.qrRefresh")}
             </Button>
           ) : null}

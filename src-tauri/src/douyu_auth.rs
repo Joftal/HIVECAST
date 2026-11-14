@@ -51,6 +51,10 @@ const MAX_BODY: usize = 1024 * 1024;
 
 /// 定时与手动续期共用一把锁，避免两个 safeAuth 同时换票。
 static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// 扫码确认的后处理（回调、落库）只执行一次；重复轮询直接返回已登录。
+static QR_CONFIRM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// 最近已处理的二维码 code（只保留少量，防止集合无限增长）。
+static QR_CONFIRMED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -253,6 +257,22 @@ fn poll_message(error: i64, fallback: &str) -> String {
     }
 }
 
+fn already_confirmed(code: &str) -> bool {
+    let handled = QR_CONFIRMED.lock().unwrap_or_else(|err| err.into_inner());
+    handled.iter().any(|item| item == code)
+}
+
+fn remember_confirmed(code: &str) {
+    let mut handled = QR_CONFIRMED.lock().unwrap_or_else(|err| err.into_inner());
+    if handled.iter().any(|item| item == code) {
+        return;
+    }
+    handled.push(code.to_string());
+    if handled.len() > 32 {
+        handled.remove(0);
+    }
+}
+
 fn qr_error(message: impl Into<String>) -> QrPoll {
     QrPoll {
         state: "error".into(),
@@ -356,6 +376,19 @@ pub async fn qr_poll(db: &Db, app: &AppHandle, code: &str) -> Result<QrPoll, App
         });
     }
 
+    // 前端可能因为网络抖动重试同一个 code；登录回调与写库必须幂等。
+    // 锁覆盖整个回调链，避免两个并发请求同时通过 already_confirmed 检查。
+    let _confirm = QR_CONFIRM_LOCK.lock().await;
+    if already_confirmed(code) {
+        tracing::debug!(code_len = code.len(), "重复的斗鱼扫码确认，已忽略");
+        return Ok(QrPoll {
+            state: "confirmed".into(),
+            message: "登录成功".into(),
+            expires_in: 0,
+            credential: None,
+        });
+    }
+
     let callback = value
         .get("data")
         .and_then(|data| data.get("url"))
@@ -413,6 +446,7 @@ pub async fn qr_poll(db: &Db, app: &AppHandle, code: &str) -> Result<QrPoll, App
         tracing::warn!("斗鱼扫码登录未拿到 LTP0，自动续期不可用");
     }
     let _ = db.clear_credential_refresh("douyu");
+    remember_confirmed(code);
     crate::account::emit_account_refresh(app);
     tracing::info!(
         account = %row.account_name,
@@ -962,6 +996,17 @@ mod tests {
     }
 
     #[test]
+    fn qr_code_validation_rejects_unsafe_input() {
+        assert!(valid_code("abcd1234"));
+        assert!(valid_code("A1_b-c9xY"));
+        assert!(!valid_code("short"));
+        assert!(!valid_code("has space 12345"));
+        assert!(!valid_code("../../etc/passwd"));
+        assert!(!valid_code(&"a".repeat(65)));
+        assert!(!valid_code("中文中文中文中文"));
+    }
+
+    #[test]
     fn douyu_poll_codes_map_to_states() {
         assert_eq!(poll_state(-2), "pending");
         assert_eq!(poll_state(1), "scanned");
@@ -1053,6 +1098,18 @@ mod tests {
             classify_probe(StatusCode::INTERNAL_SERVER_ERROR, ""),
             Probe::Transient
         ));
+    }
+
+    #[test]
+    fn confirmed_code_is_processed_only_once() {
+        let code = "unit-test-confirm-code-0001";
+        assert!(!already_confirmed(code));
+        remember_confirmed(code);
+        assert!(already_confirmed(code));
+        // 重复写入不会产生第二条记录。
+        remember_confirmed(code);
+        let handled = QR_CONFIRMED.lock().unwrap_or_else(|err| err.into_inner());
+        assert_eq!(handled.iter().filter(|item| *item == code).count(), 1);
     }
 
     #[test]
