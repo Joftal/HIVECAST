@@ -967,6 +967,9 @@ export default function MonitorPage({
     const recordBusy = busy && busyAction === "record";
     const last = lastByRoom.get(room.id);
     const startedAt = view.recording ? view.recording.startedAt : last?.startedAt;
+    // 录制中优先用活动会话的实际画质：升级/降档只更新 session，
+    // room.last_session_quality 要等本场结束才回写，直接用它会一直显示开录时的档位。
+    const shownQuality = view.recording?.quality || room.lastSessionQuality;
     const durationMs = last?.durationMs ?? 0;
     return (
       <div
@@ -1034,10 +1037,10 @@ export default function MonitorPage({
             setDetailMode("settings");
             setSelectedId(room.id);
           }}
-          title={`${t("monitor.actualQuality")}: ${room.lastSessionQuality ?? "—"}\n${t("monitor.targetQuality")}: ${t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}`}
+          title={`${t("monitor.actualQuality")}: ${shownQuality ?? "—"}\n${t("monitor.targetQuality")}: ${t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}`}
           className="focus-ring truncate rounded-ctl text-left text-[12.5px] text-muted transition-colors hover:text-ink"
         >
-          {room.lastSessionQuality ?? t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
+          {shownQuality ?? t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}
         </button>
         <span className="tnum text-right text-[12.5px] leading-4 text-ink-soft">
           {startedAt ? (

@@ -18,7 +18,7 @@ use reqwest::header::{HeaderMap, LOCATION, REFERER, SET_COOKIE};
 use reqwest::redirect::Policy;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use url::Url;
 
 use crate::account::Account;
@@ -653,9 +653,32 @@ fn notify_expired(app: &AppHandle, account_name: &str) {
     }
 }
 
-fn mark_expired(db: &Db, app: &AppHandle, row: &CredentialRow) -> bool {
-    let _guard = crate::account::credential_write_guard();
+/// 当前内存里的斗鱼 Cookie 是否仍是这次续期/复验读到的同一份。
+///
+/// 必须在持有 `credential_write_guard()` 时调用。扫码、粘贴 Cookie、退出登录
+/// 都会在写锁内替换内存凭据；只比较数据库行会在“更新中”把新凭据误标成过期。
+fn cookie_is_current(row: &CredentialRow) -> bool {
+    crate::credential::get("douyu").as_deref() == Some(row.cookie.as_str())
+}
+
+/// 标记过期。调用方必须已持有 `credential_write_guard()`。
+/// 登录态恢复后，让正在录制的房间按新权限重检画质。
+///
+/// 只在「过期 → 恢复」时调用；正常 token 轮换不触发，避免无谓地换 ffmpeg。
+fn recheck_recording(app: &AppHandle, reason: &'static str) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state
+            .recorder
+            .recheck_all_quality(app, state.broker.clone(), reason);
+    }
+}
+
+fn mark_expired_locked(db: &Db, app: &AppHandle, row: &CredentialRow) -> bool {
     if row.status == "expired" {
+        return false;
+    }
+    if !cookie_is_current(row) {
+        tracing::info!("标记过期前发现斗鱼 Cookie 已更新，跳过");
         return false;
     }
     match db.update_credential_profile(
@@ -812,6 +835,12 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
     match probe_result {
         Probe::Ok => {}
         Probe::Invalid => {
+            let guard = crate::account::credential_write_guard();
+            if !cookie_is_current(&row) {
+                drop(guard);
+                tracing::info!("斗鱼续期失败期间 Cookie 已更新，丢弃本次结果");
+                return RefreshOutcome::Discarded;
+            }
             let status = RefreshStatus {
                 checked_at: now_ts(),
                 outcome: "failed".into(),
@@ -820,10 +849,17 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
                 last_refreshed_at: before.last_refreshed_at,
             };
             write_status(db, &status);
-            mark_expired(db, app, &row);
+            mark_expired_locked(db, app, &row);
+            drop(guard);
             return RefreshOutcome::Invalid;
         }
         Probe::Transient => {
+            let guard = crate::account::credential_write_guard();
+            if !cookie_is_current(&row) {
+                drop(guard);
+                tracing::info!("斗鱼续期失败期间 Cookie 已更新，丢弃本次结果");
+                return RefreshOutcome::Discarded;
+            }
             let status = RefreshStatus {
                 checked_at: now_ts(),
                 outcome: "failed".into(),
@@ -832,6 +868,7 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
                 last_refreshed_at: before.last_refreshed_at,
             };
             write_status(db, &status);
+            drop(guard);
             return RefreshOutcome::Transient;
         }
     }
@@ -842,6 +879,12 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
     let keep_device = existing_device(&row.cookie).is_some();
     let merged = merge_refreshed_cookie(&row.cookie, &jar, keep_device);
     if !has_required_cookies(&merged) {
+        let guard = crate::account::credential_write_guard();
+        if !cookie_is_current(&row) {
+            drop(guard);
+            tracing::info!("斗鱼续期结果不完整期间 Cookie 已更新，丢弃本次结果");
+            return RefreshOutcome::Discarded;
+        }
         let status = RefreshStatus {
             checked_at: now_ts(),
             outcome: "failed".into(),
@@ -850,36 +893,45 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
             last_refreshed_at: before.last_refreshed_at,
         };
         write_status(db, &status);
+        drop(guard);
         return RefreshOutcome::Transient;
     }
 
-    // 写回前再次确认 LTP0 没有被换掉；否则这是上一份凭据的续期结果，必须丢弃。
-    let current_ltp0 = db
-        .credential_secret("douyu")
-        .ok()
-        .flatten()
-        .map(|secret| secret.refresh_token)
-        .unwrap_or_default();
-    if current_ltp0 != ltp0 {
-        tracing::warn!("斗鱼续期期间长期凭证已变化，丢弃本次结果");
-        return RefreshOutcome::Discarded;
-    }
-
+    // 写回前在同一把写锁内复核 Cookie 与 LTP0：用户可能在 safeAuth 的几秒里
+    // 重新扫码/粘贴/退出，晚到的续期结果绝不能覆盖新凭据。
     let was_expired = row.status == "expired";
     let now = now_ts();
-    let updated = CredentialRow {
-        cookie: merged.clone(),
-        status: "ok".into(),
-        updated_at: now,
-        ..row
-    };
-    if let Err(err) = db.save_credential(&updated) {
-        tracing::warn!(error = %err, "保存斗鱼续期 Cookie 失败");
-        return RefreshOutcome::Transient;
-    }
-    crate::credential::set("douyu", &merged);
-    if was_expired {
-        crate::credential::set_status("douyu", "ok");
+    let merged_for_save = merged.clone();
+    {
+        let _guard = crate::account::credential_write_guard();
+        if !cookie_is_current(&row) {
+            tracing::info!("斗鱼续期期间 Cookie 已更新，丢弃本轮结果");
+            return RefreshOutcome::Discarded;
+        }
+        let current_ltp0 = db
+            .credential_secret("douyu")
+            .ok()
+            .flatten()
+            .map(|secret| secret.refresh_token)
+            .unwrap_or_default();
+        if current_ltp0 != ltp0 {
+            tracing::warn!("斗鱼续期期间长期凭证已变化，丢弃本次结果");
+            return RefreshOutcome::Discarded;
+        }
+        let updated = CredentialRow {
+            cookie: merged_for_save,
+            status: "ok".into(),
+            updated_at: now,
+            ..row
+        };
+        if let Err(err) = db.save_credential(&updated) {
+            tracing::warn!(error = %err, "保存斗鱼续期 Cookie 失败");
+            return RefreshOutcome::Transient;
+        }
+        crate::credential::set("douyu", &merged);
+        if was_expired {
+            crate::credential::set_status("douyu", "ok");
+        }
     }
     if !keep_device {
         if let Some(device) = existing_device(&merged) {
@@ -897,6 +949,9 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
     crate::account::clear_stream_cache(app);
     crate::account::emit_account_refresh(app);
     tracing::info!("斗鱼 Cookie 自动续期完成");
+    if was_expired {
+        recheck_recording(app, "douyu_refreshed");
+    }
     RefreshOutcome::Refreshed
 }
 
@@ -932,21 +987,35 @@ pub async fn revalidate(db: &Db, app: &AppHandle) {
     match probe(&row.cookie).await {
         Probe::Ok => {
             if row.status == "expired" {
-                let _guard = crate::account::credential_write_guard();
-                let _ = db.update_credential_profile(
-                    "douyu",
-                    "ok",
-                    &row.account_name,
-                    row.avatar.as_deref(),
-                    now_ts(),
-                );
-                crate::credential::set_status("douyu", "ok");
-                crate::account::emit_account_refresh(app);
-                tracing::info!("斗鱼登录态已恢复");
+                let recovered = {
+                    let _guard = crate::account::credential_write_guard();
+                    if !cookie_is_current(&row) {
+                        tracing::info!("斗鱼复验期间 Cookie 已更新，丢弃本次恢复结果");
+                        false
+                    } else {
+                        let _ = db.update_credential_profile(
+                            "douyu",
+                            "ok",
+                            &row.account_name,
+                            row.avatar.as_deref(),
+                            now_ts(),
+                        );
+                        crate::credential::set_status("douyu", "ok");
+                        crate::account::emit_account_refresh(app);
+                        tracing::info!("斗鱼登录态已恢复");
+                        true
+                    }
+                };
+                if recovered {
+                    // 过期期间开录会被按匿名封顶；恢复登录态后主动重检一次，
+                    // 否则要等断流才会回到账号可用的最高档。
+                    recheck_recording(app, "douyu_revalidated");
+                }
             }
         }
         Probe::Invalid => {
-            if mark_expired(db, app, &row) {
+            let _guard = crate::account::credential_write_guard();
+            if mark_expired_locked(db, app, &row) {
                 tracing::warn!("斗鱼登录态已失效，已标记过期");
             }
         }

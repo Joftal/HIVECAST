@@ -85,6 +85,12 @@ pub fn get(platform: &str) -> Option<String> {
 pub fn cookie_for_url(url: &str) -> Option<String> {
     let host = url::Url::parse(url).ok()?.host_str()?.to_lowercase();
     let platform = platform_for_host(&host)?;
+    // 已标记过期的 Cookie 不再发给平台接口：斗鱼在过期态会按匿名封顶画质，
+    // 但把失效登录态继续带上可能触发风控。需要复验/续期的地方都直接读
+    // credential::get(row.cookie)，不依赖这里的自动注入。
+    if !is_ok(platform) {
+        return None;
+    }
     get(platform)
 }
 
@@ -330,6 +336,20 @@ mod tests {
         );
         remove("douyu");
         assert_eq!(cookie_for_url("https://www.douyu.com/9999"), None);
+    }
+
+    #[test]
+    fn expired_cookie_is_not_injected() {
+        set("huya", "x=1");
+        set_status("huya", "expired");
+        assert_eq!(
+            cookie_for_url("https://www.huya.com/123"),
+            None,
+            "过期 Cookie 不能继续注入平台请求"
+        );
+        set_status("huya", "ok");
+        assert!(cookie_for_url("https://www.huya.com/123").is_some());
+        remove("huya");
     }
 
     #[test]
