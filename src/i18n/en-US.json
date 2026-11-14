@@ -404,6 +404,7 @@
     "listBody": "Recording starts when a room goes live and wraps up when it ends. The list refreshes every 15s.",
     "count": "{{n}} rooms",
     "inputPlaceholder": "Paste a room link or ID",
+    "addRoomHint": "Douyu, Bilibili and other live links work. A bare number is treated as a Bilibili room; paste the full link for other platforms.",
     "add": "Add",
     "adding": "Adding…",
     "live": "Live",

@@ -67,7 +67,7 @@ export default function AddRoomDialog({ open, onOpenChange, onAdded }: Props) {
     >
       <DialogContent
         title={t("monitor.addRoom")}
-        description={t("monitor.inputPlaceholder")}
+        description={t("monitor.addRoomHint")}
         size="md"
       >
         <form

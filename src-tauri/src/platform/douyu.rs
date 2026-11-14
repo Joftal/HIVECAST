@@ -644,8 +644,26 @@ impl DouyuAdapter {
             return Ok(key.to_string());
         }
         let url = format!("{ROOM_HOST}/{key}");
-        let (body, _) = http::get_text(&url, REFERER_HOME, &[]).await?;
+        let (body, _) = match http::get_text(&url, REFERER_HOME, &[]).await {
+            Ok(value) => value,
+            // 别名不存在时房间页返回 404；如果原样透传，用户会看到内部 URL 和
+            // HTTP 状态码。这里收敛成和「页面里抠不到 room_id」一样的房间不存在。
+            Err(err) if missing_alias(&err) => {
+                return Err(PlatformError::RoomNotFound(format!("斗鱼房间 {key}")));
+            }
+            Err(err) => return Err(err),
+        };
         extract_room_id(&body).ok_or_else(|| PlatformError::RoomNotFound(format!("斗鱼房间 {key}")))
+    }
+}
+
+/// 别名房间页 404/410 代表房间不存在，而不是网络故障。
+fn missing_alias(err: &PlatformError) -> bool {
+    match err {
+        PlatformError::Network(message) => {
+            message.contains("HTTP 404") || message.contains("HTTP 410")
+        }
+        _ => false,
     }
 }
 
@@ -758,6 +776,20 @@ mod tests {
         assert!(quality_available(80, anon));
         // 平台没有给出可判定档位时，不能把所有画质都判死。
         assert!(quality_available(10000, 0));
+    }
+
+    #[test]
+    fn missing_alias_only_matches_not_found_status() {
+        assert!(missing_alias(&PlatformError::Network(
+            "https://www.douyu.com/xxkk → HTTP 404 Not Found".into()
+        )));
+        assert!(missing_alias(&PlatformError::Network(
+            "https://www.douyu.com/xxkk → HTTP 410 Gone".into()
+        )));
+        assert!(!missing_alias(&PlatformError::Network(
+            "https://www.douyu.com/xxkk → HTTP 500".into()
+        )));
+        assert!(!missing_alias(&PlatformError::Parse("bad".into())));
     }
 
     #[test]

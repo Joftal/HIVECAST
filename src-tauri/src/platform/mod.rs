@@ -215,7 +215,7 @@ impl PlatformError {
 
 #[cfg(test)]
 mod tests {
-    use super::PlatformError;
+    use super::{resolve_input, PlatformError};
 
     #[test]
     fn rate_limited_only_matches_explicit_platform_requests() {
@@ -234,6 +234,14 @@ mod tests {
     fn generic_network_errors_still_back_off_per_room() {
         assert!(PlatformError::Network("timeout".into()).is_throttle());
         assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
+    }
+
+    #[test]
+    fn explicit_platform_prefix_is_not_treated_as_url() {
+        let room = resolve_input("douyu:9999").expect("显式斗鱼前缀应可解析");
+        assert_eq!(room.platform, "douyu");
+        assert_eq!(room.room_key, "9999");
+        assert_eq!(room.canonical_url, "https://www.douyu.com/9999");
     }
 }
 
@@ -280,7 +288,10 @@ pub fn resolve_input(input: &str) -> Result<RoomRef, PlatformError> {
         return Err(PlatformError::Unsupported("输入为空".into()));
     }
 
-    let parsed = Url::parse(raw).ok();
+    // 只把 http(s) 当链接；`douyu:9999` 这类显式前缀交给各平台适配器。
+    let parsed = Url::parse(raw)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"));
     if let Some(url) = &parsed {
         for adapter in registry() {
             if adapter.matches(url) {
