@@ -6,7 +6,7 @@
 //! 3. 两条路径都取、合并并校验 SESSDATA/bili_jct/DedeUserID，再打一次 nav 确认身份，最后落库；
 //! 4. 扫码返回的 refresh_token 以 ac_time_value 并入 Cookie，之后由 refresh_loop 自动续期。
 //!
-//! 斗鱼、抖音各自有独立的扫码/登录窗口模块；虎牙仍只支持粘贴 Cookie。
+//! 其余平台没有公开的扫码接口（斗鱼/虎牙/抖音都依赖风控），v1 走粘贴 Cookie。
 
 use std::time::Duration;
 
@@ -127,7 +127,6 @@ pub(crate) fn info_for_row(db: &Db, row: &CredentialRow) -> CredentialInfo {
     let refreshable = match row.platform.as_str() {
         "bilibili" => credential::has_refresh_token(&row.cookie),
         "douyu" => crate::douyu_auth::has_refresh_token(db),
-        "douyin" => crate::douyin_auth::has_session_cookie(&row.cookie),
         _ => false,
     };
     info_with_refresh(row, refreshable, load_refresh_status(db, &row.platform))
@@ -1041,8 +1040,6 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
         bilibili_nav(&cookie).await?
     } else if platform == "douyu" {
         crate::douyu_auth::validate_cookie(&cookie).await?
-    } else if platform == "douyin" {
-        crate::douyin_auth::validate_cookie(&cookie).await?
     } else {
         Account {
             uid: String::new(),

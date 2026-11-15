@@ -5,7 +5,6 @@ mod credential;
 mod danmaku;
 mod db;
 mod disk;
-mod douyin_auth;
 mod douyin_ws;
 mod douyu_auth;
 mod error;
@@ -315,10 +314,6 @@ pub fn run() {
             commands::douyu_qr_start,
             commands::douyu_qr_poll,
             commands::douyu_refresh_now,
-            commands::douyin_login_open,
-            commands::douyin_login_poll,
-            commands::douyin_login_cancel,
-            commands::douyin_refresh_now,
             commands::bilibili_followings,
             commands::bilibili_follow_statuses,
             commands::douyu_follow_page,

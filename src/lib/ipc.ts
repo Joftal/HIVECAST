@@ -550,24 +550,6 @@ export async function douyuRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("douyu_refresh_now");
 }
 
-/** 打开抖音官方登录页（Tauri 子窗口）；登录态由后端从原生 CookieStore 读取。 */
-export async function douyinLoginOpen(): Promise<QrTicket> {
-  return invoke<QrTicket>("douyin_login_open");
-}
-
-export async function douyinLoginPoll(qrcodeKey: string): Promise<QrPoll> {
-  return invoke<QrPoll>("douyin_login_poll", { qrcodeKey });
-}
-
-export async function douyinLoginCancel(): Promise<void> {
-  return invoke<void>("douyin_login_cancel");
-}
-
-/** 立即检查一次抖音登录态，并尝试同步主页轮换的 Cookie。 */
-export async function douyinRefreshNow(): Promise<RefreshStatus> {
-  return invoke<RefreshStatus>("douyin_refresh_now");
-}
-
 /** 账号凭据或续期状态变化（登录、保存、过期、续期结果写入）。 */
 export const EVENT_ACCOUNT_REFRESH = "account://refresh";
 
