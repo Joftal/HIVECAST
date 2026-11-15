@@ -173,7 +173,7 @@ fn room_rawdata(item: &Value) -> Option<Value> {
     }
 }
 
-fn parse_room(raw: &Value) -> Option<LiveStatus> {
+pub(crate) fn parse_room(raw: &Value) -> Option<LiveStatus> {
     let room_id = text(raw, &["id_str", "id", "room_id"]).or_else(|| {
         raw.get("room")
             .and_then(|room| text(room, &["id_str", "id"]))
@@ -233,7 +233,7 @@ fn parse_room(raw: &Value) -> Option<LiveStatus> {
     })
 }
 
-fn text(value: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn text(value: &Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         let Some(field) = value.get(key) else {
             continue;
@@ -250,7 +250,7 @@ fn text(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn first_url(value: Option<&Value>) -> Option<String> {
+pub(crate) fn first_url(value: Option<&Value>) -> Option<String> {
     let value = value?;
     match value {
         Value::String(text) => non_empty(text.clone()),
@@ -270,7 +270,7 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 /// start_time/create_time 有时是毫秒时间戳，统一成秒。
-fn epoch_seconds(value: i64) -> i64 {
+pub(crate) fn epoch_seconds(value: i64) -> i64 {
     if value > 10_000_000_000 {
         value / 1000
     } else {
@@ -279,7 +279,7 @@ fn epoch_seconds(value: i64) -> i64 {
 }
 
 /// 抖音会返回 "1.2万" 这类在线人数；解析失败不阻断房间状态。
-fn parse_count(raw: &str) -> Option<u64> {
+pub(crate) fn parse_count(raw: &str) -> Option<u64> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;

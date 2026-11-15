@@ -150,6 +150,14 @@ impl AppState {
             crate::douyin_auth::maintenance_loop(db_for_douyin, app_for_douyin).await;
         });
 
+        // 抖音离线关注没有 web_rid，只能低频翻关注列表等开播；这条循环和监控分开，
+        // 不占用房间 30 秒轮询的预算。
+        let db_for_pool = db.clone();
+        let app_for_pool = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::platform::douyin_follow::pool_loop(db_for_pool, app_for_pool).await;
+        });
+
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut media_root = PathBuf::from(&settings.media_root);
         let mut media_fallback = None;

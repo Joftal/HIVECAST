@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hivecast_ipc::{
-    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, DouyuFollowingPage,
-    FfmpegStatus, FilenamePreview, FollowingPage, ImportFailure, ImportRoomInput,
-    ImportRoomsResult, LineInfo, LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem,
-    MediaPage, MonitorStatus, Playback, PostResult, QrPoll, QrTicket, RecordSession,
-    RecordingUsage, RefreshStatus, RoomRecord, RoomView, SessionSummary, Settings,
-    StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo, ViewSlotInfo,
+    ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, DouyinFollow,
+    DouyinFollowingPage, DouyinPoolAddResult, DouyuFollowingPage, FfmpegStatus, FilenamePreview,
+    FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo, LiveStatus,
+    LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
+    QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView,
+    SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo,
+    ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -312,6 +313,65 @@ pub async fn douyu_follow_page(page: Option<u32>) -> Result<DouyuFollowingPage, 
         .map_err(map_douyu_error)
 }
 
+/// 抖音关注列表的一页；顺带标记哪些关注已经在关注池里。
+#[tauri::command]
+pub async fn douyin_follow_page(
+    state: State<'_, AppState>,
+    cursor: Option<String>,
+) -> Result<DouyinFollowingPage, AppError> {
+    let mut page = crate::platform::douyin_follow::fetch_follow_page(cursor.as_deref()).await?;
+    let pool = state.db.list_douyin_follows()?;
+    let by_uid: std::collections::HashMap<&str, &DouyinFollow> =
+        pool.iter().map(|item| (item.uid.as_str(), item)).collect();
+    for item in &mut page.items {
+        if let Some(saved) = by_uid.get(item.uid.as_str()) {
+            item.in_pool = true;
+            item.promoted_room_id = saved.promoted_room_id.clone();
+        }
+    }
+    Ok(page)
+}
+
+/// 把暂时没有直播间的抖音关注放进关注池，开播后由后台扫描自动转成房间。
+#[tauri::command]
+pub fn douyin_pool_add(
+    state: State<'_, AppState>,
+    items: Vec<DouyinFollow>,
+    monitor: Option<bool>,
+    auto_record: Option<bool>,
+) -> Result<DouyinPoolAddResult, AppError> {
+    let monitor = monitor.unwrap_or(true);
+    let auto_record = monitor && auto_record.unwrap_or(false);
+    let existing: std::collections::HashSet<String> = state
+        .db
+        .list_douyin_follows()?
+        .into_iter()
+        .map(|item| item.uid)
+        .collect();
+    let mut added = 0u32;
+    let mut updated = 0u32;
+    for item in items {
+        if item.uid.trim().is_empty() {
+            continue;
+        }
+        if existing.contains(&item.uid) {
+            updated += 1;
+        } else {
+            added += 1;
+        }
+        state.db.upsert_douyin_follow(&item, monitor, auto_record)?;
+    }
+    tracing::info!(
+        target: "hivecast_lib::commands",
+        added,
+        updated,
+        monitor,
+        auto_record,
+        "抖音关注加入关注池"
+    );
+    Ok(DouyinPoolAddResult { added, updated })
+}
+
 /// 批量导入关注的主播：只写本地库，不逐房间请求平台。
 ///
 /// 已经存在的房间只刷新展示字段，不覆盖用户设置的画质/线路/备注/自动录制；
@@ -329,6 +389,14 @@ fn import_room_info(
             "roomId": item.room_id.trim(),
             "liveStatus": if item.is_live { 1 } else { 0 },
             "videoLoop": item.video_loop.unwrap_or(false),
+        })
+    } else if platform == "douyin" {
+        // 抖音的 room_id 是页面 web_rid，批量状态要用内部 19 位号，不能混写。
+        serde_json::json!({
+            "uid": uid,
+            "roomId": item.internal_room_id.as_deref().unwrap_or_default(),
+            "shortId": item.short_id,
+            "liveStatus": if item.is_live { 1 } else { 0 },
         })
     } else {
         serde_json::json!({
@@ -635,6 +703,8 @@ pub async fn room_remove(
     state.view.close_room(&app, &id).await;
     // 停止录制会顺手打上「手动停录」标记；房间都移除了，别让它跨到下次重新添加。
     state.recorder.resume_auto(&id);
+    // 关注池项和房间解绑，下次开播还能重新转正。
+    state.db.release_douyin_follow_room(&id)?;
     state.db.delete_room(&id)?;
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
@@ -1700,6 +1770,7 @@ mod tests {
             started_at: Some(1_792_050_615),
             online: Some(10),
             video_loop: None,
+            internal_room_id: None,
         };
         let info = import_room_info(&item, "bilibili", "42", "主播");
         assert_eq!(info.started_at, Some(1_792_050_615));
@@ -1724,6 +1795,7 @@ mod tests {
             started_at: None,
             online: Some(0),
             video_loop: Some(true),
+            internal_room_id: None,
         };
         let info = import_room_info(&item, "douyu", "", "主播");
         assert_eq!(info.extra["roomId"], "9999");

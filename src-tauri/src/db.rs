@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use hivecast_ipc::{
-    MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, QualitySegment, RecordSession,
-    RoomRecord, SessionSummary, TaskRecord,
+    DouyinFollow, MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, QualitySegment,
+    RecordSession, RoomRecord, SessionSummary, TaskRecord,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -18,7 +18,33 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    platform_uid TEXT,\n    -- 关注导入标记：抖音关注房可用 follow/feed 批量状态，手动房仍走单房\n    batch_follow INTEGER NOT NULL DEFAULT 0,\n    -- 平台内部房间号：抖音批量状态用 19 位 room_id，room_key 是 web_rid\n    internal_room_id TEXT,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    platform_uid TEXT,\n    -- 关注导入标记：抖音关注房可用 follow/feed 批量状态，手动房仍走单房\n    batch_follow INTEGER NOT NULL DEFAULT 0,\n    -- 平台内部房间号：抖音批量状态用 19 位 room_id，room_key 是 web_rid\n    internal_room_id TEXT,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\n-- 抖音关注池：离线关注没有 web_rid，先留在这里等开播；开播拿到 web_rid 后
+-- 转成正式 room，`promoted_room_id` 指回房间。
+CREATE TABLE IF NOT EXISTS douyin_follow (
+    uid TEXT PRIMARY KEY,
+    sec_uid TEXT NOT NULL DEFAULT '',
+    uname TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    web_rid TEXT,
+    internal_room_id TEXT,
+    is_live INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL DEFAULT '',
+    cover_url TEXT,
+    area_name TEXT,
+    online INTEGER,
+    started_at INTEGER,
+    monitor INTEGER NOT NULL DEFAULT 1,
+    auto_record INTEGER NOT NULL DEFAULT 0,
+    promoted_room_id TEXT,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_douyin_follow_pending
+    ON douyin_follow (promoted_room_id, last_checked_at);
+
+CREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -578,6 +604,170 @@ impl Db {
             .execute(
                 "UPDATE room SET last_checked_at = ?2, updated_at = ?2 WHERE id = ?1",
                 params![id, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 关注池：新增或刷新一条关注项。已转正式房间的行不会被重新覆盖成待开播。
+    pub fn upsert_douyin_follow(
+        &self,
+        item: &DouyinFollow,
+        monitor: bool,
+        auto_record: bool,
+    ) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "INSERT INTO douyin_follow (
+                    uid, sec_uid, uname, avatar_url, web_rid, internal_room_id, is_live,
+                    title, cover_url, area_name, online, started_at, monitor, auto_record,
+                    last_checked_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)
+                ON CONFLICT (uid) DO UPDATE SET
+                    sec_uid = CASE WHEN excluded.sec_uid <> '' THEN excluded.sec_uid ELSE sec_uid END,
+                    uname = CASE WHEN excluded.uname <> '' THEN excluded.uname ELSE uname END,
+                    avatar_url = COALESCE(excluded.avatar_url, avatar_url),
+                    web_rid = COALESCE(excluded.web_rid, web_rid),
+                    internal_room_id = COALESCE(excluded.internal_room_id, internal_room_id),
+                    is_live = excluded.is_live,
+                    title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE title END,
+                    cover_url = COALESCE(excluded.cover_url, cover_url),
+                    area_name = COALESCE(excluded.area_name, area_name),
+                    online = excluded.online,
+                    started_at = excluded.started_at,
+                    monitor = excluded.monitor,
+                    auto_record = excluded.auto_record,
+                    last_checked_at = excluded.last_checked_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    item.uid,
+                    item.sec_uid,
+                    item.uname,
+                    item.avatar_url,
+                    item.web_rid,
+                    item.internal_room_id,
+                    item.is_live as i64,
+                    item.title,
+                    item.cover_url,
+                    item.area_name,
+                    item.online,
+                    item.started_at,
+                    monitor as i64,
+                    auto_record as i64,
+                    now,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 关注池列表：在播的排前面，其次按最近检查时间。
+    pub fn list_douyin_follows(&self) -> Result<Vec<DouyinFollow>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT uid, sec_uid, uname, avatar_url, web_rid, internal_room_id, is_live,
+                        title, cover_url, area_name, online, started_at, monitor, auto_record, promoted_room_id
+                   FROM douyin_follow
+                  ORDER BY is_live DESC, last_checked_at DESC, uname ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], map_douyin_follow)
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// 还没转成正式房间的关注项；后台只扫描这些，已转正的交给 follow/feed。
+    pub fn pending_douyin_follows(&self) -> Result<Vec<DouyinFollow>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT uid, sec_uid, uname, avatar_url, web_rid, internal_room_id, is_live,
+                        title, cover_url, area_name, online, started_at, monitor, auto_record, promoted_room_id
+                   FROM douyin_follow
+                  WHERE promoted_room_id IS NULL
+                  ORDER BY last_checked_at ASC, uid ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], map_douyin_follow)
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// 扫描关注列表后的状态写回；不动 monitor / auto_record / promoted_room_id。
+    pub fn update_douyin_follow_status(&self, item: &DouyinFollow) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE douyin_follow SET
+                    sec_uid = CASE WHEN ?2 <> '' THEN ?2 ELSE sec_uid END,
+                    uname = CASE WHEN ?3 <> '' THEN ?3 ELSE uname END,
+                    avatar_url = COALESCE(?4, avatar_url),
+                    web_rid = COALESCE(?5, web_rid),
+                    internal_room_id = COALESCE(?6, internal_room_id),
+                    is_live = ?7,
+                    title = CASE WHEN ?8 <> '' THEN ?8 ELSE title END,
+                    cover_url = COALESCE(?9, cover_url),
+                    area_name = COALESCE(?10, area_name),
+                    online = ?11,
+                    started_at = ?12,
+                    last_checked_at = ?13,
+                    updated_at = ?13
+                  WHERE uid = ?1",
+                params![
+                    item.uid,
+                    item.sec_uid,
+                    item.uname,
+                    item.avatar_url,
+                    item.web_rid,
+                    item.internal_room_id,
+                    item.is_live as i64,
+                    item.title,
+                    item.cover_url,
+                    item.area_name,
+                    item.online,
+                    item.started_at,
+                    now,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 关注池项已转成正式房间，后续不再扫描它。
+    pub fn mark_douyin_follow_promoted(
+        &self,
+        uid: &str,
+        promoted_room_id: &str,
+    ) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE douyin_follow
+                    SET promoted_room_id = ?2, is_live = 1, last_checked_at = ?3, updated_at = ?3
+                  WHERE uid = ?1",
+                params![uid, promoted_room_id, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 房间被删除时解除关注池的转正关联，下次开播还能重新导入。
+    pub fn release_douyin_follow_room(&self, room_id: &str) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE douyin_follow
+                    SET promoted_room_id = NULL, updated_at = ?2
+                  WHERE promoted_room_id = ?1",
+                params![room_id, now],
             )
             .map_err(db_err)?;
         Ok(())
@@ -2413,6 +2603,29 @@ pub(crate) fn platform_uid_of(info: &RoomInfo) -> Option<String> {
     (uid > 0).then(|| text.to_string())
 }
 
+fn map_douyin_follow(row: &Row<'_>) -> rusqlite::Result<DouyinFollow> {
+    Ok(DouyinFollow {
+        uid: row.get(0)?,
+        sec_uid: row.get(1)?,
+        uname: row.get(2)?,
+        avatar_url: row.get(3)?,
+        web_rid: row.get(4)?,
+        internal_room_id: row.get(5)?,
+        is_live: row.get::<_, i64>(6)? != 0,
+        title: row.get(7)?,
+        cover_url: row.get(8)?,
+        area_name: row.get(9)?,
+        online: row
+            .get::<_, Option<i64>>(10)?
+            .map(|value| value.max(0) as u64),
+        started_at: row.get(11)?,
+        in_pool: true,
+        monitor: row.get::<_, i64>(12)? != 0,
+        auto_record: row.get::<_, i64>(13)? != 0,
+        promoted_room_id: row.get(14)?,
+    })
+}
+
 fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
     Ok(RoomRecord {
         id: row.get(0)?,
@@ -3334,5 +3547,69 @@ mod tests {
             )
             .expect("插坏密文失败");
         assert!(db.credentials().expect("读失败").is_empty());
+    }
+
+    #[test]
+    fn douyin_follow_upsert_keeps_promotion_and_flags() {
+        let (db, _path) = temp_db("douyin-follow");
+        let mut item = DouyinFollow {
+            uid: "u-1".into(),
+            sec_uid: "MS4wLjAB".into(),
+            uname: "离线主播".into(),
+            avatar_url: None,
+            is_live: false,
+            web_rid: None,
+            internal_room_id: None,
+            title: String::new(),
+            cover_url: None,
+            area_name: None,
+            online: None,
+            started_at: None,
+            in_pool: false,
+            monitor: true,
+            auto_record: false,
+            promoted_room_id: None,
+        };
+        db.upsert_douyin_follow(&item, true, false)
+            .expect("写入关注池失败");
+        let rows = db.list_douyin_follows().expect("读取关注池失败");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].in_pool);
+        assert!(rows[0].monitor);
+        assert!(!rows[0].auto_record);
+        assert!(rows[0].promoted_room_id.is_none());
+
+        db.mark_douyin_follow_promoted("u-1", "room-1")
+            .expect("标记转正失败");
+        assert!(db
+            .pending_douyin_follows()
+            .expect("读取待开播失败")
+            .is_empty());
+
+        // 再次导入同一 uid：展示字段刷新，但 monitor/auto_record 采用新选择，
+        // promoted_room_id 不被覆盖。
+        item.is_live = true;
+        item.web_rid = Some("938611933111".into());
+        item.internal_room_id = Some("7708331906513767187".into());
+        db.upsert_douyin_follow(&item, false, true)
+            .expect("更新关注池失败");
+        let rows = db.list_douyin_follows().expect("读取关注池失败");
+        let saved = &rows[0];
+        assert_eq!(saved.web_rid.as_deref(), Some("938611933111"));
+        assert_eq!(
+            saved.internal_room_id.as_deref(),
+            Some("7708331906513767187")
+        );
+        assert!(!saved.monitor);
+        assert!(saved.auto_record);
+        assert_eq!(saved.promoted_room_id.as_deref(), Some("room-1"));
+
+        db.release_douyin_follow_room("room-1")
+            .expect("解除关联失败");
+        assert_eq!(
+            db.list_douyin_follows().expect("读取关注池失败")[0].promoted_room_id,
+            None
+        );
+        assert_eq!(db.pending_douyin_follows().expect("读取失败").len(), 1);
     }
 }

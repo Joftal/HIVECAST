@@ -8,8 +8,12 @@ import { useNotify } from "../../lib/notify";
 import {
   bilibiliFollowings,
   bilibiliFollowStatuses,
+  douyinFollowPage,
+  douyinPoolAdd,
   douyuFollowPage,
   roomsImport,
+  type DouyinFollow,
+  type DouyinPoolAddResult,
   type FollowingUser,
   type ImportRoomInput,
   type ImportRoomsResult,
@@ -28,13 +32,31 @@ type Props = {
 
 type Filter = "all" | "live" | "room" | "new" | "existing";
 type Phase = "follows" | "status" | "ready" | "followError" | "statusError";
-type Source = "bilibili" | "douyu";
+type Source = "bilibili" | "douyu" | "douyin";
 
 const FILTERS: Filter[] = ["all", "live", "room", "new", "existing"];
-const SOURCES: Source[] = ["bilibili", "douyu"];
+const SOURCES: Source[] = ["bilibili", "douyu", "douyin"];
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+/** 把关注池条目转成列表用的直播状态；离线项没有 web_rid，roomId 留空。 */
+function douyinStatus(item: DouyinFollow): LiveStatus {
+  return {
+    uid: item.uid,
+    roomId: item.webRid,
+    shortId: item.internalRoomId,
+    uname: item.uname,
+    title: item.title,
+    avatarUrl: item.avatarUrl,
+    coverUrl: item.coverUrl,
+    areaName: item.areaName,
+    isLive: item.isLive,
+    videoLoop: false,
+    startedAt: item.startedAt,
+    online: item.online,
+  };
 }
 
 function FollowAvatar({ user }: { user: FollowingUser }) {
@@ -60,11 +82,13 @@ function FollowAvatar({ user }: { user: FollowingUser }) {
 }
 
 /**
- * 关注导入（B 站 / 斗鱼）。
+ * 关注导入（B 站 / 斗鱼 / 抖音）。
  *
  * B 站关注列表每页 50 条，拉完后用一次批量状态接口补齐直播间；斗鱼关注接口直接带
- * 直播状态，每页 120 条，不再逐房间请求 betard。导入本身只写本地库；已存在的房间
- * 只刷新展示字段，不覆盖画质、线路、备注和标签。
+ * 直播状态，每页 120 条，不再逐房间请求 betard。抖音关注每页 20 条，用 max_time
+ * 游标翻页；在播且能拿到 web_rid 的直接建房，离线或缺少 web_rid 的先进关注池，
+ * 由后台扫描开播后再转成正式房间。导入本身只写本地库；已存在的房间只刷新展示
+ * 字段，不覆盖画质、线路、备注和标签。
  */
 export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImported }: Props) {
   const { t } = useTranslation();
@@ -74,6 +98,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
   const [phase, setPhase] = useState<Phase>("follows");
   const [users, setUsers] = useState<FollowingUser[]>([]);
   const [statuses, setStatuses] = useState<Map<string, LiveStatus>>(new Map());
+  const [douyinMeta, setDouyinMeta] = useState<Map<string, DouyinFollow>>(new Map());
   const [total, setTotal] = useState(0);
   const [pageProgress, setPageProgress] = useState({ done: 0, total: 1 });
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -83,6 +108,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
   const [autoRecord, setAutoRecord] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportRoomsResult | null>(null);
+  const [poolResult, setPoolResult] = useState<DouyinPoolAddResult | null>(null);
   const [reload, setReload] = useState(0);
 
   // 每次重新打开都从 B 站开始；切换平台由下面的加载 effect 负责重新拉取。
@@ -96,6 +122,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     setPhase("follows");
     setUsers([]);
     setStatuses(new Map());
+    setDouyinMeta(new Map());
     setTotal(0);
     setPageProgress({ done: 0, total: 1 });
     setSelected(new Set());
@@ -105,6 +132,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     setAutoRecord(false);
     setImporting(false);
     setResult(null);
+    setPoolResult(null);
 
     void (async () => {
       if (source === "bilibili") {
@@ -142,6 +170,42 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
         } catch {
           if (!cancelled) setPhase("statusError");
         }
+        return;
+      }
+
+      if (source === "douyin") {
+        // 抖音：每页 20 条，cursor 是上一页的 min_time；关注池标记随列表一起下发。
+        const meta = new Map<string, DouyinFollow>();
+        const publish = () => {
+          if (cancelled) return;
+          const items = Array.from(meta.values());
+          setDouyinMeta(new Map(meta));
+          setUsers(
+            items.map((item) => ({ uid: item.uid, uname: item.uname, avatarUrl: item.avatarUrl })),
+          );
+          setStatuses(new Map(items.map((item) => [item.uid, douyinStatus(item)])));
+          setTotal(items.length);
+        };
+        try {
+          let cursor: string | null = null;
+          let pages = 0;
+          for (;;) {
+            const page = await douyinFollowPage(cursor);
+            if (cancelled) return;
+            pages += 1;
+            for (const item of page.items) meta.set(item.uid, item);
+            publish();
+            setPageProgress({ done: pages, total: page.hasMore ? pages + 1 : pages });
+            if (!page.hasMore || !page.nextCursor || page.nextCursor === cursor) break;
+            cursor = page.nextCursor;
+            await wait(180);
+            if (cancelled) return;
+          }
+        } catch {
+          if (!cancelled) setPhase("followError");
+          return;
+        }
+        if (!cancelled) setPhase("ready");
         return;
       }
 
@@ -203,14 +267,25 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
       keys.add(view.room.roomKey);
       if (view.room.platformUid) keys.add(view.room.platformUid);
     }
+    // 关注池里的主播还没建房，但已经导入过，不能再重复添加。
+    if (source === "douyin") {
+      for (const item of douyinMeta.values()) {
+        if (item.inPool || item.promotedRoomId) keys.add(item.uid);
+      }
+    }
     return keys;
-  }, [rooms, source]);
+  }, [rooms, source, douyinMeta]);
 
   const isExisting = (user: FollowingUser, status?: LiveStatus) =>
     existing.has(user.uid) ||
     (!!status?.roomId && existing.has(status.roomId)) ||
     (!!status?.shortId && existing.has(status.shortId));
-  const canImport = (user: FollowingUser, status?: LiveStatus) => !!status?.roomId && !isExisting(user, status);
+  const canImport = (user: FollowingUser, status?: LiveStatus) => {
+    if (isExisting(user, status)) return false;
+    // 抖音允许把离线关注放进关注池，等开播后再自动转成房间。
+    if (source === "douyin") return douyinMeta.has(user.uid);
+    return !!status?.roomId;
+  };
 
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase();
@@ -239,15 +314,18 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     let room = 0;
     let added = 0;
     let fresh = 0;
+    let pool = 0;
     for (const user of users) {
       const status = statuses.get(user.uid);
       if (status?.isLive) live += 1;
       if (status?.roomId) room += 1;
       if (isExisting(user, status)) added += 1;
       if (canImport(user, status)) fresh += 1;
+      const meta = douyinMeta.get(user.uid);
+      if (meta?.inPool && !meta.promotedRoomId) pool += 1;
     }
-    return { all: users.length, live, room, existing: added, new: fresh };
-  }, [users, statuses, existing]);
+    return { all: users.length, live, room, existing: added, new: fresh, pool };
+  }, [users, statuses, existing, douyinMeta]);
 
   const visibleSelectable = filtered.filter((user) => canImport(user, statuses.get(user.uid)));
   const allVisibleSelected =
@@ -278,8 +356,8 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
 
   async function retryStatuses() {
     if (phase === "status") return;
-    // 斗鱼没有独立的「关注 -> 状态」第二阶段，整页重载即可。
-    if (source === "douyu") {
+    // 斗鱼和抖音没有独立的「关注 -> 状态」第二阶段，整页重载即可。
+    if (source !== "bilibili") {
       setReload((value) => value + 1);
       return;
     }
@@ -298,42 +376,106 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     if (importing) return;
     const chosen = users
       .filter((user) => selected.has(user.uid))
-      .map((user) => ({ user, status: statuses.get(user.uid) }))
-      .filter((item): item is { user: FollowingUser; status: LiveStatus } =>
-        !!item.status?.roomId && !isExisting(item.user, item.status),
-      );
+      .map((user) => ({
+        user,
+        status: statuses.get(user.uid),
+        meta: douyinMeta.get(user.uid),
+      }))
+      .filter((item) => canImport(item.user, item.status));
     if (chosen.length === 0) {
       notify.info(t("monitor.importFollow.nothingSelected"));
       return;
     }
-    const items: ImportRoomInput[] = chosen.map(({ user, status }) => ({
-      platform: source,
-      uid: user.uid,
-      roomId: status.roomId as string,
-      shortId: status.shortId,
-      uname: status.uname || user.uname,
-      title: status.title,
-      avatarUrl: status.avatarUrl ?? user.avatarUrl,
-      coverUrl: status.coverUrl,
-      areaName: status.areaName,
-      isLive: status.isLive,
-      startedAt: status.startedAt,
-      online: status.online,
-      videoLoop: status.videoLoop,
-    }));
+
     setImporting(true);
     try {
-      const imported = await roomsImport(items, monitor, autoRecord);
-      setResult(imported);
+      let imported: ImportRoomsResult | null = null;
+      let pooled: DouyinPoolAddResult | null = null;
+
+      if (source === "douyin") {
+        // 在播且有 web_rid 的立即建房；离线或拿不到 web_rid 的先进关注池。
+        const ready = chosen.filter(
+          (item): item is { user: FollowingUser; status: LiveStatus | undefined; meta: DouyinFollow } =>
+            !!item.meta?.isLive && !!item.meta.webRid,
+        );
+        const pending = chosen
+          .map((item) => item.meta)
+          .filter((meta): meta is DouyinFollow => !!meta && !(meta.isLive && meta.webRid));
+
+        if (ready.length > 0) {
+          const items: ImportRoomInput[] = ready.map(({ user, meta }) => ({
+            platform: "douyin",
+            uid: user.uid,
+            roomId: meta.webRid as string,
+            shortId: meta.internalRoomId,
+            internalRoomId: meta.internalRoomId,
+            uname: meta.uname || user.uname,
+            title: meta.title,
+            avatarUrl: meta.avatarUrl ?? user.avatarUrl,
+            coverUrl: meta.coverUrl,
+            areaName: meta.areaName,
+            isLive: true,
+            startedAt: meta.startedAt,
+            online: meta.online,
+            videoLoop: false,
+          }));
+          imported = await roomsImport(items, monitor, autoRecord);
+          setResult(imported);
+        }
+
+        if (pending.length > 0) {
+          pooled = await douyinPoolAdd(pending, monitor, autoRecord);
+          setPoolResult(pooled);
+          setDouyinMeta((current) => {
+            const next = new Map(current);
+            for (const item of pending) next.set(item.uid, { ...item, inPool: true });
+            return next;
+          });
+        }
+      } else {
+        const items: ImportRoomInput[] = chosen.map(({ user, status }) => ({
+          platform: source,
+          uid: user.uid,
+          roomId: status?.roomId as string,
+          shortId: status?.shortId ?? null,
+          uname: status?.uname || user.uname,
+          title: status?.title ?? "",
+          avatarUrl: status?.avatarUrl ?? user.avatarUrl,
+          coverUrl: status?.coverUrl ?? null,
+          areaName: status?.areaName ?? null,
+          isLive: status?.isLive ?? false,
+          startedAt: status?.startedAt ?? null,
+          online: status?.online ?? null,
+          videoLoop: status?.videoLoop ?? false,
+          internalRoomId: null,
+        }));
+        imported = await roomsImport(items, monitor, autoRecord);
+        setResult(imported);
+      }
+
       setSelected(new Set());
       await onImported?.();
-      if (imported.failed.length > 0) {
+      if (imported && imported.failed.length > 0) {
         notify.warning(imported.failed[0].message, t("monitor.importFollow.failedTitle"));
       } else {
-        notify.success(
-          t("monitor.importFollow.done"),
-          t("monitor.importFollow.doneBody", { added: imported.added, existing: imported.existing }),
-        );
+        const parts: string[] = [];
+        if (imported) {
+          parts.push(
+            t("monitor.importFollow.doneBody", {
+              added: imported.added,
+              existing: imported.existing,
+            }),
+          );
+        }
+        if (pooled) {
+          parts.push(
+            t("monitor.importFollow.poolDoneBody", {
+              added: pooled.added,
+              updated: pooled.updated,
+            }),
+          );
+        }
+        notify.success(t("monitor.importFollow.done"), parts.join(" · "));
       }
     } catch (err) {
       notify.error(err);
@@ -351,28 +493,45 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
   };
   const statusHint =
     phase === "follows"
-      ? source === "douyu"
-        ? t("monitor.importFollow.loadingDouyu", { done: pageProgress.done, total: pageProgress.total })
-        : t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
+      ? source === "douyin"
+        ? t("monitor.importFollow.loadingDouyin", { done: pageProgress.done, n: users.length })
+        : source === "douyu"
+          ? t("monitor.importFollow.loadingDouyu", { done: pageProgress.done, total: pageProgress.total })
+          : t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
       : phase === "status"
         ? t("monitor.importFollow.statusLoading", { n: users.length })
-        : source === "douyu"
-          ? t("monitor.importFollow.summaryDouyu", { total: users.length, live: counts.live })
-          : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
+        : source === "douyin"
+          ? t("monitor.importFollow.summaryDouyin", {
+              total: users.length,
+              live: counts.live,
+              pool: counts.pool,
+            })
+          : source === "douyu"
+            ? t("monitor.importFollow.summaryDouyu", { total: users.length, live: counts.live })
+            : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
   const sourceLabel = {
     bilibili: t("monitor.importFollow.platformBilibili"),
     douyu: t("monitor.importFollow.platformDouyu"),
+    douyin: t("monitor.importFollow.platformDouyin"),
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={source === "douyu"
-          ? t("monitor.importFollow.titleDouyu")
-          : t("monitor.importFollow.title")}
-        description={source === "douyu"
-          ? t("monitor.importFollow.descriptionDouyu")
-          : t("monitor.importFollow.description")}
+        title={
+          source === "douyin"
+            ? t("monitor.importFollow.titleDouyin")
+            : source === "douyu"
+              ? t("monitor.importFollow.titleDouyu")
+              : t("monitor.importFollow.title")
+        }
+        description={
+          source === "douyin"
+            ? t("monitor.importFollow.descriptionDouyin")
+            : source === "douyu"
+              ? t("monitor.importFollow.descriptionDouyu")
+              : t("monitor.importFollow.description")
+        }
         size="lg"
       >
         <div className="flex h-[min(560px,calc(100dvh-200px))] min-h-[360px] flex-col">
@@ -383,9 +542,11 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
               onChange={(next) => setSource(next)}
             />
             <span className="min-w-0 truncate text-[11.5px] text-faint">
-              {source === "douyu"
-                ? t("monitor.importFollow.platformHintDouyu")
-                : t("monitor.importFollow.platformHintBilibili")}
+              {source === "douyin"
+                ? t("monitor.importFollow.platformHintDouyin")
+                : source === "douyu"
+                  ? t("monitor.importFollow.platformHintDouyu")
+                  : t("monitor.importFollow.platformHintBilibili")}
             </span>
           </div>
 
@@ -421,9 +582,11 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
 
           {phase === "followError" ? (
             <div className="mt-3 rounded-[8px] border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-5 text-warn">
-              {source === "douyu"
-                ? t("monitor.importFollow.followFailedDouyu")
-                : t("monitor.importFollow.followFailed")}
+              {source === "douyin"
+                ? t("monitor.importFollow.followFailedDouyin")
+                : source === "douyu"
+                  ? t("monitor.importFollow.followFailedDouyu")
+                  : t("monitor.importFollow.followFailed")}
             </div>
           ) : null}
           {phase === "statusError" ? (
@@ -431,17 +594,29 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
               {t("monitor.importFollow.statusFailed")}
             </div>
           ) : null}
-          {result ? (
+          {result || poolResult ? (
             <div
               className={cx(
                 "mt-3 rounded-[8px] border px-3 py-2 text-[12px] leading-5",
-                result.failed.length > 0
+                result && result.failed.length > 0
                   ? "border-warn/30 bg-warn/10 text-warn"
                   : "border-live/30 bg-live/10 text-live",
               )}
             >
-              {t("monitor.importFollow.doneBody", { added: result.added, existing: result.existing })}
-              {result.failed.length > 0
+              {result
+                ? t("monitor.importFollow.doneBody", {
+                    added: result.added,
+                    existing: result.existing,
+                  })
+                : null}
+              {result && poolResult ? " · " : null}
+              {poolResult
+                ? t("monitor.importFollow.poolDoneBody", {
+                    added: poolResult.added,
+                    updated: poolResult.updated,
+                  })
+                : null}
+              {result && result.failed.length > 0
                 ? " · " + t("monitor.importFollow.failedCount", { n: result.failed.length })
                 : ""}
             </div>
@@ -509,6 +684,8 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
             ) : (
               filtered.map((user) => {
                 const status = statuses.get(user.uid);
+                const meta = douyinMeta.get(user.uid);
+                const pooled = !!meta?.inPool && !meta.promotedRoomId;
                 const added = isExisting(user, status);
                 const selectable = canImport(user, status);
                 const checked = selected.has(user.uid);
@@ -537,14 +714,18 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                             {t("monitor.importFollow.live")}
                           </Chip>
                         ) : null}
-                        {added ? (
+                        {pooled ? (
+                          <Chip tone="accent">{t("monitor.importFollow.poolChip")}</Chip>
+                        ) : added ? (
                           <Chip tone="accent">{t("monitor.importFollow.existing")}</Chip>
                         ) : null}
                       </div>
                       <div className="mt-0.5 truncate text-[11.5px] text-faint" title={status?.title}>
-                        {status?.roomId
-                          ? status.title || t("monitor.importFollow.unnamed")
-                          : t("monitor.importFollow.noRoom")}
+                        {pooled
+                          ? t("monitor.importFollow.poolHint")
+                          : status?.roomId
+                            ? status.title || t("monitor.importFollow.unnamed")
+                            : t("monitor.importFollow.noRoom")}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
@@ -554,11 +735,13 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                         </span>
                       ) : null}
                       <span className="tnum min-w-[52px] whitespace-nowrap text-right text-[11px] text-faint">
-                        {status?.isLive && (status.online ?? 0) > 0
-                          ? t("monitor.importFollow.online", { n: status.online })
-                          : status?.roomId
-                            ? t("monitor.importFollow.offline")
-                            : "—"}
+                        {pooled
+                          ? t("monitor.importFollow.offline")
+                          : status?.isLive && (status.online ?? 0) > 0
+                            ? t("monitor.importFollow.online", { n: status.online })
+                            : status?.roomId
+                              ? t("monitor.importFollow.offline")
+                              : "—"}
                       </span>
                     </div>
                   </div>

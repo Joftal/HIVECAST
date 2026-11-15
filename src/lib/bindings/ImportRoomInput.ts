@@ -15,4 +15,8 @@ startedAt: number | null, online: number | null,
 /**
  * 斗鱼轮播标志；导入时写进房间 extra，避免刷新后误判。
  */
-videoLoop: boolean | null, };
+videoLoop: boolean | null,
+/**
+ * 抖音内部 19 位 room_id（follow/feed 批量状态用）；web_rid 才是 room_key。
+ */
+internalRoomId: string | null, };

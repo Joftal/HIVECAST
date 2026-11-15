@@ -6,6 +6,9 @@ import type { AppInfo } from "./bindings/AppInfo";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
+import type { DouyinFollow } from "./bindings/DouyinFollow";
+import type { DouyinFollowingPage } from "./bindings/DouyinFollowingPage";
+import type { DouyinPoolAddResult } from "./bindings/DouyinPoolAddResult";
 import type { DouyuFollowingPage } from "./bindings/DouyuFollowingPage";
 import type { FollowingPage } from "./bindings/FollowingPage";
 import type { FollowingUser } from "./bindings/FollowingUser";
@@ -49,6 +52,9 @@ export type {
   CredentialInfo,
   FfmpegStatus,
   FilenamePreview,
+  DouyinFollow,
+  DouyinFollowingPage,
+  DouyinPoolAddResult,
   DouyuFollowingPage,
   FollowingPage,
   FollowingUser,
@@ -140,6 +146,20 @@ export async function bilibiliFollowStatuses(uids: string[]): Promise<LiveStatus
 /** 斗鱼关注列表；每页最多 120 条，条目已带直播状态，不需要再批量查一次。 */
 export async function douyuFollowPage(page = 1): Promise<DouyuFollowingPage> {
   return invoke<DouyuFollowingPage>("douyu_follow_page", { page });
+}
+
+/** 抖音关注列表的一页；cursor 传上一页的 nextCursor。 */
+export async function douyinFollowPage(cursor?: string | null): Promise<DouyinFollowingPage> {
+  return invoke<DouyinFollowingPage>("douyin_follow_page", { cursor: cursor ?? null });
+}
+
+/** 把暂时没有直播间的抖音关注放进关注池，开播后自动转成房间。 */
+export async function douyinPoolAdd(
+  items: DouyinFollow[],
+  monitor = true,
+  autoRecord = false,
+): Promise<DouyinPoolAddResult> {
+  return invoke<DouyinPoolAddResult>("douyin_pool_add", { items, monitor, autoRecord });
 }
 
 /** 把关注列表里选中的主播导入监控列表；已存在的房间只刷新展示信息。 */

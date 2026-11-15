@@ -318,6 +318,8 @@ pub fn run() {
             commands::douyin_refresh_now,
             commands::bilibili_followings,
             commands::bilibili_follow_statuses,
+            commands::douyin_follow_page,
+            commands::douyin_pool_add,
             commands::douyu_follow_page,
             commands::rooms_import,
             commands::media_list,

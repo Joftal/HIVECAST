@@ -254,6 +254,65 @@ pub struct DouyuFollowingPage {
     pub items: Vec<LiveStatus>,
 }
 
+/// 抖音关注列表中的一位主播。
+///
+/// `web_rid` 是直播间页面号，能直接建房/取流；`internal_room_id` 是 follow/feed
+/// 批量状态用的 19 位内部号。离线关注通常两者都没有，需要留在关注池里等开播。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DouyinFollow {
+    pub uid: String,
+    #[serde(default)]
+    pub sec_uid: String,
+    pub uname: String,
+    pub avatar_url: Option<String>,
+    pub is_live: bool,
+    pub web_rid: Option<String>,
+    pub internal_room_id: Option<String>,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub area_name: Option<String>,
+    #[ts(type = "number | null")]
+    pub online: Option<u64>,
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
+    /// 已在关注池里（含已转成正式房间的项）。
+    #[serde(default)]
+    pub in_pool: bool,
+    /// 转成正式房间后是否继续监控。
+    #[serde(default = "default_true")]
+    pub monitor: bool,
+    /// 转成正式房间后是否自动录制。
+    #[serde(default)]
+    pub auto_record: bool,
+    /// 关注池项转成的正式房间 ID；为空表示还在等开播。
+    pub promoted_room_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 抖音关注列表的一页。分页游标是上一页的 `min_time`，不是页码。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DouyinFollowingPage {
+    pub items: Vec<DouyinFollow>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// 一批关注项加入关注池的结果。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct DouyinPoolAddResult {
+    pub added: u32,
+    pub updated: u32,
+}
+
 /// 一位关注主播的直播状态；room_id 为空表示该用户没有直播间。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +363,9 @@ pub struct ImportRoomInput {
     /// 斗鱼轮播标志；导入时写进房间 extra，避免刷新后误判。
     #[serde(default)]
     pub video_loop: Option<bool>,
+    /// 抖音内部 19 位 room_id（follow/feed 批量状态用）；web_rid 才是 room_key。
+    #[serde(default)]
+    pub internal_room_id: Option<String>,
 }
 
 /// 单条导入失败的原因；不阻断其他条目。
