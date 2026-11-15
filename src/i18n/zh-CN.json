@@ -404,7 +404,7 @@
     "listBody": "开播自动开录，下播自动收尾；列表每 15 秒刷新一次。",
     "count": "{{n}} 个房间",
     "inputPlaceholder": "粘贴直播间链接或房间号",
-    "addRoomHint": "支持斗鱼、哔哩哔哩等直播链接；纯数字按哔哩哔哩房间号解析，其他平台请粘贴完整链接。",
+    "addRoomHint": "支持哔哩哔哩、斗鱼、抖音等直播链接；纯数字按哔哩哔哩房间号解析，其他平台请粘贴完整链接。",
     "add": "添加",
     "adding": "添加中…",
     "live": "直播中",
@@ -871,7 +871,11 @@
     },
     "bilibiliHint": "扫码登录后会写入本机数据库，可直接录制 1080P。",
     "douyuHint": "用斗鱼 App 扫码登录；登录后可自动续期，录制高清画质。",
-    "douyuNoRefresh": "自动续期不可用：手动粘贴的 Cookie 没有长期凭证，扫码登录后可启用"
+    "douyuNoRefresh": "自动续期不可用：手动粘贴的 Cookie 没有长期凭证，扫码登录后可启用",
+    "douyinHint": "粘贴抖音网页 Cookie（需包含 sessionid）；登录后取流与画质按账号权限执行。",
+    "autoRefreshOnDouyin": "登录态有效（每 30 分钟复验，每 6 小时同步轮换 Cookie）",
+    "autoRefreshExpired": "登录态已失效，自动复验已暂停",
+    "douyinNoRefresh": "缺少 sessionid，无法自动复验；请在抖音网页登录后重新复制完整 Cookie"
   },
   "close": {
     "title": "有任务正在进行",

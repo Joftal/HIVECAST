@@ -58,4 +58,13 @@ notifyLive: boolean | null, notifyError: boolean | null, createdAt: number, upda
 /**
  * 平台账号 UID；B 站批量状态接口按 UID 查询，关注导入时写入。
  */
-platformUid: string | null, };
+platformUid: string | null,
+/**
+ * 是否来自关注导入：抖音关注房走 follow/feed 批量状态，手动房仍单房检查。
+ */
+batchFollow: boolean,
+/**
+ * 平台内部房间号：抖音 follow/feed 批量状态必须用它（19 位），
+ * room_key 是页面 URL 上的 web_rid（12 位），两者不能混用。
+ */
+internalRoomId: string | null, };

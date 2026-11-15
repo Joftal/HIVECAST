@@ -8,6 +8,7 @@ import {
   douyuQrPoll,
   douyuQrStart,
   douyuRefreshNow,
+  douyinRefreshNow,
   credentialSave,
   credentialsList,
   describeError,
@@ -121,7 +122,11 @@ export default function AccountSection() {
     setChecking(true);
     try {
       const status =
-        platform === "douyu" ? await douyuRefreshNow() : await bilibiliRefreshNow();
+        platform === "douyu"
+          ? await douyuRefreshNow()
+          : platform === "douyin"
+            ? await douyinRefreshNow()
+            : await bilibiliRefreshNow();
       await load();
       notify.success(t("account.refreshDone", { result: refreshOutcomeLabel(status) }));
     } catch (err) {
@@ -471,27 +476,34 @@ export default function AccountSection() {
                         ? t("account.douyuHint")
                         : t("account.cookieHint")}
                 </p>
-                {(platform === "bilibili" || platform === "douyu") && item ? (
+                {(platform === "bilibili" || platform === "douyu" || platform === "douyin") &&
+                item ? (
                   <div className="mt-1.5">
                     <p
                       className={cx(
                         "flex items-center gap-1.5 text-[10px] leading-4",
-                        item.refreshable ? "text-muted" : "text-warn/90",
+                        item.refreshable && !expired ? "text-muted" : "text-warn/90",
                       )}
                     >
                       <span
                         className={cx(
                           "h-1 w-1 rounded-full",
-                          item.refreshable ? "bg-live" : "bg-warn",
+                          item.refreshable && !expired ? "bg-live" : "bg-warn",
                         )}
                       />
-                      {item.refreshable
-                        ? platform === "douyu"
-                          ? t("account.autoRefreshOnDouyu")
-                          : t("account.autoRefreshOn")
-                        : platform === "douyu"
-                          ? t("account.douyuNoRefresh")
-                          : t("account.autoRefreshOff")}
+                      {expired
+                        ? t("account.autoRefreshExpired")
+                        : item.refreshable
+                          ? platform === "douyu"
+                            ? t("account.autoRefreshOnDouyu")
+                            : platform === "douyin"
+                              ? t("account.autoRefreshOnDouyin")
+                              : t("account.autoRefreshOn")
+                          : platform === "douyu"
+                            ? t("account.douyuNoRefresh")
+                            : platform === "douyin"
+                              ? t("account.douyinNoRefresh")
+                              : t("account.autoRefreshOff")}
                     </p>
                     {item.refreshable ? (
                       <div className="mt-1 flex items-start justify-between gap-2">

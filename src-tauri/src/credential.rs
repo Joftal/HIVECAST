@@ -103,7 +103,9 @@ pub fn platform_for_host(host: &str) -> Option<&'static str> {
         Some("douyu")
     } else if matches("huya.com") {
         Some("huya")
-    } else if matches("douyin.com") || matches("iesdouyin.com") || matches("douyincdn.com") {
+    } else if matches("douyin.com") || matches("iesdouyin.com") {
+        // 注意不要把 douyincdn.com 映射成 douyin：流地址落在第三方 CDN，
+        // 自动注入会把账号 Cookie 发给 CDN。取流侧只带 Referer/UA。
         Some("douyin")
     } else {
         None
@@ -318,6 +320,7 @@ mod tests {
         assert_eq!(platform_for_host("api.live.bilibili.com"), Some("bilibili"));
         assert_eq!(platform_for_host("www.douyu.com:443"), Some("douyu"));
         assert_eq!(platform_for_host("d1--cn-gotcha09.bilivideo.com"), None);
+        assert_eq!(platform_for_host("pull-flv-c13.douyincdn.com"), None);
         assert_eq!(platform_for_host("live.douyin.com"), Some("douyin"));
         assert_eq!(platform_for_host("example.com"), None);
     }

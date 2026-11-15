@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::platform::RoomInfo;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    platform_uid TEXT,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS room (\n    id TEXT PRIMARY KEY,\n    platform TEXT NOT NULL,\n    room_key TEXT NOT NULL,\n    platform_uid TEXT,\n    -- 关注导入标记：抖音关注房可用 follow/feed 批量状态，手动房仍走单房\n    batch_follow INTEGER NOT NULL DEFAULT 0,\n    -- 平台内部房间号：抖音批量状态用 19 位 room_id，room_key 是 web_rid\n    internal_room_id TEXT,\n    canonical_url TEXT NOT NULL,\n    title TEXT NOT NULL DEFAULT '',\n    host_name TEXT NOT NULL DEFAULT '',\n    avatar_url TEXT,\n    cover_url TEXT,\n    area_name TEXT,\n    is_live INTEGER NOT NULL DEFAULT 0,\n    started_at INTEGER,\n    online INTEGER,\n    auto_record INTEGER NOT NULL DEFAULT 1,\n    monitor_paused INTEGER NOT NULL DEFAULT 0,\n    record_qn INTEGER NOT NULL DEFAULT 10000,\n    view_qn INTEGER NOT NULL DEFAULT 0,\n    record_line TEXT,\n    last_checked_at INTEGER,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    -- 软删除：移除房间只打时间戳，录像历史仍挂在它上面\n    removed_at INTEGER,\n    UNIQUE (platform, room_key)\n);\n\nCREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -443,6 +443,8 @@ impl Db {
                 auto_record = MAX(auto_record, COALESCE((SELECT auto_record FROM room WHERE id = ?2), 0)),
                 monitor_paused = MIN(monitor_paused, COALESCE((SELECT monitor_paused FROM room WHERE id = ?2), 0)),
                 platform_uid = COALESCE(platform_uid, (SELECT platform_uid FROM room WHERE id = ?2)),
+                batch_follow = MAX(batch_follow, COALESCE((SELECT batch_follow FROM room WHERE id = ?2), 0)),
+                internal_room_id = COALESCE(internal_room_id, (SELECT internal_room_id FROM room WHERE id = ?2)),
                 record_qn = CASE WHEN COALESCE(record_qn, 0) = 0 THEN
                     COALESCE((SELECT record_qn FROM room WHERE id = ?2), 0) ELSE record_qn END,
                 view_qn = CASE WHEN COALESCE(view_qn, 0) = 0 THEN
@@ -484,10 +486,14 @@ impl Db {
                 "INSERT INTO room (
                     id, platform, room_key, platform_uid, canonical_url, title, host_name,
                     avatar_url, cover_url, area_name, is_live, started_at, online, auto_record,
-                    monitor_paused, record_qn, view_qn, last_checked_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                    monitor_paused, record_qn, view_qn, last_checked_at, created_at, updated_at,
+                    batch_follow, internal_room_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                 ON CONFLICT (platform, room_key) DO UPDATE SET
                     platform_uid = COALESCE(excluded.platform_uid, platform_uid),
+                    -- 关注来源是粘性的：手动重新添加同一直播间也不该丢掉批量资格。
+                    batch_follow = MAX(batch_follow, excluded.batch_follow),
+                    internal_room_id = COALESCE(excluded.internal_room_id, internal_room_id),
                     canonical_url = excluded.canonical_url,
                     title = excluded.title,
                     host_name = excluded.host_name,
@@ -525,6 +531,8 @@ impl Db {
                     now,
                     room.created_at,
                     now,
+                    room.batch_follow as i64,
+                    internal_room_id_of(info).or_else(|| room.internal_room_id.clone()),
                 ],
             )
             .map_err(db_err)?;
@@ -542,6 +550,7 @@ impl Db {
                     title = ?2, host_name = ?3, avatar_url = ?4, cover_url = ?5,
                     area_name = ?6, is_live = ?7, started_at = ?8, online = ?9,
                     platform_uid = COALESCE(?11, platform_uid),
+                    internal_room_id = COALESCE(?12, internal_room_id),
                     last_checked_at = ?10, updated_at = ?10
                   WHERE id = ?1",
                 params![
@@ -556,6 +565,7 @@ impl Db {
                     info.online,
                     now,
                     platform_uid_of(info),
+                    internal_room_id_of(info),
                 ],
             )
             .map_err(db_err)?;
@@ -2177,6 +2187,19 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             .map_err(db_err)?;
         tracing::info!(column = "room.platform_uid", "数据库迁移：新增列");
     }
+    if !room_columns.iter().any(|name| name == "batch_follow") {
+        conn.execute(
+            "ALTER TABLE room ADD COLUMN batch_follow INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!(column = "room.batch_follow", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "internal_room_id") {
+        conn.execute("ALTER TABLE room ADD COLUMN internal_room_id TEXT", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.internal_room_id", "数据库迁移：新增列");
+    }
     let mut backfill_last_session = false;
     for (name, ddl) in [
         (
@@ -2355,7 +2378,7 @@ const ROOM_SELECT: &str = "SELECT
     last_session_status, last_session_reason, last_session_file_size,
     note, tags, title_include, title_exclude,
     split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
-    created_at, updated_at, last_session_quality, platform_uid
+    created_at, updated_at, last_session_quality, platform_uid, batch_follow, internal_room_id
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -2364,6 +2387,18 @@ const SESSION_SELECT: &str = "SELECT
     source_path, post_mode, post_state, source_deleted, post_error,
     quality_history
   FROM record_session";
+
+/// 平台内部房间号：抖音 follow/feed 只认 19 位 room_id，不认页面上的 web_rid。
+/// 其它平台的 extra.roomId 与 room_key 等价，存下来也不会被批量逻辑使用。
+pub(crate) fn internal_room_id_of(info: &RoomInfo) -> Option<String> {
+    let value = info.extra.get("roomId")?;
+    let text = match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
 
 /// 从平台 extra 里取账号 UID；只有 B 站会填，其它平台为 None。
 pub(crate) fn platform_uid_of(info: &RoomInfo) -> Option<String> {
@@ -2418,6 +2453,8 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         updated_at: row.get(33)?,
         last_session_quality: row.get(34)?,
         platform_uid: row.get(35)?,
+        batch_follow: row.get::<_, i64>(36)? != 0,
+        internal_room_id: row.get(37)?,
     })
 }
 
@@ -2524,12 +2561,12 @@ mod tests {
         db.lock()
             .execute_batch(
                 "INSERT INTO room
-                    (id, platform, room_key, platform_uid, canonical_url, host_name, title, note, tags, auto_record, monitor_paused,
+                    (id, platform, room_key, platform_uid, batch_follow, internal_room_id, canonical_url, host_name, title, note, tags, auto_record, monitor_paused,
                      record_qn, view_qn, record_line, title_include, title_exclude, split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
                      created_at, updated_at)
                  VALUES
-                    ('keep', 'bilibili', '6', NULL, 'https://live.bilibili.com/6', '主播', '短号', '', 'LOL', 0, 1, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0),
-                    ('drop', 'bilibili', '7734200', '42', 'https://live.bilibili.com/7734200', '主播', '真号', '备注', '', 1, 0,
+                    ('keep', 'bilibili', '6', NULL, 0, NULL, 'https://live.bilibili.com/6', '主播', '短号', '', 'LOL', 0, 1, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0),
+                    ('drop', 'bilibili', '7734200', '42', 1, '7708331906513767187', 'https://live.bilibili.com/7734200', '主播', '真号', '备注', '', 1, 0,
                      15000, 250, 'line-b', '仅标题', '排除', 3600, 2048, 1, 0, 0, 0);
                  INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, quality)
                  VALUES ('s-drop', 'drop', 100, 'finished', '/tmp/drop.flv', 10, 1000, '原画 · FLV · H.264');",
@@ -2555,6 +2592,12 @@ mod tests {
             Some("原画 · FLV · H.264")
         );
         assert_eq!(room.platform_uid.as_deref(), Some("42"));
+        assert!(room.batch_follow, "关注来源在合并后仍保留");
+        assert_eq!(
+            room.internal_room_id.as_deref(),
+            Some("7708331906513767187"),
+            "合并不能丢掉批量状态所需的内部 room_id"
+        );
         assert_eq!(room.record_qn, 15000, "保留行未设置画质时继承被合并行");
         assert_eq!(room.view_qn, 250);
         assert_eq!(room.record_line.as_deref(), Some("line-b"));
@@ -3128,6 +3171,46 @@ mod tests {
                 .as_deref(),
             Some("50329118"),
             "平台这次没给 UID 时不能把已有值清空"
+        );
+    }
+
+    #[test]
+    fn internal_room_id_is_written_from_platform_info_and_never_cleared() {
+        let (db, _path) = temp_db("internal-room-id");
+        seed_media(&db);
+        let mut info = crate::platform::RoomInfo {
+            host_name: "主播甲".into(),
+            room_name: "房间甲".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: false,
+            started_at: None,
+            online: None,
+            stable_id: None,
+            extra: serde_json::json!({ "roomId": 7708331906513767187i64 }),
+        };
+        db.update_room_info("rm-a", &info).expect("更新失败");
+        assert_eq!(
+            db.get_room("rm-a")
+                .expect("读失败")
+                .expect("房间缺失")
+                .internal_room_id
+                .as_deref(),
+            Some("7708331906513767187")
+        );
+
+        // 平台后续只返回普通房间字段时，不能把已经拿到的内部 room_id 清空。
+        info.extra = serde_json::json!({});
+        db.update_room_info("rm-a", &info)
+            .expect("无内部 ID 更新失败");
+        assert_eq!(
+            db.get_room("rm-a")
+                .expect("读失败")
+                .expect("房间缺失")
+                .internal_room_id
+                .as_deref(),
+            Some("7708331906513767187")
         );
     }
 

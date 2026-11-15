@@ -144,6 +144,12 @@ impl AppState {
             crate::douyu_auth::maintenance_loop(db_for_douyu, app_for_douyu).await;
         });
 
+        let db_for_douyin = db.clone();
+        let app_for_douyin = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::douyin_auth::maintenance_loop(db_for_douyin, app_for_douyin).await;
+        });
+
         // 设置里的媒体目录优先；目录不可用时回落到默认值，不要让用户因为改错路径就打不开应用。
         let mut media_root = PathBuf::from(&settings.media_root);
         let mut media_fallback = None;

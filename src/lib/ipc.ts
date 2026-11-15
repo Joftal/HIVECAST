@@ -550,6 +550,11 @@ export async function douyuRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("douyu_refresh_now");
 }
 
+/** 立即检查一次抖音 Cookie：轮换 ttwid 并复验登录态。 */
+export async function douyinRefreshNow(): Promise<RefreshStatus> {
+  return invoke<RefreshStatus>("douyin_refresh_now");
+}
+
 /** 账号凭据或续期状态变化（登录、保存、过期、续期结果写入）。 */
 export const EVENT_ACCOUNT_REFRESH = "account://refresh";
 

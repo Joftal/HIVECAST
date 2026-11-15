@@ -169,6 +169,7 @@ pub fn spawn(
         let mut batches: HashMap<&'static str, BatchState> = HashMap::new();
         batches.insert("bilibili", BatchState::new());
         batches.insert("douyu", BatchState::new());
+        batches.insert("douyin", BatchState::new());
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -223,14 +224,36 @@ fn is_batchable(room: &hivecast_ipc::RoomRecord) -> bool {
 }
 
 /// 这个房间这一拍该走哪个平台的批量状态；None 表示单房间检查。
-fn batchable_platform(room: &hivecast_ipc::RoomRecord, douyu_ready: bool) -> Option<&'static str> {
+fn batchable_platform(
+    room: &hivecast_ipc::RoomRecord,
+    douyu_ready: bool,
+    douyin_ready: bool,
+) -> Option<&'static str> {
     if is_batchable(room) {
         return Some("bilibili");
     }
     if douyu_ready && room.platform == "douyu" && !room.room_key.trim().is_empty() {
         return Some("douyu");
     }
+    // 抖音只有关注导入的房间能进 follow/feed；手动添加的房间不在关注列表里，
+    // 塞进去只会得到「缺失」，反而多一次批量请求。
+    if douyin_ready
+        && room.platform == "douyin"
+        && room.batch_follow
+        && !room.room_key.trim().is_empty()
+        && room
+            .internal_room_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Some("douyin");
+    }
     None
+}
+
+/// 抖音批量门槛：必须登录。关注页接口匿名只会返回 blocked。
+fn douyin_batch_ready(logged_in: bool) -> bool {
+    logged_in
 }
 
 /// 斗鱼批量门槛：已登录，且未暂停监控的斗鱼房间至少有 3 个。
@@ -517,7 +540,7 @@ fn tick(
     // 间隔被用户改过（30s → 5m 或反过来）时不能继续按旧节奏：否则调大后
     // 仍会按旧间隔打接口，调小后房间要等旧的长间隔才被查。
     let mut batch_due: HashMap<&'static str, bool> = HashMap::new();
-    for platform in ["bilibili", "douyu"] {
+    for platform in ["bilibili", "douyu", "douyin"] {
         let state = batches.get_mut(platform).expect("批量状态表缺少平台");
         if state.interval != Some(base) {
             state.interval = Some(base);
@@ -548,6 +571,7 @@ fn tick(
     }
     // 斗鱼批量只覆盖关注列表；登录态失效或房间太少时全部退回单房检查。
     let douyu_ready = douyu_batch_ready(rooms, crate::credential::is_ok("douyu"));
+    let douyin_ready = douyin_batch_ready(crate::credential::is_ok("douyin"));
     let mut batch_rooms: HashMap<&'static str, Vec<hivecast_ipc::RoomRecord>> = HashMap::new();
 
     for room in rooms {
@@ -587,7 +611,7 @@ fn tick(
         // 可批量房间走平台批量状态：每个批量拍检查全部可批量房间，
         // 而不是「谁刚好在拍点上到期才带谁」。后一种做法会让拍点前几秒
         // 到期的房间白等一个完整间隔，实测 30 秒会拖成 60 秒。
-        if let Some(platform) = batchable_platform(room, douyu_ready) {
+        if let Some(platform) = batchable_platform(room, douyu_ready, douyin_ready) {
             // 上一批还在路上时整批跳过；不要在每一拍把拍点往后推，
             // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
             let due = batch_due.get(platform).copied().unwrap_or(false);
@@ -630,7 +654,7 @@ fn tick(
         });
     }
 
-    for platform in ["bilibili", "douyu"] {
+    for platform in ["bilibili", "douyu", "douyin"] {
         if !batch_due.get(platform).copied().unwrap_or(false) {
             continue;
         }
@@ -736,8 +760,17 @@ async fn run_batch_check(
     let started = Instant::now();
     let total = rooms.len();
     let authed = crate::credential::is_ok(platform);
-    // B 站按账号 UID 映射；斗鱼没有独立 UID，房间号就是键。
-    let keys: Vec<String> = if platform == "douyu" {
+    // B 站按账号 UID 映射；斗鱼用页面房间号；抖音关注页只认 19 位内部 room_id，
+    // 不能用 room_key（web_rid），两者混用整批都会「缺失」。
+    let keys: Vec<String> = if platform == "douyin" {
+        rooms
+            .iter()
+            .filter_map(|room| room.internal_room_id.as_deref())
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else if platform == "douyu" {
         rooms
             .iter()
             .map(|room| room.room_key.trim().to_string())
@@ -749,13 +782,22 @@ async fn run_batch_check(
             .filter_map(|room| room.platform_uid.clone())
             .collect()
     };
-    let fetched = if platform == "douyu" {
-        crate::platform::douyu_follow::fetch_live_statuses(&keys).await
-    } else {
-        crate::platform::bilibili::fetch_live_statuses(&keys).await
-    };
+    let fetched: Result<(Vec<hivecast_ipc::LiveStatus>, usize), crate::platform::PlatformError> =
+        if platform == "douyin" {
+            crate::platform::douyin_batch::fetch_live_statuses(&keys)
+                .await
+                .map(|batch| (batch.statuses, batch.unresolved))
+        } else if platform == "douyu" {
+            crate::platform::douyu_follow::fetch_live_statuses(&keys)
+                .await
+                .map(|statuses| (statuses, 0))
+        } else {
+            crate::platform::bilibili::fetch_live_statuses(&keys)
+                .await
+                .map(|statuses| (statuses, 0))
+        };
     match fetched {
-        Ok(statuses) => {
+        Ok((statuses, unresolved)) => {
             let returned = statuses.len();
             let live = statuses.iter().filter(|status| status.is_live).count();
             let mut missing_rooms = Vec::new();
@@ -764,7 +806,9 @@ async fn run_batch_check(
                 .map(|status| (status.uid.clone(), status))
                 .collect();
             for room in rooms {
-                let key = if platform == "douyu" {
+                let key = if platform == "douyin" {
+                    room.internal_room_id.as_deref()
+                } else if platform == "douyu" {
                     Some(room.room_key.as_str())
                 } else {
                     room.platform_uid.as_deref()
@@ -779,6 +823,16 @@ async fn run_batch_check(
                                 .await;
                         send_batch_outcome(&tx, &completed, room.id, outcome);
                     }
+                    // 抖音关注页只返回在播房间：上一轮离线、这一轮仍没返回，
+                    // 且整批没有不可解析项，就可以直接保持离线，不必再打两个单房请求。
+                    // 上一轮在播则必须单房确认，避免批量漏项把正在录的直播误停。
+                    None if keep_douyin_offline(&room, unresolved) => {
+                        let info = Arc::new(offline_room_info(&room));
+                        let outcome =
+                            check_room_info_deferred(&app, &db, &broker, &recorder, &room, info)
+                                .await;
+                        send_batch_outcome(&tx, &completed, room.id, outcome);
+                    }
                     // 批量没返回这个 UID：可能是没有直播间/接口字段缺失，
                     // 不能按离线处理，回落到单房间接口拿准确状态。
                     None => {
@@ -787,7 +841,9 @@ async fn run_batch_check(
                             room = %room.host_name,
                             room_id = %room.id,
                             platform,
-                            key = if platform == "douyu" {
+                            key = if platform == "douyin" {
+                                room.internal_room_id.as_deref().unwrap_or_default()
+                            } else if platform == "douyu" {
                                 room.room_key.as_str()
                             } else {
                                 room.platform_uid.as_deref().unwrap_or_default()
@@ -820,6 +876,7 @@ async fn run_batch_check(
                 returned,
                 live,
                 missing,
+                unresolved,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "批量状态检查完成"
             );
@@ -864,6 +921,42 @@ async fn run_batch_check(
                 send_batch_outcome(&tx, &completed, id, outcome);
             }
         }
+    }
+}
+
+/// 抖音关注房批量缺失时能否直接保持离线。
+///
+/// 三个条件缺一不可：确实来自关注导入、上一轮已经离线、整批没有不可解析项。
+/// 上一轮在播必须单房确认，避免批量漏项把正在录的直播误停。
+fn keep_douyin_offline(room: &hivecast_ipc::RoomRecord, unresolved: usize) -> bool {
+    room.platform == "douyin" && room.batch_follow && !room.is_live && unresolved == 0
+}
+
+/// 抖音批量没返回、且上一轮已经离线的关注房：合成一条离线状态。
+///
+/// 不调用单房接口是这里的关键——关注页不返回就是离线或已取关，
+/// 用户要的是「按配置间隔知道状态」，不是每 30 秒再打两个请求确认离线。
+/// started_at 必须清空，否则 apply_room_info 会沿用上一场的时间。
+fn offline_room_info(room: &hivecast_ipc::RoomRecord) -> crate::platform::RoomInfo {
+    crate::platform::RoomInfo {
+        host_name: room.host_name.clone(),
+        room_name: room.title.clone(),
+        avatar_url: room.avatar_url.clone(),
+        cover_url: room.cover_url.clone(),
+        area_name: room.area_name.clone(),
+        is_live: false,
+        started_at: None,
+        online: None,
+        stable_id: Some(room.room_key.clone()),
+        extra: serde_json::json!({
+            // 抖音必须回填内部 room_id；写成 web_rid 会让批量资格与单房信息互相覆盖。
+            "roomId": room
+                .internal_room_id
+                .clone()
+                .unwrap_or_else(|| room.room_key.clone()),
+            "liveStatus": 0,
+            "videoLoop": false,
+        }),
     }
 }
 
@@ -1064,6 +1157,8 @@ fn needs_room_write(room: &hivecast_ipc::RoomRecord, info: &RoomInfo) -> bool {
         || info.started_at != room.started_at
         || crate::db::platform_uid_of(info)
             .is_some_and(|uid| room.platform_uid.as_deref() != Some(uid.as_str()))
+        || crate::db::internal_room_id_of(info)
+            .is_some_and(|id| room.internal_room_id.as_deref() != Some(id.as_str()))
 }
 
 /// 已经拿到平台房间信息后的统一收尾：写库、判断是否需要开录/停录。
@@ -1306,6 +1401,8 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             platform_uid: Some("42".into()),
+            batch_follow: false,
+            internal_room_id: None,
         }
     }
 
@@ -1325,15 +1422,92 @@ mod tests {
         room.room_key = "9999".into();
         assert!(!is_batchable(&room), "斗鱼不能复用 B 站的 UID 批量");
         assert_eq!(
-            batchable_platform(&room, false),
+            batchable_platform(&room, false, false),
             None,
             "未登录或房间不足时斗鱼必须走单房检查"
         );
         assert_eq!(
-            batchable_platform(&room, true),
+            batchable_platform(&room, true, false),
             Some("douyu"),
             "登录且达到批量门槛后按房间号进批量"
         );
+    }
+
+    #[test]
+    fn douyin_batch_only_covers_imported_follow_rooms() {
+        let mut room = batch_room();
+        room.platform = "douyin".into();
+        room.platform_uid = None;
+        room.room_key = "938611933111".into();
+        room.internal_room_id = Some("7708331906513767187".into());
+        room.batch_follow = true;
+
+        assert_eq!(
+            batchable_platform(&room, false, false),
+            None,
+            "未登录时不能进关注页批量"
+        );
+        assert_eq!(
+            batchable_platform(&room, false, true),
+            Some("douyin"),
+            "登录后的关注房按内部 room_id 进批量"
+        );
+
+        room.batch_follow = false;
+        assert_eq!(
+            batchable_platform(&room, false, true),
+            None,
+            "手动添加的抖音房不在关注列表里，必须单房检查"
+        );
+
+        room.batch_follow = true;
+        room.internal_room_id = None;
+        assert_eq!(
+            batchable_platform(&room, false, true),
+            None,
+            "只有 web_rid 时不能进关注页批量，先单房检查回填内部 room_id"
+        );
+        assert!(douyin_batch_ready(true));
+        assert!(!douyin_batch_ready(false));
+    }
+
+    #[test]
+    fn douyin_missing_keeps_only_known_offline_follow_rooms() {
+        let mut room = batch_room();
+        room.platform = "douyin".into();
+        room.room_key = "7708331906513767187".into();
+        room.batch_follow = true;
+
+        // 上一轮已离线、整批无不可解析项：这是正常的「没开播」，不再单查。
+        room.is_live = false;
+        assert!(keep_douyin_offline(&room, 0));
+
+        // 上一轮在播：批量漏项不能直接判离线，必须单房确认。
+        room.is_live = true;
+        assert!(!keep_douyin_offline(&room, 0));
+
+        // 有 rawdata 解析失败：缺失可能只是接口异常，全部回退单房。
+        room.is_live = false;
+        assert!(!keep_douyin_offline(&room, 1));
+
+        // 手动添加的抖音房根本不在关注列表，不能拿批量缺失当离线。
+        room.batch_follow = false;
+        assert!(!keep_douyin_offline(&room, 0));
+    }
+
+    #[test]
+    fn synthetic_offline_starts_a_new_session_without_reusing_old_time() {
+        let mut room = batch_room();
+        room.platform = "douyin".into();
+        room.room_key = "7708331906513767187".into();
+        room.title = "旧标题".into();
+        room.started_at = Some(1_700_000_000);
+
+        let info = offline_room_info(&room);
+        assert!(!info.is_live);
+        assert_eq!(info.started_at, None, "离线必须清掉上一场开播时间");
+        assert_eq!(info.stable_id.as_deref(), Some("7708331906513767187"));
+        assert_eq!(crate::db::platform_uid_of(&info), None);
     }
 
     #[test]

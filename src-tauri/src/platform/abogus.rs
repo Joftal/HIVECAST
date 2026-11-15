@@ -42,7 +42,7 @@ const SORT2: [usize; 44] = [
 ];
 
 /// 签名用的 UA。抖音把 UA 摘要写进 a_bogus，所以请求头必须与这里完全一致。
-pub const SIGN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0";
+pub const SIGN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
 
 /// 浏览器指纹：屏幕/窗口/色彩/时区/平台。取值只要自洽即可，服务端不校验真伪。
 pub const SIGN_FP: &str = "1920|1080|1944|1170|0|30|0|0|1920|1080|1920|1080|1920|1080|24|24|Win32";
@@ -420,7 +420,7 @@ mod tests {
                     SIGN_UA,
                     SIGN_FP,
                 ),
-                "kju14I4qr8H/Dfmp56xLfY3q6X13YQic0SVkMD2fmxfPbL39HMYD9exoI7svQY8jNT/dIeyjy4hbO3xprQAjM36UHWwoWdQ2m6fkKl5Q5I0j53iruyRkrzDF-vG1SaBBRk-lrOX0w7lHFb8pAnAn-h2UbfebYrtswnuYt9/bzD==",
+                "kju14I4qr8H/Dfmp56xLfY3q6X13Ymsc0SVkMD2fmx3SbL39HMYD9exoI7svQY8jNT/dIeyjy4hbO3xprQAjM36UHWwoWdQ2m6fkKl5Q5I0j53iruyRkrzDF-vG1SaBBRk-lrOX0w7lHFb8pAnAn-h2UbfebYrtswnuYt9/bVf==",
             ),
             (
                 "aid=6383&web_rid=734977595361&is_need_double_stream=false",
@@ -432,7 +432,7 @@ mod tests {
                     SIGN_UA,
                     "1920|1080|0|0|Win32",
                 ),
-                "DfmpkD62kjEsdEu856xLfY3q65D2YQic0SVkMD2fBYEPbL39HMTa9exoI7svQyujNT/dIcEjy4hbO3xprQAjM36UHmJx/DqAlLDpMj==",
+                "DfmpkD62kjEsdEu856xLfY3q65D2Ymsc0SVkMD2fBYNSbL39HMTa9exoI7svQyujNT/dIcEjy4hbO3xprQAjM36UHmJx/DqAlLDpjE==",
             ),
             (
                 "aid=6383&language=zh-CN",

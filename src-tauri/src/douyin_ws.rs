@@ -39,6 +39,7 @@ pub struct Stream {
     >,
     heartbeat: tokio::time::Interval,
     seq: u64,
+    frames: u64,
 }
 
 impl Stream {
@@ -64,7 +65,27 @@ impl Stream {
                     };
                     match message.map_err(|err| format!("读取失败：{err}"))? {
                         WsMessage::Binary(bytes) => {
-                            if let Some(frame) = decode_push_frame(&bytes)? {
+                            // 服务端偶尔会推不带 gzip 头的控制帧（参考实现同样直接跳过）。
+                            // 以前这里把解帧失败当成连接错误，导致每 30–60 秒重连一次、
+                            // 重连间隙的弹幕全部丢失。坏帧只跳过，不影响长连接。
+                            let decoded = match decode_push_frame(&bytes) {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    tracing::debug!(bytes = bytes.len(), %err, "抖音弹幕跳过无法解析的帧");
+                                    continue;
+                                }
+                            };
+                            if let Some(frame) = decoded {
+                                self.frames += 1;
+                                if !frame.methods.is_empty() || self.frames <= 3 {
+                                    tracing::debug!(
+                                        frames = self.frames,
+                                        bytes = bytes.len(),
+                                        methods = ?frame.methods,
+                                        events = frame.events.len(),
+                                        "抖音弹幕数据帧"
+                                    );
+                                }
                                 if let Some((log_id, ext)) = frame.ack {
                                     let mut fields = vec![
                                         (2, Value::Varint(log_id)),
@@ -120,10 +141,33 @@ async fn resolve_web_rid(room_key: &str) -> Result<String, String> {
 pub async fn open(room_key: &str) -> Result<Stream, String> {
     let web_rid = resolve_web_rid(room_key).await?;
     let page_url = format!("{HOME}/{web_rid}");
-    let page = http::client()
+    // 登录态会让弹幕接口返回更完整的事件（尤其是礼物/进场），但 WS 只连
+    // douyin.com，不会把 Cookie 带到 CDN。
+    let saved = crate::credential::cookie_for_url(&page_url).unwrap_or_default();
+    // 匿名时页面多半是验证码中间页，拿不到 ttwid；用主动注册的 ttwid 兜底，
+    // 与房间信息取流共用同一个进程内 ttwid。
+    let anon = if saved.is_empty() {
+        crate::platform::douyin::anon_ttwid()
+            .await
+            .map(|ttwid| format!("ttwid={ttwid}"))
+    } else {
+        None
+    };
+    let base = if saved.is_empty() {
+        anon.clone().unwrap_or_default()
+    } else {
+        saved.clone()
+    };
+    let mut page_request = http::client()
         .get(&page_url)
         .header("User-Agent", UA)
-        .header("Accept-Language", "zh-CN,zh;q=0.9")
+        .header("Accept-Language", "zh-CN,zh;q=0.9");
+    if !base.is_empty() {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&base) {
+            page_request = page_request.header(reqwest::header::COOKIE, value);
+        }
+    }
+    let page = page_request
         .send()
         .await
         .map_err(|err| format!("打开直播间页面失败：{err}"))?;
@@ -147,6 +191,11 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
         .iter()
         .find_map(|pair| pair.strip_prefix("ttwid="))
         .map(str::to_string)
+        .or_else(|| {
+            anon.as_deref()
+                .and_then(|pair| pair.strip_prefix("ttwid="))
+                .map(str::to_string)
+        })
         .ok_or_else(|| "页面没有下发 ttwid".to_string())?;
 
     // 真实 room_id 以 enter 接口为准；页面 SSR 兜底（拿到的是 "$undefined" 时直接跳过）。
@@ -154,7 +203,7 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
         Ok((id, _live)) => id,
         Err(err) => {
             tracing::warn!(room = %web_rid, %err, "取真实 room_id 失败，回退页面解析");
-            extract_room_id(&body).unwrap_or(web_rid)
+            extract_room_id(&body).unwrap_or_else(|| web_rid.clone())
         }
     };
     let unique_id = user_unique_id();
@@ -169,7 +218,11 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
     let headers = request.headers_mut();
     headers.insert("User-Agent", UA.parse().expect("UA 头非法"));
     headers.insert("Origin", HOME.parse().expect("Origin 头非法"));
-    let cookie = format!("ttwid={ttwid}");
+    let cookie = if saved.is_empty() {
+        format!("ttwid={ttwid}")
+    } else {
+        crate::credential::merge(&saved, &format!("ttwid={ttwid}"))
+    };
     headers.insert(
         "Cookie",
         cookie.parse().map_err(|_| "Cookie 头非法".to_string())?,
@@ -184,17 +237,30 @@ pub async fn open(room_key: &str) -> Result<Stream, String> {
     // 第一次 tick 会立刻触发，先消耗掉，之后才是真正的 5 秒间隔。
     heartbeat.tick().await;
 
+    tracing::debug!(
+        room_id,
+        web_rid = %web_rid,
+        authed = !saved.is_empty(),
+        cookie_names = ?cookie_names(&cookie),
+        "抖音弹幕连接建立"
+    );
     Ok(Stream {
         ws,
         heartbeat,
         seq: 0,
+        frames: 0,
     })
 }
 
 /// 网页参数：与 bililive-go 保持同一套（抖音对差异很敏感，字段缺一个就签不过）。
 fn build_url(room_id: &str, unique_id: &str) -> String {
-    // 参数集对齐 biliLive-tools/packages/DouYinDanma：不带 cursor / internal_ext，
-    // sdk 版本 1.0.15，时区 Etc/GMT-8，host 用 -hl 集群。
+    // 参数集对齐 bililive-go 的 douyin client。cursor / internal_ext 不是可选项：
+    // 缺了它服务端可能握手成功但一帧都不推（表现为「连上了没弹幕」）。
+    let now = now_millis();
+    let cursor = format!("d-1_u-1_fh-7392091211001140287_t-{now}_r-1");
+    let internal_ext = format!(
+        "internal_src:dim|wss_push_room_id:{room_id}|wss_push_did:{unique_id}|first_req_ms:{now}|fetch_time:{now}|seq:1|wss_info:0-{now}-0-0|wrds_v:7392094459690748497"
+    );
     let pairs: Vec<(&str, String)> = vec![
         ("app_name", "douyin_web".into()),
         ("room_id", room_id.into()),
@@ -215,12 +281,16 @@ fn build_url(room_id: &str, unique_id: &str) -> String {
         ("browser_name", "Mozilla".into()),
         ("browser_version", BROWSER_VERSION.into()),
         ("browser_online", "true".into()),
-        ("tz_name", "Etc/GMT-8".into()),
+        ("tz_name", "Asia/Shanghai".into()),
+        ("cursor", cursor),
+        ("internal_ext", internal_ext),
         ("host", HOME.into()),
         ("aid", "6383".into()),
         ("endpoint", "live_pc".into()),
         ("support_wrds", "1".into()),
         ("im_path", "/webcast/im/fetch/".into()),
+        ("insert_task_id", String::new()),
+        ("live_reason", String::new()),
         ("need_persist_msg_count", "15".into()),
         ("heartbeatDuration", "0".into()),
     ];
@@ -234,7 +304,7 @@ fn build_url(room_id: &str, unique_id: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("&");
-    format!("wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{query}")
+    format!("wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/?{query}")
 }
 
 /// 参与签名的 13 个字段，顺序固定（顺序变了签名就废）。
@@ -258,6 +328,14 @@ fn user_unique_id() -> String {
     let value =
         1_000_000_000_000_000_000u128 + hasher.finish() as u128 % 9_000_000_000_000_000_000u128;
     value.to_string()
+}
+
+/// 只取 Cookie 名，日志里绝不输出值。
+fn cookie_names(cookie: &str) -> Vec<&str> {
+    cookie
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('=').map(|(name, _)| name.trim()))
+        .collect()
 }
 
 fn now_millis() -> i64 {
@@ -394,6 +472,8 @@ fn as_u64(value: &Value) -> u64 {
 /// 返回 Some(帧) 表示这一帧是数据帧；None 表示可以忽略（比如空 payload）。
 struct Frame {
     events: Vec<Event>,
+    /// 本帧出现的 protobuf method，用于排查「连上了但看不到弹幕」。
+    methods: Vec<String>,
     /// 需要回 ACK 时给出 (logId, internalExt)。
     ack: Option<(u64, String)>,
 }
@@ -461,6 +541,7 @@ fn decode_push_frame(buf: &[u8]) -> Result<Option<Frame>, String> {
     .ok_or_else(|| "Response 解析失败".to_string())?;
 
     let mut events = Vec::new();
+    let methods = messages.iter().map(|(method, _)| method.clone()).collect();
     for (method, body) in messages {
         match method.as_str() {
             "WebcastChatMessage" => {
@@ -478,6 +559,7 @@ fn decode_push_frame(buf: &[u8]) -> Result<Option<Frame>, String> {
     }
     Ok(Some(Frame {
         events,
+        methods,
         ack: need_ack.then_some((log_id, internal_ext)),
     }))
 }

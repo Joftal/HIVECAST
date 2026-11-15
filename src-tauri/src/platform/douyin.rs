@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
+use crate::credential;
 use crate::platform::{http, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef};
 use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup, StreamPlan};
 
@@ -25,6 +26,47 @@ const ENTER: &str = "https://live.douyin.com/webcast/room/web/enter/";
 
 /// 抖音直播接口的 aid，写死在签名里，不能改。
 const AID: &str = "6383";
+
+/// 匿名访问时页面经常直接返回验证码中间页，不会下发 ttwid。
+/// 这里走字节的 union register 主动注册一个，进程内复用，避免每轮监控都注册。
+pub(crate) async fn anon_ttwid() -> Option<&'static str> {
+    // 只缓存成功结果：注册偶发失败时下一次请求还能重试，不会把进程永久锁死在匿名不可用。
+    static TTWID: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    TTWID
+        .get_or_try_init(|| async {
+            let body = json!({
+                "region": "cn",
+                "aid": 1768,
+                "needFid": false,
+                "service": "www.ixigua.com",
+                "migrate_info": { "ticket": "", "source": "node" },
+                "cbUrlProtocol": "https",
+                "union": true,
+            });
+            let response = http::client()
+                .post("https://ttwid.bytedance.com/ttwid/union/register/")
+                .header("User-Agent", abogus::SIGN_UA)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .ok()
+                .ok_or(())?;
+            let ttwid = response
+                .headers()
+                .get_all(reqwest::header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find_map(|text| text.split(';').next()?.strip_prefix("ttwid="))
+                .ok_or(())?
+                .to_string();
+            tracing::debug!(ttwid_len = ttwid.len(), "抖音匿名 ttwid 注册完成");
+            Ok::<String, ()>(ttwid)
+        })
+        .await
+        .ok()
+        .map(String::as_str)
+}
 
 pub struct DouyinAdapter;
 
@@ -43,9 +85,15 @@ impl DouyinAdapter {
             return Ok(room.room_key.clone());
         }
 
-        let response = http::client()
+        let mut request = http::client()
             .get(&room.canonical_url)
-            .header("User-Agent", http::USER_AGENT)
+            .header("User-Agent", http::USER_AGENT);
+        if let Some(cookie) = credential::cookie_for_url(&room.canonical_url) {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&cookie) {
+                request = request.header(reqwest::header::COOKIE, value);
+            }
+        }
+        let response = request
             .send()
             .await
             .map_err(|err| PlatformError::Network(format!("{} → {err}", room.canonical_url)))?;
@@ -60,10 +108,27 @@ impl DouyinAdapter {
     /// 拿 ttwid 并请求 enter 接口。
     async fn enter(&self, rid: &str) -> Result<EnterResponse, PlatformError> {
         let page_url = Self::referer(rid);
-        let page = http::client()
+        // 登录态参与房间信息与画质：抖音对已登录账号会返回更高的清晰度档位。
+        // Cookie 只发给 douyin.com；响应里的新 ttwid 仍要合并，避免旧 ttwid 过期。
+        let saved = credential::cookie_for_url(&page_url).unwrap_or_default();
+        let base = if saved.is_empty() {
+            anon_ttwid()
+                .await
+                .map(|ttwid| format!("ttwid={ttwid}"))
+                .unwrap_or_default()
+        } else {
+            saved.clone()
+        };
+        let mut page_request = http::client()
             .get(&page_url)
             .header("User-Agent", abogus::SIGN_UA)
-            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Accept-Language", "zh-CN,zh;q=0.9");
+        if !base.is_empty() {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&base) {
+                page_request = page_request.header(reqwest::header::COOKIE, value);
+            }
+        }
+        let page = page_request
             .send()
             .await
             .map_err(|err| PlatformError::Network(format!("{page_url} → {err}")))?;
@@ -82,6 +147,31 @@ impl DouyinAdapter {
         // ttwid 是必须的，缺了会拿到空响应或风控页，所以顺带把整页读掉预热。
         let _ = page.text().await;
 
+        let fresh = cookie_parts.join("; ");
+        let fresh_ttwid = cookie_parts.iter().any(|pair| pair.starts_with("ttwid="));
+        let cookie = if base.is_empty() {
+            fresh
+        } else {
+            credential::merge(&base, &fresh)
+        };
+        let has_ttwid = cookie
+            .split(';')
+            .any(|pair| pair.trim().starts_with("ttwid="));
+        tracing::debug!(
+            saved = !saved.is_empty(),
+            fresh_ttwid,
+            fresh_cookies = cookie_parts.len(),
+            has_ttwid,
+            "抖音房间页 Cookie"
+        );
+        // 连 ttwid 都拿不到时，继续请求 enter 只会得到空 body。
+        if !has_ttwid {
+            return Err(PlatformError::Upstream {
+                code: 0,
+                message: "抖音匿名访问被风控拦截，请登录后再试".into(),
+            });
+        }
+
         let signed = abogus::sign(&enter_params(rid), "", &abogus::SignOptions::now());
         let url = format!("{ENTER}?{signed}");
         let mut request = http::client()
@@ -89,8 +179,10 @@ impl DouyinAdapter {
             .header("User-Agent", abogus::SIGN_UA)
             .header("Referer", &page_url)
             .header("Accept-Language", "zh-CN,zh;q=0.9");
-        if !cookie_parts.is_empty() {
-            request = request.header("Cookie", cookie_parts.join("; "));
+        if !cookie.is_empty() {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&cookie) {
+                request = request.header(reqwest::header::COOKIE, value);
+            }
         }
 
         let response = request
@@ -814,7 +906,12 @@ fn candidate(quality: &Quality, url: &str, format: StreamFormat, weight: f64) ->
         fps: quality.fps,
         bitrate_kbps: Some(quality.bitrate_kbps),
         url: Some(url.to_string()),
-        headers: BTreeMap::new(),
+        // CDN 只认签名参数，不需要登录 Cookie；这里只补 Referer/UA，
+        // 避免把账号凭据发给第三方节点。证书由 ffmpeg 自己校验。
+        headers: BTreeMap::from([
+            ("Referer".to_string(), format!("{HOME}/")),
+            ("User-Agent".to_string(), http::USER_AGENT.to_string()),
+        ]),
         attrs,
     }
 }

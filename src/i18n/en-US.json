@@ -404,7 +404,7 @@
     "listBody": "Recording starts when a room goes live and wraps up when it ends. The list refreshes every 15s.",
     "count": "{{n}} rooms",
     "inputPlaceholder": "Paste a room link or ID",
-    "addRoomHint": "Douyu, Bilibili and other live links work. A bare number is treated as a Bilibili room; paste the full link for other platforms.",
+    "addRoomHint": "Bilibili, Douyu, Douyin and other live links work. A bare number is treated as a Bilibili room; paste the full link for other platforms.",
     "add": "Add",
     "adding": "Adding…",
     "live": "Live",
@@ -871,7 +871,11 @@
     },
     "bilibiliHint": "Signing in stores the session locally and unlocks 1080P recording.",
     "douyuHint": "Scan with the Douyu app to sign in; the session can then refresh automatically and record in HD.",
-    "douyuNoRefresh": "Auto refresh unavailable: a pasted cookie has no long-lived credential. Scan to enable it."
+    "douyuNoRefresh": "Auto refresh unavailable: a pasted cookie has no long-lived credential. Scan to enable it.",
+    "douyinHint": "Paste a Douyin web cookie that includes sessionid; signed-in playback follows the account's quality permissions.",
+    "autoRefreshOnDouyin": "Session valid (rechecked every 30 minutes, rotating cookies synced every 6 hours)",
+    "autoRefreshExpired": "Session expired; automatic rechecks are paused",
+    "douyinNoRefresh": "sessionid is missing, so the session cannot be rechecked. Sign in on the Douyin website and paste the full cookie again."
   },
   "close": {
     "title": "Tasks are still running",

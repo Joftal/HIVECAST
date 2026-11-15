@@ -223,6 +223,9 @@ pub async fn room_add(
         created_at: timestamp,
         updated_at: timestamp,
         platform_uid: crate::db::platform_uid_of(&info),
+        // 手动添加的房间不保证在关注列表里，继续走单房检查。
+        batch_follow: false,
+        internal_room_id: crate::db::internal_room_id_of(&info),
     };
 
     let room = state.db.insert_room(&draft, &info)?;
@@ -404,10 +407,11 @@ pub async fn rooms_import(
         // B 站同一个主播可能已经用短号加过：先按真实房间号查，再按 UID 兜底。
         // 两边都命中时合并，避免导入后又留下两条指向同一直播间的记录。
         // 斗鱼没有短号别名，直接按房间号查。
-        let canonical_url = if is_bilibili {
-            format!("https://live.bilibili.com/{room_id}")
-        } else {
-            format!("https://www.douyu.com/{room_id}")
+        let canonical_url = match platform {
+            "bilibili" => format!("https://live.bilibili.com/{room_id}"),
+            "douyu" => format!("https://www.douyu.com/{room_id}"),
+            "douyin" => format!("https://live.douyin.com/{room_id}"),
+            _ => format!("https://live.bilibili.com/{room_id}"),
         };
         let mut known = state.db.find_room(platform, room_id)?;
         if is_bilibili {
@@ -475,6 +479,8 @@ pub async fn rooms_import(
                     } else {
                         None
                     },
+                    batch_follow: platform == "douyin",
+                    internal_room_id: crate::db::internal_room_id_of(&info),
                     updated_at: timestamp,
                     ..room
                 };
@@ -553,6 +559,8 @@ pub async fn rooms_import(
             } else {
                 None
             },
+            batch_follow: platform == "douyin",
+            internal_room_id: None,
         };
         let info = import_room_info(&item, platform, uid, &uname);
         match state.db.insert_room(&draft, &info) {
@@ -2133,6 +2141,15 @@ pub async fn douyu_refresh_now(
     state: State<'_, AppState>,
 ) -> Result<RefreshStatus, AppError> {
     crate::douyu_auth::refresh_now(&state.db, &app).await
+}
+
+/// 手动检查抖音登录态：先轮换 Cookie，再复验身份。
+#[tauri::command]
+pub async fn douyin_refresh_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshStatus, AppError> {
+    crate::douyin_auth::refresh_now(&state.db, &app).await
 }
 
 // ---- 媒体库 ----
