@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
+use crate::credential;
 use crate::platform::{http, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef};
 use crate::platform::{Codec, StreamCandidate, StreamFormat, StreamGroup, StreamPlan};
 
@@ -60,10 +61,17 @@ impl DouyinAdapter {
     /// 拿 ttwid 并请求 enter 接口。
     async fn enter(&self, rid: &str) -> Result<EnterResponse, PlatformError> {
         let page_url = Self::referer(rid);
-        let page = http::client()
+        // 已登录时把账号 Cookie 一起带上：抖音的清晰度与登录态相关，同时页面
+        // 返回的新 ttwid 仍要并入，避免旧 ttwid 过期后取流被风控。
+        let saved = credential::cookie_for_url(&page_url).unwrap_or_default();
+        let mut page_request = http::client()
             .get(&page_url)
             .header("User-Agent", abogus::SIGN_UA)
-            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Accept-Language", "zh-CN,zh;q=0.9");
+        if !saved.is_empty() {
+            page_request = page_request.header("Cookie", &saved);
+        }
+        let page = page_request
             .send()
             .await
             .map_err(|err| PlatformError::Network(format!("{page_url} → {err}")))?;
@@ -82,6 +90,13 @@ impl DouyinAdapter {
         // ttwid 是必须的，缺了会拿到空响应或风控页，所以顺带把整页读掉预热。
         let _ = page.text().await;
 
+        let fresh = cookie_parts.join("; ");
+        let cookie = if saved.is_empty() {
+            fresh
+        } else {
+            credential::merge(&saved, &fresh)
+        };
+
         let signed = abogus::sign(&enter_params(rid), "", &abogus::SignOptions::now());
         let url = format!("{ENTER}?{signed}");
         let mut request = http::client()
@@ -89,8 +104,8 @@ impl DouyinAdapter {
             .header("User-Agent", abogus::SIGN_UA)
             .header("Referer", &page_url)
             .header("Accept-Language", "zh-CN,zh;q=0.9");
-        if !cookie_parts.is_empty() {
-            request = request.header("Cookie", cookie_parts.join("; "));
+        if !cookie.is_empty() {
+            request = request.header("Cookie", cookie);
         }
 
         let response = request

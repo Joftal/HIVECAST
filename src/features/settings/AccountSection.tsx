@@ -8,6 +8,10 @@ import {
   douyuQrPoll,
   douyuQrStart,
   douyuRefreshNow,
+  douyinLoginCancel,
+  douyinLoginOpen,
+  douyinLoginPoll,
+  douyinRefreshNow,
   credentialSave,
   credentialsList,
   describeError,
@@ -121,7 +125,11 @@ export default function AccountSection() {
     setChecking(true);
     try {
       const status =
-        platform === "douyu" ? await douyuRefreshNow() : await bilibiliRefreshNow();
+        platform === "douyu"
+          ? await douyuRefreshNow()
+          : platform === "douyin"
+            ? await douyinRefreshNow()
+            : await bilibiliRefreshNow();
       await load();
       notify.success(t("account.refreshDone", { result: refreshOutcomeLabel(status) }));
     } catch (err) {
@@ -168,17 +176,26 @@ export default function AccountSection() {
   };
 
   const closeQr = () => {
+    if (qr?.platform === "douyin") void douyinLoginCancel().catch(() => {});
     qrSeq.current += 1;
     setQr(null);
     setBusy(false);
   };
 
   const openQr = async (platform: Platform) => {
+    if (qr?.platform === "douyin" && platform !== "douyin") {
+      void douyinLoginCancel().catch(() => {});
+    }
     const seq = ++qrSeq.current;
     setQr(null);
     setBusy(true);
     try {
-      const ticket = platform === "douyu" ? await douyuQrStart() : await bilibiliQrStart();
+      const ticket =
+        platform === "douyu"
+          ? await douyuQrStart()
+          : platform === "douyin"
+            ? await douyinLoginOpen()
+            : await bilibiliQrStart();
       // 关闭面板或重新打开后，旧请求的响应必须丢弃。
       if (seq !== qrSeq.current) return;
       setQr({
@@ -217,12 +234,21 @@ export default function AccountSection() {
   const qrState = qr?.poll?.state ?? "pending";
   const qrMessage =
     qr?.error ??
-    (qr ? (qr.poll ? qr.poll.message : t("account.qrWaiting")) : t("account.qrWaiting"));
+    (qr
+      ? qr.poll
+        ? qr.poll.message
+        : qr.platform === "douyin"
+          ? t("account.qrDouyinWaiting")
+          : t("account.qrWaiting")
+      : t("account.qrWaiting"));
   const secondsLeft = useSecondsLeft(qr?.expiresAt);
   const counting = Boolean(qr) && (qrState === "pending" || qrState === "scanned");
 
   // 本地先到点就先判失效，不必等服务端下一次轮询（最多省 1.6 秒的错觉）。
+  // 抖音的二维码由官方页面自己刷新，倒计时只用于提示；必须让后端轮询到点
+  // 关闭登录窗口，否则窗口会一直留在前台却不再被轮询。
   useEffect(() => {
+    if (qr?.platform === "douyin") return;
     if (!counting || secondsLeft === null || secondsLeft > 0) return;
     setQr((current) =>
       current && !current.poll?.state?.startsWith("expired")
@@ -237,7 +263,7 @@ export default function AccountSection() {
           }
         : current,
     );
-  }, [counting, secondsLeft, t]);
+  }, [counting, qr?.platform, secondsLeft, t]);
 
   // 扫码期间每 1.6 秒问一次；confirmed / expired / error 后停表。
   useEffect(() => {
@@ -254,7 +280,9 @@ export default function AccountSection() {
         const poll =
           qr.platform === "douyu"
             ? await douyuQrPoll(qr.ticket.qrcodeKey)
-            : await bilibiliQrPoll(qr.ticket.qrcodeKey);
+            : qr.platform === "douyin"
+              ? await douyinLoginPoll(qr.ticket.qrcodeKey)
+              : await bilibiliQrPoll(qr.ticket.qrcodeKey);
         if (cancelled) return;
         setQr((current) =>
           current
@@ -338,7 +366,11 @@ export default function AccountSection() {
     <div className="animate-fade-rise mt-3 space-y-2.5 rounded-[9px] border border-line bg-raised/40 p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[10.5px] font-medium text-muted">
-          {qr.platform === "douyu" ? t("account.qrTitleDouyu") : t("account.qrTitle")}
+          {qr.platform === "douyu"
+            ? t("account.qrTitleDouyu")
+            : qr.platform === "douyin"
+              ? t("account.qrTitleDouyin")
+              : t("account.qrTitle")}
         </span>
         <button
           type="button"
@@ -349,11 +381,27 @@ export default function AccountSection() {
         </button>
       </div>
       <div className="flex items-start gap-3">
-        <div
-          className="w-[128px] shrink-0 overflow-hidden rounded-ctl border border-line bg-white p-1.5 [&_svg]:h-full [&_svg]:w-full"
-          // SVG 由本地 qrcode 库生成，不含外部输入。
-          dangerouslySetInnerHTML={{ __html: qr.ticket.svg }}
-        />
+        {qr.platform === "douyin" ? (
+          <div className="flex h-[128px] w-[128px] shrink-0 flex-col items-center justify-center gap-1 rounded-ctl border border-line bg-surface px-2 text-center">
+            <span className="font-mono text-[9px] tracking-[0.12em] text-faint">DOUYIN</span>
+            <span className="text-[10px] leading-4 text-muted">
+              {qrState === "expired" || qr?.error
+                ? t("account.qrDouyinClosed")
+                : t("account.qrDouyinWindow")}
+            </span>
+            <span className="text-[9px] leading-3.5 text-faint">
+              {qrState === "expired" || qr?.error
+                ? t("account.qrDouyinClosedHint")
+                : t("account.qrDouyinWindowHint")}
+            </span>
+          </div>
+        ) : (
+          <div
+            className="w-[128px] shrink-0 overflow-hidden rounded-ctl border border-line bg-white p-1.5 [&_svg]:h-full [&_svg]:w-full"
+            // SVG 由本地 qrcode 库生成，不含外部输入。
+            dangerouslySetInnerHTML={{ __html: qr.ticket.svg }}
+          />
+        )}
         <div className="min-w-0 flex-1 space-y-1.5">
           <p
             className={cx(
@@ -378,7 +426,11 @@ export default function AccountSection() {
             </p>
           ) : null}
           <p className="text-[10px] leading-4 text-faint">
-            {qr.platform === "douyu" ? t("account.qrHintDouyu") : t("account.qrHint")}
+            {qr.platform === "douyu"
+              ? t("account.qrHintDouyu")
+              : qr.platform === "douyin"
+                ? t("account.qrHintDouyin")
+                : t("account.qrHint")}
           </p>
           {qrState === "expired" || qr?.error ? (
             <Button
@@ -387,7 +439,9 @@ export default function AccountSection() {
               disabled={busy}
               onClick={() => void openQr(qr.platform)}
             >
-              {t("account.qrRefresh")}
+              {qr.platform === "douyin"
+                ? t("account.qrDouyinReopen")
+                : t("account.qrRefresh")}
             </Button>
           ) : null}
         </div>
@@ -469,9 +523,11 @@ export default function AccountSection() {
                       ? t("account.bilibiliHint")
                       : platform === "douyu"
                         ? t("account.douyuHint")
-                        : t("account.cookieHint")}
+                        : platform === "douyin"
+                          ? t("account.douyinHint")
+                          : t("account.cookieHint")}
                 </p>
-                {(platform === "bilibili" || platform === "douyu") && item ? (
+                {(platform === "bilibili" || platform === "douyu" || platform === "douyin") && item ? (
                   <div className="mt-1.5">
                     <p
                       className={cx(
@@ -488,10 +544,14 @@ export default function AccountSection() {
                       {item.refreshable
                         ? platform === "douyu"
                           ? t("account.autoRefreshOnDouyu")
-                          : t("account.autoRefreshOn")
+                          : platform === "douyin"
+                            ? t("account.autoRefreshOnDouyin")
+                            : t("account.autoRefreshOn")
                         : platform === "douyu"
                           ? t("account.douyuNoRefresh")
-                          : t("account.autoRefreshOff")}
+                          : platform === "douyin"
+                            ? t("account.douyinNoRefresh")
+                            : t("account.autoRefreshOff")}
                     </p>
                     {item.refreshable ? (
                       <div className="mt-1 flex items-start justify-between gap-2">
@@ -547,7 +607,7 @@ export default function AccountSection() {
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-1 border-t border-line/80 pt-2.5">
-                {platform === "bilibili" || platform === "douyu" ? (
+                {platform === "bilibili" || platform === "douyu" || platform === "douyin" ? (
                   <Button
                     size="sm"
                     variant={connected ? "ghost" : "secondary"}

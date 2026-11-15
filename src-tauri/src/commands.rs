@@ -2135,6 +2135,43 @@ pub async fn douyu_refresh_now(
     crate::douyu_auth::refresh_now(&state.db, &app).await
 }
 
+/// 打开抖音官方登录页。抖音扫码轮询带设备风控，不复刻签名，直接让用户
+/// 在真实 WebView 里完成扫码/短信验证，再从原生 CookieStore 读取登录态。
+#[tauri::command]
+pub async fn douyin_login_open(app: AppHandle) -> Result<QrTicket, AppError> {
+    crate::douyin_auth::open_login(&app)
+}
+
+#[tauri::command]
+pub async fn douyin_login_poll(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    qrcode_key: String,
+) -> Result<QrPoll, AppError> {
+    let poll = crate::douyin_auth::poll_login(&state.db, &app, &qrcode_key).await?;
+    if poll.state == "confirmed" {
+        state.broker.clear_groups();
+        state
+            .recorder
+            .recheck_all_quality(&app, state.broker.clone(), "douyin_login_confirmed");
+    }
+    Ok(poll)
+}
+
+#[tauri::command]
+pub async fn douyin_login_cancel(app: AppHandle) -> Result<(), AppError> {
+    crate::douyin_auth::cancel_login(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn douyin_refresh_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshStatus, AppError> {
+    crate::douyin_auth::refresh_now(&state.db, &app).await
+}
+
 // ---- 媒体库 ----
 
 /// 媒体库列表：筛选/排序/分页在 SQL 里做，返回本页 + 总数。
