@@ -759,18 +759,45 @@ impl Db {
         Ok(())
     }
 
-    /// 房间被删除时解除关注池的转正关联，下次开播还能重新导入。
-    pub fn release_douyin_follow_room(&self, room_id: &str) -> Result<(), AppError> {
+    /// 把已有抖音房间补成「关注批量」房间。
+    ///
+    /// 用户可能先手动添加、之后才导入关注；导入接口命中已有行时不会重建，
+    /// 但必须补上 batch_follow 与关注 uid，否则这个房间永远走单房轮询。
+    /// 关注池转正命中已有房间也走这里。
+    pub fn mark_douyin_batch_room(
+        &self,
+        room_id: &str,
+        uid: Option<&str>,
+        internal_room_id: Option<&str>,
+    ) -> Result<(), AppError> {
         let now = now_ts();
         self.lock()
             .execute(
-                "UPDATE douyin_follow
-                    SET promoted_room_id = NULL, updated_at = ?2
-                  WHERE promoted_room_id = ?1",
-                params![room_id, now],
+                "UPDATE room SET
+                    batch_follow = 1,
+                    platform_uid = COALESCE(?2, platform_uid),
+                    internal_room_id = COALESCE(?3, internal_room_id),
+                    updated_at = ?4
+                  WHERE id = ?1 AND platform = 'douyin'",
+                params![room_id, uid, internal_room_id, now],
             )
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// 房间被删除时一起删掉对应的关注池项。
+    ///
+    /// 不能只把 promoted_room_id 置空：关注仍在池里，下一轮扫描会把刚删掉的
+    /// 房间重新转正，用户会看到「删了又回来」。要恢复关注批量，重新导入即可。
+    pub fn delete_douyin_follow_for_room(&self, room_id: &str) -> Result<usize, AppError> {
+        let removed = self
+            .lock()
+            .execute(
+                "DELETE FROM douyin_follow WHERE promoted_room_id = ?1",
+                params![room_id],
+            )
+            .map_err(db_err)?;
+        Ok(removed)
     }
 
     /// 没有结构性变化时的写库：只更新在线人数与检测时间，且最多 min_interval 秒一次（G2）。
@@ -3604,12 +3631,56 @@ mod tests {
         assert!(saved.auto_record);
         assert_eq!(saved.promoted_room_id.as_deref(), Some("room-1"));
 
-        db.release_douyin_follow_room("room-1")
-            .expect("解除关联失败");
+        // 用户移除房间时关注池项一并删除：只解绑 promoted_room_id 会让池扫描
+        // 在下一轮把刚删掉的房间重新转正。
         assert_eq!(
-            db.list_douyin_follows().expect("读取关注池失败")[0].promoted_room_id,
-            None
+            db.delete_douyin_follow_for_room("room-1")
+                .expect("删除关注池项失败"),
+            1
         );
-        assert_eq!(db.pending_douyin_follows().expect("读取失败").len(), 1);
+        assert!(db.list_douyin_follows().expect("读取关注池失败").is_empty());
+        assert!(db.pending_douyin_follows().expect("读取失败").is_empty());
+        assert_eq!(
+            db.delete_douyin_follow_for_room("room-1")
+                .expect("重复删除失败"),
+            0
+        );
+    }
+
+    #[test]
+    fn manual_douyin_room_can_join_batch_and_removal_drops_follow() {
+        let (db, _path) = temp_db("douyin-batch-upgrade");
+        seed_media(&db);
+        db.lock()
+            .execute("UPDATE room SET platform = 'douyin' WHERE id = 'rm-a'", [])
+            .expect("改平台失败");
+        db.lock()
+            .execute(
+                "INSERT INTO douyin_follow (uid, promoted_room_id, created_at, updated_at)
+                 VALUES ('u-9', 'rm-a', 0, 0)",
+                [],
+            )
+            .expect("写入关注池失败");
+
+        db.mark_douyin_batch_room("rm-a", Some("u-9"), Some("7708331906513767187"))
+            .expect("标记批量失败");
+        let rooms = db.list_rooms().expect("读取房间失败");
+        let room = rooms
+            .iter()
+            .find(|room| room.id == "rm-a")
+            .expect("rm-a 缺失");
+        assert!(room.batch_follow);
+        assert_eq!(room.platform_uid.as_deref(), Some("u-9"));
+        assert_eq!(
+            room.internal_room_id.as_deref(),
+            Some("7708331906513767187")
+        );
+
+        assert_eq!(
+            db.delete_douyin_follow_for_room("rm-a")
+                .expect("删除关注池项失败"),
+            1
+        );
+        assert!(db.list_douyin_follows().expect("读取关注池失败").is_empty());
     }
 }

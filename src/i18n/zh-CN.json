@@ -498,6 +498,7 @@
       "live": "直播中",
       "existing": "已添加",
       "poolChip": "待开播",
+      "batchJoinChip": "可加入批量",
       "poolHint": "已加入关注池，开播后自动添加",
       "noRoom": "无直播间",
       "unnamed": "未命名直播间",

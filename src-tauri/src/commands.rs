@@ -440,6 +440,7 @@ pub async fn rooms_import(
     let mut restored = 0u32;
     let mut merged = 0u32;
     let mut rekeyed = 0u32;
+    let mut upgraded = 0u32;
     let mut failed = Vec::new();
     let mut started: Vec<RoomRecord> = Vec::new();
 
@@ -542,7 +543,7 @@ pub async fn rooms_import(
                     canonical_url: canonical_url.clone(),
                     auto_record,
                     monitor_paused: !monitor,
-                    platform_uid: if is_bilibili {
+                    platform_uid: if is_bilibili || platform == "douyin" {
                         Some(uid.to_string())
                     } else {
                         None
@@ -576,7 +577,42 @@ pub async fn rooms_import(
             } else {
                 // 单行刷新失败不应该让整批导入停在半路。
                 match state.db.update_room_info(&room.id, &info) {
-                    Ok(()) => existing += 1,
+                    Ok(()) => {
+                        existing += 1;
+                        // 先手动添加、后导入关注：房间已存在，但 batch_follow 还是 0。
+                        // 这里补标记，让它下一次调度就进 follow/feed 批量。
+                        if platform == "douyin" {
+                            let internal = crate::db::internal_room_id_of(&info);
+                            if !room.batch_follow
+                                || room.platform_uid.as_deref() != Some(uid)
+                                || room.internal_room_id.is_none()
+                            {
+                                match state.db.mark_douyin_batch_room(
+                                    &room.id,
+                                    Some(uid),
+                                    internal.as_deref(),
+                                ) {
+                                    Ok(()) => {
+                                        upgraded += 1;
+                                        tracing::info!(
+                                            target: "hivecast_lib::commands",
+                                            room_id = %room.id,
+                                            room_key = room_id,
+                                            uid,
+                                            internal_room_id = internal.as_deref().unwrap_or_default(),
+                                            "导入关注：已有抖音房间加入批量状态"
+                                        );
+                                    }
+                                    Err(err) => tracing::warn!(
+                                        target: "hivecast_lib::commands",
+                                        room_id = %room.id,
+                                        error = %err,
+                                        "导入关注：补写批量标记失败"
+                                    ),
+                                }
+                            }
+                        }
+                    }
                     Err(err) => failed.push(ImportFailure {
                         uid: identity.to_string(),
                         uname,
@@ -622,7 +658,7 @@ pub async fn rooms_import(
             notify_error: None,
             created_at: timestamp,
             updated_at: timestamp,
-            platform_uid: if is_bilibili {
+            platform_uid: if is_bilibili || platform == "douyin" {
                 Some(uid.to_string())
             } else {
                 None
@@ -655,6 +691,7 @@ pub async fn rooms_import(
         restored,
         merged,
         rekeyed,
+        upgraded,
         failed = failed.len(),
         monitor,
         auto_record,
@@ -703,9 +740,18 @@ pub async fn room_remove(
     state.view.close_room(&app, &id).await;
     // 停止录制会顺手打上「手动停录」标记；房间都移除了，别让它跨到下次重新添加。
     state.recorder.resume_auto(&id);
-    // 关注池项和房间解绑，下次开播还能重新转正。
-    state.db.release_douyin_follow_room(&id)?;
+    // 关注池项一起删掉：只解绑会让池扫描把刚移除的房间重新转正。
+    // 用户想恢复关注批量，重新导入关注即可。
+    let follow_removed = state.db.delete_douyin_follow_for_room(&id)?;
     state.db.delete_room(&id)?;
+    if follow_removed > 0 {
+        tracing::info!(
+            target: "hivecast_lib::commands",
+            room_id = %id,
+            follow_removed,
+            "移除房间：同时删除关注池项"
+        );
+    }
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
     Ok(())
 }

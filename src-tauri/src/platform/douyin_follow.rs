@@ -409,6 +409,9 @@ async fn promote(
 
     if let Some(room) = db.find_room("douyin", &web_rid)? {
         db.update_room_info(&room.id, &info)?;
+        // 已有房间可能是先手动添加的，batch_follow 仍为 0；关联时一起补上，
+        // 否则关注转正了却继续走单房轮询。
+        db.mark_douyin_batch_room(&room.id, Some(&item.uid), internal_room_id.as_deref())?;
         db.mark_douyin_follow_promoted(&item.uid, &room.id)?;
         let _ = app.emit(EVENT_ROOMS_CHANGED, ());
         tracing::info!(
@@ -416,6 +419,7 @@ async fn promote(
             uid = %item.uid,
             room = %web_rid,
             room_id = %room.id,
+            batch_follow = true,
             "抖音关注开播，已关联到已有房间"
         );
         return Ok(Some(room.id));

@@ -213,6 +213,22 @@ impl PlatformError {
             _ => false,
         }
     }
+
+    /// 抖音批量接口的「登录态失效 / 风控拦截」。
+    ///
+    /// 关注页 follow/feed 在 Cookie 过期或请求被拦截时返回 status_code=8
+    /// 或 10011。这类错误不是某个房间的问题，批量降级成 N 个单房请求
+    /// 只会放大风控；监控应像限流一样整平台暂停一轮，等 Cookie 复验恢复。
+    pub fn is_auth_or_risk(&self) -> bool {
+        match self {
+            PlatformError::Upstream { code, message } => {
+                matches!(*code, 8 | 10011 | 10012 | 10013)
+                    || message.contains("未登录")
+                    || message.to_ascii_lowercase().contains("blocked")
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +246,26 @@ mod tests {
         assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
         assert!(!PlatformError::Parse("bad json".into()).is_rate_limited());
         assert!(!PlatformError::RoomNotFound("42".into()).is_rate_limited());
+    }
+
+    #[test]
+    fn douyin_auth_and_risk_codes_are_not_per_room_failures() {
+        assert!(PlatformError::Upstream {
+            code: 8,
+            message: "not login".into()
+        }
+        .is_auth_or_risk());
+        assert!(PlatformError::Upstream {
+            code: 10011,
+            message: "blocked".into()
+        }
+        .is_auth_or_risk());
+        assert!(!PlatformError::Upstream {
+            code: 500,
+            message: "server error".into()
+        }
+        .is_auth_or_risk());
+        assert!(!PlatformError::Network("timeout".into()).is_auth_or_risk());
     }
 
     #[test]

@@ -902,6 +902,26 @@ async fn run_batch_check(
                 send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait as i64));
             }
         }
+        Err(err) if platform == "douyin" && err.is_auth_or_risk() => {
+            // 抖音关注页在 Cookie 过期/被风控时返回 8/10011。此时每个房间
+            // 都会失败，逐个降级只会放大风控；整平台暂停 2 分钟等复验恢复。
+            let wait = 120i64;
+            *not_before
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(Instant::now() + Duration::from_secs(wait as u64));
+            tracing::warn!(
+                error = %err,
+                platform,
+                rooms = rooms.len(),
+                retry_after = wait,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "批量状态登录态或风控异常，本平台暂停检查"
+            );
+            for room in rooms {
+                send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait));
+            }
+        }
         Err(err) => {
             tracing::warn!(
                 error = %err,

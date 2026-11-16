@@ -498,6 +498,7 @@
       "live": "Live",
       "existing": "Added",
       "poolChip": "Waiting",
+      "batchJoinChip": "Add to batch",
       "poolHint": "In the follow pool; added automatically when live",
       "noRoom": "No live room",
       "unnamed": "Untitled room",

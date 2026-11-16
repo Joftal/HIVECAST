@@ -276,14 +276,36 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     return keys;
   }, [rooms, source, douyinMeta]);
 
+  // 先手动添加、后导入关注的抖音房间：已经建房但 batch_follow 还是 0。
+  // 允许再次勾选，导入时后端只补批量标记，不会重复建房。
+  const douyinBatchKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (source !== "douyin") return keys;
+    for (const view of rooms) {
+      if (view.room.platform !== "douyin" || view.room.batchFollow) continue;
+      keys.add(view.room.roomKey);
+      if (view.room.platformUid) keys.add(view.room.platformUid);
+      if (view.room.internalRoomId) keys.add(view.room.internalRoomId);
+    }
+    return keys;
+  }, [rooms, source]);
+
   const isExisting = (user: FollowingUser, status?: LiveStatus) =>
     existing.has(user.uid) ||
     (!!status?.roomId && existing.has(status.roomId)) ||
     (!!status?.shortId && existing.has(status.shortId));
+  const isBatchUpgradable = (user: FollowingUser, status?: LiveStatus) =>
+    source === "douyin" &&
+    (douyinBatchKeys.has(user.uid) ||
+      (!!status?.roomId && douyinBatchKeys.has(status.roomId)) ||
+      (!!status?.shortId && douyinBatchKeys.has(status.shortId)));
   const canImport = (user: FollowingUser, status?: LiveStatus) => {
+    // 抖音允许把离线关注放进关注池；已有的手动房允许补成批量房。
+    if (source === "douyin") {
+      if (isBatchUpgradable(user, status)) return true;
+      return !isExisting(user, status) && douyinMeta.has(user.uid);
+    }
     if (isExisting(user, status)) return false;
-    // 抖音允许把离线关注放进关注池，等开播后再自动转成房间。
-    if (source === "douyin") return douyinMeta.has(user.uid);
     return !!status?.roomId;
   };
 
@@ -307,7 +329,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
           return true;
       }
     });
-  }, [users, statuses, query, filter, existing]);
+  }, [users, statuses, query, filter, existing, douyinBatchKeys]);
 
   const counts = useMemo(() => {
     let live = 0;
@@ -687,6 +709,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                 const meta = douyinMeta.get(user.uid);
                 const pooled = !!meta?.inPool && !meta.promotedRoomId;
                 const added = isExisting(user, status);
+                const batchJoin = isBatchUpgradable(user, status);
                 const selectable = canImport(user, status);
                 const checked = selected.has(user.uid);
                 return (
@@ -718,6 +741,9 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                           <Chip tone="accent">{t("monitor.importFollow.poolChip")}</Chip>
                         ) : added ? (
                           <Chip tone="accent">{t("monitor.importFollow.existing")}</Chip>
+                        ) : null}
+                        {batchJoin ? (
+                          <Chip tone="accent">{t("monitor.importFollow.batchJoinChip")}</Chip>
                         ) : null}
                       </div>
                       <div className="mt-0.5 truncate text-[11.5px] text-faint" title={status?.title}>
