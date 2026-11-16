@@ -480,10 +480,12 @@ struct Frame {
 
 fn decode_push_frame(buf: &[u8]) -> Result<Option<Frame>, String> {
     let mut log_id = 0u64;
+    let mut payload_type = String::new();
     let mut payload = Vec::new();
     walk_fields(buf, |number, value| {
         match number {
             2 => log_id = as_u64(&value),
+            7 => payload_type = as_string(&value),
             8 => {
                 if let Value::Bytes(raw) = value {
                     payload = raw;
@@ -497,12 +499,25 @@ fn decode_push_frame(buf: &[u8]) -> Result<Option<Frame>, String> {
     if payload.is_empty() {
         return Ok(None);
     }
+    // 心跳/ACK/关闭帧不是 Response，按普通数据帧解只会得到无意义的错误。
+    if matches!(payload_type.as_str(), "hb" | "ack" | "close" | "closeRoom") {
+        return Ok(None);
+    }
 
-    let mut decoder = GzDecoder::new(payload.as_slice());
-    let mut plain = Vec::new();
-    decoder
-        .read_to_end(&mut plain)
-        .map_err(|err| format!("gzip 解压失败：{err}"))?;
+    // 心跳/ACK 等控制帧的 payload 不是 gzip，直接按 gzip 解会报
+    // invalid gzip header。数据帧也可能没有压缩头；两种都先看魔数，
+    // 非 gzip 就按明文 Response 解析。坏帧只跳过，不能当断线重连。
+    let plain = if payload.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = GzDecoder::new(payload.as_slice());
+        let mut plain = Vec::new();
+        decoder
+            .read_to_end(&mut plain)
+            .map_err(|err| format!("gzip 解压失败：{err}"))?;
+        plain
+    } else {
+        tracing::trace!(payload_type = %payload_type, bytes = payload.len(), "抖音弹幕收到未压缩帧");
+        payload
+    };
 
     let mut messages: Vec<(String, Vec<u8>)> = Vec::new();
     let mut internal_ext = String::new();
@@ -566,14 +581,21 @@ fn decode_push_frame(buf: &[u8]) -> Result<Option<Frame>, String> {
 
 fn decode_chat(body: &[u8]) -> Option<Event> {
     let mut content = String::new();
+    let mut user_id = String::new();
+    let mut short_id = String::new();
     let mut nickname = String::new();
     walk_fields(body, |number, value| {
         match number {
             2 => {
                 if let Value::Bytes(raw) = value {
+                    // User: 1=id, 2=shortId(数字), 3=nickname。旧实现把 shortId
+                    // 当昵称，文件里就出现了 `u:"1129549704"` 这种数字。
                     let _ = walk_fields(&raw, |field, inner| {
-                        if field == 2 {
-                            nickname = as_string(&inner);
+                        match field {
+                            1 => user_id = as_string(&inner),
+                            2 => short_id = as_string(&inner),
+                            3 => nickname = as_string(&inner),
+                            _ => {}
                         }
                         true
                     });
@@ -587,29 +609,42 @@ fn decode_chat(body: &[u8]) -> Option<Event> {
     if content.is_empty() {
         return None;
     }
+    let user = if !nickname.is_empty() {
+        nickname
+    } else if !short_id.is_empty() {
+        // 少数旧版消息只带 shortId，至少保留可追溯的发送者标识。
+        short_id
+    } else if !user_id.is_empty() {
+        user_id
+    } else {
+        "未知用户".into()
+    };
     Some(Event {
         kind: "chat",
-        user: if nickname.is_empty() {
-            "未知用户".into()
-        } else {
-            nickname
-        },
+        user,
         content,
     })
 }
 
 fn decode_gift(body: &[u8]) -> Option<Event> {
+    let mut user_id = String::new();
+    let mut short_id = String::new();
     let mut nickname = String::new();
     let mut gift_name = String::new();
+    let mut gift_id = String::new();
     let mut count = 1u64;
     walk_fields(body, |number, value| {
         match number {
+            2 => gift_id = as_string(&value),
             5 => count = as_u64(&value).max(1),
             7 => {
                 if let Value::Bytes(raw) = value {
                     let _ = walk_fields(&raw, |field, inner| {
-                        if field == 2 {
-                            nickname = as_string(&inner);
+                        match field {
+                            1 => user_id = as_string(&inner),
+                            2 => short_id = as_string(&inner),
+                            3 => nickname = as_string(&inner),
+                            _ => {}
                         }
                         true
                     });
@@ -618,8 +653,10 @@ fn decode_gift(body: &[u8]) -> Option<Event> {
             15 => {
                 if let Value::Bytes(raw) = value {
                     let _ = walk_fields(&raw, |field, inner| {
-                        if field == 16 {
-                            gift_name = as_string(&inner);
+                        match field {
+                            5 => gift_id = as_string(&inner),
+                            16 => gift_name = as_string(&inner),
+                            _ => {}
                         }
                         true
                     });
@@ -629,17 +666,28 @@ fn decode_gift(body: &[u8]) -> Option<Event> {
         }
         true
     })?;
-    if gift_name.is_empty() {
-        return None;
-    }
+    let user = if !nickname.is_empty() {
+        nickname
+    } else if !short_id.is_empty() {
+        short_id
+    } else if !user_id.is_empty() {
+        user_id
+    } else {
+        "未知用户".into()
+    };
+    // 礼物名缺失（新礼物/地区包/协议裁剪）不能整条丢掉：保留 gift_id 或
+    // 通用文案，至少让落盘与回放知道「这里发生过一次礼物」。
+    let gift = if !gift_name.is_empty() {
+        gift_name
+    } else if !gift_id.is_empty() {
+        format!("礼物 #{gift_id}")
+    } else {
+        "礼物".to_string()
+    };
     Some(Event {
         kind: "gift",
-        user: if nickname.is_empty() {
-            "未知用户".into()
-        } else {
-            nickname
-        },
-        content: format!("赠送 {gift_name} × {count}"),
+        user,
+        content: format!("赠送 {gift} × {count}"),
     })
 }
 
@@ -762,6 +810,85 @@ mod tests {
         write_varint(&mut out, 300);
         let mut pos = 0;
         assert_eq!(read_varint(&out, &mut pos), Some(300));
+    }
+
+    fn bytes_field(number: u32, raw: &[u8]) -> (u32, Value) {
+        (number, Value::Bytes(raw.to_vec()))
+    }
+
+    fn test_user(id: u64, short: u64, nickname: &str) -> Vec<u8> {
+        encode_frame(&[
+            (1, Value::Varint(id)),
+            (2, Value::Varint(short)),
+            bytes_field(3, nickname.as_bytes()),
+        ])
+    }
+
+    #[test]
+    fn chat_uses_nickname_not_short_id() {
+        let user = test_user(7001, 1129549704, "黄二哥");
+        let body = encode_frame(&[bytes_field(2, &user), bytes_field(3, "笑死我了".as_bytes())]);
+        let event = decode_chat(&body).expect("应解析聊天");
+        assert_eq!(event.user, "黄二哥");
+        assert_eq!(event.content, "笑死我了");
+    }
+
+    #[test]
+    fn chat_falls_back_to_short_id_when_nickname_missing() {
+        let user = encode_frame(&[(1, Value::Varint(7001)), (2, Value::Varint(42))]);
+        let body = encode_frame(&[bytes_field(2, &user), bytes_field(3, "hi".as_bytes())]);
+        assert_eq!(decode_chat(&body).expect("应解析聊天").user, "42");
+    }
+
+    #[test]
+    fn gift_uses_nickname_and_keeps_unknown_gift_name() {
+        let user = test_user(7001, 123456, "执事");
+        let gift = encode_frame(&[(5, Value::Varint(9988))]);
+        let body = encode_frame(&[
+            (2, Value::Varint(9988)),
+            (5, Value::Varint(3)),
+            bytes_field(7, &user),
+            bytes_field(15, &gift),
+        ]);
+        let event = decode_gift(&body).expect("礼物名缺失也要落盘");
+        assert_eq!(event.kind, "gift");
+        assert_eq!(event.user, "执事");
+        assert_eq!(event.content, "赠送 礼物 #9988 × 3");
+    }
+
+    #[test]
+    fn gift_uses_protocol_name_and_count() {
+        let user = test_user(7001, 123456, "执事");
+        let gift = encode_frame(&[
+            (5, Value::Varint(9988)),
+            bytes_field(16, "小心心".as_bytes()),
+        ]);
+        let body = encode_frame(&[
+            (5, Value::Varint(6)),
+            bytes_field(7, &user),
+            bytes_field(15, &gift),
+        ]);
+        assert_eq!(
+            decode_gift(&body).expect("应解析礼物").content,
+            "赠送 小心心 × 6"
+        );
+    }
+
+    #[test]
+    fn ignores_uncompressed_control_frame_without_gzip_error() {
+        // 心跳帧 payload 不是 gzip；应被当成空事件帧处理，而不是解压报错。
+        let frame = encode_frame(&[
+            (1, Value::Varint(1)),
+            (2, Value::Varint(2)),
+            (7, Value::Bytes(b"hb".to_vec())),
+            (8, Value::Bytes(b"not-gzip".to_vec())),
+        ]);
+        assert!(
+            decode_push_frame(&frame)
+                .expect("控制帧不应让连接报错")
+                .is_none(),
+            "控制帧应直接忽略"
+        );
     }
 
     #[test]

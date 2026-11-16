@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::jce;
@@ -65,6 +66,9 @@ struct RoomConn {
     dropped: AtomicU32,
     last_error: Mutex<Option<String>>,
     batch_log: Mutex<BatchMeter>,
+    /// 斗鱼同一个礼物事件偶尔会下发两条完全相同的帧（同 t、同人、同内容），
+    /// 用最近一秒内的礼物键做短窗去重；中间夹着别的礼物也能认出来。
+    recent_gifts: Mutex<HashMap<String, i64>>,
     started: Instant,
 }
 
@@ -110,6 +114,7 @@ impl RoomConn {
             dropped: AtomicU32::new(0),
             last_error: Mutex::new(None),
             batch_log: Mutex::new(BatchMeter::new(now)),
+            recent_gifts: Mutex::new(HashMap::new()),
             started: now,
         }
     }
@@ -837,6 +842,22 @@ async fn fetch_conf(real_id: i64) -> Result<DanmuSession, String> {
 }
 
 /// 单房间限速 + 打时间戳 + 写盘 + 攒批。
+/// 斗鱼会为同一礼物重复下发完全相同的帧；1 秒窗口内按「发送者 + 内容」去重。
+/// 用 map 而不是只记上一条，避免两条重复帧中间夹了别的礼物就漏掉。
+fn duplicate_gift(recent: &mut HashMap<String, i64>, message: &DanmakuMessage) -> bool {
+    let user = message.user.as_deref().unwrap_or("");
+    let key = format!("{}:{}:{}", user.len(), user, message.content);
+    let now = message.offset_ms;
+    recent.retain(|_, at| (now - *at).abs() <= 5_000);
+    if let Some(at) = recent.get(&key) {
+        if (now - *at).abs() <= 1_000 {
+            return true;
+        }
+    }
+    recent.insert(key, now);
+    false
+}
+
 fn accept(
     conn: &RoomConn,
     window_start: &mut Instant,
@@ -849,6 +870,17 @@ fn accept(
         *count = 0;
     }
     message.offset_ms = conn.started.elapsed().as_millis() as i64;
+    // 斗鱼同一礼物事件可能重复下发：同用户、同内容且间隔不超过 1 秒只留第一条。
+    // 只对斗鱼礼物生效，聊天里用户自己连发同样的话不能被吞。
+    if conn.room.platform == "douyu"
+        && message.kind == "gift"
+        && duplicate_gift(
+            &mut conn.recent_gifts.lock().expect("礼物去重状态被污染"),
+            &message,
+        )
+    {
+        return;
+    }
     // 录制落盘先于限流：爆发房间也要留下完整弹幕文件。
     conn.fan_out(&message);
     if *count >= MAX_PER_SECOND {
@@ -1441,6 +1473,31 @@ mod tests {
     }
 
     #[test]
+    fn douyu_duplicate_gift_collapses_within_one_second() {
+        let mut recent = HashMap::new();
+        let gift = DanmakuMessage {
+            offset_ms: 1_000,
+            kind: "gift".into(),
+            user: Some("欢笑的魔鬼".into()),
+            content: "粉丝荧光棒 x1".into(),
+            color: 0,
+        };
+        assert!(!duplicate_gift(&mut recent, &gift));
+        assert!(duplicate_gift(&mut recent, &gift));
+        let mut other = gift.clone();
+        other.user = Some("另一个人".into());
+        other.offset_ms = 1_100;
+        assert!(!duplicate_gift(&mut recent, &other));
+        // 重复帧中间夹了别人的礼物，仍然要认出来。
+        let mut interleaved = gift.clone();
+        interleaved.offset_ms = 1_500;
+        assert!(duplicate_gift(&mut recent, &interleaved));
+        let mut later = gift.clone();
+        later.offset_ms = 3_000;
+        assert!(!duplicate_gift(&mut recent, &later));
+    }
+
+    #[test]
     fn auth_body_carries_login_identity_or_zero() {
         let authed = DanmuSession {
             token: "t".into(),
@@ -1751,7 +1808,8 @@ fn douyu_fields(raw: &str) -> HashMap<&str, &str> {
 }
 
 /// 斗鱼的 col 是调色板索引，不是 RGB。网页聊天区把 0..=5 映射成红/蓝/绿/金/紫/粉，
-/// 6 是普通正文灰；更大的数值才是历史客户端直接下发的 RGB。
+/// 6 在网页聊天区是「正文色」，但视频浮层背景不是白色，深灰几乎不可见，
+/// 因此这里统一按白色处理；更大的数值才是历史客户端直接下发的 RGB。
 fn douyu_color(raw: &str) -> u32 {
     let Ok(value) = raw.trim().parse::<u32>() else {
         return 0xFF_FF_FF;
@@ -1763,7 +1821,7 @@ fn douyu_color(raw: &str) -> u32 {
         3 => 0xD4_A1_13,
         4 => 0x8A_5B_E9,
         5 => 0xE0_4A_C0,
-        6 => 0x33_33_33,
+        6 => 0xFF_FF_FF,
         7..=0x0F => 0xFF_FF_FF,
         _ => value & 0xFF_FF_FF,
     }
@@ -1806,7 +1864,12 @@ fn douyu_message(raw: &str) -> Option<DanmakuMessage> {
         Some("spbc") => {
             // 房间内礼物广播（火箭/飞机等大礼物）。与 dgb 是两条独立事件：
             // dgb 给聊天区小条，spbc 给全房间横幅，两条都要留才不会漏礼物。
-            let name = fields.get("gn").map(|name| douyu_unescape(name))?;
+            let name = fields
+                .get("gn")
+                .or_else(|| fields.get("gfn"))
+                .map(|name| douyu_unescape(name))
+                .or_else(|| fields.get("gfid").map(|id| format!("礼物 {id}")))
+                .unwrap_or_else(|| "礼物".to_string());
             let count = fields.get("gc").copied().unwrap_or("1");
             Some(DanmakuMessage {
                 offset_ms: 0,
@@ -1843,7 +1906,10 @@ fn douyu_message(raw: &str) -> Option<DanmakuMessage> {
             Some(DanmakuMessage {
                 offset_ms: 0,
                 kind: "super_chat".into(),
-                user: fields.get("sn").map(|name| douyu_unescape(name)),
+                user: fields
+                    .get("sn")
+                    .or_else(|| fields.get("nn"))
+                    .map(|name| douyu_unescape(name)),
                 content,
                 color: 0xFF_8A_00,
             })
@@ -1858,7 +1924,12 @@ async fn run_douyu_room(app: AppHandle, conn: Arc<RoomConn>) {
         if conn.closed.load(Ordering::SeqCst) {
             break;
         }
-        match douyu_once(&app, &conn, &mut backoff).await {
+        // 把 batch 提到循环外：douyu_once 的任意 ? 早退都要先把最后一批
+        // 已解析消息发给前端，再进入重连，不能丢掉最后 200ms 的实时弹幕。
+        let mut batch: Vec<DanmakuMessage> = Vec::new();
+        let result = douyu_once(&app, &conn, &mut backoff, &mut batch).await;
+        flush(&app, &conn, &mut batch);
+        match result {
             Ok(()) => break,
             Err(err) => {
                 tracing::warn!(room = %conn.room.room_key, %err, "斗鱼弹幕连接中断");
@@ -1879,6 +1950,7 @@ async fn douyu_once(
     app: &AppHandle,
     conn: &Arc<RoomConn>,
     backoff: &mut Duration,
+    batch: &mut Vec<DanmakuMessage>,
 ) -> Result<(), String> {
     let room_id: i64 = conn
         .room
@@ -1886,7 +1958,35 @@ async fn douyu_once(
         .parse()
         .map_err(|_| format!("斗鱼房间号不是数字：{}", conn.room.room_key))?;
 
-    let mut ws = douyu_connect().await?;
+    // 斗鱼网页端 WS 握手本身不强制登录，但带上账号 Cookie 与不带相比，
+    // 服务端可能返回不同的 loginres（登录 uid）或更完整的事件。优先登录态。
+    let cookie = crate::credential::cookie_for_url("https://www.douyu.com/");
+    // 带 Cookie 的握手是「优先尝试」，不是硬依赖：部分账号的 Cookie 很长或
+    // 网关策略变化时会直接拒绝握手。失败后必须回退匿名，不能让弹幕整体不可用。
+    let mut authed = cookie.is_some();
+    let mut ws = match douyu_connect(cookie.as_deref()).await {
+        Ok(ws) => ws,
+        Err(err) if cookie.is_some() => {
+            tracing::warn!(
+                room = %conn.room.room_key,
+                %err,
+                "斗鱼带 Cookie 连接弹幕失败，回退匿名"
+            );
+            authed = false;
+            douyu_connect(None).await?
+        }
+        Err(err) => return Err(err),
+    };
+    tracing::debug!(
+        room = %conn.room.room_key,
+        authed,
+        cookie_bytes = if authed {
+            cookie.as_ref().map_or(0, |value| value.len())
+        } else {
+            0
+        },
+        "斗鱼弹幕连接建立"
+    );
     {
         use futures_util::SinkExt;
         ws.send(WsMessage::Binary(douyu_frame(&format!(
@@ -1915,7 +2015,6 @@ async fn douyu_once(
     let mut last_rx = Instant::now();
     let mut window_start = Instant::now();
     let mut count = 0u32;
-    let mut batch: Vec<DanmakuMessage> = Vec::new();
     let mut buffer: Vec<u8> = Vec::new();
     let mut frames = 0u64;
     let mut parsed = 0u64;
@@ -1935,9 +2034,17 @@ async fn douyu_once(
                         buffer.extend_from_slice(&data);
                         for raw in douyu_drain(&mut buffer) {
                             frames += 1;
+                            if raw.starts_with("type@=loginres/") {
+                                let fields = douyu_fields(&raw);
+                                tracing::debug!(
+                                    room = %conn.room.room_key,
+                                    userid = fields.get("userid").copied().unwrap_or("0"),
+                                    "斗鱼弹幕登录回执"
+                                );
+                            }
                             if let Some(message) = douyu_message(&raw) {
                                 parsed += 1;
-                                accept(conn, &mut window_start, &mut count, &mut batch, message);
+                                accept(conn, &mut window_start, &mut count, batch, message);
                             }
                         }
                     }
@@ -1950,7 +2057,7 @@ async fn douyu_once(
                 }
             }
             _ = batch_tick.tick() => {
-                flush(app, conn, &mut batch);
+                flush(app, conn, batch);
                 batches += 1;
             }
             _ = idle_check.tick() => {
@@ -1981,7 +2088,7 @@ async fn douyu_once(
     }
 }
 
-async fn douyu_connect() -> Result<WsStream, String> {
+async fn douyu_connect(cookie: Option<&str>) -> Result<WsStream, String> {
     // 斗鱼弹幕前置网关对 rustls 的 ClientHello 直接回 HandshakeFailure，
     // 用系统 TLS（macOS Security / Windows SChannel）才握得上，其它平台仍走 rustls。
     let native = native_tls::TlsConnector::builder()
@@ -1992,8 +2099,26 @@ async fn douyu_connect() -> Result<WsStream, String> {
     let mut last = String::new();
     for port in DOUYU_PORTS {
         let url = format!("wss://danmuproxy.douyu.com:{port}/");
+        let mut request = url
+            .clone()
+            .into_client_request()
+            .map_err(|err| format!("构造斗鱼弹幕请求失败：{err}"))?;
+        request
+            .headers_mut()
+            .insert("Origin", HeaderValue::from_static("https://www.douyu.com"));
+        request.headers_mut().insert(
+            "Referer",
+            HeaderValue::from_static("https://www.douyu.com/"),
+        );
+        if let Some(value) = cookie {
+            request.headers_mut().insert(
+                "Cookie",
+                HeaderValue::from_str(value)
+                    .map_err(|err| format!("斗鱼 Cookie 含非法字符：{err}"))?,
+            );
+        }
         match tokio_tungstenite::connect_async_tls_with_config(
-            &url,
+            request,
             None,
             false,
             Some(connector.clone()),
@@ -2062,6 +2187,9 @@ mod douyu_tests {
         // 缺字段时按默认白，不能当成 col=0 的红色。
         let none = douyu_message("type@=chatmsg/nn@=a/txt@=hi/").unwrap();
         assert_eq!(none.color, 0xFF_FF_FF);
+        // col=6 在网页聊天区是正文深灰，叠在视频上不可见，浮层统一改白。
+        let plain = douyu_message("type@=chatmsg/nn@=a/txt@=hi/col@=6/").unwrap();
+        assert_eq!(plain.color, 0xFF_FF_FF);
     }
 
     #[test]
@@ -2078,6 +2206,14 @@ mod douyu_tests {
             .expect("应该解析超级弹幕");
         assert_eq!(super_chat.kind, "super_chat");
         assert_eq!(super_chat.content, "这是一条超级弹幕");
+
+        // spbc 个别只给 gfid 不给 gn，仍要保留；ssd 没有 sn 时退回 nn。
+        let gift =
+            douyu_message("type@=spbc/sn@=神秘人/gfid@=23716/gc@=1/").expect("spbc 缺 gn 也要保留");
+        assert_eq!(gift.content, "礼物 23716 x1");
+        let super_chat =
+            douyu_message("type@=ssd/nn@=观众A/content@=置顶/").expect("ssd 使用 nn 兜底");
+        assert_eq!(super_chat.user.as_deref(), Some("观众A"));
     }
 
     #[test]
@@ -2112,7 +2248,7 @@ mod douyu_tests {
     async fn live_probe() {
         use futures_util::SinkExt;
         let room: i64 = 9999;
-        let mut ws = douyu_connect().await.expect("连不上斗鱼弹幕");
+        let mut ws = douyu_connect(None).await.expect("连不上斗鱼弹幕");
         ws.send(WsMessage::Binary(douyu_frame(&format!(
             "type@=loginreq/roomid@={room}/"
         ))))
@@ -2640,7 +2776,11 @@ async fn run_douyin_room(app: AppHandle, conn: Arc<RoomConn>) {
         if conn.closed.load(Ordering::SeqCst) {
             break;
         }
-        match douyin_session(&app, &conn).await {
+        // 与斗鱼同理：任何退出路径都先冲刷最后一批，重连不能吞掉刚收到的弹幕。
+        let mut batch: Vec<DanmakuMessage> = Vec::new();
+        let result = douyin_session(&app, &conn, &mut batch).await;
+        flush(&app, &conn, &mut batch);
+        match result {
             Ok(()) => {
                 if conn.closed.load(Ordering::SeqCst) {
                     break;
@@ -2666,16 +2806,19 @@ async fn wait_closed(conn: &RoomConn) {
     }
 }
 
-async fn douyin_session(app: &AppHandle, conn: &RoomConn) -> Result<(), String> {
+async fn douyin_session(
+    app: &AppHandle,
+    conn: &RoomConn,
+    batch: &mut Vec<DanmakuMessage>,
+) -> Result<(), String> {
     let mut stream = crate::douyin_ws::open(&conn.room.room_key).await?;
     let mut window = Instant::now();
     let mut count = 0u32;
-    let mut batch: Vec<DanmakuMessage> = Vec::new();
     let mut last_flush = Instant::now();
 
     loop {
         if conn.closed.load(Ordering::SeqCst) {
-            flush(app, conn, &mut batch);
+            flush(app, conn, batch);
             return Ok(());
         }
         let events =
@@ -2696,10 +2839,10 @@ async fn douyin_session(app: &AppHandle, conn: &RoomConn) -> Result<(), String> 
                     0xFFFFFF
                 },
             };
-            accept(conn, &mut window, &mut count, &mut batch, message);
+            accept(conn, &mut window, &mut count, batch, message);
         }
         if last_flush.elapsed() >= BATCH_WINDOW {
-            flush(app, conn, &mut batch);
+            flush(app, conn, batch);
             last_flush = Instant::now();
         }
     }

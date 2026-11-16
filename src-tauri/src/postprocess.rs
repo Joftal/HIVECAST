@@ -372,6 +372,16 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
         let at = value["t"].as_i64().unwrap_or(0);
         let color = value["col"].as_u64().unwrap_or(0) as u32;
         let kind = value["k"].as_str().unwrap_or("chat");
+        // 礼物/上舰在实时浮层里是「发送者：内容」，字幕也保持一致；
+        // 聊天保持纯文本，避免每条滚动弹幕都顶一个名字。
+        let text = if kind != "chat" {
+            match value["u"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+                Some(user) => format!("{user}：{text}"),
+                None => text,
+            }
+        } else {
+            text
+        };
         lines.push((at, text, color, kind != "chat"));
     }
     if lines.is_empty() {
@@ -680,7 +690,7 @@ mod tests {
         assert!(!text.contains("{\\move(0,0)}"));
         // 礼物走固定公告：居中、an8 顶部对齐，不带 move。
         assert!(text.contains("\\an8\\pos(640,"));
-        assert!(text.contains("赠送 辣条 ×3"));
+        assert!(text.contains("小刚：赠送 辣条 ×3"));
         assert!(text.contains("[30 元] 加油"), "SC 不能丢");
         assert!(text.contains("开通了 舰长 × 1"), "舰长不能丢");
         std::fs::remove_dir_all(&dir).ok();

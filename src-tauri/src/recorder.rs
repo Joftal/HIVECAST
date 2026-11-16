@@ -2618,14 +2618,11 @@ impl Recorder {
                     for (index, clip) in rendered.iter().enumerate() {
                         let start =
                             (clip.started_at * 1000 - recording_started_ms - writer_shift).max(0);
-                        let end = if index + 1 == rendered.len() {
-                            None
-                        } else {
-                            Some(
-                                (clip.ended_at * 1000 - recording_started_ms - writer_shift)
-                                    .max(start),
-                            )
-                        };
+                        // 最后一段也要用结束时刻封口：停止录制后合并/收尾期间
+                        // 弹幕连接还活着，继续到达的事件不属于这段视频。
+                        let end = Some(
+                            (clip.ended_at * 1000 - recording_started_ms - writer_shift).max(start),
+                        );
                         let out = if index == 0 {
                             first_jsonl.clone()
                         } else {
