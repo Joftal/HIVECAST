@@ -120,10 +120,6 @@ impl BatchState {
     }
 }
 
-/// 斗鱼关注数达到这个量级才值得走批量：少量房间单查更准，也不会因为
-/// 关注列表里缺一个房间就整批回退。
-const DOUYU_BATCH_MIN_ROOMS: usize = 3;
-
 /// 监控排期快照：命令层读取，详情抽屉轮询显示下次检查与退避。
 pub type MonitorStatusMap = Arc<Mutex<HashMap<String, hivecast_ipc::MonitorStatus>>>;
 
@@ -256,20 +252,12 @@ fn douyin_batch_ready(logged_in: bool) -> bool {
     logged_in
 }
 
-/// 斗鱼批量门槛：已登录，且未暂停监控的斗鱼房间至少有 3 个。
+/// 斗鱼批量门槛：只看登录态，不再限制房间数量。
 ///
-/// 少量房间单查更准；关注列表缺房间时还要逐房回退，批量反而多一次请求。
-fn douyu_batch_ready(rooms: &[hivecast_ipc::RoomRecord], logged_in: bool) -> bool {
-    if !logged_in {
-        return false;
-    }
-    rooms
-        .iter()
-        .filter(|room| {
-            room.platform == "douyu" && !room.monitor_paused && !room.room_key.trim().is_empty()
-        })
-        .count()
-        >= DOUYU_BATCH_MIN_ROOMS
+/// 登录后 1 个房间也走一次关注列表请求：它同时刷新标题、封面、人气和
+/// `videoLoop`，比单房 `betard` 多拿到的字段更完整；缺失房间仍会单房回退。
+fn douyu_batch_ready(logged_in: bool) -> bool {
+    logged_in
 }
 
 /// 每秒把排期快照写给命令层；详情抽屉只读这一份，不直接碰调度内部。
@@ -569,8 +557,8 @@ fn tick(
         }
         batch_due.insert(platform, due);
     }
-    // 斗鱼批量只覆盖关注列表；登录态失效或房间太少时全部退回单房检查。
-    let douyu_ready = douyu_batch_ready(rooms, crate::credential::is_ok("douyu"));
+    // 斗鱼批量只覆盖关注列表；未登录时退回单房检查，登录后 1 个房间也批量。
+    let douyu_ready = douyu_batch_ready(crate::credential::is_ok("douyu"));
     let douyin_ready = douyin_batch_ready(crate::credential::is_ok("douyin"));
     let mut batch_rooms: HashMap<&'static str, Vec<hivecast_ipc::RoomRecord>> = HashMap::new();
 
@@ -902,9 +890,22 @@ async fn run_batch_check(
                 send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait as i64));
             }
         }
-        Err(err) if platform == "douyin" && err.is_auth_or_risk() => {
-            // 抖音关注页在 Cookie 过期/被风控时返回 8/10011。此时每个房间
-            // 都会失败，逐个降级只会放大风控；整平台暂停 2 分钟等复验恢复。
+        Err(err) if err.is_auth_expired() => {
+            // 登录态失效不是风控：批量接口不能再用当前 Cookie，但单房匿名
+            // 接口通常还能查。先降级让这一拍的状态继续更新，账号维护循环
+            // 会复验/轮换 Cookie，恢复后批量自动重新生效。
+            tracing::warn!(
+                error = %err,
+                platform,
+                rooms = rooms.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "批量状态登录态失效，降级单房间检查"
+            );
+            fallback_single_checks(&app, &db, &broker, &recorder, &rooms, &tx, &completed).await;
+        }
+        Err(err) if err.is_risk_blocked() => {
+            // 明确的风控拦截：逐房降级只会把 N 个请求变成新的风控证据，
+            // 整平台暂停 2 分钟，等接口恢复再发下一批。
             let wait = 120i64;
             *not_before
                 .lock()
@@ -916,7 +917,7 @@ async fn run_batch_check(
                 rooms = rooms.len(),
                 retry_after = wait,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "批量状态登录态或风控异常，本平台暂停检查"
+                "批量状态被风控，整平台暂停检查"
             );
             for room in rooms {
                 send_batch_outcome(&tx, &completed, room.id, Outcome::Retry(wait));
@@ -930,17 +931,33 @@ async fn run_batch_check(
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "批量状态失败，全量降级单房间检查"
             );
-            let results = futures_util::future::join_all(rooms.iter().map(|room| async {
-                (
-                    room.id.clone(),
-                    run_check(&app, &db, &broker, &recorder, room).await,
-                )
-            }))
-            .await;
-            for (id, outcome) in results {
-                send_batch_outcome(&tx, &completed, id, outcome);
-            }
+            fallback_single_checks(&app, &db, &broker, &recorder, &rooms, &tx, &completed).await;
         }
+    }
+}
+
+/// 批量失败后把这一拍的房间全部降级为单房检查。
+///
+/// 登录态失效与普通网络错误都走这里；缺失房间的单查也复用同样的并发方式，
+/// 避免一个慢接口串行拖住整批结果。
+async fn fallback_single_checks(
+    app: &AppHandle,
+    db: &Arc<Db>,
+    broker: &Arc<StreamBroker>,
+    recorder: &Arc<Recorder>,
+    rooms: &[hivecast_ipc::RoomRecord],
+    tx: &mpsc::UnboundedSender<(String, Outcome)>,
+    completed: &Mutex<HashSet<String>>,
+) {
+    let results = futures_util::future::join_all(rooms.iter().map(|room| async {
+        (
+            room.id.clone(),
+            run_check(app, db, broker, recorder, room).await,
+        )
+    }))
+    .await;
+    for (id, outcome) in results {
+        send_batch_outcome(tx, completed, id, outcome);
     }
 }
 
@@ -1444,12 +1461,12 @@ mod tests {
         assert_eq!(
             batchable_platform(&room, false, false),
             None,
-            "未登录或房间不足时斗鱼必须走单房检查"
+            "未登录时斗鱼必须走单房检查"
         );
         assert_eq!(
             batchable_platform(&room, true, false),
             Some("douyu"),
-            "登录且达到批量门槛后按房间号进批量"
+            "登录后单个斗鱼房间也按房间号进批量"
         );
     }
 
@@ -1531,37 +1548,23 @@ mod tests {
     }
 
     #[test]
-    fn douyu_batch_requires_login_and_three_live_rooms() {
-        let mut first = batch_room();
-        first.platform = "douyu".into();
-        first.platform_uid = None;
-        first.room_key = "9999".into();
-        let second = hivecast_ipc::RoomRecord {
-            id: "room-2".into(),
-            room_key: "9998".into(),
-            ..first.clone()
-        };
-        let third = hivecast_ipc::RoomRecord {
-            id: "room-3".into(),
-            room_key: "9997".into(),
-            ..first.clone()
-        };
-        let two = vec![first.clone(), second.clone()];
-        assert!(!douyu_batch_ready(&two, true), "两个房间单查更准");
+    fn douyu_batch_requires_login_only() {
+        assert!(!douyu_batch_ready(false), "未登录时不能请求关注列表");
+        assert!(douyu_batch_ready(true), "登录后 1 个房间也走批量");
 
-        let mut three = two.clone();
-        three.push(third.clone());
-        assert!(
-            !douyu_batch_ready(&three, false),
-            "未登录时不能请求关注列表"
+        let mut room = batch_room();
+        room.platform = "douyu".into();
+        room.platform_uid = None;
+        room.room_key = "9999".into();
+        assert_eq!(
+            batchable_platform(&room, false, false),
+            None,
+            "未登录时斗鱼走单房检查"
         );
-        assert!(douyu_batch_ready(&three, true));
-
-        let mut paused = three;
-        paused[2].monitor_paused = true;
-        assert!(
-            !douyu_batch_ready(&paused, true),
-            "暂停监控的房间不参与批量门槛"
+        assert_eq!(
+            batchable_platform(&room, true, false),
+            Some("douyu"),
+            "登录后单个斗鱼房间也进批量"
         );
     }
 

@@ -214,17 +214,37 @@ impl PlatformError {
         }
     }
 
-    /// 抖音批量接口的「登录态失效 / 风控拦截」。
+    /// 平台明确返回「登录态失效」。
     ///
-    /// 关注页 follow/feed 在 Cookie 过期或请求被拦截时返回 status_code=8
-    /// 或 10011。这类错误不是某个房间的问题，批量降级成 N 个单房请求
-    /// 只会放大风控；监控应像限流一样整平台暂停一轮，等 Cookie 复验恢复。
-    pub fn is_auth_or_risk(&self) -> bool {
+    /// 抖音是 8，B 站是 -101，斗鱼关注列表未登录是 -1；有些接口只在
+    /// message 里写「未登录」/「登录态失效」。这类错误只说明批量接口
+    /// 不能再用当前 Cookie，不代表平台在风控：应降级到匿名单房检查，
+    /// 让监控继续更新，同时等账号维护循环复验/轮换 Cookie。
+    pub fn is_auth_expired(&self) -> bool {
         match self {
             PlatformError::Upstream { code, message } => {
-                matches!(*code, 8 | 10011 | 10012 | 10013)
+                matches!(*code, 8 | -101 | -1)
                     || message.contains("未登录")
-                    || message.to_ascii_lowercase().contains("blocked")
+                    || message.contains("登录态失效")
+                    || message.to_ascii_lowercase().contains("not login")
+            }
+            _ => false,
+        }
+    }
+
+    /// 平台明确返回「风控拦截」，而不是登录态失效。
+    ///
+    /// 抖音关注页被拦截时返回 10011/10012/10013。这时逐房降级只会把
+    /// N 个请求变成新的风控证据，应像限流一样整平台冷却，等接口恢复。
+    pub fn is_risk_blocked(&self) -> bool {
+        match self {
+            PlatformError::Upstream { code, message } => {
+                matches!(*code, 10011 | 10012 | 10013) || {
+                    let lower = message.to_ascii_lowercase();
+                    lower.contains("blocked")
+                        || message.contains("风控")
+                        || message.contains("频繁")
+                }
             }
             _ => false,
         }
@@ -249,23 +269,30 @@ mod tests {
     }
 
     #[test]
-    fn douyin_auth_and_risk_codes_are_not_per_room_failures() {
-        assert!(PlatformError::Upstream {
-            code: 8,
-            message: "not login".into()
+    fn auth_expiry_is_separate_from_risk_blocking() {
+        for (code, message) in [(8, "not login"), (-101, "账号未登录"), (-1, "未登录")] {
+            let err = PlatformError::Upstream {
+                code,
+                message: message.into(),
+            };
+            assert!(err.is_auth_expired(), "code {code} 应判登录态失效");
+            assert!(!err.is_risk_blocked(), "code {code} 不是风控");
         }
-        .is_auth_or_risk());
-        assert!(PlatformError::Upstream {
+
+        let blocked = PlatformError::Upstream {
             code: 10011,
-            message: "blocked".into()
-        }
-        .is_auth_or_risk());
-        assert!(!PlatformError::Upstream {
+            message: "blocked".into(),
+        };
+        assert!(blocked.is_risk_blocked());
+        assert!(!blocked.is_auth_expired());
+
+        let server = PlatformError::Upstream {
             code: 500,
-            message: "server error".into()
-        }
-        .is_auth_or_risk());
-        assert!(!PlatformError::Network("timeout".into()).is_auth_or_risk());
+            message: "server error".into(),
+        };
+        assert!(!server.is_auth_expired());
+        assert!(!server.is_risk_blocked());
+        assert!(!PlatformError::Network("timeout".into()).is_auth_expired());
     }
 
     #[test]
