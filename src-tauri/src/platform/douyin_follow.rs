@@ -6,8 +6,8 @@
 //! 后台任务顺序翻完关注列表，开播后自动转正。
 //!
 //! 关注列表分页靠 max_time = 上一页 min_time，不是 offset；每页固定 20 条。
-//! 全量扫描 1531 个关注约 77 个请求，放在 120 秒一次的后台任务里，比每 30 秒
-//! 对几十个房间逐个请求轻得多，也不会拖慢监控自身的轮询节奏。
+//! 全量扫描 1531 个关注约 77 个请求，只在还有待转正关注时执行；扫描节奏跟随
+//! 设置里的「监控检测间隔」，0（关闭自动检测）时一并暂停。
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -30,8 +30,10 @@ use crate::recorder::EVENT_ROOMS_CHANGED;
 const FOLLOW_API: &str = "https://www.douyin.com/aweme/v1/web/user/following/list/";
 const PROFILE_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383&channel=channel_pc_web&publish_video_strategy_type=2&source=channel_pc_web";
 const REFERER: &str = "https://www.douyin.com/follow";
-/// 关注池扫描间隔：全量关注列表要翻很多页，30 秒一次会自己把自己风控。
-const POOL_INTERVAL: Duration = Duration::from_secs(120);
+/// 设置变更的检查粒度：间隔改小或关闭后，不必等完旧的睡眠周期。
+const POOL_TICK: Duration = Duration::from_secs(2);
+/// 启动后的首次扫描上限：监控间隔很长时也别让关注池干等一整个周期。
+const POOL_STARTUP_MAX: Duration = Duration::from_secs(25);
 const PROFILE_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Default)]
@@ -475,18 +477,89 @@ async fn promote(
     Ok(Some(room.id))
 }
 
-/// 关注池后台循环：启动后晚一点跑，之后固定间隔扫描。
+fn pool_interval_from_secs(secs: u32) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs as u64))
+}
+
+fn pool_interval(db: &Db) -> Option<Duration> {
+    pool_interval_from_secs(crate::settings::load(db).monitor_interval_sec)
+}
+
+/// 首次扫描最多等 25 秒；监控间隔更短时按用户的间隔来。
+fn pool_first_delay(interval: Duration) -> Duration {
+    interval.min(POOL_STARTUP_MAX)
+}
+
+/// 关注池后台循环：启动后先扫一次，之后跟随「监控检测间隔」。
+/// 间隔为 0（关闭自动检测）时暂停扫描，改回正数后重新开始。
 pub async fn pool_loop(db: std::sync::Arc<Db>, app: AppHandle) {
-    tokio::time::sleep(Duration::from_secs(25)).await;
+    let mut interval = pool_interval(&db);
+    let mut next_at = interval.map(|delay| Instant::now() + pool_first_delay(delay));
+    match interval {
+        Some(delay) => tracing::info!(
+            target: "hivecast_lib::douyin_follow",
+            interval_sec = delay.as_secs(),
+            "抖音关注池扫描已启动"
+        ),
+        None => tracing::info!(
+            target: "hivecast_lib::douyin_follow",
+            "监控检测已关闭，抖音关注池暂停扫描"
+        ),
+    }
+    let mut settings_at = Instant::now();
     loop {
-        if let Err(err) = refresh_pool(&db, &app).await {
-            tracing::warn!(
-                target: "hivecast_lib::douyin_follow",
-                error = %err,
-                "抖音关注池扫描失败"
-            );
+        if settings_at.elapsed() >= POOL_TICK {
+            let next = pool_interval(&db);
+            if next != interval {
+                match next {
+                    Some(delay) => {
+                        tracing::info!(
+                            target: "hivecast_lib::douyin_follow",
+                            interval_sec = delay.as_secs(),
+                            "抖音关注池扫描间隔已更新"
+                        );
+                        next_at = Some(Instant::now() + delay);
+                    }
+                    None => {
+                        tracing::info!(
+                            target: "hivecast_lib::douyin_follow",
+                            "监控检测已关闭，抖音关注池暂停扫描"
+                        );
+                        next_at = None;
+                    }
+                }
+                interval = next;
+            }
+            settings_at = Instant::now();
         }
-        tokio::time::sleep(POOL_INTERVAL).await;
+        let mut sleep_for = POOL_TICK;
+        if let Some(delay) = interval {
+            let now = Instant::now();
+            let due = next_at.is_none_or(|at| now >= at);
+            if due {
+                tracing::debug!(
+                    target: "hivecast_lib::douyin_follow",
+                    interval_sec = delay.as_secs(),
+                    "抖音关注池开始扫描"
+                );
+                if let Err(err) = refresh_pool(&db, &app).await {
+                    tracing::warn!(
+                        target: "hivecast_lib::douyin_follow",
+                        error = %err,
+                        "抖音关注池扫描失败"
+                    );
+                }
+                next_at = Some(Instant::now() + delay);
+            }
+            // 睡到下一个拍点，而不是固定 2 秒一跳：5 秒间隔不能被量化成 6 秒。
+            if let Some(at) = next_at {
+                let now = Instant::now();
+                if at > now {
+                    sleep_for = (at - now).min(POOL_TICK);
+                }
+            }
+        }
+        tokio::time::sleep(sleep_for).await;
     }
 }
 
@@ -636,5 +709,31 @@ mod tests {
         let root = serde_json::json!({ "status_code": 8, "status_msg": "登录态失效" });
         let err = parse_follow_page(&root, None).expect_err("应报错");
         assert!(err.to_string().contains("登录态失效"));
+    }
+
+    #[test]
+    fn pool_interval_follows_monitor_setting_and_zero_disables() {
+        assert_eq!(pool_interval_from_secs(0), None);
+        assert_eq!(pool_interval_from_secs(45), Some(Duration::from_secs(45)));
+        assert_eq!(
+            pool_interval_from_secs(3600),
+            Some(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn pool_first_scan_caps_long_intervals() {
+        assert_eq!(
+            pool_first_delay(Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            pool_first_delay(Duration::from_secs(30)),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            pool_first_delay(Duration::from_secs(3600)),
+            Duration::from_secs(25)
+        );
     }
 }
