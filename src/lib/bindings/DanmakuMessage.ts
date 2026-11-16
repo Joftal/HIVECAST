@@ -11,7 +11,11 @@ offsetMs: number,
 /**
  * chat | gift | super_chat | guard
  */
-kind: string, user: string | null, content: string,
+kind: string,
+/**
+ * 仅礼物、SC、上舰携带；三平台普通聊天在服务端归一化时已清空。
+ */
+user: string | null, content: string,
 /**
  * 0xRRGGBB
  */

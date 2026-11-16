@@ -66,9 +66,6 @@ struct RoomConn {
     dropped: AtomicU32,
     last_error: Mutex<Option<String>>,
     batch_log: Mutex<BatchMeter>,
-    /// 斗鱼同一个礼物事件偶尔会下发两条完全相同的帧（同 t、同人、同内容），
-    /// 用最近一秒内的礼物键做短窗去重；中间夹着别的礼物也能认出来。
-    recent_gifts: Mutex<HashMap<String, i64>>,
     started: Instant,
 }
 
@@ -114,7 +111,6 @@ impl RoomConn {
             dropped: AtomicU32::new(0),
             last_error: Mutex::new(None),
             batch_log: Mutex::new(BatchMeter::new(now)),
-            recent_gifts: Mutex::new(HashMap::new()),
             started: now,
         }
     }
@@ -396,13 +392,20 @@ impl RecordWriter {
         let Some(mut file) = inner.file.take() else {
             return;
         };
-        let line = json!({
+        let mut line = json!({
             "t": offset,
             "k": message.kind,
-            "u": message.user,
             "c": message.content,
             "col": message.color,
         });
+        // user 为空时不写 u 字段；普通聊天在 accept 里已清空，礼物/SC/上舰保留发送者。
+        if let Some(user) = message
+            .user
+            .as_deref()
+            .filter(|user| !user.trim().is_empty())
+        {
+            line["u"] = json!(user);
+        }
         match writeln!(file, "{line}") {
             Ok(()) => {
                 inner.count += 1;
@@ -841,23 +844,15 @@ async fn fetch_conf(real_id: i64) -> Result<DanmuSession, String> {
     })
 }
 
-/// 单房间限速 + 打时间戳 + 写盘 + 攒批。
-/// 斗鱼会为同一礼物重复下发完全相同的帧；1 秒窗口内按「发送者 + 内容」去重。
-/// 用 map 而不是只记上一条，避免两条重复帧中间夹了别的礼物就漏掉。
-fn duplicate_gift(recent: &mut HashMap<String, i64>, message: &DanmakuMessage) -> bool {
-    let user = message.user.as_deref().unwrap_or("");
-    let key = format!("{}:{}:{}", user.len(), user, message.content);
-    let now = message.offset_ms;
-    recent.retain(|_, at| (now - *at).abs() <= 5_000);
-    if let Some(at) = recent.get(&key) {
-        if (now - *at).abs() <= 1_000 {
-            return true;
-        }
+/// 普通聊天只保留正文；礼物、SC、上舰才需要发送者身份。
+/// B 站、斗鱼、抖音的聊天弹幕在落盘和实时批次里都不再携带用户名。
+fn drop_chat_user(platform: &str, message: &mut DanmakuMessage) {
+    if message.kind == "chat" && matches!(platform, "bilibili" | "douyu" | "douyin") {
+        message.user = None;
     }
-    recent.insert(key, now);
-    false
 }
 
+/// 单房间限速 + 打时间戳 + 写盘 + 攒批。
 fn accept(
     conn: &RoomConn,
     window_start: &mut Instant,
@@ -870,18 +865,9 @@ fn accept(
         *count = 0;
     }
     message.offset_ms = conn.started.elapsed().as_millis() as i64;
-    // 斗鱼同一礼物事件可能重复下发：同用户、同内容且间隔不超过 1 秒只留第一条。
-    // 只对斗鱼礼物生效，聊天里用户自己连发同样的话不能被吞。
-    if conn.room.platform == "douyu"
-        && message.kind == "gift"
-        && duplicate_gift(
-            &mut conn.recent_gifts.lock().expect("礼物去重状态被污染"),
-            &message,
-        )
-    {
-        return;
-    }
+    drop_chat_user(&conn.room.platform, &mut message);
     // 录制落盘先于限流：爆发房间也要留下完整弹幕文件。
+    // 不去重：平台重复下发的帧也原样保留，先保证事件完整。
     conn.fan_out(&message);
     if *count >= MAX_PER_SECOND {
         conn.dropped.fetch_add(1, Ordering::Relaxed);
@@ -1473,28 +1459,24 @@ mod tests {
     }
 
     #[test]
-    fn douyu_duplicate_gift_collapses_within_one_second() {
-        let mut recent = HashMap::new();
-        let gift = DanmakuMessage {
-            offset_ms: 1_000,
-            kind: "gift".into(),
-            user: Some("欢笑的魔鬼".into()),
-            content: "粉丝荧光棒 x1".into(),
-            color: 0,
-        };
-        assert!(!duplicate_gift(&mut recent, &gift));
-        assert!(duplicate_gift(&mut recent, &gift));
-        let mut other = gift.clone();
-        other.user = Some("另一个人".into());
-        other.offset_ms = 1_100;
-        assert!(!duplicate_gift(&mut recent, &other));
-        // 重复帧中间夹了别人的礼物，仍然要认出来。
-        let mut interleaved = gift.clone();
-        interleaved.offset_ms = 1_500;
-        assert!(duplicate_gift(&mut recent, &interleaved));
-        let mut later = gift.clone();
-        later.offset_ms = 3_000;
-        assert!(!duplicate_gift(&mut recent, &later));
+    fn chat_drops_user_but_special_events_keep_it() {
+        for platform in ["bilibili", "douyu", "douyin"] {
+            let mut chat = record_message("chat");
+            drop_chat_user(platform, &mut chat);
+            assert!(chat.user.is_none(), "{platform} 普通聊天不应保留用户名");
+
+            let mut gift = record_message("gift");
+            drop_chat_user(platform, &mut gift);
+            assert_eq!(
+                gift.user.as_deref(),
+                Some("观众"),
+                "{platform} 礼物要保留用户名"
+            );
+        }
+        // 未列入本次策略的平台保持原行为。
+        let mut huya = record_message("chat");
+        drop_chat_user("huya", &mut huya);
+        assert_eq!(huya.user.as_deref(), Some("观众"));
     }
 
     #[test]
@@ -1552,6 +1534,38 @@ mod tests {
         assert!(text.contains("\"k\":\"system\""));
         assert!(!text.contains("\"k\":\"super_chat\""));
         assert!(!text.contains("\"k\":\"guard\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writer_omits_user_field_when_absent() {
+        let dir = std::env::temp_dir().join(format!("hivecast-danmaku-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user.jsonl");
+        let writer = RecordWriter::new(&path, RecordRules::new(true, true, true)).expect("writer");
+        let mut chat = record_message("chat");
+        chat.user = None;
+        writer.push(&chat);
+        writer.push(&record_message("gift"));
+        let (_, count) = writer.finish();
+        assert_eq!(count, 2);
+        let text = std::fs::read_to_string(&path).expect("jsonl");
+        let chat_line = text
+            .lines()
+            .find(|line| line.contains(r#""k":"chat""#))
+            .unwrap();
+        let gift_line = text
+            .lines()
+            .find(|line| line.contains(r#""k":"gift""#))
+            .unwrap();
+        assert!(
+            !chat_line.contains(r#""u""#),
+            "聊天不应写 u 字段：{chat_line}"
+        );
+        assert!(
+            gift_line.contains(r#""u":"观众""#),
+            "礼物应保留发送者：{gift_line}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

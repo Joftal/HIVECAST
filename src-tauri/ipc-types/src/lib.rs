@@ -571,6 +571,7 @@ pub struct DanmakuMessage {
     pub offset_ms: i64,
     /// chat | gift | super_chat | guard
     pub kind: String,
+    /// 仅礼物、SC、上舰携带；三平台普通聊天在服务端归一化时已清空。
     pub user: Option<String>,
     pub content: String,
     /// 0xRRGGBB
