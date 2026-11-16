@@ -685,6 +685,10 @@ mod tests {
         let result = danmaku_to_ass(&file).unwrap();
         let text = std::fs::read_to_string(&result.path).unwrap();
         assert!(text.contains("Dialogue: 0,0:00:01.20"));
+        assert!(
+            text.contains(&format!("Style: Danmaku,{},", danmaku_font())),
+            "ASS 必须声明当前平台可用的中文字体"
+        );
         assert!(text.contains("&H000000FF&"));
         assert!(text.contains("｛"));
         assert!(!text.contains("{\\move(0,0)}"));
