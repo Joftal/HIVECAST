@@ -1556,6 +1556,25 @@ mod tests {
     }
 
     #[test]
+    fn finished_writer_drops_events_that_arrive_after_stop() {
+        let dir = std::env::temp_dir().join(format!("hivecast-danmaku-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("late.jsonl");
+        let writer = RecordWriter::new(&path, RecordRules::new(true, true, true)).expect("writer");
+        writer.push(&record_message("chat"));
+        let (_, count) = writer.finish();
+        assert_eq!(count, 1);
+        // 收尾合并分片期间弹幕连接可能还活着；writer 已 finish，晚到事件必须被丢弃，
+        // 否则它们会以超过视频时长的 t 留在 JSONL 里。
+        writer.push(&record_message("gift"));
+        let text = std::fs::read_to_string(&path).expect("jsonl");
+        assert_eq!(text.lines().count(), 1, "finish 之后不能再写入");
+        assert!(text.contains(r#""k":"chat""#));
+        assert!(!text.contains(r#""k":"gift""#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn empty_record_file_is_removed() {
         let dir = std::env::temp_dir().join(format!("hivecast-danmaku-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");

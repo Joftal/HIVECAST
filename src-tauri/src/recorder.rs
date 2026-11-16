@@ -2319,6 +2319,23 @@ impl Recorder {
             }
         };
 
+        // 弹幕 writer 必须在 ffmpeg 退出后立刻摘掉，不能等分片合并跑完。
+        // 合并 2GB 录像可能持续十几秒，这段时间弹幕连接还活着，事件已经
+        // 不属于这段视频：留在 JSONL 里会让条数/ASS 越界；合并多段时还会
+        // 按上一段时长算偏移，落进下一段时间轴。
+        let writer_started_ms = active
+            .danmaku
+            .as_ref()
+            .map(|writer| writer.started_epoch_ms());
+        let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
+            (Some(hub), Some(writer)) => hub
+                .detach_record(room_id, writer)
+                .map_or((None, 0), |(path, count)| {
+                    (Some(path.display().to_string()), count as i64)
+                }),
+            _ => (None, 0),
+        };
+
         // 分割只在收尾做：录制期间始终是一个连续 ffmpeg，不存在停旧起新的空窗。
         let plans = clip_plans(&active);
         // 即使只有一段也写清单：收尾失败（磁盘满、合并/拼接失败）时
@@ -2467,21 +2484,6 @@ impl Recorder {
             streak
         } else {
             0
-        };
-
-        // 弹幕 writer 也要在封口阶段摘掉：新一场会挂新的 writer，
-        // 旧场的 flush/计数不能等后处理跑完再做。
-        let writer_started_ms = active
-            .danmaku
-            .as_ref()
-            .map(|writer| writer.started_epoch_ms());
-        let (danmaku_path, danmaku_count) = match (self.danmaku.as_ref(), active.danmaku.as_ref()) {
-            (Some(hub), Some(writer)) => hub
-                .detach_record(room_id, writer)
-                .map_or((None, 0), |(path, count)| {
-                    (Some(path.display().to_string()), count as i64)
-                }),
-            _ => (None, 0),
         };
 
         if final_status == "finished" {
