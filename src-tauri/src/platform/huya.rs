@@ -21,6 +21,7 @@ use super::{
     Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
     StreamFormat, StreamGroup, StreamPlan,
 };
+use crate::credential;
 
 const ROOM_HOST: &str = "https://www.huya.com";
 const REFERER_HOME: &str = "https://www.huya.com/";
@@ -140,7 +141,14 @@ impl PlatformAdapter for HuyaAdapter {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let quality = pick_quality(&stream, qn);
+        // 虎牙页面不返回贵族/VIP 等级，能稳定拿到的能力信号只有两个：
+        // 当前是否登录、房间源码率是否达到 20M。两者都满足才解锁 4K，
+        // 否则 4K 档在 UI 显示「当前不可用」，录制也会回落到 2K/1080P。
+        let source_bitrate = source_bitrate(&stream);
+        let logged_in =
+            credential::cookie_for_url(ROOM_HOST).is_some_and(|cookie| !cookie.trim().is_empty());
+        let cap_qn = quality_cap(source_bitrate, logged_in);
+        let quality = pick_quality(&stream, qn, cap_qn);
 
         let mut groups: Vec<StreamGroup> = Vec::new();
         for entry in &list {
@@ -266,11 +274,21 @@ impl PlatformAdapter for HuyaAdapter {
                 } else {
                     format!("{bitrate} kbps")
                 };
+                let available = quality_available(qn, cap_qn);
+                let hint = if !available && qn >= 20_000 {
+                    if !logged_in {
+                        format!("{hint} · 登录后可用")
+                    } else {
+                        format!("{hint} · 当前不可用")
+                    }
+                } else {
+                    hint
+                };
                 let info = QualityInfo {
                     qn,
                     label: name,
                     hint: Some(hint),
-                    available: true,
+                    available,
                     codec: Some(if h264 { "h264" } else { "h265" }.into()),
                 };
                 match quality_map.get(&qn) {
@@ -301,6 +319,31 @@ struct Quality {
     codec: Codec,
 }
 
+/// 房间源码率（kbps）。虎牙页面给的是数字，少量模板会给字符串。
+fn source_bitrate(stream: &Value) -> u32 {
+    stream
+        .pointer("/data/0/gameLiveInfo/bitRate")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0) as u32
+}
+
+/// 4K 需要登录且房间源码率确实达到 20M；否则最高只解锁 2K HDR。
+fn quality_cap(source_bitrate: u32, logged_in: bool) -> u32 {
+    if logged_in && source_bitrate >= 20_000 {
+        30_000
+    } else {
+        15_100
+    }
+}
+
+fn quality_available(qn: u32, cap_qn: u32) -> bool {
+    qn <= cap_qn
+}
+
 /// HEVC 专用档位的 qn → 精确码率；普通 qn 仍走 H.264 档位表。
 fn hevc_bitrate_for_qn(qn: u32) -> Option<u32> {
     match qn {
@@ -314,7 +357,9 @@ fn hevc_bitrate_for_qn(qn: u32) -> Option<u32> {
 
 /// 按期望 qn 从 vMultiStreamInfo 里挑最接近的一档。
 /// HEVC 专用 qn 精确取对应码率；其余 qn 只取 H.264，保证兼容性。
-fn pick_quality(stream: &Value, qn: u32) -> Quality {
+fn pick_quality(stream: &Value, qn: u32, cap_qn: u32) -> Quality {
+    // 已保存的 4K 偏好在账号/房间不满足时自动回落，不能让录制继续撞 4K。
+    let qn = if qn == 0 { qn } else { qn.min(cap_qn) };
     let options: Vec<(u32, String, i64)> = stream
         .get("vMultiStreamInfo")
         .and_then(Value::as_array)
@@ -797,39 +842,82 @@ mod tests {
                 { "sDisplayName": "流畅", "iBitRate": 500, "iCodecType": 0 }
             ]
         });
-        assert_eq!(pick_quality(&stream, 10000).bitrate, 0);
-        assert_eq!(pick_quality(&stream, 10000).qn, 10000);
-        assert_eq!(pick_quality(&stream, 400).bitrate, 4000);
-        assert_eq!(pick_quality(&stream, 400).qn, 400);
-        assert_eq!(pick_quality(&stream, 250).bitrate, 2000);
-        assert_eq!(pick_quality(&stream, 250).qn, 250);
-        assert_eq!(pick_quality(&stream, 150).bitrate, 900);
-        assert_eq!(pick_quality(&stream, 150).qn, 150);
-        assert_eq!(pick_quality(&stream, 80).bitrate, 500);
-        assert_eq!(pick_quality(&stream, 80).name, "流畅");
+        assert_eq!(pick_quality(&stream, 10000, 30_000).bitrate, 0);
+        assert_eq!(pick_quality(&stream, 10000, 30_000).qn, 10000);
+        assert_eq!(pick_quality(&stream, 400, 30_000).bitrate, 4000);
+        assert_eq!(pick_quality(&stream, 400, 30_000).qn, 400);
+        assert_eq!(pick_quality(&stream, 250, 30_000).bitrate, 2000);
+        assert_eq!(pick_quality(&stream, 250, 30_000).qn, 250);
+        assert_eq!(pick_quality(&stream, 150, 30_000).bitrate, 900);
+        assert_eq!(pick_quality(&stream, 150, 30_000).qn, 150);
+        assert_eq!(pick_quality(&stream, 80, 30_000).bitrate, 500);
+        assert_eq!(pick_quality(&stream, 80, 30_000).name, "流畅");
         // HEVC 专用档位必须精确回选，不能退到 H.264 或相邻码率。
-        let hdr4k = pick_quality(&stream, 30_000);
+        let hdr4k = pick_quality(&stream, 30_000, 30_000);
         assert_eq!(
             (hdr4k.bitrate, hdr4k.qn, hdr4k.codec),
             (20_100, 30_000, Codec::H265)
         );
-        let uhd4k = pick_quality(&stream, 20_000);
+        let uhd4k = pick_quality(&stream, 20_000, 30_000);
         assert_eq!(
             (uhd4k.bitrate, uhd4k.qn, uhd4k.codec),
             (20_000, 20_000, Codec::H265)
         );
-        let hdr2k = pick_quality(&stream, 15_100);
+        let hdr2k = pick_quality(&stream, 15_100, 30_000);
         assert_eq!(
             (hdr2k.bitrate, hdr2k.qn, hdr2k.codec),
             (14_100, 15_100, Codec::H265)
         );
-        let uhd2k = pick_quality(&stream, 15_000);
+        let uhd2k = pick_quality(&stream, 15_000, 30_000);
         assert_eq!(
             (uhd2k.bitrate, uhd2k.qn, uhd2k.codec),
             (14_000, 15_000, Codec::H265)
         );
         // 没有 vMultiStreamInfo 时退回原画。
-        assert_eq!(pick_quality(&serde_json::json!({}), 250).bitrate, 0);
+        assert_eq!(pick_quality(&serde_json::json!({}), 250, 30_000).bitrate, 0);
+    }
+
+    #[test]
+    fn quality_cap_requires_login_and_4k_source() {
+        assert_eq!(quality_cap(20_000, true), 30_000);
+        assert_eq!(quality_cap(20_100, true), 30_000);
+        assert_eq!(quality_cap(20_000, false), 15_100);
+        assert_eq!(quality_cap(10_000, true), 15_100);
+        assert_eq!(quality_cap(0, true), 15_100);
+        assert!(quality_available(15_100, 15_100));
+        assert!(!quality_available(20_000, 15_100));
+        assert!(!quality_available(30_000, 15_100));
+    }
+
+    #[test]
+    fn unavailable_4k_falls_back_to_2k_hdr() {
+        let stream = serde_json::json!({
+            "data": [{ "gameLiveInfo": { "bitRate": 10_000 } }],
+            "vMultiStreamInfo": [
+                { "sDisplayName": "4K HDR", "iBitRate": 20100, "iCodecType": 1 },
+                { "sDisplayName": "4K", "iBitRate": 20000, "iCodecType": 1 },
+                { "sDisplayName": "2K HDR", "iBitRate": 14100, "iCodecType": 1 },
+                { "sDisplayName": "蓝光10M", "iBitRate": 0, "iCodecType": 0 }
+            ]
+        });
+        assert_eq!(source_bitrate(&stream), 10_000);
+        let cap = quality_cap(source_bitrate(&stream), true);
+        assert_eq!(cap, 15_100);
+        let chosen = pick_quality(&stream, 20_000, cap);
+        assert_eq!(
+            (chosen.bitrate, chosen.qn, chosen.codec),
+            (14_100, 15_100, Codec::H265)
+        );
+        // 源码率够 4K 且已登录时才保留用户选择的 4K。
+        let four_k = serde_json::json!({
+            "data": [{ "gameLiveInfo": { "bitRate": 20_000 } }],
+            "vMultiStreamInfo": [
+                { "sDisplayName": "4K", "iBitRate": 20000, "iCodecType": 1 },
+                { "sDisplayName": "2K HDR", "iBitRate": 14100, "iCodecType": 1 }
+            ]
+        });
+        let cap = quality_cap(source_bitrate(&four_k), true);
+        assert_eq!(pick_quality(&four_k, 20_000, cap).bitrate, 20_000);
     }
 
     #[test]
