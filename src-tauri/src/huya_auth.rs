@@ -604,14 +604,18 @@ async fn confirm_login(
     }
     let login_time = value_str(data, "loginTime");
     let sign = value_str(data, "sign");
-    if login_time.is_empty() || sign.is_empty() {
-        return Ok(qr_state(
-            "error",
-            "虎牙登录响应缺少换票参数，请刷新二维码重试",
-            0,
-        ));
-    }
     let mut jar = jar.clone();
+    if login_time.is_empty() || sign.is_empty() {
+        // 真机扫码常见分支：虎牙返回 uid + biztoken（快速登录票据），而不是
+        // loginTime/sign。biztoken 本身即 udb_biztoken，直接落 Cookie 后
+        // checkLogin 即可确认登录态；quickTicket 会返回 10052，不能再换一次。
+        if let Err(message) = apply_quick_login(data, &mut jar) {
+            return Ok(qr_state("error", message, 0));
+        }
+        let uid = value_str(data, "uid");
+        tracing::info!(uid = %uid, "虎牙扫码返回快速登录票据，使用 uid+biztoken 落登录态");
+        return finish_login(db, app, qr_id, jar, "quick").await;
+    }
     let callback = format!(
         "{CALLBACK}&loginTime={}&sign={}&callback=cb",
         page_encode(&login_time),
@@ -624,6 +628,37 @@ async fn confirm_login(
     for (name, value) in extra {
         jar.insert(name, value);
     }
+    finish_login(db, app, qr_id, jar, "qr").await
+}
+
+/// 把扫码返回的快速登录票据写进设备 Cookie。
+/// 真机返回形如 {"uid":1199573670219,"biztoken":"...","passport":"","version":"1.0","stage":2}。
+fn apply_quick_login(data: &Value, jar: &mut BTreeMap<String, String>) -> Result<(), &'static str> {
+    let uid = value_str(data, "uid");
+    let biztoken = value_str(data, "biztoken");
+    if uid.is_empty() || biztoken.is_empty() {
+        return Err("虎牙登录响应缺少换票参数，请刷新二维码重试");
+    }
+    jar.insert("udb_uid".into(), uid);
+    jar.insert("udb_biztoken".into(), biztoken);
+    let passport = value_str(data, "passport");
+    if !passport.is_empty() {
+        jar.insert("udb_passport".into(), passport);
+    }
+    let version = value_str(data, "version");
+    if !version.is_empty() {
+        jar.insert("udb_version".into(), version);
+    }
+    Ok(())
+}
+
+async fn finish_login(
+    db: &Db,
+    app: &AppHandle,
+    qr_id: &str,
+    mut jar: BTreeMap<String, String>,
+    method: &str,
+) -> Result<QrPoll, AppError> {
     let mut cookie = jar_cookie(&jar);
     // 回调链有时要第二次请求才落全 Cookie；给服务端三次机会，避免刚扫码成功就报失败。
     let mut account = None;
@@ -667,6 +702,7 @@ async fn confirm_login(
     tracing::info!(
         account = %account.name,
         uid = %account.uid,
+        method,
         cookie_names = ?crate::credential::names(&cookie),
         "虎牙扫码登录成功"
     );
@@ -1427,6 +1463,44 @@ mod tests {
         assert!(has_login_cookie("udb_uid=1; udb_biztoken=t"));
         assert!(!has_login_cookie("udb_uid=1"));
         assert!(!has_login_cookie("udb_biztoken=t"));
+    }
+
+    #[test]
+    fn quick_login_ticket_fills_device_cookie() {
+        let mut jar = BTreeMap::new();
+        apply_quick_login(
+            &json!({
+                "uid": 1199573670219_i64,
+                "biztoken": "token-value",
+                "passport": "passport-value",
+                "version": "1.0",
+                "stage": 2
+            }),
+            &mut jar,
+        )
+        .expect("快速登录票据应可用");
+        assert_eq!(
+            jar.get("udb_uid").map(String::as_str),
+            Some("1199573670219")
+        );
+        assert_eq!(
+            jar.get("udb_biztoken").map(String::as_str),
+            Some("token-value")
+        );
+        assert_eq!(
+            jar.get("udb_passport").map(String::as_str),
+            Some("passport-value")
+        );
+        assert_eq!(jar.get("udb_version").map(String::as_str), Some("1.0"));
+    }
+
+    #[test]
+    fn quick_login_ticket_requires_uid_and_token() {
+        let mut jar = BTreeMap::new();
+        assert!(apply_quick_login(&json!({ "uid": 1 }), &mut jar).is_err());
+        assert!(apply_quick_login(&json!({ "biztoken": "t" }), &mut jar).is_err());
+        assert!(!jar.contains_key("udb_uid"));
+        assert!(!jar.contains_key("udb_biztoken"));
     }
 
     #[tokio::test]

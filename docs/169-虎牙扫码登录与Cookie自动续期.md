@@ -2,7 +2,7 @@
 
 - 日期：2026-11-17
 - 范围：虎牙账号登录、Cookie 校验、长期凭证与自动续期；哔哩哔哩、斗鱼、抖音账号链路保持不变。
-- 结论：虎牙具备可用的自动续期能力，核心是长期 `udb_cred` + 每 20 分钟 `cookieExchange`，失败回退 `credLogin`。本次已实现原生 HTTP 扫码登录、Cookie 校验、长期凭证加密保存、自动续期与失效标记，并完成二维码生成/等待/过期与无效 Cookie 的真机验证。真实账号扫码换票与真实 `cookieExchange` 轮换因没有可用虎牙账号，尚未做真机闭环验证，边界见 §6。
+- 结论：虎牙具备可用的自动续期能力，核心是长期 `udb_cred` + 每 20 分钟 `cookieExchange`，失败回退 `credLogin`。本次已实现原生 HTTP 扫码登录、Cookie 校验、长期凭证加密保存、自动续期与失效标记；除二维码生成/等待/过期与无效 Cookie 外，真实账号扫码快速登录、登录态落库、真实 `cookieExchange` 轮换均已完成真机闭环，证据见 §5.2/§5.3。剩余边界见 §6。
 
 ## 1. 需求与改动前的缺口
 
@@ -48,7 +48,22 @@ stage 语义：0/4 等待；1/10 已扫码待确认；2/3 登录成功；5 二�
 
 ### 2.3 登录成功换票
 
-`stage=2/3` 时，响应里有 `loginTime` 与 `sign`。`confirm_login`（`huya_auth.rs:589`）请求：
+`stage=2/3` 有两个分支。真机（2026-11-17 12:33）实际返回的是**快速登录票据**，没有 `loginTime`/`sign`：
+
+```json
+{"uri":70004,"returnCode":0,"data":{
+  "uid":1199573670219,"passport":"","subUid":0,"regOrigin":0,
+  "version":"1.0","biztoken":"<344 字符>","status":1188881,"stage":2}}
+```
+
+`confirm_login`（`huya_auth.rs:589`）先读 `loginTime`/`sign`；任一为空时调用 `apply_quick_login`（`huya_auth.rs:636`）：
+
+- 要求 `uid` 与 `biztoken` 同时存在，否则返回「虎牙登录响应缺少换票参数，请刷新二维码重试」。
+- 把 `uid`、`biztoken` 直接写成 `udb_uid`、`udb_biztoken`，`passport`/`version` 非空时一并写入 `udb_passport`/`udb_version`。
+- `biztoken` 已经是最终票据，不能再走 `/web/v2/quickTicket`：真机用 `biztoken` 请求该接口返回 `returnCode=10052`「LGN_LOGIN_FAILS / 登录失败，请稍候重试」。
+- 随后与普通分支共用 `finish_login`（`huya_auth.rs:655`）：`checkLogin`（最多三次重试）、合并 `udb_cred`、落库、加密长期凭证、关二维码会话、广播刷新。
+
+如果响应确实带 `loginTime`/`sign`，仍走原来的 `huyaCallback` 分支：
 
 ```
 GET https://l.huya.com/udb_web/udbport2.php?m=HuyaLogin&do=huyaCallback
@@ -82,7 +97,7 @@ POST https://udblgn.huya.com/web/cookieExchange
 
 响应 `data.writeCookieFlag` 表示服务端是否写回了 Cookie；真正的登录态仍以 `checkLogin` 为准。若 `cookieExchange` 失效，再请求 `POST /web/credLogin`（`uri=70017`），请求体只有 `sdid` 与 `page`，依赖 Cookie 里的 `udb_cred`。
 
-本项目的 `refresh_once`（`huya_auth.rs:956`）顺序：
+本项目的 `refresh_once`（`huya_auth.rs:993`）顺序：
 
 1. 读凭据与 `credential_secret`；没有 `udb_cred` 直接 `NotRefreshable`，不碰账号状态。
 2. `refresh_due`：成功/新鲜态 20 分钟；失败且需重扫码 24 小时；临时失败 6 小时；已过期立即。
@@ -97,15 +112,15 @@ POST https://udblgn.huya.com/web/cookieExchange
 - `cookieExchange` 可能轮换掉 `udb_cred` 本身。若合并后的 Cookie 缺少它，`refresh_once` 会从独立的加密长期凭证补回，再走 `credLogin`；绝不会把旧设备的凭证写进新账号。
 - 长期凭证与 Cookie 在同一把 `credential_write_guard` 内落库，避免扫码登录刚好插进来后，本次旧结果覆盖新账号的 `udb_cred`。
 
-`maintenance_loop`（`huya_auth.rs:1224`）每 20 分钟跑一次 `refresh_once`；`revalidate`（`:1237`）每 6 小时用 `checkLogin` 独立复验，只在明确 `LoggedOut` 时标记过期，网络失败不误踢。
+`maintenance_loop`（`huya_auth.rs:1261`）每 20 分钟跑一次 `refresh_once`；`revalidate`（`:1274`）每 6 小时用 `checkLogin` 独立复验，只在明确 `LoggedOut` 时标记过期，网络失败不误踢。
 
 ## 3. 手动 Cookie
 
-`prepare_cookie`（`huya_auth.rs:838`）用于「粘贴 Cookie」：
+`prepare_cookie`（`huya_auth.rs:875`）用于「粘贴 Cookie」：
 
 - 有 `udb_cred` 但缺 `udb_uid`/`udb_biztoken`：先 `credLogin` 补票，再 `checkLogin`。
 - 没有 `udb_cred`：只做 `checkLogin`，校验通过也能保存，但 `refreshable=false`，界面显示「手动粘贴的 Cookie 没有长期凭证，扫码登录后可启用自动续期」。
-- 保存时 `remember_secret`（`huya_auth.rs:682`）只在当前 Cookie 含 `udb_cred` 时写长期凭证；没有就清掉旧设备的凭证，避免拿旧票污染新账号。
+- 保存时 `remember_secret`（`huya_auth.rs:719`）只在当前 Cookie 含 `udb_cred` 时写长期凭证；没有就清掉旧设备的凭证，避免拿旧票污染新账号。
 
 ## 4. 前端与命令
 
@@ -121,12 +136,12 @@ POST https://udblgn.huya.com/web/cookieExchange
 ### 5.1 自动化
 
 - `cargo fmt --check`、`cargo check --all-targets` 通过，0 警告。
-- `cargo test --lib`：**378 passed / 0 failed / 19 ignored**，其中 `huya_auth` 8 个单测覆盖设备 Cookie、Cookie 合并/删除、JSONP、退避窗口、登录 Cookie 判定、回调 URL 编码。
+- `cargo test --lib`：**380 passed / 0 failed / 19 ignored**，其中 `huya_auth` 10 个单测覆盖设备 Cookie、Cookie 合并/删除、JSONP、退避窗口、登录 Cookie 判定、回调 URL 编码，以及快速登录票据的 `uid`/`biztoken` 写入与缺参拒绝。
 - 真实网络 ignored 测试 `huya_auth::tests::live_qr_start_returns_png_svg` 通过（0.24 秒），证明当前网络下 `getQrId` + `getQrImg` 能拿到 PNG 并包成 SVG。
 - `pnpm exec tsc -b`、`check:i18n`、`check:docs`、`pnpm build` 通过。
 - release bundle 构建通过，`HIVECAST.app` 32.61 MiB。
 
-### 5.2 真机二维码与无效 Cookie
+### 5.2 真机二维码、无效 Cookie 与真实登录
 
 release bundle 真机（macOS）：
 
@@ -135,26 +150,51 @@ release bundle 真机（macOS）：
 - 粘贴 `udb_uid=1; udb_biztoken=fake; foo=bar` 保存：日志 `ERROR hivecast_lib::ui: 界面错误 context=ipc:credential_save 虎牙 Cookie 已失效或未登录`，toast 同文案；数据库 `credential` 仍只有哔哩哔哩/斗鱼/抖音，未写入虎牙，`credential_secret` 仍只有斗鱼；截图 `/tmp/huya-invalid.png`。
 - 轮询期间无错误日志，倒计时按服务端 `expires_in` 对齐。
 
-### 5.3 协议探针
+真实扫码闭环（同一 release bundle，2026-11-17 12:32–12:38）：
+
+- 重新生成二维码后，用户用虎牙 App 扫码并在手机确认；日志依次出现：
+  `INFO huya_auth: 虎牙扫码返回快速登录票据，使用 uid+biztoken 落登录态 uid=1199573670219`
+  `INFO huya_auth: 虎牙扫码登录成功 account=hy_139432760 uid=1199573670219 method="quick" cookie_names=[...17 个...]`
+- Cookie 名包含 `udb_uid`、`udb_biztoken`、`udb_cred`、`PHPSESSID`、`sdid`、`yyuid` 等；说明 `checkLogin` 已把快速登录票据换成完整登录态，而不是只停在 `biztoken`。
+- 数据库：`credential` 新增 `huya|ok|hy_139432760|1199573670219|1299 字符 Cookie`；`credential_secret` 新增 `huya`，`refresh_token` 247 字符、`device_id` 95 字符；原哔哩哔哩/斗鱼/抖音三行未变。
+- 账号卡从「未登录」变为「已登录 / hy_139432760 / 17 个 Cookie / 自动续期可用（每 20 分钟同步 Cookie，每 6 小时复验登录态）」；截图 `assets/169-huya-login.png`。
+- 点虎牙「立即检查」：日志 `DEBUG huya_auth: 虎牙 cookieExchange 完成 write_flag=true changed=true cookies=9 return_code=0`，随后 `INFO huya_auth: 虎牙 Cookie 自动续期完成 changed=true rotated=true udb_cred_len=152`；`credential_refresh` 写入 `huya|refreshed|已同步虎牙登录态|key_stale=0`，界面显示「上次检查 11/17 12:38 · 已轮换 Cookie」，截图 `assets/169-huya-refresh.png`。
+
+![虎牙 Cookie 真实轮换](assets/169-huya-refresh.png)
+- 本次真实轮换确实更新了 `udb_cred`（长度 152），不是只返回 `returnCode=0` 的空轮换。
+
+![虎牙扫码登录成功](assets/169-huya-login.png)
+
+![虎牙 Cookie 真实轮换](assets/169-huya-refresh.png)
+
+### 5.3 协议探针与真实轮换
 
 - `checkLogin` 匿名：`cb({"isLogined":false,"userName":"","uid":0,...})`。
 - `cookieExchange` 伪造 `udb_cred`：HTTP 200、`returnCode=0`、`writeCookieFlag=false`，证明不能只凭 `returnCode` 判断续期成功；代码随后用 `checkLogin` 兜底。
 - `credLogin` 伪造 `udb_cred`：`returnCode=40002`、`description="登录失败，请重新登录"`，对应 `RefreshFailure::Invalid`，会标记需要重新扫码。
+- 真实快速登录票据请求 `/web/v2/quickTicket`（`uri=30007`）：`returnCode=10052`、`description="LGN_LOGIN_FAILS / 登录失败，请稍候重试"`，确认 `biztoken` 不能再换一次，必须直接作为 `udb_biztoken` 使用。
+- 真实登录态的 `cookieExchange`：`writeCookieFlag=true`、`changed=true`、9 个 Cookie 被更新，和伪造票据时的 `writeCookieFlag=false` 形成对照。
 
 ## 6. 未验证与边界
 
-必须明确：
+已经真机闭环的部分不再列入「未验证」：
 
-1. **没有真实虎牙账号，完整扫码换票没有真机闭环。** 二维码生成、等待、过期、取消与无效 Cookie 已验证；`stage=2/3` 之后的 `huyaCallback`、`checkLogin` 登录成功、`udb_cred` 落库没有真实响应证据。
-2. **真实 `cookieExchange` 轮换未验证。** 不知道真实账号的 `udb_cred` 有效期、`writeCookieFlag` 是否变 true、是否轮换 `udb_biztoken`；代码按官方 SDK 的 20 分钟节奏与「`checkLogin` 为准」实现。
+- 真实扫码快速登录：`uid+biztoken` → `udb_uid/udb_biztoken` → `checkLogin` → `credential`/`credential_secret`。
+- 真实 `cookieExchange` 轮换：`writeCookieFlag=true`、`udb_cred` 更新、`credential_refresh=refreshed`。
+- 二维码生成/等待/过期/取消与无效 Cookie 拒绝。
+
+仍需明确的边界：
+
+1. **`loginTime/sign` + `huyaCallback` 分支没有真实响应样本。** 本次真实扫码走的是快速登录分支；旧分支仍保留，但只有代码路径与匿名探针，未在真实账号上触发。若虎牙后续切回回调模式，需要再验一次。
+2. **`udb_cred` 的长期有效期与多次轮换稳定性只观察了一次。** 本次 20 分钟周期内轮换成功；更长周期（天级）、服务端主动让 `udb_cred` 过期、以及 `credLogin` 回退是否仍可用，尚未经历。
 3. **登录是否提升虎牙画质未验证。** 虎牙取流当前匿名可用；登录态是否解锁更高档位、是否需要额外参数，需要真实账号录制对比。
 4. 手动 Cookie 没有 `udb_cred` 时只校验、不续期，这是与斗鱼一致的降级路径，不是缺陷。
-5. `revalidate` 在明确 `LoggedOut` 时会把 `last_refreshed_at` 置 0；当前界面只用于展示「上次轮换」，不影响续期判断。
+5. `revalidate` 在明确 `LoggedOut` 时会把 `last_refreshed_at` 置 0；当前界面只用于展示「上次轮换」，不影响续期判断。6 小时复验周期本次未等到触发。
 6. 二维码确认失败时返回 `error` 但不销毁会话，下一轮仍可重试；用户关闭面板后会话在 10 分钟内自然清理。
 
 ## 7. 文件清单
 
-- `/Library/dshproject/HIVECAST/src-tauri/src/huya_auth.rs`：新增，设备 Cookie、getQrId/getQrImg/tryQrLogin、confirm_login、prepare_cookie、cookieExchange/credLogin、refresh_once、maintenance_loop、revalidate、8 个单测与 1 个 ignored 真实网络测试。
+- `/Library/dshproject/HIVECAST/src-tauri/src/huya_auth.rs`：新增，设备 Cookie、getQrId/getQrImg/tryQrLogin、confirm_login、apply_quick_login、finish_login、prepare_cookie、cookieExchange/credLogin、refresh_once、maintenance_loop、revalidate、10 个单测与 1 个 ignored 真实网络测试。
 - `/Library/dshproject/HIVECAST/src-tauri/src/account.rs`：`info_for_row` 的 huya 可续期判断、`save_cookie` 的 huya 校验与长期凭证保存。
 - `/Library/dshproject/HIVECAST/src-tauri/src/commands.rs`：三个 huya 命令。
 - `/Library/dshproject/HIVECAST/src-tauri/src/lib.rs`：模块与命令注册。

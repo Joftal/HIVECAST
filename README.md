@@ -185,7 +185,7 @@
 | [167-抖音与斗鱼弹幕礼物全链路复查](docs/167-抖音与斗鱼弹幕礼物全链路复查.md) | 复查抖音/斗鱼弹幕连接、鉴权、帧解析、JSONL、ASS/Canvas、分段与合并，并回归 B 站；确认斗鱼 Cookie 不参与弹幕鉴权（双 WS chat 45/45、gift 5/5、loginres userid=0），抖音登录态 authed=true、匿名 ttwid 可用；修复抖音昵称/礼物字段、batch 退出丢批、斗鱼颜色/礼物/上舰兜底、ASS 发送者、最后段越界、抖音控制帧 gzip 误判、斗鱼礼物去重（后按 168 移除）；真机 12 分钟/12 片段/743 条重复 0；368 tests | 排查三平台弹幕数量不一致、礼物无名、ASS 与实时浮层不同、分段尾部事件越界、抖音控制帧报 gzip 失败或斗鱼礼物重复时 |
 | [166-斗鱼单房批量与三平台登录态降级](docs/166-斗鱼单房批量与三平台登录态降级.md) | 斗鱼批量改为登录后 1 个房间也批量，不再要求 ≥3 房；把登录失效与风控拆开：登录失效本拍降级并发单房（B 站/斗鱼/抖音），明确风控才整平台暂停 120 秒；解释抖音 `follow/feed` 只返回在播房时如何用上一轮状态合成离线显示；真机单斗鱼房 `rooms=1 keys=1 returned=1 live=1` 318ms，362 tests | 排查斗鱼 1 个房间不进批量、登录失效后监控停滞、风控请求放大、抖音离线房不显示或批量缺失误判时 |
 | [168-弹幕用户名与去重策略调整](docs/168-弹幕用户名与去重策略调整.md) | 三平台普通聊天不再记录/显示用户名，仅礼物、SC、上舰保留发送者；JSONL 聊天行省略 `u` 字段，旧数据与前端保持兼容；移除斗鱼礼物去重，三平台先完整保留所有事件；真机斗鱼两段 26 条事件中 chat 带 `u` 为 0、gift 带 `u` 为 9，ASS 同步；370 tests、832 i18n、169 docs、release 32.25 MiB | 排查 JSONL `u` 字段、礼物发送者、实时/ASS 用户名或弹幕去重时 |
-| [169-虎牙扫码登录与Cookie自动续期](docs/169-虎牙扫码登录与Cookie自动续期.md) | 虎牙原先只有粘贴 Cookie、不校验、不续期；从官方登录 SDK 逆出 udb_cred + 20 分钟 cookieExchange + credLogin 回退链路，用原生 HTTP 实现设备 Cookie、getQrId/getQrImg/tryQrLogin、huyaCallback/checkLogin、长期凭证加密保存、20 分钟续期与 6 小时复验；无效 Cookie 拒绝、二维码生成/等待/过期真机通过，真实账号扫码换票待验证；378 tests、837 i18n、32.61 MiB | 排查虎牙扫码、Cookie 校验、自动续期、失效标记或对比三平台账号链路时 |
+| [169-虎牙扫码登录与Cookie自动续期](docs/169-虎牙扫码登录与Cookie自动续期.md) | 虎牙原先只有粘贴 Cookie、不校验、不续期；从官方登录 SDK 逆出 udb_cred + 20 分钟 cookieExchange + credLogin 回退链路，用原生 HTTP 实现设备 Cookie、getQrId/getQrImg/tryQrLogin、huyaCallback/checkLogin、快速登录 uid+biztoken 分支、长期凭证加密保存、20 分钟续期与 6 小时复验；真实账号扫码登录（hy_139432760）、udb_cred 落库与 cookieExchange 真实轮换（write_flag=true、udb_cred 152）真机通过；380 tests、837 i18n、32.61 MiB | 排查虎牙扫码、Cookie 校验、自动续期、失效标记或对比三平台账号链路时 |
 
 ## 阅读顺序建议
 
