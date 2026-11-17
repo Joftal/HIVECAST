@@ -187,6 +187,7 @@
 | [168-弹幕用户名与去重策略调整](docs/168-弹幕用户名与去重策略调整.md) | 三平台普通聊天不再记录/显示用户名，仅礼物、SC、上舰保留发送者；JSONL 聊天行省略 `u` 字段，旧数据与前端保持兼容；移除斗鱼礼物去重，三平台先完整保留所有事件；真机斗鱼两段 26 条事件中 chat 带 `u` 为 0、gift 带 `u` 为 9，ASS 同步；370 tests、832 i18n、169 docs、release 32.25 MiB | 排查 JSONL `u` 字段、礼物发送者、实时/ASS 用户名或弹幕去重时 |
 | [169-虎牙扫码登录与Cookie自动续期](docs/169-虎牙扫码登录与Cookie自动续期.md) | 虎牙原先只有粘贴 Cookie、不校验、不续期；从官方登录 SDK 逆出 udb_cred + 20 分钟 cookieExchange + credLogin 回退链路，用原生 HTTP 实现设备 Cookie、getQrId/getQrImg/tryQrLogin、huyaCallback/checkLogin、快速登录 uid+biztoken 分支、长期凭证加密保存、20 分钟续期与 6 小时复验；真实账号扫码登录（hy_139432760）、udb_cred 落库与 cookieExchange 真实轮换（write_flag=true、udb_cred 152）真机通过；380 tests、837 i18n、32.61 MiB | 排查虎牙扫码、Cookie 校验、自动续期、失效标记或对比三平台账号链路时 |
 | [170-虎牙Cookie全链路复查](docs/170-虎牙Cookie全链路复查.md) | 复查虎牙扫码与续期全链路：响应体 2MB 限流、日志去敏、`qr_cancel` 显式释放二维码 session、checkLogin Set-Cookie 合并、手动 Cookie 的 udb_cred 重试、续期状态写锁竞态；真机验证取消、225 秒自然过期、刷新二维码与真实 cookieExchange（write_flag=false 不伪造轮换）；382 tests、837 i18n、docs 171、bundle 32.48 MiB | 继续排查虎牙扫码生命周期、Cookie 续期真实性或与三平台账号链路对齐时 |
+| [171-虎牙直播流录制与Cookie复查](docs/171-虎牙直播流录制与Cookie复查.md) | 复查虎牙扫码/网页/匿名三种 Cookie 下的直播间数据、8 档画质、6 条线路、1080P/2K/4K 录制；三组房间与取流结果一致，修复 `totalCount`/`startTime` 裸数字导致在线人数与开播时间永远为空；1080P 与 2K HDR 稳定，4K HDR 只能录 4–5 秒后中断（腾讯云 FLV），记录 HLS 可用但适配器未使用；扫码 Cookie 轮转真实成功，CDN/ffmpeg 不带账号 Cookie | 排查虎牙在线人数/开播时间为空、4K 录制中断、扫码与网页 Cookie 差异或请求泄露时 |
 
 ## 阅读顺序建议
 

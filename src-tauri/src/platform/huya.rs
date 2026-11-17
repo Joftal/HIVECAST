@@ -95,10 +95,8 @@ impl PlatformAdapter for HuyaAdapter {
             .unwrap_or_default();
 
         let is_on = parse_is_on(&body);
-        let started_at = field(&body, "startTime")
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|value| *value > 0);
-        let online = field(&body, "totalCount").and_then(|value| value.parse::<u64>().ok());
+        let started_at = number_field::<i64>(&body, "startTime").filter(|value| *value > 0);
+        let online = number_field::<u64>(&body, "totalCount");
 
         Ok(RoomInfo {
             host_name: nick,
@@ -599,6 +597,21 @@ fn field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
+/// 页面里的数字字段是裸数字（`"totalCount":1362495`），不能用只认字符串的
+/// [`field`]；这里同时兼容被引号包起来的数字，避免页面格式小幅变化就丢数据。
+fn number_field<T: std::str::FromStr>(body: &str, key: &str) -> Option<T> {
+    let needle = format!("\"{key}\":");
+    let start = body.find(&needle)? + needle.len();
+    let rest = body[start..].trim_start();
+    let raw = if let Some(inner) = rest.strip_prefix('"') {
+        &inner[..inner.find('"')?]
+    } else {
+        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
+        rest[..end].trim()
+    };
+    raw.parse().ok()
+}
+
 fn parse_is_on(body: &str) -> bool {
     let needle = "\"isOn\":";
     let Some(start) = body.find(needle) else {
@@ -829,6 +842,19 @@ mod tests {
         assert_eq!(qn_for_bitrate(2_000), 250);
         assert_eq!(qn_for_bitrate(900), 150);
         assert_eq!(qn_for_bitrate(500), 80);
+    }
+
+    #[test]
+    fn parses_numeric_room_fields() {
+        let body = r#"{"totalCount":1362495,"startTime":1793092036,"zero":0}"#;
+        assert_eq!(number_field::<u64>(body, "totalCount"), Some(1_362_495));
+        assert_eq!(number_field::<i64>(body, "startTime"), Some(1_793_092_036));
+        assert_eq!(number_field::<u64>(body, "zero"), Some(0));
+        assert_eq!(
+            number_field::<u64>(r#"{"totalCount":"42"}"#, "totalCount"),
+            Some(42)
+        );
+        assert_eq!(number_field::<u64>(body, "missing"), None);
     }
 
     #[test]
