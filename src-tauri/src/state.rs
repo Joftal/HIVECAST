@@ -150,6 +150,22 @@ impl AppState {
             crate::douyin_auth::maintenance_loop(db_for_douyin, app_for_douyin).await;
         });
 
+        // 虎牙：20 分钟 cookieExchange + 6 小时 checkLogin 复验，失败按 6h/24h 退避。
+        let db_for_huya = db.clone();
+        let app_for_huya = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::huya_auth::maintenance_loop(db_for_huya, app_for_huya).await;
+        });
+
+        let db_for_huya_check = db.clone();
+        let app_for_huya_check = app.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                crate::huya_auth::revalidate(&db_for_huya_check, &app_for_huya_check).await;
+                tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+            }
+        });
+
         // 抖音离线关注没有 web_rid，只能低频翻关注列表等开播；这条循环和监控分开，
         // 不占用房间 30 秒轮询的预算。
         let db_for_pool = db.clone();

@@ -128,6 +128,7 @@ pub(crate) fn info_for_row(db: &Db, row: &CredentialRow) -> CredentialInfo {
         "bilibili" => credential::has_refresh_token(&row.cookie),
         "douyu" => crate::douyu_auth::has_refresh_token(db),
         "douyin" => crate::douyin_auth::has_session_cookie(&row.cookie),
+        "huya" => crate::huya_auth::has_refresh_token(db),
         _ => false,
     };
     info_with_refresh(row, refreshable, load_refresh_status(db, &row.platform))
@@ -1032,7 +1033,7 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
         tracing::warn!(platform, "保存 Cookie 被拒绝：平台不受支持");
         return Err(AppError::User(format!("不支持的平台：{platform}")));
     }
-    let cookie = credential::normalize(raw).map_err(|err| {
+    let mut cookie = credential::normalize(raw).map_err(|err| {
         tracing::warn!(platform, error = %err, "Cookie 格式不规范");
         AppError::User(err)
     })?;
@@ -1043,6 +1044,10 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
         crate::douyu_auth::validate_cookie(&cookie).await?
     } else if platform == "douyin" {
         crate::douyin_auth::validate_cookie(&cookie).await?
+    } else if platform == "huya" {
+        let (account, refreshed) = crate::huya_auth::prepare_cookie(&cookie).await?;
+        cookie = refreshed;
+        account
     } else {
         Account {
             uid: String::new(),
@@ -1060,6 +1065,9 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
         if let Err(err) = db.clear_credential_secret("douyu") {
             tracing::warn!(error = %err, "清理斗鱼长期凭证失败");
         }
+    } else if platform == "huya" {
+        // 手动 Cookie 里的 udb_cred 才属于当前账号；没有就清掉旧设备的凭证。
+        crate::huya_auth::remember_secret(db, &cookie);
     }
     tracing::info!(platform, account = %row.account_name, "Cookie 已保存");
     Ok(info_for_row(db, &row))

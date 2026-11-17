@@ -11,6 +11,7 @@ mod douyu_auth;
 mod error;
 mod ffmpeg;
 mod filename;
+mod huya_auth;
 mod instance;
 mod jce;
 mod jobs;
@@ -316,6 +317,9 @@ pub fn run() {
             commands::douyu_qr_poll,
             commands::douyu_refresh_now,
             commands::douyin_refresh_now,
+            commands::huya_qr_start,
+            commands::huya_qr_poll,
+            commands::huya_refresh_now,
             commands::bilibili_followings,
             commands::bilibili_follow_statuses,
             commands::douyin_follow_page,

@@ -575,6 +575,19 @@ export async function douyinRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("douyin_refresh_now");
 }
 
+export async function huyaQrStart(): Promise<QrTicket> {
+  return invoke<QrTicket>("huya_qr_start");
+}
+
+export async function huyaQrPoll(qrcodeKey: string): Promise<QrPoll> {
+  return invoke<QrPoll>("huya_qr_poll", { qrcodeKey });
+}
+
+/** 立即检查一次虎牙 Cookie：cookieExchange/credLogin 并复验登录态。 */
+export async function huyaRefreshNow(): Promise<RefreshStatus> {
+  return invoke<RefreshStatus>("huya_refresh_now");
+}
+
 /** 账号凭据或续期状态变化（登录、保存、过期、续期结果写入）。 */
 export const EVENT_ACCOUNT_REFRESH = "account://refresh";
 

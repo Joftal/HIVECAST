@@ -886,7 +886,12 @@
     "douyinHint": "Paste a Douyin web cookie that includes sessionid; signed-in playback follows the account's quality permissions.",
     "autoRefreshOnDouyin": "Session valid (rechecked every 30 minutes, rotating cookies synced every 6 hours)",
     "autoRefreshExpired": "Session expired; automatic rechecks are paused",
-    "douyinNoRefresh": "sessionid is missing, so the session cannot be rechecked. Sign in on the Douyin website and paste the full cookie again."
+    "douyinNoRefresh": "sessionid is missing, so the session cannot be rechecked. Sign in on the Douyin website and paste the full cookie again.",
+    "huyaHint": "Scan with the Huya app to sign in; the session can then refresh automatically and record in HD.",
+    "huyaNoRefresh": "Auto refresh unavailable: a pasted cookie has no long-lived credential. Scan to enable it.",
+    "qrTitleHuya": "Scan with the Huya app",
+    "qrHintHuya": "Signing in enables automatic cookie refresh and HD recording.",
+    "autoRefreshOnHuya": "Auto refresh available (cookies synced every 20 minutes, session rechecked every 6 hours)"
   },
   "close": {
     "title": "Tasks are still running",

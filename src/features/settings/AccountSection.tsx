@@ -9,6 +9,9 @@ import {
   douyuQrStart,
   douyuRefreshNow,
   douyinRefreshNow,
+  huyaQrPoll,
+  huyaQrStart,
+  huyaRefreshNow,
   credentialSave,
   credentialsList,
   describeError,
@@ -126,7 +129,9 @@ export default function AccountSection() {
           ? await douyuRefreshNow()
           : platform === "douyin"
             ? await douyinRefreshNow()
-            : await bilibiliRefreshNow();
+            : platform === "huya"
+              ? await huyaRefreshNow()
+              : await bilibiliRefreshNow();
       await load();
       notify.success(t("account.refreshDone", { result: refreshOutcomeLabel(status) }));
     } catch (err) {
@@ -183,7 +188,12 @@ export default function AccountSection() {
     setQr(null);
     setBusy(true);
     try {
-      const ticket = platform === "douyu" ? await douyuQrStart() : await bilibiliQrStart();
+      const ticket =
+        platform === "douyu"
+          ? await douyuQrStart()
+          : platform === "huya"
+            ? await huyaQrStart()
+            : await bilibiliQrStart();
       // 关闭面板或重新打开后，旧请求的响应必须丢弃。
       if (seq !== qrSeq.current) return;
       setQr({
@@ -259,7 +269,9 @@ export default function AccountSection() {
         const poll =
           qr.platform === "douyu"
             ? await douyuQrPoll(qr.ticket.qrcodeKey)
-            : await bilibiliQrPoll(qr.ticket.qrcodeKey);
+            : qr.platform === "huya"
+              ? await huyaQrPoll(qr.ticket.qrcodeKey)
+              : await bilibiliQrPoll(qr.ticket.qrcodeKey);
         if (cancelled) return;
         setQr((current) =>
           current
@@ -343,7 +355,11 @@ export default function AccountSection() {
     <div className="animate-fade-rise mt-3 space-y-2.5 rounded-[9px] border border-line bg-raised/40 p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[10.5px] font-medium text-muted">
-          {qr.platform === "douyu" ? t("account.qrTitleDouyu") : t("account.qrTitle")}
+          {qr.platform === "douyu"
+            ? t("account.qrTitleDouyu")
+            : qr.platform === "huya"
+              ? t("account.qrTitleHuya")
+              : t("account.qrTitle")}
         </span>
         <button
           type="button"
@@ -383,7 +399,11 @@ export default function AccountSection() {
             </p>
           ) : null}
           <p className="text-[10px] leading-4 text-faint">
-            {qr.platform === "douyu" ? t("account.qrHintDouyu") : t("account.qrHint")}
+            {qr.platform === "douyu"
+              ? t("account.qrHintDouyu")
+              : qr.platform === "huya"
+                ? t("account.qrHintHuya")
+                : t("account.qrHint")}
           </p>
           {qrState === "expired" || qr?.error ? (
             <Button
@@ -474,9 +494,14 @@ export default function AccountSection() {
                       ? t("account.bilibiliHint")
                       : platform === "douyu"
                         ? t("account.douyuHint")
-                        : t("account.cookieHint")}
+                        : platform === "huya"
+                          ? t("account.huyaHint")
+                          : t("account.cookieHint")}
                 </p>
-                {(platform === "bilibili" || platform === "douyu" || platform === "douyin") &&
+                {(platform === "bilibili" ||
+                  platform === "douyu" ||
+                  platform === "huya" ||
+                  platform === "douyin") &&
                 item ? (
                   <div className="mt-1.5">
                     <p
@@ -498,12 +523,16 @@ export default function AccountSection() {
                             ? t("account.autoRefreshOnDouyu")
                             : platform === "douyin"
                               ? t("account.autoRefreshOnDouyin")
-                              : t("account.autoRefreshOn")
+                              : platform === "huya"
+                                ? t("account.autoRefreshOnHuya")
+                                : t("account.autoRefreshOn")
                           : platform === "douyu"
                             ? t("account.douyuNoRefresh")
                             : platform === "douyin"
                               ? t("account.douyinNoRefresh")
-                              : t("account.autoRefreshOff")}
+                              : platform === "huya"
+                                ? t("account.huyaNoRefresh")
+                                : t("account.autoRefreshOff")}
                     </p>
                     {item.refreshable ? (
                       <div className="mt-1 flex items-start justify-between gap-2">
@@ -559,7 +588,7 @@ export default function AccountSection() {
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-1 border-t border-line/80 pt-2.5">
-                {platform === "bilibili" || platform === "douyu" ? (
+                {platform === "bilibili" || platform === "douyu" || platform === "huya" ? (
                   <Button
                     size="sm"
                     variant={connected ? "ghost" : "secondary"}

@@ -886,7 +886,12 @@
     "douyinHint": "粘贴抖音网页 Cookie（需包含 sessionid）；登录后取流与画质按账号权限执行。",
     "autoRefreshOnDouyin": "登录态有效（每 30 分钟复验，每 6 小时同步轮换 Cookie）",
     "autoRefreshExpired": "登录态已失效，自动复验已暂停",
-    "douyinNoRefresh": "缺少 sessionid，无法自动复验；请在抖音网页登录后重新复制完整 Cookie"
+    "douyinNoRefresh": "缺少 sessionid，无法自动复验；请在抖音网页登录后重新复制完整 Cookie",
+    "huyaHint": "用虎牙 App 扫码登录；登录后可自动续期，录制高清画质。",
+    "huyaNoRefresh": "自动续期不可用：手动粘贴的 Cookie 没有长期凭证，扫码登录后可启用",
+    "qrTitleHuya": "用虎牙 App 扫码",
+    "qrHintHuya": "登录后可自动续期，录制高清画质。",
+    "autoRefreshOnHuya": "自动续期可用（每 20 分钟同步 Cookie，每 6 小时复验登录态）"
   },
   "close": {
     "title": "有任务正在进行",

@@ -2270,6 +2270,28 @@ pub async fn douyin_refresh_now(
     crate::douyin_auth::refresh_now(&state.db, &app).await
 }
 
+#[tauri::command]
+pub async fn huya_qr_start() -> Result<QrTicket, AppError> {
+    crate::huya_auth::qr_start().await
+}
+
+#[tauri::command]
+pub async fn huya_qr_poll(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    qrcode_key: String,
+) -> Result<QrPoll, AppError> {
+    crate::huya_auth::qr_poll(&state.db, &app, &qrcode_key).await
+}
+
+#[tauri::command]
+pub async fn huya_refresh_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshStatus, AppError> {
+    crate::huya_auth::refresh_now(&state.db, &app).await
+}
+
 // ---- 媒体库 ----
 
 /// 媒体库列表：筛选/排序/分页在 SQL 里做，返回本页 + 总数。
