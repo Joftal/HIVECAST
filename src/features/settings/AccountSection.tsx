@@ -9,6 +9,7 @@ import {
   douyuQrStart,
   douyuRefreshNow,
   douyinRefreshNow,
+  huyaQrCancel,
   huyaQrPoll,
   huyaQrStart,
   huyaRefreshNow,
@@ -177,14 +178,21 @@ export default function AccountSection() {
     }
   };
 
+  const cancelHuyaQr = (platform: Platform | undefined, key: string | undefined) => {
+    if (platform === "huya" && key) void huyaQrCancel(key).catch(() => {});
+  };
+
   const closeQr = () => {
     qrSeq.current += 1;
+    cancelHuyaQr(qr?.platform, qr?.ticket.qrcodeKey);
     setQr(null);
     setBusy(false);
   };
 
   const openQr = async (platform: Platform) => {
     const seq = ++qrSeq.current;
+    // 刷新/换平台前先释放旧虎牙 session，避免后台旧二维码继续存活。
+    cancelHuyaQr(qr?.platform, qr?.ticket.qrcodeKey);
     setQr(null);
     setBusy(true);
     try {
@@ -195,7 +203,10 @@ export default function AccountSection() {
             ? await huyaQrStart()
             : await bilibiliQrStart();
       // 关闭面板或重新打开后，旧请求的响应必须丢弃。
-      if (seq !== qrSeq.current) return;
+      if (seq !== qrSeq.current) {
+        if (platform === "huya") void huyaQrCancel(ticket.qrcodeKey).catch(() => {});
+        return;
+      }
       setQr({
         platform,
         ticket,
@@ -229,6 +240,15 @@ export default function AccountSection() {
     };
   }, []);
 
+  // 组件卸载或切换到另一个二维码时，通知后端释放虎牙 session。
+  useEffect(() => {
+    if (qr?.platform !== "huya") return;
+    const key = qr.ticket.qrcodeKey;
+    return () => {
+      void huyaQrCancel(key).catch(() => {});
+    };
+  }, [qr?.platform, qr?.ticket.qrcodeKey]);
+
   const qrState = qr?.poll?.state ?? "pending";
   const qrMessage =
     qr?.error ??
@@ -239,6 +259,10 @@ export default function AccountSection() {
   // 本地先到点就先判失效，不必等服务端下一次轮询（最多省 1.6 秒的错觉）。
   useEffect(() => {
     if (!counting || secondsLeft === null || secondsLeft > 0) return;
+    // 本地先到点时也通知后端释放虎牙 session，避免面板已显示过期、后端还留 10 分钟。
+    if (qr?.platform === "huya") {
+      void huyaQrCancel(qr.ticket.qrcodeKey).catch(() => {});
+    }
     setQr((current) =>
       current && !current.poll?.state?.startsWith("expired")
         ? {
@@ -252,7 +276,7 @@ export default function AccountSection() {
           }
         : current,
     );
-  }, [counting, secondsLeft, t]);
+  }, [counting, secondsLeft, t, qr?.platform, qr?.ticket.qrcodeKey]);
 
   // 扫码期间每 1.6 秒问一次；confirmed / expired / error 后停表。
   useEffect(() => {

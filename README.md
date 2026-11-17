@@ -186,6 +186,7 @@
 | [166-斗鱼单房批量与三平台登录态降级](docs/166-斗鱼单房批量与三平台登录态降级.md) | 斗鱼批量改为登录后 1 个房间也批量，不再要求 ≥3 房；把登录失效与风控拆开：登录失效本拍降级并发单房（B 站/斗鱼/抖音），明确风控才整平台暂停 120 秒；解释抖音 `follow/feed` 只返回在播房时如何用上一轮状态合成离线显示；真机单斗鱼房 `rooms=1 keys=1 returned=1 live=1` 318ms，362 tests | 排查斗鱼 1 个房间不进批量、登录失效后监控停滞、风控请求放大、抖音离线房不显示或批量缺失误判时 |
 | [168-弹幕用户名与去重策略调整](docs/168-弹幕用户名与去重策略调整.md) | 三平台普通聊天不再记录/显示用户名，仅礼物、SC、上舰保留发送者；JSONL 聊天行省略 `u` 字段，旧数据与前端保持兼容；移除斗鱼礼物去重，三平台先完整保留所有事件；真机斗鱼两段 26 条事件中 chat 带 `u` 为 0、gift 带 `u` 为 9，ASS 同步；370 tests、832 i18n、169 docs、release 32.25 MiB | 排查 JSONL `u` 字段、礼物发送者、实时/ASS 用户名或弹幕去重时 |
 | [169-虎牙扫码登录与Cookie自动续期](docs/169-虎牙扫码登录与Cookie自动续期.md) | 虎牙原先只有粘贴 Cookie、不校验、不续期；从官方登录 SDK 逆出 udb_cred + 20 分钟 cookieExchange + credLogin 回退链路，用原生 HTTP 实现设备 Cookie、getQrId/getQrImg/tryQrLogin、huyaCallback/checkLogin、快速登录 uid+biztoken 分支、长期凭证加密保存、20 分钟续期与 6 小时复验；真实账号扫码登录（hy_139432760）、udb_cred 落库与 cookieExchange 真实轮换（write_flag=true、udb_cred 152）真机通过；380 tests、837 i18n、32.61 MiB | 排查虎牙扫码、Cookie 校验、自动续期、失效标记或对比三平台账号链路时 |
+| [170-虎牙Cookie全链路复查](docs/170-虎牙Cookie全链路复查.md) | 复查虎牙扫码与续期全链路：响应体 2MB 限流、日志去敏、`qr_cancel` 显式释放二维码 session、checkLogin Set-Cookie 合并、手动 Cookie 的 udb_cred 重试、续期状态写锁竞态；真机验证取消、225 秒自然过期、刷新二维码与真实 cookieExchange（write_flag=false 不伪造轮换）；382 tests、837 i18n、docs 171、bundle 32.48 MiB | 继续排查虎牙扫码生命周期、Cookie 续期真实性或与三平台账号链路对齐时 |
 
 ## 阅读顺序建议
 

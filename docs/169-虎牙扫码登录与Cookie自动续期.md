@@ -156,7 +156,7 @@ release bundle 真机（macOS）：
   `INFO huya_auth: 虎牙扫码返回快速登录票据，使用 uid+biztoken 落登录态 uid=1199573670219`
   `INFO huya_auth: 虎牙扫码登录成功 account=hy_139432760 uid=1199573670219 method="quick" cookie_names=[...17 个...]`
 - Cookie 名包含 `udb_uid`、`udb_biztoken`、`udb_cred`、`PHPSESSID`、`sdid`、`yyuid` 等；说明 `checkLogin` 已把快速登录票据换成完整登录态，而不是只停在 `biztoken`。
-- 数据库：`credential` 新增 `huya|ok|hy_139432760|1199573670219|1299 字符 Cookie`；`credential_secret` 新增 `huya`，`refresh_token` 247 字符、`device_id` 95 字符；原哔哩哔哩/斗鱼/抖音三行未变。
+- 数据库：`credential` 新增 `huya|ok|hy_139432760|1199573670219`，DB 里是 AES-256-GCM 密文（1299 字符），`credential::get` 解出的明文 Cookie 是 941 字符；`credential_secret` 新增 `huya`，`refresh_token` 密文 247 字符（明文 `udb_cred` 152 字符）、`device_id` 密文 95 字符；原哔哩哔哩/斗鱼/抖音三行未变。
 - 账号卡从「未登录」变为「已登录 / hy_139432760 / 17 个 Cookie / 自动续期可用（每 20 分钟同步 Cookie，每 6 小时复验登录态）」；截图 `assets/169-huya-login.png`。
 - 点虎牙「立即检查」：日志 `DEBUG huya_auth: 虎牙 cookieExchange 完成 write_flag=true changed=true cookies=9 return_code=0`，随后 `INFO huya_auth: 虎牙 Cookie 自动续期完成 changed=true rotated=true udb_cred_len=152`；`credential_refresh` 写入 `huya|refreshed|已同步虎牙登录态|key_stale=0`，界面显示「上次检查 11/17 12:38 · 已轮换 Cookie」，截图 `assets/169-huya-refresh.png`。
 
@@ -190,9 +190,13 @@ release bundle 真机（macOS）：
 3. **登录是否提升虎牙画质未验证。** 虎牙取流当前匿名可用；登录态是否解锁更高档位、是否需要额外参数，需要真实账号录制对比。
 4. 手动 Cookie 没有 `udb_cred` 时只校验、不续期，这是与斗鱼一致的降级路径，不是缺陷。
 5. `revalidate` 在明确 `LoggedOut` 时会把 `last_refreshed_at` 置 0；当前界面只用于展示「上次轮换」，不影响续期判断。6 小时复验周期本次未等到触发。
-6. 二维码确认失败时返回 `error` 但不销毁会话，下一轮仍可重试；用户关闭面板后会话在 10 分钟内自然清理。
+6. 二维码确认失败时返回 `error` 但不销毁会话，下一轮仍可重试；用户关闭/刷新面板现在会显式 `qr_cancel` 释放 session，10 分钟清理阈值只作为遗漏兜底，见 `170-虎牙Cookie全链路复查.md`。
 
-## 7. 文件清单
+## 7. 后续复查
+
+2026-11-17 的 `170-虎牙Cookie全链路复查.md` 补做了扫码取消/关闭清理、checkLogin Set-Cookie 合并、手动 Cookie 的 `udb_cred` 重试、响应体限流与续期状态竞态检查；本文 §6 的“关闭面板后 10 分钟自然清理”已由显式取消替代。
+
+## 8. 文件清单
 
 - `/Library/dshproject/HIVECAST/src-tauri/src/huya_auth.rs`：新增，设备 Cookie、getQrId/getQrImg/tryQrLogin、confirm_login、apply_quick_login、finish_login、prepare_cookie、cookieExchange/credLogin、refresh_once、maintenance_loop、revalidate、10 个单测与 1 个 ignored 真实网络测试。
 - `/Library/dshproject/HIVECAST/src-tauri/src/account.rs`：`info_for_row` 的 huya 可续期判断、`save_cookie` 的 huya 校验与长期凭证保存。

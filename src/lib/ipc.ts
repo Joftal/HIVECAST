@@ -583,6 +583,11 @@ export async function huyaQrPoll(qrcodeKey: string): Promise<QrPoll> {
   return invoke<QrPoll>("huya_qr_poll", { qrcodeKey });
 }
 
+/** 关闭或刷新虎牙扫码面板时释放后端 session，停止后续轮询。 */
+export async function huyaQrCancel(qrcodeKey: string): Promise<void> {
+  return invoke<void>("huya_qr_cancel", { qrcodeKey });
+}
+
 /** 立即检查一次虎牙 Cookie：cookieExchange/credLogin 并复验登录态。 */
 export async function huyaRefreshNow(): Promise<RefreshStatus> {
   return invoke<RefreshStatus>("huya_refresh_now");

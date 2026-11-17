@@ -216,20 +216,37 @@ fn sdid_of(cookie: &str) -> String {
     cookie_value(cookie, "sdid").unwrap_or_default()
 }
 
+/// 读取响应体，但绝不一次性把远端内容全读进内存。
+/// Content-Length 只能提前拒绝明显超限的响应；chunk 循环负责兜底没有长度或长度撒谎的响应。
+async fn read_body_limited(mut resp: Response, what: &str) -> Result<Vec<u8>, AppError> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BODY as u64 {
+            return Err(upstream(format!("{what}过大")));
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|err| {
+        tracing::warn!(error = %err, what, "读取虎牙响应失败");
+        upstream("虎牙接口暂时不可用，请稍后重试")
+    })? {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err(upstream(format!("{what}过大")));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn response_json(resp: Response) -> Result<Value, AppError> {
     let status = resp.status();
-    let text = resp.text().await.map_err(|err| {
-        tracing::warn!(error = %err, "读取虎牙响应失败");
-        upstream("虎牙接口暂时不可用，请稍后重试")
-    })?;
-    if text.len() > MAX_BODY {
-        return Err(upstream("虎牙接口返回内容过大"));
-    }
+    let bytes = read_body_limited(resp, "虎牙接口返回内容").await?;
     if !status.is_success() {
         return Err(upstream(format!("虎牙接口返回 HTTP {status}")));
     }
+    let text = String::from_utf8(bytes).map_err(|_| upstream("虎牙接口响应不是有效 UTF-8"))?;
     serde_json::from_str(&text).map_err(|err| {
-        tracing::warn!(error = %err, body = %text.chars().take(200).collect::<String>(), "虎牙响应解析失败");
+        // 不打印 body：扫码/换票响应可能带 biztoken，日志里只保留长度。
+        tracing::warn!(error = %err, bytes = text.len(), "虎牙响应解析失败");
         upstream("虎牙接口响应解析失败")
     })
 }
@@ -359,13 +376,8 @@ async fn get_huya(
     let status = resp.status();
     let mut jar = BTreeMap::new();
     absorb_cookies(resp.headers(), &mut jar);
-    let text = resp.text().await.map_err(|err| {
-        tracing::warn!(error = %err, "读取虎牙响应失败");
-        upstream("虎牙接口暂时不可用，请稍后重试")
-    })?;
-    if text.len() > MAX_BODY {
-        return Err(upstream("虎牙接口返回内容过大"));
-    }
+    let bytes = read_body_limited(resp, "虎牙响应").await?;
+    let text = String::from_utf8(bytes).map_err(|_| upstream("虎牙接口响应不是有效 UTF-8"))?;
     Ok((jar, text, status))
 }
 
@@ -409,17 +421,11 @@ async fn fetch_qr_png(qr_id: &str, jar: &BTreeMap<String, String>) -> Result<Vec
             upstream("虎牙二维码下载失败，请稍后重试")
         })?;
     let status = resp.status();
-    let bytes = resp.bytes().await.map_err(|err| {
-        tracing::warn!(error = %err, "读取虎牙二维码失败");
-        upstream("虎牙二维码下载失败，请稍后重试")
-    })?;
+    let bytes = read_body_limited(resp, "虎牙二维码图片").await?;
     if !status.is_success() || bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
         return Err(upstream("虎牙二维码图片格式异常"));
     }
-    if bytes.len() > MAX_BODY {
-        return Err(upstream("虎牙二维码图片过大"));
-    }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 fn qr_svg(png: &[u8]) -> String {
@@ -510,6 +516,15 @@ fn expire_session(qr_id: &str) {
     sessions.retain(|(key, _)| key != qr_id);
 }
 
+/// 用户关闭/刷新扫码面板时立即释放内存里的设备 Cookie 与轮询状态。
+/// 幂等且不访问网络；已确认的登录结果仍由 QR_CONFIRMED 保留，供重复轮询读取。
+pub fn qr_cancel(qr_id: &str) {
+    if qr_id.trim().is_empty() {
+        return;
+    }
+    expire_session(qr_id);
+}
+
 /// 轮询扫码状态；成功时完成换票、校验、落库，返回 CredentialInfo。
 pub async fn qr_poll(db: &Db, app: &AppHandle, qr_id: &str) -> Result<QrPoll, AppError> {
     if is_confirmed(qr_id) {
@@ -571,6 +586,10 @@ pub async fn qr_poll(db: &Db, app: &AppHandle, qr_id: &str) -> Result<QrPoll, Ap
         }
         8 => Ok(qr_state("error", "扫码账号异常，请更换账号后重试", 0)),
         2 | 3 => {
+            // 请求期间用户可能已经关闭/刷新面板；取消后不要再换票落库。
+            if peek_session(qr_id).is_none() {
+                return Ok(qr_state("expired", "二维码已取消，请刷新", 0));
+            }
             let mut jar = session.jar.clone();
             for (name, value) in extra {
                 jar.insert(name, value);
@@ -663,7 +682,11 @@ async fn finish_login(
     // 回调链有时要第二次请求才落全 Cookie；给服务端三次机会，避免刚扫码成功就报失败。
     let mut account = None;
     for attempt in 0..3 {
-        match check_login(&cookie).await? {
+        let (check, extra) = check_login_with_cookies(&cookie).await?;
+        if merge_cookie_jar(&mut jar, extra) {
+            cookie = jar_cookie(&jar);
+        }
+        match check {
             Check::LoggedIn(found) => {
                 account = Some(found);
                 break;
@@ -693,10 +716,16 @@ async fn finish_login(
         jar.insert("udb_cred".into(), cred);
         cookie = jar_cookie(&jar);
     }
+    // checkLogin 可能耗时数百毫秒；落库前再确认面板没有被用户关掉。
+    if peek_session(qr_id).is_none() {
+        return Ok(qr_state("expired", "二维码已取消，请刷新", 0));
+    }
     let row = crate::account::store_account(db, "huya", &cookie, &account)?;
     save_secret(db, &cookie, &sdid_of(&cookie));
     remember_confirmed(qr_id);
     expire_session(qr_id);
+    // 新账号使用自己的复验窗口，不能沿用上一个账号的 6 小时计时。
+    reset_revalidation_clock();
     crate::account::clear_stream_cache(app);
     crate::account::emit_account_refresh(app);
     tracing::info!(
@@ -771,45 +800,64 @@ fn strip_jsonp(body: &str) -> &str {
     text[open + 1..text.len() - 1].trim()
 }
 
-async fn check_login(cookie: &str) -> Result<Check, AppError> {
+async fn check_login_with_cookies(
+    cookie: &str,
+) -> Result<(Check, BTreeMap<String, String>), AppError> {
     let url = format!("{CHECK_LOGIN}&callback=cb");
-    let (_, body, status) = get_huya(&url, cookie).await?;
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return Ok(Check::LoggedOut);
-    }
-    if !status.is_success() {
-        return Ok(Check::Transient);
-    }
-    let value: Value = match serde_json::from_str(strip_jsonp(&body)) {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::warn!(error = %err, "虎牙登录态响应解析失败");
-            return Ok(Check::Transient);
+    let (jar, body, status) = get_huya(&url, cookie).await?;
+    let check = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        Check::LoggedOut
+    } else if !status.is_success() {
+        Check::Transient
+    } else {
+        match serde_json::from_str::<Value>(strip_jsonp(&body)) {
+            Ok(value) => {
+                if !value_bool(&value, "isLogined") {
+                    Check::LoggedOut
+                } else {
+                    let uid = value_str(&value, "uid");
+                    if uid.is_empty() || uid == "0" {
+                        Check::LoggedOut
+                    } else {
+                        let name = {
+                            let nick = value_str(&value, "userNick");
+                            let user = value_str(&value, "userName");
+                            if !nick.trim().is_empty() {
+                                nick
+                            } else if !user.trim().is_empty() {
+                                user
+                            } else {
+                                "虎牙用户".into()
+                            }
+                        };
+                        let avatar = {
+                            let logo = value_str(&value, "userLogo");
+                            (!logo.trim().is_empty()).then_some(logo)
+                        };
+                        Check::LoggedIn(Account { uid, name, avatar })
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "虎牙登录态响应解析失败");
+                Check::Transient
+            }
         }
     };
-    if !value_bool(&value, "isLogined") {
-        return Ok(Check::LoggedOut);
+    Ok((check, jar))
+}
+
+async fn check_login(cookie: &str) -> Result<Check, AppError> {
+    Ok(check_login_with_cookies(cookie).await?.0)
+}
+
+/// 把 checkLogin 返回的 Set-Cookie 合并进当前设备 Cookie；返回是否有变化。
+fn merge_cookie_jar(jar: &mut BTreeMap<String, String>, extra: BTreeMap<String, String>) -> bool {
+    let before = jar.clone();
+    for (name, value) in extra {
+        jar.insert(name, value);
     }
-    let uid = value_str(&value, "uid");
-    if uid.is_empty() || uid == "0" {
-        return Ok(Check::LoggedOut);
-    }
-    let name = {
-        let nick = value_str(&value, "userNick");
-        let user = value_str(&value, "userName");
-        if !nick.trim().is_empty() {
-            nick
-        } else if !user.trim().is_empty() {
-            user
-        } else {
-            "虎牙用户".into()
-        }
-    };
-    let avatar = {
-        let logo = value_str(&value, "userLogo");
-        (!logo.trim().is_empty()).then_some(logo)
-    };
-    Ok(Check::LoggedIn(Account { uid, name, avatar }))
+    *jar != before
 }
 
 #[derive(Debug)]
@@ -874,14 +922,14 @@ async fn cookie_exchange(
 pub(crate) async fn prepare_cookie(cookie: &str) -> Result<(Account, String), AppError> {
     let mut jar = parse_cookie(cookie);
     let mut current = cookie.to_string();
+    let mut tried_cred = false;
     if !has_login_cookie(&current) && cookie_value(&current, "udb_cred").is_some() {
         let sdid = sdid_of(&current);
         match cred_login(&current, &sdid).await {
             Ok((extra, _)) => {
-                for (name, value) in extra {
-                    jar.insert(name, value);
-                }
+                merge_cookie_jar(&mut jar, extra);
                 current = jar_cookie(&jar);
+                tried_cred = true;
             }
             Err(RefreshFailure::Invalid) => {
                 return Err(user("虎牙 Cookie 已失效或未登录"));
@@ -891,10 +939,36 @@ pub(crate) async fn prepare_cookie(cookie: &str) -> Result<(Account, String), Ap
             }
         }
     }
-    match check_login(&current).await? {
-        Check::LoggedIn(account) => Ok((account, current)),
-        Check::LoggedOut => Err(user("虎牙 Cookie 已失效或未登录")),
-        Check::Transient => Err(upstream("虎牙接口暂时不可用，无法校验 Cookie")),
+    loop {
+        let (check, extra) = check_login_with_cookies(&current).await?;
+        if merge_cookie_jar(&mut jar, extra) {
+            current = jar_cookie(&jar);
+        }
+        match check {
+            Check::LoggedIn(account) => return Ok((account, current)),
+            Check::LoggedOut if !tried_cred && cookie_value(&current, "udb_cred").is_some() => {
+                // 手动 Cookie 里的 udb_uid/udb_biztoken 可能已过期，但长期凭证
+                // udb_cred 仍有效：先换票再校验，不能直接判失效。
+                let sdid = sdid_of(&current);
+                match cred_login(&current, &sdid).await {
+                    Ok((extra, _)) => {
+                        merge_cookie_jar(&mut jar, extra);
+                        current = jar_cookie(&jar);
+                        tried_cred = true;
+                    }
+                    Err(RefreshFailure::Invalid) => {
+                        return Err(user("虎牙 Cookie 已失效或未登录"));
+                    }
+                    Err(RefreshFailure::Transient) => {
+                        return Err(upstream("虎牙接口暂时不可用，无法校验 Cookie"));
+                    }
+                }
+            }
+            Check::LoggedOut => return Err(user("虎牙 Cookie 已失效或未登录")),
+            Check::Transient => {
+                return Err(upstream("虎牙接口暂时不可用，无法校验 Cookie"));
+            }
+        }
     }
 }
 
@@ -1077,12 +1151,24 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
 
     // exchange 即使返回 0 也可能只是「没登录」；只有 checkLogin 才算数。
     let mut account = None;
-    match check_login(&merged).await {
-        Ok(Check::LoggedIn(found)) => account = Some(found),
-        Ok(Check::LoggedOut) => {}
-        Ok(Check::Transient) => {
-            return record_transient(db, &row, &before, "虎牙登录态校验暂时失败，稍后自动重试")
-                .await;
+    match check_login_with_cookies(&merged).await {
+        Ok((check, extra)) => {
+            if merge_cookie_jar(&mut jar, extra) {
+                merged = jar_cookie(&jar);
+            }
+            match check {
+                Check::LoggedIn(found) => account = Some(found),
+                Check::LoggedOut => {}
+                Check::Transient => {
+                    return record_transient(
+                        db,
+                        &row,
+                        &before,
+                        "虎牙登录态校验暂时失败，稍后自动重试",
+                    )
+                    .await;
+                }
+            }
         }
         Err(_) => {
             return record_transient(db, &row, &before, "虎牙登录态校验暂时失败，稍后自动重试")
@@ -1104,10 +1190,26 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
                     jar.insert(name, value);
                 }
                 merged = jar_cookie(&jar);
-                match check_login(&merged).await {
-                    Ok(Check::LoggedIn(found)) => account = Some(found),
-                    Ok(Check::LoggedOut) => {}
-                    Ok(Check::Transient) | Err(_) => {
+                match check_login_with_cookies(&merged).await {
+                    Ok((check, extra)) => {
+                        if merge_cookie_jar(&mut jar, extra) {
+                            merged = jar_cookie(&jar);
+                        }
+                        match check {
+                            Check::LoggedIn(found) => account = Some(found),
+                            Check::LoggedOut => {}
+                            Check::Transient => {
+                                return record_transient(
+                                    db,
+                                    &row,
+                                    &before,
+                                    "虎牙登录态校验暂时失败，稍后自动重试",
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    Err(_) => {
                         return record_transient(
                             db,
                             &row,
@@ -1191,7 +1293,16 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
             before.last_refreshed_at
         },
     };
-    write_status(db, &status);
+    {
+        // 保存 Cookie 与写续期状态之间不能插入一次新扫码登录，否则旧状态会覆盖
+        // 新登录刚清空的检查结果。
+        let _guard = crate::account::credential_write_guard();
+        if crate::credential::get("huya").as_deref() != Some(merged.as_str()) {
+            tracing::info!("虎牙写续期状态前发现 Cookie 已更新，丢弃本次结果");
+            return RefreshOutcome::Discarded;
+        }
+        write_status(db, &status);
+    }
     crate::account::clear_stream_cache(app);
     crate::account::emit_account_refresh(app);
     tracing::info!(
@@ -1266,6 +1377,11 @@ pub async fn maintenance_loop(db: std::sync::Arc<Db>, app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(EXCHANGE_EVERY as u64)).await;
         }
     }
+}
+
+/// 新扫码/手动保存后重置复验计时，避免新账号沿用旧账号的 6 小时窗口。
+pub(crate) fn reset_revalidation_clock() {
+    REVALIDATED_AT.store(0, Ordering::Relaxed);
 }
 
 /// 每 6 小时独立复验一次。cookieExchange 失败不一定代表登录失效，
@@ -1397,6 +1513,36 @@ mod tests {
         assert!(merged.contains("udb_biztoken=new"));
         assert!(merged.contains("foo=bar"));
         assert!(merged.contains("PHPSESSID=x"));
+    }
+
+    #[test]
+    fn check_login_cookie_merge_reports_real_changes() {
+        let mut jar = parse_cookie("udb_uid=1; foo=bar");
+        assert!(!merge_cookie_jar(&mut jar, BTreeMap::new()));
+        let mut extra = BTreeMap::new();
+        extra.insert("foo".to_string(), "baz".to_string());
+        assert!(merge_cookie_jar(&mut jar, extra));
+        assert_eq!(jar.get("foo").map(String::as_str), Some("baz"));
+    }
+
+    #[test]
+    fn qr_cancel_drops_the_session_and_is_idempotent() {
+        let qr_id = "unit-qr-cancel";
+        {
+            let mut sessions = lock_sessions();
+            sessions.push((
+                qr_id.to_string(),
+                QrSession {
+                    jar: new_device_jar(),
+                    created_at: now_ts(),
+                },
+            ));
+        }
+        assert!(peek_session(qr_id).is_some());
+        qr_cancel(qr_id);
+        assert!(peek_session(qr_id).is_none());
+        qr_cancel(qr_id);
+        assert!(peek_session(qr_id).is_none());
     }
 
     #[test]

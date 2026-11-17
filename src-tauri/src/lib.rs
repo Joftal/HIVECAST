@@ -318,6 +318,7 @@ pub fn run() {
             commands::douyu_refresh_now,
             commands::douyin_refresh_now,
             commands::huya_qr_start,
+            commands::huya_qr_cancel,
             commands::huya_qr_poll,
             commands::huya_refresh_now,
             commands::bilibili_followings,

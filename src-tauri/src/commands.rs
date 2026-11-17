@@ -2276,6 +2276,11 @@ pub async fn huya_qr_start() -> Result<QrTicket, AppError> {
 }
 
 #[tauri::command]
+pub fn huya_qr_cancel(qrcode_key: String) {
+    crate::huya_auth::qr_cancel(&qrcode_key);
+}
+
+#[tauri::command]
 pub async fn huya_qr_poll(
     app: AppHandle,
     state: State<'_, AppState>,

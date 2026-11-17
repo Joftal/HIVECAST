@@ -1068,6 +1068,7 @@ pub async fn save_cookie(db: &Db, platform: &str, raw: &str) -> Result<Credentia
     } else if platform == "huya" {
         // 手动 Cookie 里的 udb_cred 才属于当前账号；没有就清掉旧设备的凭证。
         crate::huya_auth::remember_secret(db, &cookie);
+        crate::huya_auth::reset_revalidation_clock();
     }
     tracing::info!(platform, account = %row.account_name, "Cookie 已保存");
     Ok(info_for_row(db, &row))
