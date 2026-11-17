@@ -21,7 +21,6 @@ use super::{
     Codec, PlatformAdapter, PlatformError, PlatformId, RoomInfo, RoomRef, StreamCandidate,
     StreamFormat, StreamGroup, StreamPlan,
 };
-use crate::credential;
 
 const ROOM_HOST: &str = "https://www.huya.com";
 const REFERER_HOME: &str = "https://www.huya.com/";
@@ -96,6 +95,7 @@ impl PlatformAdapter for HuyaAdapter {
             .unwrap_or_default();
 
         let is_on = parse_is_on(&body);
+        let replay = parse_is_replay(&body);
         let started_at = number_field::<i64>(&body, "startTime").filter(|value| *value > 0);
         let online = number_field::<u64>(&body, "totalCount");
 
@@ -110,13 +110,16 @@ impl PlatformAdapter for HuyaAdapter {
             cover_url: field(&body, "screenshot").map(unescape),
             area_name: field(&body, "gameFullName").map(unescape),
             // 封禁房间返回「未开播」而不是错误，避免监控每轮都重试（docs/07 §5.5）。
-            is_live: is_on && !banned,
+            // 重播房间的 `isOn` 仍是 true，但 `is_replay=1`；按未开播处理，
+            // 否则会把一段回放当成直播去录制，且回放源不提供 4K。
+            is_live: is_on && !banned && !replay,
             started_at,
             online,
             stable_id: None,
             extra: serde_json::json!({
                 "roomKey": room.room_key,
                 "banned": banned,
+                "replay": replay,
             }),
         })
     }
@@ -130,7 +133,8 @@ impl PlatformAdapter for HuyaAdapter {
                 room.room_key
             )));
         }
-        if !parse_is_on(&body) {
+        // 重播房间的 isOn 也是 true，但它不是直播；不拦住会把回放当成直播录制。
+        if !parse_is_on(&body) || parse_is_replay(&body) {
             return Err(PlatformError::NotLive);
         }
 
@@ -141,13 +145,10 @@ impl PlatformAdapter for HuyaAdapter {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        // 虎牙页面不返回贵族/VIP 等级，能稳定拿到的能力信号只有两个：
-        // 当前是否登录、房间源码率是否达到 20M。两者都满足才解锁 4K，
-        // 否则 4K 档在 UI 显示「当前不可用」，录制也会回落到 2K/1080P。
-        let source_bitrate = source_bitrate(&stream);
-        let logged_in =
-            credential::cookie_for_url(ROOM_HOST).is_some_and(|cookie| !cookie.trim().is_empty());
-        let cap_qn = quality_cap(source_bitrate, logged_in);
+        // 虎牙页面没有 B 站那种 accept_qn/current_qn 授权字段，vMultiStreamInfo
+        // 也不随登录态变化（匿名同样列出 4K）。这里按实际取流探测：只有 CDN
+        // 真的给出 4K 数据时才解锁 4K，探测不确定时不隐藏高档位。
+        let cap_qn = probed_quality_cap(&stream).await;
         let quality = pick_quality(&stream, qn, cap_qn);
 
         let mut groups: Vec<StreamGroup> = Vec::new();
@@ -276,11 +277,7 @@ impl PlatformAdapter for HuyaAdapter {
                 };
                 let available = quality_available(qn, cap_qn);
                 let hint = if !available && qn >= 20_000 {
-                    if !logged_in {
-                        format!("{hint} · 登录后可用")
-                    } else {
-                        format!("{hint} · 当前不可用")
-                    }
+                    format!("{hint} · 当前不可用")
                 } else {
                     hint
                 };
@@ -319,24 +316,98 @@ struct Quality {
     codec: Codec,
 }
 
-/// 房间源码率（kbps）。虎牙页面给的是数字，少量模板会给字符串。
-fn source_bitrate(stream: &Value) -> u32 {
-    stream
-        .pointer("/data/0/gameLiveInfo/bitRate")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-        })
-        .unwrap_or(0) as u32
+/// 探测某个 HEVC 档位是否真的能出流。返回 None 表示网络超时/状态不明，
+/// 调用方不能把它当成「不可用」，否则一次抖动就会把 4K 藏起来。
+async fn probe_quality(stream: &Value, qn: u32) -> Option<bool> {
+    let bitrate = hevc_bitrate_for_qn(qn)?;
+    let list = stream
+        .pointer("/data/0/gameStreamInfoList")
+        .and_then(Value::as_array)?;
+    let quality = Quality {
+        bitrate,
+        name: if qn == 30_000 { "4K HDR" } else { "4K" }.to_string(),
+        qn,
+        codec: Codec::H265,
+    };
+    let mut inconclusive = false;
+    // 只探前两条线路：4K 权限/回放源是房间级属性，不是某条 CDN 独有；
+    // 全部试一遍会让 4K 被禁的房间每次起播多等十几秒。
+    for entry in list.iter().take(2) {
+        let (Some(base), Some(name), Some(anti)) = (
+            text(entry, "sFlvUrl"),
+            text(entry, "sStreamName"),
+            text(entry, "sFlvAntiCode"),
+        ) else {
+            continue;
+        };
+        let suffix = text(entry, "sFlvUrlSuffix").unwrap_or_else(|| "flv".to_string());
+        let Some(url) =
+            build_stream_url(&base, &name, &suffix, &anti, quality.bitrate, quality.codec)
+        else {
+            continue;
+        };
+        let request = http::client()
+            .get(&url)
+            .header("Referer", ROOM_HOST)
+            .header("Range", "bytes=0-65535");
+        let mut response =
+            match tokio::time::timeout(std::time::Duration::from_secs(4), request.send()).await {
+                Ok(Ok(response)) => response,
+                _ => {
+                    inconclusive = true;
+                    continue;
+                }
+            };
+        if response.status().is_success() {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), response.chunk()).await {
+                Ok(Ok(Some(chunk))) if !chunk.is_empty() => return Some(true),
+                Ok(Ok(_)) => continue,
+                _ => inconclusive = true,
+            }
+        } else if response.status() == reqwest::StatusCode::FORBIDDEN
+            || response.status() == reqwest::StatusCode::NOT_FOUND
+        {
+            continue;
+        } else {
+            inconclusive = true;
+        }
+    }
+    if inconclusive {
+        None
+    } else {
+        Some(false)
+    }
 }
 
-/// 4K 需要登录且房间源码率确实达到 20M；否则最高只解锁 2K HDR。
-fn quality_cap(source_bitrate: u32, logged_in: bool) -> u32 {
-    if logged_in && source_bitrate >= 20_000 {
-        30_000
-    } else {
-        15_100
+/// 用实际取流结果决定 4K 上限；探测不确定时最多解锁非 HDR 的 4K。
+async fn probed_quality_cap(stream: &Value) -> u32 {
+    let has_4k = stream
+        .get("vMultiStreamInfo")
+        .and_then(Value::as_array)
+        .is_some_and(|list| {
+            list.iter()
+                .any(|item| item.get("iBitRate").and_then(Value::as_u64).unwrap_or(0) >= 20_000)
+        });
+    if !has_4k {
+        return 15_100;
+    }
+    let hdr = probe_quality(stream, 30_000).await;
+    if hdr == Some(true) {
+        return 30_000;
+    }
+    let uhd = probe_quality(stream, 20_000).await;
+    quality_cap(hdr, uhd)
+}
+
+/// Some(true) 已确认可出流，Some(false) 已确认 403/404，None 状态不明。
+fn quality_cap(hdr: Option<bool>, uhd: Option<bool>) -> u32 {
+    match (hdr, uhd) {
+        (Some(true), _) => 30_000,
+        (_, Some(true)) => 20_000,
+        (Some(false), Some(false)) => 15_100,
+        // 4K HDR 不明、4K 已确认不可用时，保留普通 4K 的尝试；
+        // 全都探测不到也按普通 4K 处理，避免网络抖动误伤。
+        _ => 20_000,
     }
 }
 
@@ -666,6 +737,22 @@ fn parse_is_on(body: &str) -> bool {
     rest.starts_with("true") || rest.starts_with("\"true\"")
 }
 
+/// 虎牙回放房间仍然返回 isOn=true，但会同时给 is_replay=1（页面文案「重播中」）。
+/// 只看 isOn 会把回放当直播，录制到一段 VOD；回放源也不提供 4K。
+fn parse_is_replay(body: &str) -> bool {
+    let needle = "\"is_replay\":";
+    let mut rest = body;
+    // 页面里可能先出现一个 false 的开关，再出现房间级的 true；逐个看，任意一个为真即重播。
+    while let Some(start) = rest.find(needle) {
+        let tail = rest[start + needle.len()..].trim_start();
+        if tail.starts_with('1') || tail.starts_with("\"1\"") {
+            return true;
+        }
+        rest = tail;
+    }
+    body.contains("\"live_status_text\":\"重播中\"")
+}
+
 /// 页面里的字符串是 JSON 转义过的，中文会写成 \uXXXX。
 fn unescape(value: &str) -> String {
     if !value.contains('\\') {
@@ -878,12 +965,11 @@ mod tests {
     }
 
     #[test]
-    fn quality_cap_requires_login_and_4k_source() {
-        assert_eq!(quality_cap(20_000, true), 30_000);
-        assert_eq!(quality_cap(20_100, true), 30_000);
-        assert_eq!(quality_cap(20_000, false), 15_100);
-        assert_eq!(quality_cap(10_000, true), 15_100);
-        assert_eq!(quality_cap(0, true), 15_100);
+    fn quality_cap_uses_actual_probe_results() {
+        assert_eq!(quality_cap(Some(true), None), 30_000);
+        assert_eq!(quality_cap(Some(false), Some(true)), 20_000);
+        assert_eq!(quality_cap(Some(false), Some(false)), 15_100);
+        assert_eq!(quality_cap(None, None), 20_000);
         assert!(quality_available(15_100, 15_100));
         assert!(!quality_available(20_000, 15_100));
         assert!(!quality_available(30_000, 15_100));
@@ -892,7 +978,6 @@ mod tests {
     #[test]
     fn unavailable_4k_falls_back_to_2k_hdr() {
         let stream = serde_json::json!({
-            "data": [{ "gameLiveInfo": { "bitRate": 10_000 } }],
             "vMultiStreamInfo": [
                 { "sDisplayName": "4K HDR", "iBitRate": 20100, "iCodecType": 1 },
                 { "sDisplayName": "4K", "iBitRate": 20000, "iCodecType": 1 },
@@ -900,24 +985,22 @@ mod tests {
                 { "sDisplayName": "蓝光10M", "iBitRate": 0, "iCodecType": 0 }
             ]
         });
-        assert_eq!(source_bitrate(&stream), 10_000);
-        let cap = quality_cap(source_bitrate(&stream), true);
+        // 两种 4K 都探测到 403：用户保存的 4K 偏好必须回落到 2K HDR。
+        let cap = quality_cap(Some(false), Some(false));
         assert_eq!(cap, 15_100);
         let chosen = pick_quality(&stream, 20_000, cap);
         assert_eq!(
             (chosen.bitrate, chosen.qn, chosen.codec),
             (14_100, 15_100, Codec::H265)
         );
-        // 源码率够 4K 且已登录时才保留用户选择的 4K。
+        // 实际探测确认 4K 可出流时，保留用户选择的 4K。
         let four_k = serde_json::json!({
-            "data": [{ "gameLiveInfo": { "bitRate": 20_000 } }],
             "vMultiStreamInfo": [
                 { "sDisplayName": "4K", "iBitRate": 20000, "iCodecType": 1 },
                 { "sDisplayName": "2K HDR", "iBitRate": 14100, "iCodecType": 1 }
             ]
         });
-        let cap = quality_cap(source_bitrate(&four_k), true);
-        assert_eq!(pick_quality(&four_k, 20_000, cap).bitrate, 20_000);
+        assert_eq!(pick_quality(&four_k, 20_000, 20_000).bitrate, 20_000);
     }
 
     #[test]
@@ -958,6 +1041,17 @@ mod tests {
     }
 
     #[test]
+    fn replay_is_not_live() {
+        assert!(parse_is_replay(r#"{"isOn":true,"is_replay":"1"}"#));
+        assert!(parse_is_replay(r#"{"live_status_text":"重播中"}"#));
+        assert!(parse_is_replay(
+            r#"{"a":{"is_replay":"0"},"b":{"is_replay":"1"}}"#
+        ));
+        assert!(!parse_is_replay(r#"{"is_replay":"0"}"#));
+        assert!(!parse_is_replay(r#"{"isOn":true}"#));
+    }
+
+    #[test]
     fn maps_cdn_labels() {
         assert_eq!(cdn_label("AL"), "阿里云");
         assert_eq!(cdn_label("TX15"), "腾讯云 15");
@@ -986,6 +1080,13 @@ mod tests {
             "room: {} / {} live={}",
             info.host_name, info.room_name, info.is_live
         );
+        let (body, _) =
+            http::get_text(&format!("{ROOM_HOST}/{}", room.room_key), REFERER_HOME, &[])
+                .await
+                .expect("取页面失败");
+        if let Some(stream) = extract_stream_json(&body) {
+            println!("probed cap_qn={}", probed_quality_cap(&stream).await);
+        }
         match adapter.stream_groups(&room, 10000).await {
             Ok(groups) => {
                 println!("groups={}", groups.len());
