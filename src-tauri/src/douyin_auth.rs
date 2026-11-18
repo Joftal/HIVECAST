@@ -325,7 +325,7 @@ fn recheck_recording(app: &AppHandle, reason: &'static str) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         state
             .recorder
-            .recheck_all_quality(app, state.broker.clone(), reason);
+            .recheck_all_quality(app, state.broker.clone(), "douyin", reason);
     }
 }
 

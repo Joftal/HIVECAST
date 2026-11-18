@@ -2217,20 +2217,36 @@ impl Recorder {
         }
     }
 
-    /// 凭据保存 / 扫码确认后调用：对所有正在录制的房间做一次强制重检。
+    /// 凭据保存 / 扫码确认后调用：只对同一平台正在录制的房间做一次重检。
+    ///
+    /// 保存 A 平台 Cookie 不能顺带探测 B 平台的活动录制：那会让一条无关的
+    /// 录像因为另一个平台的登录态变化而短暂换 ffmpeg。平台从房间行读取，
+    /// 因为 RecordingInfo 是前端快照，不携带平台字段。
     pub fn recheck_all_quality(
         self: &Arc<Self>,
         app: &AppHandle,
         broker: Arc<StreamBroker>,
+        platform: &str,
         reason: &'static str,
     ) {
         for recording in self.active_all() {
+            let room_platform = self
+                .db
+                .get_room(&recording.room_id)
+                .ok()
+                .flatten()
+                .map(|room| room.platform);
+            if room_platform.as_deref() != Some(platform) {
+                continue;
+            }
+            let platform = platform.to_string();
             let recorder = Arc::clone(self);
             let app = app.clone();
             let broker = Arc::clone(&broker);
             tauri::async_runtime::spawn(async move {
                 tracing::info!(
                     room_id = %recording.room_id,
+                    platform,
                     reason,
                     "凭据恢复，检查是否可升级画质"
                 );

@@ -82,7 +82,7 @@ GET https://l.huya.com/udb_web/udbport2.php?m=HuyaLogin&do=checkLogin&callback=c
 
 - `store_account(db,"huya",...)` 写入账号。
 - `save_secret` 把 `udb_cred` 放进 `credential_secret.refresh_token`，`sdid` 放进 `device_id`；两者都走现有的加密存储。
-- 清流地址缓存、广播账号刷新，命令层再触发画质重检。
+- 清流地址缓存、广播账号刷新；`huya_qr_poll` 确认后由命令层再触发同平台画质重检，与 B 站/斗鱼一致。
 
 ### 2.4 自动续期
 

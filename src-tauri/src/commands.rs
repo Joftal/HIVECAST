@@ -2187,7 +2187,7 @@ pub async fn credential_save(
     state.broker.clear_groups();
     state
         .recorder
-        .recheck_all_quality(&app, state.broker.clone(), "credential_saved");
+        .recheck_all_quality(&app, state.broker.clone(), &platform, "credential_saved");
     Ok(info)
 }
 
@@ -2218,7 +2218,7 @@ pub async fn bilibili_qr_poll(
         state.broker.clear_groups();
         state
             .recorder
-            .recheck_all_quality(&app, state.broker.clone(), "qr_confirmed");
+            .recheck_all_quality(&app, state.broker.clone(), "bilibili", "qr_confirmed");
     }
     Ok(poll)
 }
@@ -2246,9 +2246,12 @@ pub async fn douyu_qr_poll(
     let poll = crate::douyu_auth::qr_poll(&state.db, &app, &qrcode_key).await?;
     if poll.state == "confirmed" {
         state.broker.clear_groups();
-        state
-            .recorder
-            .recheck_all_quality(&app, state.broker.clone(), "douyu_qr_confirmed");
+        state.recorder.recheck_all_quality(
+            &app,
+            state.broker.clone(),
+            "douyu",
+            "douyu_qr_confirmed",
+        );
     }
     Ok(poll)
 }
@@ -2286,7 +2289,16 @@ pub async fn huya_qr_poll(
     state: State<'_, AppState>,
     qrcode_key: String,
 ) -> Result<QrPoll, AppError> {
-    crate::huya_auth::qr_poll(&state.db, &app, &qrcode_key).await
+    let poll = crate::huya_auth::qr_poll(&state.db, &app, &qrcode_key).await?;
+    // 与 B 站/斗鱼扫码确认保持一致：确认后清一次取流缓存并重检画质。
+    // 只重检虎牙，避免扫虎牙码影响其他平台正在录制的进程。
+    if poll.state == "confirmed" {
+        state.broker.clear_groups();
+        state
+            .recorder
+            .recheck_all_quality(&app, state.broker.clone(), "huya", "huya_qr_confirmed");
+    }
+    Ok(poll)
 }
 
 #[tauri::command]

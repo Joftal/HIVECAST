@@ -1315,7 +1315,7 @@ async fn refresh_once(db: &Db, app: &AppHandle, force: bool) -> RefreshOutcome {
         if let Some(state) = app.try_state::<crate::state::AppState>() {
             state
                 .recorder
-                .recheck_all_quality(app, state.broker.clone(), "huya_refreshed");
+                .recheck_all_quality(app, state.broker.clone(), "huya", "huya_refreshed");
         }
     }
     if changed || rotated {
@@ -1437,6 +1437,7 @@ pub async fn revalidate(db: &Db, app: &AppHandle) {
                     state.recorder.recheck_all_quality(
                         app,
                         state.broker.clone(),
+                        "huya",
                         "huya_revalidated",
                     );
                 }
