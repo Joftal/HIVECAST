@@ -224,7 +224,8 @@ impl PlatformError {
     pub fn is_auth_expired(&self) -> bool {
         match self {
             PlatformError::Upstream { code, message } => {
-                matches!(*code, 8 | -101 | -1)
+                // 905 是虎牙 WUP 的登录态无效/票据失效（实测无效 udb_uid 或过期 Cookie）。
+                matches!(*code, 8 | -101 | -1 | 905)
                     || message.contains("未登录")
                     || message.contains("登录态失效")
                     || message.to_ascii_lowercase().contains("not login")
@@ -271,7 +272,12 @@ mod tests {
 
     #[test]
     fn auth_expiry_is_separate_from_risk_blocking() {
-        for (code, message) in [(8, "not login"), (-101, "账号未登录"), (-1, "未登录")] {
+        for (code, message) in [
+            (8, "not login"),
+            (-101, "账号未登录"),
+            (-1, "未登录"),
+            (905, ""),
+        ] {
             let err = PlatformError::Upstream {
                 code,
                 message: message.into(),

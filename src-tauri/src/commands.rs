@@ -98,6 +98,8 @@ fn canonical_reference(reference: &RoomRef, info: &RoomInfo) -> RoomRef {
         "bilibili" => format!("https://live.bilibili.com/{stable}"),
         // 斗鱼别名同样归一到数字房间号，后续导入数字 room_id 才能命中同一行。
         "douyu" => format!("https://www.douyu.com/{stable}"),
+        // 虎牙别名同样归一到数字房号，手动添加 lpl 与 660000 只保留一行。
+        "huya" => format!("https://www.huya.com/{stable}"),
         _ => reference.canonical_url.clone(),
     };
     RoomRef {
@@ -442,6 +444,60 @@ fn import_room_info(
     }
 }
 
+/// 把导入时命中的别名/UID 行折叠到数字房号行。
+///
+/// 虎牙和 B 站都有「别名 + 数字房号」两种写法。导入只能修复这一次命中的行；
+/// 如果库里同时有软删的数字行和活跃的别名行，必须按活跃者优先合并，
+/// 否则导入后仍会留下两条指向同一场直播的记录。
+fn fold_import_alias(
+    db: &crate::db::Db,
+    known: &mut Option<RoomRecord>,
+    alias: RoomRecord,
+    room_id: &str,
+    canonical_url: &str,
+    uid: &str,
+) -> Result<(u32, u32), AppError> {
+    if known.as_ref().is_some_and(|room| room.id == alias.id) {
+        return Ok((0, 0));
+    }
+    let mut merged = 0;
+    let mut rekeyed = 0;
+    match known.take() {
+        None => {
+            if alias.room_key != room_id {
+                db.rekey_room(&alias.id, room_id, canonical_url)?;
+                rekeyed = 1;
+            }
+            *known = db.get_room(&alias.id)?;
+        }
+        Some(primary) => {
+            let primary_active = !db.room_removed(&primary.id)?;
+            let alias_active = !db.room_removed(&alias.id)?;
+            let (keep, drop) = if !primary_active && alias_active {
+                (&alias, &primary)
+            } else {
+                (&primary, &alias)
+            };
+            db.merge_room(&keep.id, &drop.id)?;
+            merged = 1;
+            tracing::info!(
+                target: "hivecast_lib::commands",
+                keep = %keep.id,
+                keep_key = %keep.room_key,
+                drop = %drop.id,
+                drop_key = %drop.room_key,
+                uid,
+                "导入关注：合并重复房间"
+            );
+            if keep.room_key != room_id {
+                db.rekey_room(&keep.id, room_id, canonical_url)?;
+                rekeyed = 1;
+            }
+            *known = db.get_room(&keep.id)?;
+        }
+    }
+    Ok((merged, rekeyed))
+}
 #[tauri::command]
 pub async fn rooms_import(
     app: AppHandle,
@@ -521,6 +577,32 @@ pub async fn rooms_import(
             }
             if known.is_none() {
                 known = state.db.find_room_by_uid(platform, uid)?;
+            }
+            // 别名行与数字行可能同时存在（手动加过别名、后来又加过数字房号，
+            // 或数字行已软删而别名仍活跃）。逐条折叠，活跃者优先保留。
+            // short_id 与 UID 可能指向同一行；去重后再折叠，避免第二次合并
+            // 拿着已经删掉的 drop 行去迁移会话。
+            let mut aliases: Vec<RoomRecord> = Vec::new();
+            if let Some(short) = item
+                .short_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(row) = state.db.find_room(platform, short)? {
+                    aliases.push(row);
+                }
+            }
+            if let Some(row) = state.db.find_room_by_uid(platform, uid)? {
+                if !aliases.iter().any(|existing| existing.id == row.id) {
+                    aliases.push(row);
+                }
+            }
+            for alias in aliases {
+                let (m, r) =
+                    fold_import_alias(&state.db, &mut known, alias, room_id, &canonical_url, uid)?;
+                merged += m;
+                rekeyed += r;
             }
         }
         if is_bilibili {
@@ -737,6 +819,14 @@ pub async fn rooms_import(
         match state.db.insert_room(&draft, &info) {
             Ok(room) => {
                 added += 1;
+                tracing::debug!(
+                    target: "hivecast_lib::commands",
+                    room_id = %room.id,
+                    room_key = %room.room_key,
+                    platform,
+                    uid,
+                    "导入关注：新建房间"
+                );
                 if room.is_live && room.auto_record {
                     started.push(room);
                 }
@@ -1778,11 +1868,36 @@ mod tests {
         assert_eq!(canonical.room_key, "7734200");
         assert_eq!(canonical.canonical_url, "https://live.bilibili.com/7734200");
 
-        // 没有稳定 ID 的平台保持原键，避免改变斗鱼/虎牙的行为。
+        // 没有稳定 ID 的平台保持原键。
         let mut no_stable = info;
         no_stable.stable_id = None;
         let unchanged = canonical_reference(&reference, &no_stable);
         assert_eq!(unchanged.room_key, "6");
+    }
+
+    #[test]
+    fn canonical_reference_promotes_huya_alias_to_numeric_room() {
+        let reference = RoomRef {
+            platform: "huya".into(),
+            room_key: "lpl".into(),
+            canonical_url: "https://www.huya.com/lpl".into(),
+            input: "https://www.huya.com/lpl".into(),
+        };
+        let info = RoomInfo {
+            host_name: "虎牙英雄联盟赛事".into(),
+            room_name: "S16".into(),
+            avatar_url: None,
+            cover_url: None,
+            area_name: None,
+            is_live: true,
+            started_at: None,
+            online: None,
+            stable_id: Some("660000".into()),
+            extra: serde_json::Value::Null,
+        };
+        let canonical = canonical_reference(&reference, &info);
+        assert_eq!(canonical.room_key, "660000");
+        assert_eq!(canonical.canonical_url, "https://www.huya.com/660000");
     }
 
     #[test]

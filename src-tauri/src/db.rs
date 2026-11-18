@@ -809,6 +809,21 @@ impl Db {
         Ok(())
     }
 
+    /// 连续多次在关注列表里找不到这个房间：退回单房检查。
+    ///
+    /// 不删平台 UID，也不删房间；只是清掉 `batch_follow`，下一拍开始走
+    /// 单房接口。用户重新导入关注时会再次补上标记。
+    pub fn clear_batch_follow(&self, room_id: &str) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE room SET batch_follow = 0, updated_at = ?2 WHERE id = ?1",
+                params![room_id, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// 房间被删除时一起删掉对应的关注池项。
     ///
     /// 不能只把 promoted_room_id 置空：关注仍在池里，下一轮扫描会把刚删掉的

@@ -47,6 +47,9 @@ const FIRST_CHECK_MAX_DELAY: i64 = 30;
 /// 平台信息没有结构性变化时，写库的最小间隔（G2）。
 /// 在线人数这类字段每拍都在跳，但没必要每秒整行 UPDATE 一次。
 const ROOM_TOUCH_INTERVAL: i64 = 10;
+/// 虎牙关注房连续这么多拍在关注列表里缺失，就退回单房检查。
+/// 取关后仍保留 batch_follow 的房间不会每 30 秒再打两次接口。
+const HUYA_MISS_DEGRADE_AFTER: u32 = 3;
 
 /// 每个房间的下次检测时间与失败计数。
 #[derive(Clone, Copy)]
@@ -107,6 +110,8 @@ struct BatchState {
     interval: Option<i64>,
     inflight: Arc<AtomicBool>,
     not_before: Arc<Mutex<Option<Instant>>>,
+    /// 连续批量缺项计数，按 room.id 记；只用于虎牙降级。
+    missing: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl BatchState {
@@ -116,6 +121,7 @@ impl BatchState {
             interval: None,
             inflight: Arc::new(AtomicBool::new(false)),
             not_before: Arc::new(Mutex::new(None)),
+            missing: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -694,6 +700,7 @@ fn tick(
         let completed_for_task = completed.clone();
         let inflight = state.inflight.clone();
         let not_before = state.not_before.clone();
+        let missing_streaks = state.missing.clone();
         inflight.store(true, Ordering::Release);
         tokio::spawn(async move {
             // 整批 panic 也要给每个房间回结果，否则 inflight 会卡死；
@@ -708,6 +715,7 @@ fn tick(
                 tx.clone(),
                 completed_for_task,
                 not_before,
+                missing_streaks,
             ));
             if let Err(err) = guard.await {
                 tracing::warn!(%err, platform, "批量检测任务异常退出");
@@ -764,6 +772,7 @@ async fn run_batch_check(
     tx: mpsc::UnboundedSender<(String, Outcome)>,
     completed: Arc<Mutex<HashSet<String>>>,
     not_before: Arc<Mutex<Option<Instant>>>,
+    missing_streaks: Arc<Mutex<HashMap<String, u32>>>,
 ) {
     let started = Instant::now();
     let total = rooms.len();
@@ -790,34 +799,39 @@ async fn run_batch_check(
             .filter_map(|room| room.platform_uid.clone())
             .collect()
     };
-    let fetched: Result<(Vec<hivecast_ipc::LiveStatus>, usize), crate::platform::PlatformError> =
-        if platform == "douyin" {
-            crate::platform::douyin_batch::fetch_live_statuses(&keys)
-                .await
-                .map(|batch| (batch.statuses, batch.unresolved))
-        } else if platform == "douyu" {
-            crate::platform::douyu_follow::fetch_live_statuses(&keys)
-                .await
-                .map(|statuses| (statuses, 0))
-        } else if platform == "huya" {
-            match crate::platform::huya_follow::fetch_live_statuses(&keys).await {
-                // 关注列表把重播也算在播：只复核在播项，离线项仍共享一次列表请求。
-                Ok(statuses) => Ok((
-                    crate::platform::huya_follow::confirm_live(statuses).await,
-                    0,
-                )),
-                Err(err) => Err(err),
+    // 第三项是「在播项复核失败数」，目前只有虎牙会产生；其余平台恒为 0。
+    let fetched: Result<
+        (Vec<hivecast_ipc::LiveStatus>, usize, usize),
+        crate::platform::PlatformError,
+    > = if platform == "douyin" {
+        crate::platform::douyin_batch::fetch_live_statuses(&keys)
+            .await
+            .map(|batch| (batch.statuses, batch.unresolved, 0))
+    } else if platform == "douyu" {
+        crate::platform::douyu_follow::fetch_live_statuses(&keys)
+            .await
+            .map(|statuses| (statuses, 0, 0))
+    } else if platform == "huya" {
+        match crate::platform::huya_follow::fetch_live_statuses(&keys).await {
+            // 关注列表把重播也算在播：只复核在播项，离线项仍共享一次列表请求。
+            Ok(statuses) => {
+                let (statuses, confirm_failed) =
+                    crate::platform::huya_follow::confirm_live(statuses).await;
+                Ok((statuses, 0, confirm_failed))
             }
-        } else {
-            crate::platform::bilibili::fetch_live_statuses(&keys)
-                .await
-                .map(|statuses| (statuses, 0))
-        };
+            Err(err) => Err(err),
+        }
+    } else {
+        crate::platform::bilibili::fetch_live_statuses(&keys)
+            .await
+            .map(|statuses| (statuses, 0, 0))
+    };
     match fetched {
-        Ok((statuses, unresolved)) => {
+        Ok((statuses, unresolved, confirm_failed)) => {
             let returned = statuses.len();
             let live = statuses.iter().filter(|status| status.is_live).count();
             let mut missing_rooms = Vec::new();
+            let mut missing_keys = Vec::new();
             let by_key: HashMap<String, hivecast_ipc::LiveStatus> = statuses
                 .into_iter()
                 .map(|status| (status.uid.clone(), status))
@@ -832,6 +846,7 @@ async fn run_batch_check(
                 };
                 match key.and_then(|key| by_key.get(key)) {
                     Some(status) => {
+                        clear_batch_missing(&missing_streaks, &room.id);
                         let info = Arc::new(batch_room_info(status, &room, platform));
                         // 先写状态、推事件，再把开录/停录扔到独立任务：
                         // 第 50 个房间不该等前 49 个 ffmpeg 启动完才更新。
@@ -844,6 +859,7 @@ async fn run_batch_check(
                     // 且整批没有不可解析项，就可以直接保持离线，不必再打两个单房请求。
                     // 上一轮在播则必须单房确认，避免批量漏项把正在录的直播误停。
                     None if keep_douyin_offline(&room, unresolved) => {
+                        clear_batch_missing(&missing_streaks, &room.id);
                         let info = Arc::new(offline_room_info(&room));
                         let outcome =
                             check_room_info_deferred(&app, &db, &broker, &recorder, &room, info)
@@ -853,20 +869,24 @@ async fn run_batch_check(
                     // 批量没返回这个 UID：可能是没有直播间/接口字段缺失，
                     // 不能按离线处理，回落到单房间接口拿准确状态。
                     None => {
+                        let key = if platform == "douyin" {
+                            room.internal_room_id.as_deref().unwrap_or_default()
+                        } else if platform == "douyu" {
+                            room.room_key.as_str()
+                        } else {
+                            room.platform_uid.as_deref().unwrap_or_default()
+                        };
+                        let misses = note_batch_missing(&db, platform, &room, &missing_streaks);
                         tracing::debug!(
                             target: "hivecast_lib::monitor",
                             room = %room.host_name,
                             room_id = %room.id,
                             platform,
-                            key = if platform == "douyin" {
-                                room.internal_room_id.as_deref().unwrap_or_default()
-                            } else if platform == "douyu" {
-                                room.room_key.as_str()
-                            } else {
-                                room.platform_uid.as_deref().unwrap_or_default()
-                            },
+                            key,
+                            misses,
                             "批量状态缺少该房间，回退单房间检查"
                         );
+                        missing_keys.push(key.to_string());
                         missing_rooms.push(room);
                     }
                 }
@@ -894,6 +914,8 @@ async fn run_batch_check(
                 live,
                 missing,
                 unresolved,
+                confirm_failed,
+                missing_keys = ?missing_keys.iter().take(10).collect::<Vec<_>>(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "批量状态检查完成"
             );
@@ -988,6 +1010,60 @@ async fn fallback_single_checks(
     for (id, outcome) in results {
         send_batch_outcome(tx, completed, id, outcome);
     }
+}
+
+/// 这一拍在批量里命中了：清掉连续缺项计数。
+fn clear_batch_missing(streaks: &Mutex<HashMap<String, u32>>, room_id: &str) {
+    streaks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(room_id);
+}
+
+/// 连续缺项到阈值且仍标记为关注导入时，应该退回单房检查。
+fn should_clear_batch_follow(platform: &str, misses: u32, batch_follow: bool) -> bool {
+    platform == "huya" && misses >= HUYA_MISS_DEGRADE_AFTER && batch_follow
+}
+
+/// 记一次批量缺项；虎牙连续缺 3 拍后清掉 `batch_follow`，下一拍改走单房。
+///
+/// 不能一开始就清：关注列表可能因为服务端缓存/隐私设置短暂缺项，
+/// 三次是「确实不在关注列表」和「临时抖动」之间的折中。
+fn note_batch_missing(
+    db: &Db,
+    platform: &str,
+    room: &hivecast_ipc::RoomRecord,
+    streaks: &Mutex<HashMap<String, u32>>,
+) -> u32 {
+    let misses = {
+        let mut guard = streaks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = guard.entry(room.id.clone()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    };
+    if should_clear_batch_follow(platform, misses, room.batch_follow) {
+        match db.clear_batch_follow(&room.id) {
+            Ok(()) => {
+                tracing::warn!(
+                    target: "hivecast_lib::monitor",
+                    room_id = %room.id,
+                    room_key = %room.room_key,
+                    misses,
+                    "虎牙关注房连续缺项，改为单房间检查"
+                );
+                clear_batch_missing(streaks, &room.id);
+            }
+            Err(err) => tracing::warn!(
+                target: "hivecast_lib::monitor",
+                room_id = %room.id,
+                error = %err,
+                "虎牙关注房缺项降级写库失败"
+            ),
+        }
+    }
+    misses
 }
 
 /// 抖音关注房批量缺失时能否直接保持离线。
@@ -1535,6 +1611,49 @@ mod tests {
         );
         assert!(douyin_batch_ready(true));
         assert!(!douyin_batch_ready(false));
+    }
+
+    #[test]
+    fn huya_batch_requires_login_and_batch_follow() {
+        let mut room = batch_room();
+        room.platform = "huya".into();
+        room.room_key = "660000".into();
+        room.platform_uid = Some("1346609715".into());
+        room.batch_follow = true;
+
+        assert_eq!(
+            batchable_platform(&room, false, false, false),
+            None,
+            "未登录时虎牙关注列表不可用，必须单房检查"
+        );
+        assert_eq!(
+            batchable_platform(&room, false, false, true),
+            Some("huya"),
+            "登录后的导入房按 lUid 进批量"
+        );
+        room.batch_follow = false;
+        assert_eq!(
+            batchable_platform(&room, false, false, true),
+            None,
+            "手动添加的虎牙房不进关注列表批量"
+        );
+        room.batch_follow = true;
+        room.platform_uid = None;
+        assert_eq!(
+            batchable_platform(&room, false, false, true),
+            None,
+            "缺 lUid 的虎牙房不能塞进批量"
+        );
+    }
+
+    #[test]
+    fn huya_missing_degrades_only_after_three_misses() {
+        assert!(!should_clear_batch_follow("huya", 1, true));
+        assert!(!should_clear_batch_follow("huya", 2, true));
+        assert!(should_clear_batch_follow("huya", 3, true));
+        assert!(should_clear_batch_follow("huya", 4, true));
+        assert!(!should_clear_batch_follow("huya", 3, false));
+        assert!(!should_clear_batch_follow("douyin", 3, true));
     }
 
     #[test]

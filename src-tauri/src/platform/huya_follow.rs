@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use hivecast_ipc::{HuyaFollowingPage, LiveStatus};
 
 use super::huya::HuyaAdapter;
@@ -47,7 +48,8 @@ pub async fn fetch_follow_page(page: u32) -> Result<HuyaFollowingPage, PlatformE
     let mut fetched = fetch_follow_page_raw(page).await?;
     // 导入弹窗也直接读这个接口：重播在关注列表里同样标「在播」，
     // 这里先复核，避免把回放展示成直播、并在导入时误触发自动录制。
-    fetched.items = confirm_live(fetched.items).await;
+    let (items, _) = confirm_live(fetched.items).await;
+    fetched.items = items;
     Ok(fetched)
 }
 
@@ -150,39 +152,54 @@ pub async fn fetch_live_statuses(keys: &[String]) -> Result<Vec<LiveStatus>, Pla
 /// 直接用批量结果会把回放当直播显示、甚至触发自动录制。这里只对在播项
 /// 逐房打开页面确认，离线项仍由一次关注列表覆盖；复核失败时保留批量结果，
 /// 绝不因为一次网络错误把正在直播的房间判成离线。
-pub async fn confirm_live(statuses: Vec<LiveStatus>) -> Vec<LiveStatus> {
-    let checks = statuses.into_iter().map(|mut status| async move {
-        if !status.is_live {
-            return status;
-        }
-        let Some(key) = status
-            .room_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-        else {
-            return status;
-        };
-        let room = RoomRef {
-            platform: "huya".to_string(),
-            room_key: key.to_string(),
-            canonical_url: format!("https://www.huya.com/{key}"),
-            input: String::new(),
-        };
-        match HuyaAdapter::new().room_info(&room).await {
-            Ok(info) => apply_confirmation(&mut status, &info),
-            Err(err) => {
-                tracing::debug!(
-                    target: "hivecast_lib::platform::huya_follow",
-                    room = key,
-                    error = %err,
-                    "虎牙批量状态复核失败，保留批量结果"
-                );
+/// 返回 `(复核后的状态, 复核失败数)`。
+pub async fn confirm_live(statuses: Vec<LiveStatus>) -> (Vec<LiveStatus>, usize) {
+    // 关注多时在播项可能几十上百个；限制 6 路并发，既不串行拖慢整批，
+    // 也不让一次批量复核瞬间打出上百个页面请求。
+    let outcomes: Vec<(LiveStatus, bool)> =
+        futures_util::stream::iter(statuses.into_iter().map(|mut status| async move {
+            if !status.is_live {
+                return (status, true);
             }
-        }
-        status
-    });
-    futures_util::future::join_all(checks).await
+            let Some(key) = status
+                .room_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+            else {
+                // 在播但拿不到房号，无法复核；计数里如实记为一次失败。
+                return (status, false);
+            };
+            let room = RoomRef {
+                platform: "huya".to_string(),
+                room_key: key.to_string(),
+                canonical_url: format!("https://www.huya.com/{key}"),
+                input: String::new(),
+            };
+            match HuyaAdapter::new().room_info(&room).await {
+                Ok(info) => {
+                    apply_confirmation(&mut status, &info);
+                    (status, true)
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        target: "hivecast_lib::platform::huya_follow",
+                        room = key,
+                        error = %err,
+                        "虎牙批量状态复核失败，保留批量结果"
+                    );
+                    (status, false)
+                }
+            }
+        }))
+        .buffered(6)
+        .collect()
+        .await;
+    let failures = outcomes.iter().filter(|(_, ok)| !ok).count();
+    (
+        outcomes.into_iter().map(|(status, _)| status).collect(),
+        failures,
+    )
 }
 
 /// 用单房页面信息纠正批量状态：重播/下播判未开播，在播则补人气与开播时间。

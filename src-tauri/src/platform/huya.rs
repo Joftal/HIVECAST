@@ -115,7 +115,9 @@ impl PlatformAdapter for HuyaAdapter {
             is_live: is_on && !banned && !replay,
             started_at,
             online,
-            stable_id: None,
+            // 用页面里的数字房号做稳定 ID：别名（如 lpl）和数字房号
+            // 是同一个直播间，添加/导入时必须归一到同一行。
+            stable_id: stable_room_id(&body),
             extra: serde_json::json!({
                 "roomKey": room.room_key,
                 "banned": banned,
@@ -728,6 +730,13 @@ fn number_field<T: std::str::FromStr>(body: &str, key: &str) -> Option<T> {
     raw.parse().ok()
 }
 
+/// 页面里的数字房号（`"profileRoom":660000`），别名也会返回真实房号。
+fn stable_room_id(body: &str) -> Option<String> {
+    number_field::<u64>(body, "profileRoom")
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
+}
+
 fn parse_is_on(body: &str) -> bool {
     let needle = "\"isOn\":";
     let Some(start) = body.find(needle) else {
@@ -1013,6 +1022,18 @@ mod tests {
         assert_eq!(qn_for_bitrate(2_000), 250);
         assert_eq!(qn_for_bitrate(900), 150);
         assert_eq!(qn_for_bitrate(500), 80);
+    }
+
+    #[test]
+    fn profile_room_is_used_as_stable_id() {
+        let body = r#"{"profileRoom":660000,"isOn":true}"#;
+        assert_eq!(stable_room_id(body).as_deref(), Some("660000"));
+        assert_eq!(
+            stable_room_id(r#"{"profileRoom":"660000"}"#).as_deref(),
+            Some("660000")
+        );
+        assert_eq!(stable_room_id(r#"{"profileRoom":0}"#), None);
+        assert_eq!(stable_room_id("{}"), None);
     }
 
     #[test]
