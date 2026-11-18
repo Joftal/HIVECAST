@@ -785,6 +785,30 @@ impl Db {
         Ok(())
     }
 
+    /// 给已有房间补批量标记（虎牙先手动添加、后导入关注时用）。
+    ///
+    /// 只改平台匹配的行，避免把别的平台房间误标成批量；uid 为 None 时保留
+    /// 原值，重复导入不会把已经解析出的 UID 清空。
+    pub fn mark_platform_batch_room(
+        &self,
+        room_id: &str,
+        platform: &str,
+        uid: Option<&str>,
+    ) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE room SET
+                    batch_follow = 1,
+                    platform_uid = COALESCE(?3, platform_uid),
+                    updated_at = ?4
+                  WHERE id = ?1 AND platform = ?2",
+                params![room_id, platform, uid, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// 房间被删除时一起删掉对应的关注池项。
     ///
     /// 不能只把 promoted_room_id 置空：关注仍在池里，下一轮扫描会把刚删掉的

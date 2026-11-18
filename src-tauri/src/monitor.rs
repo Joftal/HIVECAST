@@ -166,6 +166,7 @@ pub fn spawn(
         batches.insert("bilibili", BatchState::new());
         batches.insert("douyu", BatchState::new());
         batches.insert("douyin", BatchState::new());
+        batches.insert("huya", BatchState::new());
         loop {
             if settings_at.elapsed() >= SETTINGS_TTL {
                 settings = settings::load(&db);
@@ -224,6 +225,7 @@ fn batchable_platform(
     room: &hivecast_ipc::RoomRecord,
     douyu_ready: bool,
     douyin_ready: bool,
+    huya_ready: bool,
 ) -> Option<&'static str> {
     if is_batchable(room) {
         return Some("bilibili");
@@ -244,6 +246,17 @@ fn batchable_platform(
     {
         return Some("douyin");
     }
+    // 虎牙关注列表要登录态；手动添加的房间也允许在导入时升级成批量房。
+    if huya_ready
+        && room.platform == "huya"
+        && room.batch_follow
+        && room
+            .platform_uid
+            .as_deref()
+            .is_some_and(|uid| !uid.trim().is_empty())
+    {
+        return Some("huya");
+    }
     None
 }
 
@@ -257,6 +270,12 @@ fn douyin_batch_ready(logged_in: bool) -> bool {
 /// 登录后 1 个房间也走一次关注列表请求：它同时刷新标题、封面、人气和
 /// `videoLoop`，比单房 `betard` 多拿到的字段更完整；缺失房间仍会单房回退。
 fn douyu_batch_ready(logged_in: bool) -> bool {
+    logged_in
+}
+
+/// 虎牙批量门槛：只看登录态。关注列表接口用 WUP 登录态，未登录没有可用的
+/// 关注列表；离线房间仍会逐页扫描，但只有导入房会进批量。
+fn huya_batch_ready(logged_in: bool) -> bool {
     logged_in
 }
 
@@ -528,7 +547,7 @@ fn tick(
     // 间隔被用户改过（30s → 5m 或反过来）时不能继续按旧节奏：否则调大后
     // 仍会按旧间隔打接口，调小后房间要等旧的长间隔才被查。
     let mut batch_due: HashMap<&'static str, bool> = HashMap::new();
-    for platform in ["bilibili", "douyu", "douyin"] {
+    for platform in ["bilibili", "douyu", "douyin", "huya"] {
         let state = batches.get_mut(platform).expect("批量状态表缺少平台");
         if state.interval != Some(base) {
             state.interval = Some(base);
@@ -560,6 +579,7 @@ fn tick(
     // 斗鱼批量只覆盖关注列表；未登录时退回单房检查，登录后 1 个房间也批量。
     let douyu_ready = douyu_batch_ready(crate::credential::is_ok("douyu"));
     let douyin_ready = douyin_batch_ready(crate::credential::is_ok("douyin"));
+    let huya_ready = huya_batch_ready(crate::credential::is_ok("huya"));
     let mut batch_rooms: HashMap<&'static str, Vec<hivecast_ipc::RoomRecord>> = HashMap::new();
 
     for room in rooms {
@@ -599,7 +619,7 @@ fn tick(
         // 可批量房间走平台批量状态：每个批量拍检查全部可批量房间，
         // 而不是「谁刚好在拍点上到期才带谁」。后一种做法会让拍点前几秒
         // 到期的房间白等一个完整间隔，实测 30 秒会拖成 60 秒。
-        if let Some(platform) = batchable_platform(room, douyu_ready, douyin_ready) {
+        if let Some(platform) = batchable_platform(room, douyu_ready, douyin_ready, huya_ready) {
             // 上一批还在路上时整批跳过；不要在每一拍把拍点往后推，
             // 否则长批次结束后的下一批会被硬生生拖过一个完整间隔。
             let due = batch_due.get(platform).copied().unwrap_or(false);
@@ -642,7 +662,7 @@ fn tick(
         });
     }
 
-    for platform in ["bilibili", "douyu", "douyin"] {
+    for platform in ["bilibili", "douyu", "douyin", "huya"] {
         if !batch_due.get(platform).copied().unwrap_or(false) {
             continue;
         }
@@ -779,6 +799,15 @@ async fn run_batch_check(
             crate::platform::douyu_follow::fetch_live_statuses(&keys)
                 .await
                 .map(|statuses| (statuses, 0))
+        } else if platform == "huya" {
+            match crate::platform::huya_follow::fetch_live_statuses(&keys).await {
+                // 关注列表把重播也算在播：只复核在播项，离线项仍共享一次列表请求。
+                Ok(statuses) => Ok((
+                    crate::platform::huya_follow::confirm_live(statuses).await,
+                    0,
+                )),
+                Err(err) => Err(err),
+            }
         } else {
             crate::platform::bilibili::fetch_live_statuses(&keys)
                 .await
@@ -1040,7 +1069,7 @@ fn batch_room_info(
                 "liveStatus": if status.is_live { 1 } else { 0 },
                 "videoLoop": status.video_loop,
             });
-            if platform == "bilibili" {
+            if platform == "bilibili" || platform == "huya" {
                 extra["uid"] = serde_json::Value::String(status.uid.clone());
             }
             extra
@@ -1459,12 +1488,12 @@ mod tests {
         room.room_key = "9999".into();
         assert!(!is_batchable(&room), "斗鱼不能复用 B 站的 UID 批量");
         assert_eq!(
-            batchable_platform(&room, false, false),
+            batchable_platform(&room, false, false, false),
             None,
             "未登录时斗鱼必须走单房检查"
         );
         assert_eq!(
-            batchable_platform(&room, true, false),
+            batchable_platform(&room, true, false, false),
             Some("douyu"),
             "登录后单个斗鱼房间也按房间号进批量"
         );
@@ -1480,19 +1509,19 @@ mod tests {
         room.batch_follow = true;
 
         assert_eq!(
-            batchable_platform(&room, false, false),
+            batchable_platform(&room, false, false, false),
             None,
             "未登录时不能进关注页批量"
         );
         assert_eq!(
-            batchable_platform(&room, false, true),
+            batchable_platform(&room, false, true, false),
             Some("douyin"),
             "登录后的关注房按内部 room_id 进批量"
         );
 
         room.batch_follow = false;
         assert_eq!(
-            batchable_platform(&room, false, true),
+            batchable_platform(&room, false, true, false),
             None,
             "手动添加的抖音房不在关注列表里，必须单房检查"
         );
@@ -1500,7 +1529,7 @@ mod tests {
         room.batch_follow = true;
         room.internal_room_id = None;
         assert_eq!(
-            batchable_platform(&room, false, true),
+            batchable_platform(&room, false, true, false),
             None,
             "只有 web_rid 时不能进关注页批量，先单房检查回填内部 room_id"
         );
@@ -1557,12 +1586,12 @@ mod tests {
         room.platform_uid = None;
         room.room_key = "9999".into();
         assert_eq!(
-            batchable_platform(&room, false, false),
+            batchable_platform(&room, false, false, false),
             None,
             "未登录时斗鱼走单房检查"
         );
         assert_eq!(
-            batchable_platform(&room, true, false),
+            batchable_platform(&room, true, false, false),
             Some("douyu"),
             "登录后单个斗鱼房间也进批量"
         );

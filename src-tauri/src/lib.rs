@@ -326,6 +326,7 @@ pub fn run() {
             commands::douyin_follow_page,
             commands::douyin_pool_add,
             commands::douyu_follow_page,
+            commands::huya_follow_page,
             commands::rooms_import,
             commands::media_list,
             commands::media_group_clips,

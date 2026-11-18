@@ -254,6 +254,19 @@ pub struct DouyuFollowingPage {
     pub items: Vec<LiveStatus>,
 }
 
+/// 虎牙关注列表的一页。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct HuyaFollowingPage {
+    #[ts(type = "number")]
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub page_count: u32,
+    pub items: Vec<LiveStatus>,
+}
+
 /// 抖音关注列表中的一位主播。
 ///
 /// `web_rid` 是直播间页面号，能直接建房/取流；`internal_room_id` 是 follow/feed

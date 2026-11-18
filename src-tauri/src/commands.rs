@@ -4,11 +4,11 @@ use std::time::Instant;
 use hivecast_ipc::{
     ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, DouyinFollow,
     DouyinFollowingPage, DouyinPoolAddResult, DouyuFollowingPage, FfmpegStatus, FilenamePreview,
-    FollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo, LiveStatus,
-    LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
-    QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord, RoomView,
-    SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord, TrashInfo,
-    ViewSlotInfo,
+    FollowingPage, HuyaFollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo,
+    LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback,
+    PostResult, QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord,
+    RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord,
+    TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -313,6 +313,21 @@ pub async fn douyu_follow_page(page: Option<u32>) -> Result<DouyuFollowingPage, 
         .map_err(map_douyu_error)
 }
 
+/// 虎牙关注列表的一页。
+#[tauri::command]
+pub async fn huya_follow_page(page: Option<u32>) -> Result<HuyaFollowingPage, AppError> {
+    crate::platform::huya_follow::fetch_follow_page(page.unwrap_or(1))
+        .await
+        .map_err(|err| match err {
+            crate::platform::PlatformError::Upstream { code: -1, message }
+                if message.contains("登录") =>
+            {
+                AppError::User(message)
+            }
+            other => other.into(),
+        })
+}
+
 /// 抖音关注列表的一页；顺带标记哪些关注已经在关注池里。
 #[tauri::command]
 pub async fn douyin_follow_page(
@@ -398,6 +413,13 @@ fn import_room_info(
             "shortId": item.short_id,
             "liveStatus": if item.is_live { 1 } else { 0 },
         })
+    } else if platform == "huya" {
+        // 虎牙批量按账号 UID 匹配；数字房号就是 room_key，不再重复写 internal。
+        serde_json::json!({
+            "uid": uid,
+            "shortId": item.short_id,
+            "liveStatus": if item.is_live { 1 } else { 0 },
+        })
     } else {
         serde_json::json!({
             "uid": uid,
@@ -480,9 +502,27 @@ pub async fn rooms_import(
             "bilibili" => format!("https://live.bilibili.com/{room_id}"),
             "douyu" => format!("https://www.douyu.com/{room_id}"),
             "douyin" => format!("https://live.douyin.com/{room_id}"),
+            "huya" => format!("https://www.huya.com/{room_id}"),
             _ => format!("https://live.bilibili.com/{room_id}"),
         };
         let mut known = state.db.find_room(platform, room_id)?;
+        // 虎牙房间同时有数字房号、别名（如 lpl）和账号 UID。用户可能先按别名
+        // 手动加过，导入关注时要把它改挂到数字房号，再补 UID 才能进批量。
+        if platform == "huya" {
+            if known.is_none() {
+                if let Some(short) = item
+                    .short_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    known = state.db.find_room(platform, short)?;
+                }
+            }
+            if known.is_none() {
+                known = state.db.find_room_by_uid(platform, uid)?;
+            }
+        }
         if is_bilibili {
             if let Some(alias) = state.db.find_room_by_uid(platform, uid)? {
                 if known.as_ref().map_or(true, |room| room.id != alias.id) {
@@ -543,12 +583,12 @@ pub async fn rooms_import(
                     canonical_url: canonical_url.clone(),
                     auto_record,
                     monitor_paused: !monitor,
-                    platform_uid: if is_bilibili || platform == "douyin" {
+                    platform_uid: if is_bilibili || platform == "douyin" || platform == "huya" {
                         Some(uid.to_string())
                     } else {
                         None
                     },
-                    batch_follow: platform == "douyin",
+                    batch_follow: platform == "douyin" || platform == "huya",
                     internal_room_id: crate::db::internal_room_id_of(&info),
                     updated_at: timestamp,
                     ..room
@@ -612,6 +652,33 @@ pub async fn rooms_import(
                                 }
                             }
                         }
+                        // 虎牙：先按别名手动添加的房间此时已 rekey 到数字房号，
+                        // 补 batch_follow 与平台 UID 后就能进关注列表批量。
+                        if platform == "huya"
+                            && (!room.batch_follow || room.platform_uid.as_deref() != Some(uid))
+                        {
+                            match state
+                                .db
+                                .mark_platform_batch_room(&room.id, "huya", Some(uid))
+                            {
+                                Ok(()) => {
+                                    upgraded += 1;
+                                    tracing::info!(
+                                        target: "hivecast_lib::commands",
+                                        room_id = %room.id,
+                                        room_key = room_id,
+                                        uid,
+                                        "导入关注：已有虎牙房间加入批量状态"
+                                    );
+                                }
+                                Err(err) => tracing::warn!(
+                                    target: "hivecast_lib::commands",
+                                    room_id = %room.id,
+                                    error = %err,
+                                    "导入关注：补写虎牙批量标记失败"
+                                ),
+                            }
+                        }
                     }
                     Err(err) => failed.push(ImportFailure {
                         uid: identity.to_string(),
@@ -658,12 +725,12 @@ pub async fn rooms_import(
             notify_error: None,
             created_at: timestamp,
             updated_at: timestamp,
-            platform_uid: if is_bilibili || platform == "douyin" {
+            platform_uid: if is_bilibili || platform == "douyin" || platform == "huya" {
                 Some(uid.to_string())
             } else {
                 None
             },
-            batch_follow: platform == "douyin",
+            batch_follow: platform == "douyin" || platform == "huya",
             internal_room_id: None,
         };
         let info = import_room_info(&item, platform, uid, &uname);

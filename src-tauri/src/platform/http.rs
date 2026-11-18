@@ -437,6 +437,27 @@ pub async fn post_json<T: DeserializeOwned>(
     Ok(Fetched { data, date })
 }
 
+/// 以二进制 body POST 并读回原始字节（虎牙关注列表走 WUP 二进制协议）。
+///
+/// WUP 把登录态放在请求体的 UserId.sCookie 里，HTTP 头不再注入本地 Cookie，
+/// 避免同一份 Cookie 走两条路径、也避免被 CDN 侧按浏览器 Cookie 处理。
+pub async fn post_octets(
+    url: &str,
+    body: Vec<u8>,
+    headers: &[(&str, &str)],
+) -> Result<Vec<u8>, PlatformError> {
+    let mut request = client().post(url).body(body);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = send_anon(request, url).await?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
+    Ok(bytes.to_vec())
+}
+
 /// 表单 POST，显式指定 Origin/Cookie，并读回 Set-Cookie（B 站 Cookie 续期走这条路）。
 ///
 /// 与 post_form_json 的区别：不硬编码斗鱼的 Origin，也不依赖全局凭据注入；

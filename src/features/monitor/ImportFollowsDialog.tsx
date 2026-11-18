@@ -11,6 +11,7 @@ import {
   douyinFollowPage,
   douyinPoolAdd,
   douyuFollowPage,
+  huyaFollowPage,
   roomsImport,
   type DouyinFollow,
   type DouyinPoolAddResult,
@@ -32,10 +33,10 @@ type Props = {
 
 type Filter = "all" | "live" | "room" | "new" | "existing";
 type Phase = "follows" | "status" | "ready" | "followError" | "statusError";
-type Source = "bilibili" | "douyu" | "douyin";
+type Source = "bilibili" | "douyu" | "douyin" | "huya";
 
 const FILTERS: Filter[] = ["all", "live", "room", "new", "existing"];
-const SOURCES: Source[] = ["bilibili", "douyu", "douyin"];
+const SOURCES: Source[] = ["bilibili", "douyu", "douyin", "huya"];
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -82,13 +83,14 @@ function FollowAvatar({ user }: { user: FollowingUser }) {
 }
 
 /**
- * 关注导入（B 站 / 斗鱼 / 抖音）。
+ * 关注导入（B 站 / 斗鱼 / 抖音 / 虎牙）。
  *
  * B 站关注列表每页 50 条，拉完后用一次批量状态接口补齐直播间；斗鱼关注接口直接带
  * 直播状态，每页 120 条，不再逐房间请求 betard。抖音关注每页 20 条，用 max_time
  * 游标翻页；在播且能拿到 web_rid 的直接建房，离线或缺少 web_rid 的先进关注池，
- * 由后台扫描开播后再转成正式房间。导入本身只写本地库；已存在的房间只刷新展示
- * 字段，不覆盖画质、线路、备注和标签。
+ * 由后台扫描开播后再转成正式房间。虎牙关注接口同样自带直播状态，每页 120 条，
+ * 用数字房号作为稳定键。导入本身只写本地库；已存在的房间只刷新展示字段，不覆盖
+ * 画质、线路、备注和标签。
  */
 export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImported }: Props) {
   const { t } = useTranslation();
@@ -209,19 +211,22 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
         return;
       }
 
-      // 斗鱼：关注接口已经带状态，按页累积成 LiveStatus，再用 roomId 作为稳定键。
+      // 斗鱼 / 虎牙：关注接口已经带状态，按页累积成 LiveStatus，再用 roomId 作为稳定键。
       const live = new Map<string, LiveStatus>();
       const publish = () => {
         if (cancelled) return;
         const items = Array.from(live.values());
+        // 虎牙用账号 UID 作为行键，房号只用于展示/建房；斗鱼没有 UID，继续用房号。
+        const rowKey = (status: LiveStatus) =>
+          source === "huya" ? status.uid : (status.roomId ?? status.uid);
         setUsers(
           items.map((status) => ({
-            uid: status.roomId ?? status.uid,
+            uid: rowKey(status),
             uname: status.uname,
             avatarUrl: status.avatarUrl,
           })),
         );
-        setStatuses(new Map(items.map((status) => [status.roomId ?? status.uid, status])));
+        setStatuses(new Map(items.map((status) => [rowKey(status), status])));
         setTotal(items.length);
       };
       const absorb = (items: LiveStatus[]) => {
@@ -230,7 +235,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
         }
       };
       try {
-        const first = await douyuFollowPage(1);
+        const first = source === "huya" ? await huyaFollowPage(1) : await douyuFollowPage(1);
         if (cancelled) return;
         absorb(first.items);
         const pages = Math.max(
@@ -242,7 +247,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
         for (let page = 2; page <= pages; page += 1) {
           await wait(180);
           if (cancelled) return;
-          const next = await douyuFollowPage(page);
+          const next = source === "huya" ? await huyaFollowPage(page) : await douyuFollowPage(page);
           if (cancelled) return;
           absorb(next.items);
           publish();
@@ -276,13 +281,13 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     return keys;
   }, [rooms, source, douyinMeta]);
 
-  // 先手动添加、后导入关注的抖音房间：已经建房但 batch_follow 还是 0。
+  // 先手动添加、后导入关注的抖音 / 虎牙房间：已经建房但 batch_follow 还是 0。
   // 允许再次勾选，导入时后端只补批量标记，不会重复建房。
-  const douyinBatchKeys = useMemo(() => {
+  const batchUpgradableKeys = useMemo(() => {
     const keys = new Set<string>();
-    if (source !== "douyin") return keys;
+    if (source !== "douyin" && source !== "huya") return keys;
     for (const view of rooms) {
-      if (view.room.platform !== "douyin" || view.room.batchFollow) continue;
+      if (view.room.platform !== source || view.room.batchFollow) continue;
       keys.add(view.room.roomKey);
       if (view.room.platformUid) keys.add(view.room.platformUid);
       if (view.room.internalRoomId) keys.add(view.room.internalRoomId);
@@ -295,14 +300,14 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
     (!!status?.roomId && existing.has(status.roomId)) ||
     (!!status?.shortId && existing.has(status.shortId));
   const isBatchUpgradable = (user: FollowingUser, status?: LiveStatus) =>
-    source === "douyin" &&
-    (douyinBatchKeys.has(user.uid) ||
-      (!!status?.roomId && douyinBatchKeys.has(status.roomId)) ||
-      (!!status?.shortId && douyinBatchKeys.has(status.shortId)));
+    (source === "douyin" || source === "huya") &&
+    (batchUpgradableKeys.has(user.uid) ||
+      (!!status?.roomId && batchUpgradableKeys.has(status.roomId)) ||
+      (!!status?.shortId && batchUpgradableKeys.has(status.shortId)));
   const canImport = (user: FollowingUser, status?: LiveStatus) => {
     // 抖音允许把离线关注放进关注池；已有的手动房允许补成批量房。
+    if (isBatchUpgradable(user, status)) return true;
     if (source === "douyin") {
-      if (isBatchUpgradable(user, status)) return true;
       return !isExisting(user, status) && douyinMeta.has(user.uid);
     }
     if (isExisting(user, status)) return false;
@@ -329,7 +334,7 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
           return true;
       }
     });
-  }, [users, statuses, query, filter, existing, douyinBatchKeys]);
+  }, [users, statuses, query, filter, existing, batchUpgradableKeys]);
 
   const counts = useMemo(() => {
     let live = 0;
@@ -519,7 +524,9 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
         ? t("monitor.importFollow.loadingDouyin", { done: pageProgress.done, n: users.length })
         : source === "douyu"
           ? t("monitor.importFollow.loadingDouyu", { done: pageProgress.done, total: pageProgress.total })
-          : t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
+          : source === "huya"
+            ? t("monitor.importFollow.loadingHuya", { done: pageProgress.done, total: pageProgress.total })
+            : t("monitor.importFollow.loading", { done: pageProgress.done, total: pageProgress.total })
       : phase === "status"
         ? t("monitor.importFollow.statusLoading", { n: users.length })
         : source === "douyin"
@@ -530,11 +537,14 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
             })
           : source === "douyu"
             ? t("monitor.importFollow.summaryDouyu", { total: users.length, live: counts.live })
-            : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
+            : source === "huya"
+              ? t("monitor.importFollow.summaryHuya", { total: users.length, live: counts.live })
+              : t("monitor.importFollow.summary", { total, room: counts.room, live: counts.live });
   const sourceLabel = {
     bilibili: t("monitor.importFollow.platformBilibili"),
     douyu: t("monitor.importFollow.platformDouyu"),
     douyin: t("monitor.importFollow.platformDouyin"),
+    huya: t("monitor.importFollow.platformHuya"),
   };
 
   return (
@@ -545,14 +555,18 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
             ? t("monitor.importFollow.titleDouyin")
             : source === "douyu"
               ? t("monitor.importFollow.titleDouyu")
-              : t("monitor.importFollow.title")
+              : source === "huya"
+                ? t("monitor.importFollow.titleHuya")
+                : t("monitor.importFollow.title")
         }
         description={
           source === "douyin"
             ? t("monitor.importFollow.descriptionDouyin")
             : source === "douyu"
               ? t("monitor.importFollow.descriptionDouyu")
-              : t("monitor.importFollow.description")
+              : source === "huya"
+                ? t("monitor.importFollow.descriptionHuya")
+                : t("monitor.importFollow.description")
         }
         size="lg"
       >
@@ -568,7 +582,9 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                 ? t("monitor.importFollow.platformHintDouyin")
                 : source === "douyu"
                   ? t("monitor.importFollow.platformHintDouyu")
-                  : t("monitor.importFollow.platformHintBilibili")}
+                  : source === "huya"
+                    ? t("monitor.importFollow.platformHintHuya")
+                    : t("monitor.importFollow.platformHintBilibili")}
             </span>
           </div>
 
@@ -608,7 +624,9 @@ export default function ImportFollowsDialog({ open, onOpenChange, rooms, onImpor
                 ? t("monitor.importFollow.followFailedDouyin")
                 : source === "douyu"
                   ? t("monitor.importFollow.followFailedDouyu")
-                  : t("monitor.importFollow.followFailed")}
+                  : source === "huya"
+                    ? t("monitor.importFollow.followFailedHuya")
+                    : t("monitor.importFollow.followFailed")}
             </div>
           ) : null}
           {phase === "statusError" ? (

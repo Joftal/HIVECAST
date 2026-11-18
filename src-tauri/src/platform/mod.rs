@@ -11,6 +11,7 @@ pub mod douyu;
 pub mod douyu_follow;
 pub mod http;
 pub mod huya;
+pub mod huya_follow;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};

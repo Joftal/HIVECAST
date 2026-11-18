@@ -10,6 +10,7 @@ import type { DouyinFollow } from "./bindings/DouyinFollow";
 import type { DouyinFollowingPage } from "./bindings/DouyinFollowingPage";
 import type { DouyinPoolAddResult } from "./bindings/DouyinPoolAddResult";
 import type { DouyuFollowingPage } from "./bindings/DouyuFollowingPage";
+import type { HuyaFollowingPage } from "./bindings/HuyaFollowingPage";
 import type { FollowingPage } from "./bindings/FollowingPage";
 import type { FollowingUser } from "./bindings/FollowingUser";
 import type { ImportRoomInput } from "./bindings/ImportRoomInput";
@@ -146,6 +147,11 @@ export async function bilibiliFollowStatuses(uids: string[]): Promise<LiveStatus
 /** 斗鱼关注列表；每页最多 120 条，条目已带直播状态，不需要再批量查一次。 */
 export async function douyuFollowPage(page = 1): Promise<DouyuFollowingPage> {
   return invoke<DouyuFollowingPage>("douyu_follow_page", { page });
+}
+
+/** 虎牙关注列表；每页最多 120 条，条目已带直播状态。 */
+export async function huyaFollowPage(page = 1): Promise<HuyaFollowingPage> {
+  return invoke<HuyaFollowingPage>("huya_follow_page", { page });
 }
 
 /** 抖音关注列表的一页；cursor 传上一页的 nextCursor。 */
