@@ -23,11 +23,11 @@ import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
 import type { LogStatus } from "./bindings/LogStatus";
-import type { MediaHost } from "./bindings/MediaHost";
-import type { MediaHostPage } from "./bindings/MediaHostPage";
 import type { MediaFile } from "./bindings/MediaFile";
 import type { MediaItem } from "./bindings/MediaItem";
 import type { MediaPage } from "./bindings/MediaPage";
+import type { RemovedRoom } from "./bindings/RemovedRoom";
+import type { RoomRecord } from "./bindings/RoomRecord";
 import type { PlatformCount } from "./bindings/PlatformCount";
 import type { Playback } from "./bindings/Playback";
 import type { QualityInfo } from "./bindings/QualityInfo";
@@ -70,10 +70,10 @@ export type {
   LineInfo,
   LogStatus,
   MediaFile,
-  MediaHost,
-  MediaHostPage,
   MediaItem,
   MediaPage,
+  RemovedRoom,
+  RoomRecord,
   PlatformCount,
   Playback,
   PostProgress,
@@ -175,6 +175,15 @@ export async function roomsImport(
   autoRecord = false,
 ): Promise<ImportRoomsResult> {
   return invoke<ImportRoomsResult>("rooms_import", { items, monitor, autoRecord });
+}
+
+export async function removedRooms(): Promise<RemovedRoom[]> {
+  return invoke<RemovedRoom[]>("removed_rooms");
+}
+
+/** 从“已移除”里找回直播间：恢复后重新进入监控列表。 */
+export async function roomRestore(id: string): Promise<RoomView> {
+  return invoke<RoomView>("room_restore", { id });
 }
 
 export async function roomRemove(id: string): Promise<void> {
@@ -414,27 +423,6 @@ export async function mediaList(query: MediaQuery = {}): Promise<MediaPage> {
 /** 补齐一整场直播的全部片段（分页只拿到部分时用）。 */
 export async function mediaGroupClips(groupId: string): Promise<MediaItem[]> {
   return invoke<MediaItem[]>("media_group_clips", { groupId });
-}
-
-/** 主播墙筛选条件。 */
-export type HostQuery = {
-  query?: string | null;
-  platform?: string | null;
-  days?: number | null;
-  sort?: "name" | "latest" | "size" | "count";
-  limit?: number;
-  offset?: number;
-};
-
-export async function mediaHosts(query: HostQuery = {}): Promise<MediaHostPage> {
-  return invoke<MediaHostPage>("media_hosts", {
-    query: query.query ?? null,
-    platform: query.platform ?? null,
-    days: query.days ?? null,
-    sort: query.sort ?? "name",
-    limit: query.limit ?? 60,
-    offset: query.offset ?? 0,
-  });
 }
 
 export const EVENT_MEDIA_THUMB = "media://thumb";

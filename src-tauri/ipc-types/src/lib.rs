@@ -120,6 +120,23 @@ pub struct RoomRecord {
     /// room_key 是页面 URL 上的 web_rid（12 位），两者不能混用。
     #[serde(default)]
     pub internal_room_id: Option<String>,
+    /// 软删除时间；仅在「已移除」列表里有值。
+    #[ts(type = "number | null")]
+    pub removed_at: Option<i64>,
+}
+
+/// 已移除的直播间：房间信息 + 仍在磁盘上的录像汇总。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RemovedRoom {
+    pub room: RoomRecord,
+    /// 这个房间的录像场次（按 group 去重）。
+    #[ts(type = "number")]
+    pub session_count: i64,
+    /// 这些录像的体积之和（字节）。
+    #[ts(type = "number")]
+    pub total_bytes: i64,
 }
 
 /// 正在进行的录制快照。
@@ -889,43 +906,6 @@ pub struct MediaPage {
     #[ts(type = "number")]
     pub total: i64,
     /// 当前筛选条件下各平台的条数（不受平台筛选本身影响），给下拉菜单显示计数。
-    pub platform_counts: Vec<PlatformCount>,
-}
-
-/// 媒体库的「主播卡」：按房间聚合出的一行汇总（v1 主播身份 = room.id）。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../src/lib/bindings/")]
-pub struct MediaHost {
-    pub room_id: String,
-    pub platform: String,
-    /// 主播名（room.host_name），卡片主标题
-    pub host_name: String,
-    /// 房间标题（room.title），卡片副标题
-    pub room_title: String,
-    pub avatar_url: Option<String>,
-    pub cover_url: Option<String>,
-    /// 这个主播名下的录像条数
-    #[ts(type = "number")]
-    pub count: i64,
-    /// 这些录像的体积之和（字节）
-    #[ts(type = "number")]
-    pub bytes: i64,
-    /// 最新一条录像的开始时间（unix 秒）
-    #[ts(type = "number")]
-    pub latest_at: i64,
-}
-
-/// 主播墙一页数据。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../src/lib/bindings/")]
-pub struct MediaHostPage {
-    pub items: Vec<MediaHost>,
-    /// 当前筛选条件下的主播总数
-    #[ts(type = "number")]
-    pub total: i64,
-    /// 各平台的主播数（不受平台筛选本身影响）
     pub platform_counts: Vec<PlatformCount>,
 }
 

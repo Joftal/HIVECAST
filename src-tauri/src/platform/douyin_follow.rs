@@ -452,6 +452,7 @@ async fn promote(
         last_session_reason: None,
         last_session_file_size: 0,
         last_session_quality: None,
+        removed_at: None,
         note: String::new(),
         tags: String::new(),
         title_include: None,

@@ -7,7 +7,6 @@ import { Button, cx } from "../../components/ui/Controls";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import PageEmpty from "../../components/ui/PageEmpty";
 import EmptyArt from "../../components/ui/EmptyArt";
-import { Checkbox } from "../../components/arc/checkbox/checkbox";
 import { useNotify } from "../../lib/notify";
 import { PageBody, PageChip, PageHeader, PageSearch, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import {
@@ -17,7 +16,6 @@ import {
   mediaDanmaku,
   mediaFiles,
   mediaGroupClips,
-  mediaHosts,
   mediaList,
   mediaPlay,
   mediaReveal,
@@ -34,11 +32,10 @@ import {
   sessionsMerge,
   type DanmakuMessage,
   type MediaFile,
-  type MediaHost,
   type MediaItem,
   type Playback,
-  type PlatformCount,
   type PostProgress,
+  type RoomRecord,
 } from "../../lib/ipc";
 
 const PAGE_SIZE = 60;
@@ -51,7 +48,6 @@ const FILE_ROLE: Record<string, string> = {
 };
 
 type SortKey = "recent" | "duration" | "size";
-type HostSortKey = "name" | "latest" | "size" | "count";
 type Range = 0 | 1 | 7 | 30;
 
 /** 媒体库卡片：一场直播下挂多个片段。 */
@@ -131,8 +127,6 @@ const PLATFORM_TINT: Record<string, string> = {
   douyin: "#8d1f42",
 };
 
-// 主播墙：卡片最小 250，窗口变宽自动多列。
-const HOST_GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))" };
 // 录像网格：卡片最小 228。
 const GRID_STYLE = { gridTemplateColumns: "repeat(auto-fill, minmax(228px, 1fr))" };
 
@@ -160,40 +154,6 @@ function IconBack() {
   );
 }
 
-// 主播头像：有图用图，没图用平台底色的首字母，不再额外画色点。
-function HostAvatar({ host, size, onCover = true }: { host: MediaHost; size: number; onCover?: boolean }) {
-  const name = host.hostName || host.roomTitle || host.roomId;
-  if (host.avatarUrl) {
-    return (
-      <img
-        src={host.avatarUrl}
-        alt=""
-        draggable={false}
-        className={
-          "shrink-0 rounded-full border object-cover " + (onCover ? "border-white/70" : "border-line")
-        }
-        style={{ width: size, height: size }}
-      />
-    );
-  }
-  return (
-    <span
-      className={
-        "grid shrink-0 place-items-center rounded-full font-semibold text-white/90 " +
-        (onCover ? "border border-white/25" : "border border-line")
-      }
-      style={{
-        width: size,
-        height: size,
-        fontSize: Math.round(size * 0.4),
-        background: PLATFORM_TINT[host.platform] ?? "#3a3f47",
-      }}
-    >
-      {name.slice(0, 1).toUpperCase()}
-    </span>
-  );
-}
-
 function PlatformChip({ platform, dark }: { platform: string; dark?: boolean }) {
   const { t } = useTranslation();
   return (
@@ -208,25 +168,18 @@ function PlatformChip({ platform, dark }: { platform: string; dark?: boolean }) 
   );
 }
 
-export default function MediaPage({
-  seed,
-  onSeedApplied,
+/** 单个直播间的录制文件：从场次列表进入，不再有全局主播墙。 */
+export default function RoomRecordingsPage({
+  room,
+  onClose,
 }: {
-  seed?: { roomId: string; nonce: number } | null;
-  onSeedApplied?: () => void;
+  room: RoomRecord;
+  onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const hostId = room.id;
 
-  // —— 主播墙 ——
-  const [hosts, setHosts] = useState<MediaHost[]>([]);
-  const [hostTotal, setHostTotal] = useState(0);
-  const [hostCounts, setHostCounts] = useState<PlatformCount[]>([]);
-  const [hostId, setHostId] = useState<string | null>(null);
-  const [hostSort, setHostSort] = useState<HostSortKey>("name");
-  const [hostLoading, setHostLoading] = useState(true);
-  const [hostLoadingMore, setHostLoadingMore] = useState(false);
-
-  // —— 某个主播的录像 ——
+  // —— 这个房间的录像 ——
   const [items, setItems] = useState<MediaItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -237,15 +190,12 @@ export default function MediaPage({
   const notify = useNotify();
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
-  const [platform, setPlatform] = useState("all");
   const [range, setRange] = useState<Range>(0);
   const [onlyDanmaku, setOnlyDanmaku] = useState(false);
   const [sort, setSort] = useState<SortKey>("recent");
 
-  const [selected, setSelected] = useState<string[]>([]);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [progress] = useState<{ done: number; total: number } | null>(null);
   // 后处理进度按 sessionId 存：自动收尾、手动转封装、重试互不覆盖。
   const [postJobs, setPostJobs] = useState<Record<string, PostProgress>>({});
   const [confirmSourceDelete, setConfirmSourceDelete] = useState(false);
@@ -324,37 +274,6 @@ export default function MediaPage({
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  const loadHosts = useCallback(
-    async (offset: number) => {
-      if (!isTauri()) {
-        setHostLoading(false);
-        return true;
-      }
-      if (offset > 0) setHostLoadingMore(true);
-      else setHostLoading(true);
-      try {
-        const page = await mediaHosts({
-          query: keyword || null,
-          platform: platform === "all" ? null : platform,
-          sort: hostSort,
-          limit: PAGE_SIZE,
-          offset,
-        });
-        setHosts((prev) => (offset > 0 ? [...prev, ...page.items] : page.items));
-        setHostTotal(page.total);
-        setHostCounts(page.platformCounts);
-        return true;
-      } catch (err) {
-        notify.error(err);
-        return false;
-      } finally {
-        setHostLoading(false);
-        setHostLoadingMore(false);
-      }
-    },
-    [keyword, platform, hostSort, notify],
-  );
-
   const loadFiles = useCallback(
     async (offset: number) => {
       if (!hostId) return false;
@@ -417,42 +336,23 @@ export default function MediaPage({
   );
 
   useEffect(() => {
-    void loadHosts(0);
-  }, [loadHosts]);
-
-  useEffect(() => {
     if (!hostId) return;
-    setSelected([]);
-    setConfirmDelete(false);
     void loadFiles(0);
   }, [loadFiles, hostId]);
-
-  // 从监控详情跳进来时直接打开该房间的录像列表。
-  useEffect(() => {
-    if (!seed) return;
-    setQuery("");
-    setKeyword("");
-    setPlatform("all");
-    setHostId(seed.roomId);
-    onSeedApplied?.();
-    // 只响应新的跳转请求，避免 onSeedApplied 每次渲染换引用导致循环。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed?.nonce]);
 
   // 启动后的崩溃恢复合并在后台跑完时会改文件路径/大小，重新拉一遍列表（I2）。
   useEffect(() => {
     if (!isTauri()) return;
     let dispose: (() => void) | undefined;
     void onMediaChanged(() => {
-      void loadHosts(0);
-      if (hostId) void loadFiles(0);
+      void loadFiles(0);
     })
       .then((off) => {
         dispose = off;
       })
       .catch(() => undefined);
     return () => dispose?.();
-  }, [hostId, loadFiles, loadHosts]);
+  }, [hostId, loadFiles]);
 
   // 生成好的九宫格封面按 id 替换，不整页重载。
   useEffect(() => {
@@ -488,8 +388,7 @@ export default function MediaPage({
       if (one.state === "done" || one.state === "failed" || one.state === "cancelled") {
         const timer = window.setTimeout(() => {
           timers.delete(timer);
-          if (hostId) void loadFiles(0);
-          else void loadHosts(0);
+          void loadFiles(0);
         }, 500);
         timers.add(timer);
       }
@@ -502,7 +401,7 @@ export default function MediaPage({
       dispose?.();
       for (const timer of timers) window.clearTimeout(timer);
     };
-  }, [hostId, loadFiles, loadHosts]);
+  }, [hostId, loadFiles]);
 
   // 离开媒体库时把回放停掉：缓存目录要清，不能留 ffmpeg 在后台。
   useEffect(
@@ -522,51 +421,6 @@ export default function MediaPage({
       // 隐私模式下写不进去，只影响下次启动的默认值。
     }
   };
-
-  const enterHost = (host: MediaHost) => {
-    setQuery("");
-    setKeyword("");
-    setSelected([]);
-    setConfirmDelete(false);
-    setHostId(host.roomId);
-  };
-
-  const backToHosts = () => {
-    setHostId(null);
-    setSelected([]);
-    setConfirmDelete(false);
-    void loadHosts(0);
-  };
-
-  const active = hostId ? hosts.find((one) => one.roomId === hostId) ?? null : null;
-
-
-  const platforms = useMemo(() => {
-    const order = ["bilibili", "douyu", "huya", "douyin"];
-    const known = hostCounts
-      .map((one) => one.platform)
-      .sort((a, b) => {
-        const left = order.indexOf(a);
-        const right = order.indexOf(b);
-        if (left === -1 && right === -1) return a.localeCompare(b);
-        if (left === -1) return 1;
-        if (right === -1) return -1;
-        return left - right;
-      });
-    return ["all", ...known];
-  }, [hostCounts]);
-
-  const countOf = (one: string) => {
-    // 「全部」用各平台计数之和：total 会跟着平台筛选变小，拿它当全部会自相矛盾。
-    if (one === "all") return hostCounts.reduce((sum, entry) => sum + entry.count, 0);
-    return hostCounts.find((entry) => entry.platform === one)?.count ?? 0;
-  };
-
-  const selectedItems = useMemo(
-    () => items.filter((item) => selected.includes(item.id)),
-    [items, selected],
-  );
-  const selectedSize = selectedItems.reduce((sum, item) => sum + Math.max(0, item.size), 0);
 
   // 后端按片段返回；同一场的片段聚成一张卡片，避免媒体库被同标题刷屏。
   const groups = useMemo(() => {
@@ -594,25 +448,6 @@ export default function MediaPage({
       } satisfies MediaGroup;
     });
   }, [items]);
-
-  // 选中一个片段等于选中整个场次；提示数量要按整场算，不能只算当前已加载的片段。
-  const deleteGroups = useMemo(
-    () => groups.filter((group) => group.clips.some((clip) => selected.includes(clip.id))),
-    [groups, selected],
-  );
-  const deleteClipCount = useMemo(
-    () => deleteGroups.reduce((sum, group) => sum + group.clipCount, 0),
-    [deleteGroups],
-  );
-
-  const toggleGroup = (group: MediaGroup) => {
-    setConfirmDelete(false);
-    const ids = group.clips.map((clip) => clip.id);
-    setSelected((prev) => {
-      const all = ids.every((id) => prev.includes(id));
-      return all ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])];
-    });
-  };
 
   const stopPlayback = async (id: string) => {
     await mediaStop(id).catch(() => undefined);
@@ -701,7 +536,7 @@ export default function MediaPage({
         setConfirmSourceDelete(false);
         return;
       }
-      if (hostId) backToHosts();
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -709,90 +544,11 @@ export default function MediaPage({
   }, [hostId]);
 
   const refreshAll = async () => {
-    if (hostId) {
-      const files = await loadFiles(0);
-      const hosts = await loadHosts(0);
-      return files && hosts;
-    }
-    return loadHosts(0);
+    return loadFiles(0);
   };
 
   const refreshView = async () => {
     if (await refreshAll()) notify.success(t("media.refreshed"));
-  };
-
-  const runBatch = async (kind: "remux" | "ass" | "merge" | "reveal" | "delete") => {
-    if (selectedItems.length === 0 || busy) return;
-
-    if (kind === "reveal") {
-      let opened = 0;
-      for (const item of selectedItems) {
-        try {
-          await mediaReveal(item.id);
-          opened += 1;
-        } catch (err) {
-          notify.error(err);
-        }
-      }
-      if (opened > 0) notify.info(t("media.revealed"));
-      return;
-    }
-
-    if (kind === "delete" && !confirmDelete) {
-      setConfirmDelete(true);
-      return;
-    }
-
-    setBusy(kind);
-    setProgress(null);
-    try {
-      if (kind === "merge") {
-        if (selectedItems.length < 2) {
-          notify.warning(t("media.mergeHint"));
-          return;
-        }
-        const result = await sessionsMerge(selectedItems.map((item) => item.id));
-        notify.success(t("media.mergeDone", { size: formatSize(result.size) }));
-        setSelected([]);
-        await refreshAll();
-        return;
-      }
-
-      if (kind === "delete") {
-        for (const group of deleteGroups) {
-          if (playing && group.clips.some((clip) => clip.id === playing.item.id)) await closePlay();
-          await mediaDeleteGroup(group.id, group.hasFile);
-        }
-        notify.success(t("media.deletedBatch", { n: deleteClipCount }));
-        setSelected([]);
-        setConfirmDelete(false);
-        await refreshAll();
-        return;
-      }
-
-      let done = 0;
-      for (const item of selectedItems) {
-        setProgress({ done, total: selectedItems.length });
-        if (kind === "remux") await sessionRemux(item.id);
-        else await sessionExportDanmaku(item.id);
-        done += 1;
-      }
-      notify.success(
-        kind === "remux"
-          ? t("media.remuxDone", { n: done })
-          : t("media.exportDone", { n: done }),
-      );
-      setSelected([]);
-      await refreshAll();
-    } catch (err) {
-      // 整组删除是逐段进行的：中途失败时前面的片段可能已经删掉，
-      // 刷新一下列表，避免界面还留着已经不在的卡片。
-      if (kind === "delete") await refreshAll();
-      notify.error(err, t("media.postFailed"));
-    } finally {
-      setBusy(null);
-      setProgress(null);
-    }
   };
 
   // 抽屉里的单条后处理：只作用于当前正在回放的这条。
@@ -908,10 +664,21 @@ export default function MediaPage({
     }
   };
 
-  const allSelected =
-    groups.length > 0 &&
-    groups.every((group) => group.clips.every((clip) => selected.includes(clip.id)));
-  const hostFiltersActive = keyword !== "" || platform !== "all";
+  // 单场多段合并：把这一场的片段交给后端合并成一个文件，不再需要底部批量条。
+  const mergeGroup = async (group: MediaGroup) => {
+    if (busy) return;
+    setBusy("merge:" + group.id);
+    try {
+      const result = await sessionsMerge(group.clips.map((clip) => clip.id));
+      notify.success(t("media.mergeDone", { size: formatSize(result.size) }));
+      await refreshAll();
+    } catch (err) {
+      notify.error(err, t("media.mergeFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const fileFiltersActive = keyword !== "" || range !== 0 || onlyDanmaku;
 
   const rangeItems: Array<{ key: Range; label: string }> = [
@@ -927,147 +694,90 @@ export default function MediaPage({
       : t("common.loading")
     : null;
 
-  const platformMenu = (
-    <SelectMenu
-      variant="bare"
-      align="start"
-      active={platform !== "all"}
-      value={platform}
-      onChange={setPlatform}
-      placeholder={
-        platform === "all"
-          ? t("media.platformFilter")
-          : t("platformName." + platform, { defaultValue: platform })
-      }
-      options={platforms.map((one) => ({
-        value: one,
-        label: one === "all" ? t("media.filterAll") : t("platformName." + one, { defaultValue: one }),
-        hint: String(countOf(one)),
-      }))}
-    />
-  );
-
   return (
     <PageShell>
-      {hostId ? (
-        <PageHeader
-          leading={
-            <button
-              type="button"
-              onClick={backToHosts}
-              className="focus-ring -ml-1 inline-flex w-fit items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11.5px] text-muted transition-colors hover:text-ink"
-            >
-              <IconBack />
-              {t("media.hosts.back")}
-            </button>
-          }
-          prefix={
-            active ? (
-              <span className="block overflow-hidden rounded-[10px]">
-                <HostAvatar host={active} size={36} onCover={false} />
-              </span>
-            ) : undefined
-          }
-          title={active ? active.hostName || active.roomTitle || active.roomId : t("media.title")}
-          subtitle={
-            active ? (
-              <span className="flex flex-wrap items-center gap-2">
-                <span className="font-mono tabular-nums">{t("media.hosts.count", { n: active.count })}</span>
-                <span className="text-line">·</span>
-                <span className="font-mono tabular-nums">{formatSize(active.bytes)}</span>
-                <span className="text-line">·</span>
-                <span className="font-mono tabular-nums">
-                  {t("media.hosts.latest", { time: formatDate(active.latestAt) })}
-                </span>
-                <span className="text-line">·</span>
-                <span className="truncate">{active.roomTitle}</span>
-              </span>
-            ) : (
-              t("media.subtitle")
-            )
-          }
-          actions={
-            active ? (
-              <>
-                <Button
-                  size="lg"
-                  variant="secondary"
-                  disabled={items.length === 0}
-                  onClick={() => setSelected(allSelected ? [] : items.map((one) => one.id))}
-                >
-                  {t("media.selectAll")}
-                </Button>
-                <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshView()}>
-                  {t("common.refresh")}
-                </Button>
-              </>
-            ) : undefined
-          }
-        />
-      ) : null}
-
-      {hostId ? (
-        <PageToolbar>
-          <div className="flex h-9 items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
-            {rangeItems.map((one) => (
-              <button
-                key={one.key}
-                type="button"
-                onClick={() => setRange(one.key)}
-                className={cx(
-                  "focus-ring rounded-[5px] px-2.5 py-[5px] text-[12px] font-medium transition-colors",
-                  range === one.key ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
-                )}
-              >
-                {one.label}
-              </button>
-            ))}
-          </div>
-          <PageChip active={onlyDanmaku} onClick={() => setOnlyDanmaku((on) => !on)}>
-            {t("media.onlyDanmaku")}
-          </PageChip>
-          <SelectMenu
-            size="md"
-            value={sort}
-            onChange={(next) => setSort(next as SortKey)}
-            options={[
-              { value: "recent", label: t("media.sortRecent") },
-              { value: "duration", label: t("media.sortDuration") },
-              { value: "size", label: t("media.sortSize") },
-            ]}
-            ariaLabel={t("media.sortLabel")}
-            className="ml-auto w-[140px] justify-between"
-          />
-        </PageToolbar>
-      ) : (
-        <PageToolbar className="pt-4">
-          {platformMenu}
-          <SelectMenu
-            size="md"
-            value={hostSort}
-            onChange={(next) => setHostSort(next as HostSortKey)}
-            options={[
-              { value: "name", label: t("media.hosts.sortName") },
-              { value: "latest", label: t("media.hosts.sortLatest") },
-              { value: "size", label: t("media.hosts.sortSize") },
-              { value: "count", label: t("media.hosts.sortCount") },
-            ]}
-            ariaLabel={t("media.sortLabel")}
-            className="w-[140px] justify-between"
-          />
-          <div className="ml-auto flex items-center gap-2">
-            <PageSearch
-              value={query}
-              onChange={setQuery}
-              placeholder={t("media.hosts.search")}
-              clearLabel={t("common.clear")}
+      <PageHeader
+        leading={
+          <button
+            type="button"
+            onClick={onClose}
+            className="focus-ring -ml-1 inline-flex w-fit items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11.5px] text-muted transition-colors hover:text-ink"
+          >
+            <IconBack />
+            {t("media.backToMonitor")}
+          </button>
+        }
+        prefix={
+          room.avatarUrl ? (
+            <img
+              src={room.avatarUrl}
+              alt=""
+              draggable={false}
+              className="h-9 w-9 rounded-[10px] border border-line object-cover"
             />
-            <Button size="lg" variant="secondary" disabled={hostLoading} onClick={() => void refreshView()}>
-              {t("common.refresh")}
-            </Button>
-          </div>
-        </PageToolbar>
-      )}
+          ) : (
+            <span
+              className="grid h-9 w-9 place-items-center rounded-[10px] border border-line text-[13px] font-semibold text-white/90"
+              style={{ background: PLATFORM_TINT[room.platform] ?? "#3a3f47" }}
+            >
+              {(room.hostName || room.roomKey).slice(0, 1).toUpperCase()}
+            </span>
+          )
+        }
+        title={room.hostName || room.roomKey}
+        subtitle={
+          <span className="flex flex-wrap items-center gap-2">
+            <PlatformChip platform={room.platform} />
+            <span className="truncate">{room.title || room.canonicalUrl}</span>
+            <span className="text-line">·</span>
+            <span className="font-mono tabular-nums">{room.roomKey}</span>
+          </span>
+        }
+        actions={
+          <Button size="lg" variant="secondary" disabled={loading} onClick={() => void refreshView()}>
+            {t("common.refresh")}
+          </Button>
+        }
+      />
+
+      <PageToolbar>
+        <PageSearch
+          value={query}
+          onChange={setQuery}
+          placeholder={t("media.roomSearch")}
+          clearLabel={t("common.clear")}
+        />
+        <div className="flex h-9 items-center gap-0.5 rounded-ctl bg-raised p-[3px]">
+          {rangeItems.map((one) => (
+            <button
+              key={one.key}
+              type="button"
+              onClick={() => setRange(one.key)}
+              className={cx(
+                "focus-ring rounded-[5px] px-2.5 py-[5px] text-[12px] font-medium transition-colors",
+                range === one.key ? "bg-surface text-ink shadow-[0_1px_2px_rgba(16,24,40,0.1)]" : "text-muted hover:text-ink",
+              )}
+            >
+              {one.label}
+            </button>
+          ))}
+        </div>
+        <PageChip active={onlyDanmaku} onClick={() => setOnlyDanmaku((on) => !on)}>
+          {t("media.onlyDanmaku")}
+        </PageChip>
+        <SelectMenu
+          size="md"
+          value={sort}
+          onChange={(next) => setSort(next as SortKey)}
+          options={[
+            { value: "recent", label: t("media.sortRecent") },
+            { value: "duration", label: t("media.sortDuration") },
+            { value: "size", label: t("media.sortSize") },
+          ]}
+          ariaLabel={t("media.sortLabel")}
+          className="ml-auto w-[140px] justify-between"
+        />
+      </PageToolbar>
       {statusLine ? (
         <div className="mx-5 mb-2 flex items-center justify-between rounded-ctl border border-line bg-raised px-3 py-2 text-[11.5px] text-ink-soft">
           <span className="truncate">{statusLine}</span>
@@ -1075,16 +785,8 @@ export default function MediaPage({
       ) : null}
 
       <PageBody className="pb-5">
-      {hostId ? (
-        loading ? (
+      {loading ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
-        ) : !active ? (
-          <PageEmpty
-            className="flex-1"
-            title={t("media.hosts.goneTitle")}
-            description={t("media.hosts.goneBody")}
-            icon={<EmptyArt kind="gone" />}
-          />
         ) : items.length === 0 ? (
           <PageEmpty
             className="flex-1"
@@ -1099,7 +801,6 @@ export default function MediaPage({
               // 封面优先播放第一个真的有文件的片段：首片段被单独删掉/文件丢失时，
               // 后面仍在的片段不能因为 primary 不可播而整组都点不开。
               const playable = group.clips.find((clip) => clip.hasFile) ?? group.primary;
-              const isSelected = group.clips.every((clip) => selected.includes(clip.id));
               const isPlaying = group.clips.some((clip) => clip.id === playing?.item.id);
               const isBusy = group.clips.some((clip) => clip.id === playBusy);
               const job = postJobs[playable.id] ?? postJobs[item.id];
@@ -1111,7 +812,7 @@ export default function MediaPage({
                   key={group.id}
                   className={cx(
                     "group flex flex-col overflow-hidden rounded-panel border bg-surface transition-colors duration-150",
-                    isSelected ? "border-accent/60 shadow-[0_0_0_1px_var(--accent-soft)]" : "border-line hover:border-line-strong",
+                    "border-line hover:border-line-strong",
                   )}
                 >
                   <div className="relative aspect-video w-full overflow-hidden bg-raised">
@@ -1178,15 +879,6 @@ export default function MediaPage({
                         {item.sourceDeleted ? " · " + t("media.sourceDeleted") : ""}
                       </span>
                     )}
-
-                    <div className="absolute right-0 top-0 z-10">
-                      <Checkbox
-                        checked={isSelected}
-                        onCheckedChange={() => toggleGroup(group)}
-                        aria-label={t("media.selectSession")}
-                        tone="overlay"
-                      />
-                    </div>
 
                     <span className="pointer-events-none absolute bottom-2 left-2 rounded-[4px] bg-black/60 px-1.5 py-[3px] font-mono text-[10px] tabular-nums leading-none text-white/90">
                       {formatDuration(group.durationMs)}
@@ -1262,6 +954,17 @@ export default function MediaPage({
                         ) : null}
                       </div>
                     ) : null}
+                    {group.clipCount > 1 ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!!busy}
+                        onClick={() => void mergeGroup(group)}
+                        className="mt-1 w-full justify-center"
+                      >
+                        {t("media.mergeThisSession", { n: group.clipCount })}
+                      </Button>
+                    ) : null}
                     <div className="mt-auto flex items-center justify-between gap-2 pt-0.5 text-[10.5px] text-faint">
                       <span className="font-mono tabular-nums">{formatDate(item.startedAt)}</span>
                       <span className="shrink-0 font-mono tabular-nums">{formatSize(group.size)}</span>
@@ -1278,67 +981,9 @@ export default function MediaPage({
             })}
           </div>
         )
-      ) : hostLoading ? (
-        <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
-      ) : hosts.length === 0 ? (
-        <PageEmpty
-          className="flex-1"
-          title={hostFiltersActive ? t("media.hosts.noMatchTitle") : t("media.hosts.emptyTitle")}
-          description={hostFiltersActive ? t("media.hosts.noMatchBody") : t("media.hosts.emptyBody")}
-          icon={<EmptyArt kind={hostFiltersActive ? "search" : "media"} />}
-        />
-      ) : (
-        <div className="grid gap-3" style={HOST_GRID_STYLE}>
-          {hosts.map((host) => (
-            <button
-              key={host.roomId}
-              type="button"
-              onClick={() => enterHost(host)}
-              className="group flex flex-col overflow-hidden rounded-panel border border-line bg-surface text-left transition-colors hover:border-line-strong"
-            >
-              <div className="relative w-full overflow-hidden bg-raised" style={{ aspectRatio: "16 / 10" }}>
-                {host.coverUrl ? (
-                  <img
-                    src={host.coverUrl}
-                    alt=""
-                    draggable={false}
-                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
-                  />
-                ) : (
-                  <div className="grid h-full w-full place-items-center bg-raised text-[12px] text-faint">
-                    {t("platformName." + host.platform, { defaultValue: host.platform })}
-                  </div>
-                )}
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent" />
-                <div className="absolute left-2 top-2">
-                  <PlatformChip platform={host.platform} dark />
-                </div>
-                <div className="pointer-events-none absolute inset-x-2.5 bottom-2 flex items-center gap-2">
-                  <HostAvatar host={host} size={36} />
-                  <div className="min-w-0">
-                    <div className="truncate text-[13px] font-medium text-white drop-shadow">
-                      {host.hostName || host.roomTitle || host.roomId}
-                    </div>
-                    <div className="truncate text-[10px] text-white/60">{host.roomTitle}</div>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col gap-0.5 px-2.5 py-2 text-[10.5px] text-muted">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono tabular-nums">{t("media.hosts.count", { n: host.count })}</span>
-                  <span className="text-line">·</span>
-                  <span className="font-mono tabular-nums">{formatSize(host.bytes)}</span>
-                </div>
-                <div className="truncate font-mono tabular-nums text-faint">
-                  {t("media.hosts.latest", { time: formatDate(host.latestAt) })}
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+      }
 
-      {hostId && !loading && items.length > 0 && items.length < total ? (
+      {!loading && items.length > 0 && items.length < total ? (
         <div className="flex justify-center pb-2">
           <Button size="sm" variant="secondary" disabled={loadingMore} onClick={() => void loadFiles(items.length)}>
             {loadingMore ? t("common.loading") : t("media.loadMore")}
@@ -1346,57 +991,7 @@ export default function MediaPage({
         </div>
       ) : null}
 
-      {!hostId && !hostLoading && hosts.length > 0 && hosts.length < hostTotal ? (
-        <div className="flex justify-center pb-2">
-          <Button size="sm" variant="secondary" disabled={hostLoadingMore} onClick={() => void loadHosts(hosts.length)}>
-            {hostLoadingMore ? t("common.loading") : t("media.loadMore")}
-          </Button>
-        </div>
-      ) : null}
       </PageBody>
-
-      {selected.length > 0
-        ? createPortal(
-            <div className="fixed bottom-5 left-1/2 z-40 flex -translate-x-1/2 animate-pop items-center gap-1.5 rounded-[10px] border border-line bg-surface px-3 py-2 shadow-pop">
-              <span className="mr-1 whitespace-nowrap text-[11.5px] text-ink">
-                {t("media.selectedSize", { n: selected.length, size: formatSize(selectedSize) })}
-              </span>
-              <span className="h-4 w-px bg-line" />
-              <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void runBatch("remux")}>
-                {t("media.remux")}
-              </Button>
-              <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void runBatch("ass")}>
-                {t("media.exportAss")}
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!!busy || selected.length < 2}
-                onClick={() => void runBatch("merge")}
-              >
-                {t("media.merge")}
-              </Button>
-              <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void runBatch("reveal")}>
-                {t("media.reveal")}
-              </Button>
-              <Button size="sm" variant="danger" disabled={!!busy} onClick={() => void runBatch("delete")}>
-                {confirmDelete ? t("media.deleteConfirm", { n: deleteClipCount }) : t("media.deleteSelected")}
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!!busy}
-                onClick={() => {
-                  setSelected([]);
-                  setConfirmDelete(false);
-                }}
-              >
-                {t("media.clearSelection")}
-              </Button>
-            </div>,
-            document.body,
-          )
-        : null}
 
       {playing
         ? createPortal(

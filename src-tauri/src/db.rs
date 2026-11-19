@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use hivecast_ipc::{
-    DouyinFollow, MediaFile, MediaHost, MediaHostPage, MediaItem, PlatformCount, QualitySegment,
-    RecordSession, RoomRecord, SessionSummary, TaskRecord,
+    DouyinFollow, MediaFile, MediaItem, PlatformCount, QualitySegment, RecordSession, RemovedRoom,
+    RoomRecord, SessionSummary, TaskRecord,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -218,85 +218,6 @@ pub struct Db {
     secret: crate::secret::Secret,
 }
 
-/// 主播墙的筛选条件。与 MediaFilter 分开：主播维度的「条数」是录像条数之和，
-/// 排序也是按主播聚合后的指标（最新/体积/条数）。
-#[derive(Debug, Clone)]
-pub struct MediaHostFilter {
-    pub query: Option<String>,
-    pub platform: Option<String>,
-    /// 只要最近 N 天有录制的房间
-    pub days: Option<i64>,
-    /// name / latest / size / count，其余值按 name 处理
-    pub sort: String,
-    pub limit: usize,
-    pub offset: usize,
-}
-
-impl Default for MediaHostFilter {
-    fn default() -> Self {
-        Self {
-            query: None,
-            platform: None,
-            days: None,
-            sort: "name".into(),
-            limit: 60,
-            offset: 0,
-        }
-    }
-}
-
-impl MediaHostFilter {
-    fn order_by(&self) -> &'static str {
-        match self.sort.as_str() {
-            "latest" => "MAX(s.started_at) DESC",
-            "size" => "SUM(s.file_size) DESC, MAX(s.started_at) DESC",
-            "count" => "COUNT(s.id) DESC, MAX(s.started_at) DESC",
-            // 默认按主播名：同一屏里找固定的人比按时间扫更快。
-            _ => "r.host_name COLLATE NOCASE ASC, MAX(s.started_at) DESC",
-        }
-    }
-}
-
-/// 主播墙的 WHERE 片段：只统计有文件、已结束的会话。
-fn host_where(filter: &MediaHostFilter, include_platform: bool) -> (String, Vec<SqlValue>) {
-    let mut where_sql = String::from(
-        " WHERE s.file_path IS NOT NULL AND s.file_path <> '' AND s.status = 'finished'",
-    );
-    let mut args: Vec<SqlValue> = Vec::new();
-    if let Some(keyword) = filter
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|one| !one.is_empty())
-    {
-        where_sql.push_str(r" AND (r.host_name LIKE ? ESCAPE '\' OR r.title LIKE ? ESCAPE '\')");
-        let like = format!(
-            "%{}%",
-            keyword
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        args.push(SqlValue::Text(like.clone()));
-        args.push(SqlValue::Text(like));
-    }
-    if include_platform {
-        if let Some(platform) = filter
-            .platform
-            .as_deref()
-            .filter(|one| !one.is_empty() && *one != "all")
-        {
-            where_sql.push_str(" AND r.platform = ?");
-            args.push(SqlValue::Text(platform.to_string()));
-        }
-    }
-    if let Some(days) = filter.days.filter(|days| *days > 0) {
-        where_sql.push_str(" AND s.started_at >= ?");
-        args.push(SqlValue::Integer(now_ts() - days * 86_400));
-    }
-    (where_sql, args)
-}
-
 impl Db {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         tracing::debug!(path = %path.display(), "打开数据库");
@@ -391,6 +312,39 @@ impl Db {
             .map_err(db_err)?;
         let rows = stmt.query_map([], map_room).map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// 已移除的直播间：软删除后房间不再出现在监控列表，但录像仍要能找回。
+    pub fn list_removed_rooms(&self) -> Result<Vec<RemovedRoom>, AppError> {
+        let conn = self.lock();
+        let rooms = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "{ROOM_SELECT} WHERE removed_at IS NOT NULL ORDER BY removed_at DESC"
+                ))
+                .map_err(db_err)?;
+            let rows = stmt.query_map([], map_room).map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
+        };
+        rooms
+            .into_iter()
+            .map(|room| {
+                let (session_count, total_bytes) = conn
+                    .query_row(
+                        "SELECT COUNT(DISTINCT COALESCE(group_id, id)),
+                                COALESCE(SUM(file_size), 0)
+                           FROM record_session WHERE room_id = ?1",
+                        params![room.id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(db_err)?;
+                Ok(RemovedRoom {
+                    room,
+                    session_count,
+                    total_bytes,
+                })
+            })
+            .collect()
     }
 
     pub fn get_room(&self, id: &str) -> Result<Option<RoomRecord>, AppError> {
@@ -922,6 +876,21 @@ impl Db {
         Ok(())
     }
 
+    /// 恢复一个软删除的房间：重新进入监控列表，并马上安排一次检查。
+    pub fn restore_room(&self, id: &str) -> Result<(), AppError> {
+        let now = now_ts();
+        self.lock()
+            .execute(
+                "UPDATE room
+                    SET removed_at = NULL, monitor_paused = 0,
+                        last_checked_at = NULL, updated_at = ?2
+                  WHERE id = ?1",
+                params![id, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// 这条房间是否已被移除（软删除）。
     pub fn room_removed(&self, id: &str) -> Result<bool, AppError> {
         self.lock()
@@ -1399,90 +1368,6 @@ impl Db {
                JOIN room r ON r.id = s.room_id{where_sql}
               GROUP BY r.platform
               ORDER BY COUNT(DISTINCT COALESCE(s.group_id, s.id)) DESC, r.platform ASC"
-        );
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(args.iter()), |row| {
-                Ok(PlatformCount {
-                    platform: row.get(0)?,
-                    count: row.get(1)?,
-                })
-            })
-            .map_err(db_err)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
-    }
-
-    /// 主播墙：按 room.id 聚合出主播卡（v1 的主播身份就是房间）。
-    pub fn media_hosts(&self, filter: &MediaHostFilter) -> Result<MediaHostPage, AppError> {
-        let conn = self.lock();
-        let (where_sql, args) = host_where(filter, true);
-
-        let total: i64 = conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM (
-                        SELECT r.id FROM record_session s JOIN room r ON r.id = s.room_id{where_sql}
-                        GROUP BY r.id
-                     )"
-                ),
-                rusqlite::params_from_iter(args.iter()),
-                |row| row.get(0),
-            )
-            .map_err(db_err)?;
-
-        let mut page_args = args;
-        page_args.push(SqlValue::Integer(filter.limit.clamp(1, 500) as i64));
-        page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
-        let sql = format!(
-            "SELECT r.id, r.platform, r.host_name, r.title, r.avatar_url, r.cover_url,
-                    COUNT(DISTINCT COALESCE(s.group_id, s.id)),
-                    COALESCE(SUM(s.file_size), 0), MAX(s.started_at)
-               FROM record_session s
-               JOIN room r ON r.id = s.room_id{where_sql}
-              GROUP BY r.id
-              ORDER BY {}
-              LIMIT ? OFFSET ?",
-            filter.order_by()
-        );
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-        let items = stmt
-            .query_map(rusqlite::params_from_iter(page_args.iter()), |row| {
-                Ok(MediaHost {
-                    room_id: row.get(0)?,
-                    platform: row.get(1)?,
-                    host_name: row.get(2)?,
-                    room_title: row.get(3)?,
-                    avatar_url: row.get(4)?,
-                    cover_url: row.get(5)?,
-                    count: row.get(6)?,
-                    bytes: row.get(7)?,
-                    latest_at: row.get(8)?,
-                })
-            })
-            .map_err(db_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(db_err)?;
-
-        let platform_counts = Self::host_counts_locked(&conn, filter)?;
-        Ok(MediaHostPage {
-            items,
-            total,
-            platform_counts,
-        })
-    }
-
-    /// 各平台的主播数（忽略平台筛选本身），给平台下拉显示计数。
-    fn host_counts_locked(
-        conn: &Connection,
-        filter: &MediaHostFilter,
-    ) -> Result<Vec<PlatformCount>, AppError> {
-        let (where_sql, args) = host_where(filter, false);
-        let sql = format!(
-            "SELECT r.platform, COUNT(DISTINCT r.id)
-               FROM record_session s
-               JOIN room r ON r.id = s.room_id{where_sql}
-              GROUP BY r.platform
-              ORDER BY COUNT(DISTINCT r.id) DESC, r.platform ASC"
         );
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
@@ -2634,7 +2519,8 @@ const ROOM_SELECT: &str = "SELECT
     last_session_status, last_session_reason, last_session_file_size,
     note, tags, title_include, title_exclude,
     split_max_duration_sec, split_max_size_mb, notify_live, notify_error,
-    created_at, updated_at, last_session_quality, platform_uid, batch_follow, internal_room_id
+    created_at, updated_at, last_session_quality, platform_uid, batch_follow, internal_room_id,
+    removed_at
   FROM room";
 
 const SESSION_SELECT: &str = "SELECT
@@ -2734,6 +2620,7 @@ fn map_room(row: &Row<'_>) -> rusqlite::Result<RoomRecord> {
         platform_uid: row.get(35)?,
         batch_follow: row.get::<_, i64>(36)? != 0,
         internal_room_id: row.get(37)?,
+        removed_at: row.get(38)?,
     })
 }
 
@@ -3027,52 +2914,7 @@ mod tests {
     }
 
     #[test]
-    fn media_hosts_aggregates_finished_sessions_per_room() {
-        let (db, _path) = temp_db("hosts");
-        seed_media(&db);
-
-        let page = db
-            .media_hosts(&MediaHostFilter::default())
-            .expect("主播墙查询失败");
-        assert_eq!(page.total, 2);
-        // 默认按主播名升序（码点序）：乙 在 甲 前面。
-        assert_eq!(page.items[0].room_id, "rm-b");
-        let latest = db
-            .media_hosts(&MediaHostFilter {
-                sort: "latest".into(),
-                ..MediaHostFilter::default()
-            })
-            .expect("按时间排序失败");
-        // 最新录制优先：rm-a 的 3000 比 rm-b 的 2000 新。
-        assert_eq!(latest.items[0].room_id, "rm-a");
-        assert_eq!(latest.items[0].host_name, "主播甲");
-        assert_eq!(latest.items[0].count, 2);
-        assert_eq!(latest.items[0].bytes, 400);
-        assert_eq!(latest.items[0].latest_at, 3000);
-        // 还在录的会话不进主播墙。
-        assert_eq!(page.platform_counts.len(), 2);
-
-        let by_size = db
-            .media_hosts(&MediaHostFilter {
-                sort: "size".into(),
-                ..MediaHostFilter::default()
-            })
-            .expect("按体积排序失败");
-        assert_eq!(by_size.items[0].room_id, "rm-a");
-
-        let only_douyu = db
-            .media_hosts(&MediaHostFilter {
-                platform: Some("douyu".into()),
-                ..MediaHostFilter::default()
-            })
-            .expect("平台筛选失败");
-        assert_eq!(only_douyu.items.len(), 1);
-        // 平台筛选不影响计数：两个平台都要出现。
-        assert_eq!(only_douyu.platform_counts.len(), 2);
-    }
-
-    #[test]
-    fn split_clips_form_one_session_in_library_and_host_counts() {
+    fn split_clips_form_one_session_in_library() {
         let (db, _path) = temp_db("clips");
         seed_media(&db);
         // 把 a2 挂到 a1 下，模拟一场直播切成两段。
@@ -3094,23 +2936,6 @@ mod tests {
         assert_eq!(clips[0].id, "s-a1");
         assert_eq!(clips[1].split_reason.as_deref(), Some("duration"));
         assert_eq!(clips.iter().map(|one| one.clip_count).max(), Some(2));
-
-        // 主播墙按“场”计数，但体积/最新时间仍按片段累计。
-        let hosts = db
-            .media_hosts(&MediaHostFilter {
-                sort: "size".into(),
-                ..MediaHostFilter::default()
-            })
-            .expect("主播墙失败");
-        let room_a = hosts
-            .items
-            .iter()
-            .find(|one| one.room_id == "rm-a")
-            .expect("主播甲");
-        assert_eq!(room_a.count, 1, "两段只算一场直播");
-        assert_eq!(room_a.bytes, 400);
-        assert_eq!(room_a.latest_at, 3000);
-        assert_eq!(hosts.platform_counts.len(), 2);
 
         let counts = db
             .media_platform_counts(&MediaFilter::default())
@@ -3137,16 +2962,6 @@ mod tests {
         assert_eq!(db.session_group_size("s-b1").expect("场次大小"), 2);
         assert_eq!(db.session_group_size("s-b2").expect("片段大小"), 2);
         assert_eq!(db.media_group_items("s-b1").expect("整组查询失败").len(), 2);
-        let hosts = db
-            .media_hosts(&MediaHostFilter::default())
-            .expect("主播墙失败");
-        let room_b = hosts
-            .items
-            .iter()
-            .find(|one| one.room_id == "rm-b")
-            .expect("主播乙");
-        assert_eq!(room_b.count, 1);
-        assert_eq!(room_b.bytes, 100);
     }
 
     #[test]
@@ -3327,6 +3142,20 @@ mod tests {
         let (items, total) = db.media_list(&MediaFilter::default()).expect("媒体库失败");
         assert_eq!(total, 4);
         assert!(items.iter().any(|one| one.room_id == "rm-a"));
+        let removed = db.list_removed_rooms().expect("已移除列表失败");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].room.id, "rm-a");
+        assert!(removed[0].session_count > 0);
+        assert!(removed[0].total_bytes > 0);
+
+        db.restore_room("rm-a").expect("恢复房间失败");
+        assert!(!db.room_removed("rm-a").expect("读标记失败"));
+        assert_eq!(db.list_rooms().expect("恢复后列表失败").len(), 2);
+        assert!(db
+            .list_removed_rooms()
+            .expect("恢复后已移除列表失败")
+            .is_empty());
+        db.delete_room("rm-a").expect("再次移除失败");
 
         // 重新添加同一个房间：insert_room 的 ON CONFLICT 分支要清掉软删除标记。
         let existing = db.get_room("rm-a").expect("读失败").expect("房间还在");

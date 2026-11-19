@@ -5,7 +5,7 @@ import WindowControls from "./components/WindowControls";
 import { ToastStack } from "./components/arc/toast-stack/toast-stack";
 import { UndoToast } from "./components/arc/undo-toast/undo-toast";
 import ResizeHandles from "./components/ResizeHandles";
-import MediaPage from "./features/media/MediaPage";
+import RoomRecordingsPage from "./features/media/RoomRecordingsPage";
 import MonitorPage from "./features/monitor/MonitorPage";
 import SettingsView, { type PageKey } from "./features/settings/SettingsView";
 import TasksPage from "./features/tasks/TasksPage";
@@ -26,6 +26,7 @@ import {
   settingsGet,
   settingsUpdate,
   type ActiveTask,
+  type RoomRecord,
   type Settings,
 } from "./lib/ipc";
 import { suspendViews } from "./lib/viewLifecycle";
@@ -33,7 +34,7 @@ import { useNotify } from "./lib/notify";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
 
-type TabKey = "monitor" | "watch" | "media" | "tasks" | "settings";
+type TabKey = "monitor" | "watch" | "tasks" | "settings";
 const PAGE_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 export default function App() {
@@ -63,8 +64,8 @@ export default function App() {
   const themeTimer = useRef<number | null>(null);
   // 监控页多选后带进观看页；nonce 让同一批房间再点一次也能重新应用。
   const [watchSeed, setWatchSeed] = useState<WatchSeed | null>(null);
-  // 监控详情跳到媒体库/任务页时带的房间筛选；nonce 让重复跳转也生效。
-  const [mediaSeed, setMediaSeed] = useState<{ roomId: string; nonce: number } | null>(null);
+  // 监控页推入的“录制文件”页；null 时显示监控列表。
+  const [roomFiles, setRoomFiles] = useState<RoomRecord | null>(null);
   const [taskSeed, setTaskSeed] = useState<{ roomId: string; nonce: number } | null>(null);
   // 通知开关按事件分三类：录制、异常、登录失效。
   const notifyRef = useRef<Settings | null>(null);
@@ -415,7 +416,6 @@ export default function App() {
             [
               { key: "monitor", label: t("tab.monitor") },
               { key: "watch", label: t("tab.watch") },
-              { key: "media", label: t("tab.media") },
               { key: "tasks", label: t("tab.tasks") },
             ] as Array<{ key: TabKey; label: string }>
           ).map((item) => (
@@ -487,28 +487,27 @@ export default function App() {
         className="flex min-h-0 flex-1 flex-col"
       >
         {tab === "monitor" ? (
-          <MonitorPage
-            onOpenWatch={(ids, kind) => {
-              if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now(), kind });
-              setTab("watch");
-            }}
-            onOpenMedia={(roomId) => {
-              setMediaSeed({ roomId, nonce: Date.now() });
-              setTab("media");
-            }}
-            onOpenTasks={(roomId) => {
-              setTaskSeed({ roomId, nonce: Date.now() });
-              setTab("tasks");
-            }}
-          />
+          roomFiles ? (
+            <RoomRecordingsPage room={roomFiles} onClose={() => setRoomFiles(null)} />
+          ) : (
+            <MonitorPage
+              onOpenWatch={(ids, kind) => {
+                if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now(), kind });
+                setTab("watch");
+              }}
+              onOpenRoomFiles={(room) => setRoomFiles(room)}
+              onOpenTasks={(roomId) => {
+                setTaskSeed({ roomId, nonce: Date.now() });
+                setTab("tasks");
+              }}
+            />
+          )
         ) : tab === "watch" ? (
           <WatchPage
             seed={watchSeed}
             onSeedApplied={() => setWatchSeed(null)}
             onImmersiveChange={setImmersive}
           />
-        ) : tab === "media" ? (
-          <MediaPage seed={mediaSeed} onSeedApplied={() => setMediaSeed(null)} />
         ) : tab === "tasks" ? (
           <TasksPage seed={taskSeed} onSeedApplied={() => setTaskSeed(null)} />
         ) : (

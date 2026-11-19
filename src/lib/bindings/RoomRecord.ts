@@ -67,4 +67,8 @@ batchFollow: boolean,
  * 平台内部房间号：抖音 follow/feed 批量状态必须用它（19 位），
  * room_key 是页面 URL 上的 web_rid（12 位），两者不能混用。
  */
-internalRoomId: string | null, };
+internalRoomId: string | null,
+/**
+ * 软删除时间；仅在「已移除」列表里有值。
+ */
+removedAt: number | null, };

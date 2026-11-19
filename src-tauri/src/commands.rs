@@ -5,15 +5,15 @@ use hivecast_ipc::{
     ActiveTask, AddRoomResult, AppInfo, CredentialInfo, DanmakuMessage, DouyinFollow,
     DouyinFollowingPage, DouyinPoolAddResult, DouyuFollowingPage, FfmpegStatus, FilenamePreview,
     FollowingPage, HuyaFollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo,
-    LiveStatus, LogStatus, MediaFile, MediaHostPage, MediaItem, MediaPage, MonitorStatus, Playback,
-    PostResult, QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RoomRecord,
+    LiveStatus, LogStatus, MediaFile, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
+    QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RemovedRoom, RoomRecord,
     RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord,
     TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::db::{now_ts, MediaFilter, MediaHostFilter};
+use crate::db::{now_ts, MediaFilter};
 use crate::error::AppError;
 use crate::monitor::room_ref;
 use crate::platform::{resolve_input, RoomInfo, RoomRef};
@@ -66,6 +66,34 @@ pub async fn rooms_list(state: State<'_, AppState>) -> Result<Vec<RoomView>, App
             room,
         })
         .collect())
+}
+
+/// 已移除的直播间：房间信息 + 剩余录像汇总，供监控页底部入口找回。
+#[tauri::command]
+pub async fn removed_rooms(state: State<'_, AppState>) -> Result<Vec<RemovedRoom>, AppError> {
+    state.db.list_removed_rooms()
+}
+
+/// 恢复一个已移除的直播间；下一次监控轮询会立刻刷新它。
+#[tauri::command]
+pub async fn room_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<RoomView, AppError> {
+    tracing::info!(target: "hivecast_lib::commands", room_id = %id, "恢复房间");
+    state.db.restore_room(&id)?;
+    let room = state
+        .db
+        .get_room(&id)?
+        .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
+    state.broker.invalidate(&room_ref(&room));
+    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    Ok(RoomView {
+        recording: state.recorder.active(&room.id),
+        error: state.recorder.last_error(&room.id),
+        room,
+    })
 }
 
 #[tauri::command]
@@ -215,6 +243,7 @@ pub async fn room_add(
         last_session_reason: None,
         last_session_file_size: 0,
         last_session_quality: None,
+        removed_at: None,
         note: String::new(),
         tags: String::new(),
         title_include: None,
@@ -797,6 +826,7 @@ pub async fn rooms_import(
             last_session_reason: None,
             last_session_file_size: 0,
             last_session_quality: None,
+            removed_at: None,
             note: String::new(),
             tags: String::new(),
             title_include: None,
@@ -2636,30 +2666,6 @@ pub async fn media_group_clips(
     tracing::debug!(target: "hivecast_lib::commands", group_id = %group_id, clips = items.len(), "补齐整场片段");
     state.thumbs.ensure(app, pending);
     Ok(items)
-}
-
-/// 主播墙：按房间聚合出主播卡（条数 / 体积 / 最新一条时间）。
-#[tauri::command]
-pub async fn media_hosts(
-    state: State<'_, AppState>,
-    query: Option<String>,
-    platform: Option<String>,
-    days: Option<i64>,
-    sort: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
-) -> Result<MediaHostPage, AppError> {
-    let filter = MediaHostFilter {
-        query,
-        platform,
-        days,
-        sort: sort.unwrap_or_else(|| "latest".into()),
-        limit: limit.unwrap_or(60) as usize,
-        offset: offset.unwrap_or(0) as usize,
-    };
-    let page = state.db.media_hosts(&filter)?;
-    tracing::debug!(target: "hivecast_lib::commands", total = page.total, page = page.items.len(), "主播墙列表");
-    Ok(page)
 }
 
 /// 把这条录像的弹幕 JSONL 导出成 ASS 字幕，返回产物路径。

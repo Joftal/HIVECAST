@@ -28,6 +28,10 @@ import {
   openUrl,
   recordStart,
   recordStop,
+  removedRooms,
+  roomRestore,
+  type RemovedRoom,
+  type RoomRecord,
   recordingUsage,
   roomStreamOptions,
   roomRefresh,
@@ -281,6 +285,11 @@ function MonitorDiagnostics({
   );
 }
 
+function formatWhen(seconds: number): string {
+  // DB 里 room.removed_at 是 Unix 秒，不是毫秒。
+  return new Date(seconds * 1000).toLocaleDateString();
+}
+
 function size(bytes: number): string {
   if (!bytes) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -479,11 +488,11 @@ function SortHead({
 
 export default function MonitorPage({
   onOpenWatch,
-  onOpenMedia,
+  onOpenRoomFiles,
   onOpenTasks,
 }: {
   onOpenWatch?: (roomIds?: string[], kind?: LayoutKind) => void;
-  onOpenMedia?: (roomId: string) => void;
+  onOpenRoomFiles?: (room: RoomRecord) => void;
   onOpenTasks?: (roomId: string) => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -505,6 +514,9 @@ export default function MonitorPage({
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [removed, setRemoved] = useState<RemovedRoom[]>([]);
+  const [removedOpen, setRemovedOpen] = useState(false);
+  const [removedBusy, setRemovedBusy] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"watch" | "record" | null>(null);
   const notify = useNotify();
@@ -572,6 +584,7 @@ export default function MonitorPage({
         loadQueued.current = false;
         try {
           setViews(await roomsList());
+          setRemoved(await removedRooms());
           loadErrorShown.current = false;
           setLoadFailed(false);
         } catch (err) {
@@ -827,9 +840,27 @@ export default function MonitorPage({
     }
   };
 
+  const restoreRoom = async (item: RemovedRoom) => {
+    setRemovedBusy(item.room.id);
+    try {
+      await roomRestore(item.room.id);
+      setRemoved((prev) => {
+        const next = prev.filter((one) => one.room.id !== item.room.id);
+        if (next.length === 0) setRemovedOpen(false);
+        return next;
+      });
+      notify.success(t("monitor.restored"));
+      await load();
+    } catch (err) {
+      notify.error(err);
+    } finally {
+      setRemovedBusy(null);
+    }
+  };
+
   const removeRoom = async (room: RoomView["room"]) => {
     const ok = await run(room.id, () => roomRemove(room.id));
-    // 移除只隐藏房间，录像历史仍按主播留在媒体库，明确告知免得以为被删了。
+    // 移除只隐藏房间，录像历史仍留在该房间的录制文件里，明确告知免得以为被删了。
     if (ok) notify.info(t("monitor.removedKept"));
     return ok;
   };
@@ -1148,6 +1179,12 @@ export default function MonitorPage({
                 },
               },
               {
+                key: "files",
+                label: t("monitor.openMedia"),
+                disabled: !onOpenRoomFiles,
+                onSelect: () => onOpenRoomFiles?.(room),
+              },
+              {
                 key: "pause",
                 label: room.monitorPaused ? t("monitor.resumeMonitor") : t("monitor.pauseMonitor"),
                 separatorBefore: true,
@@ -1372,9 +1409,9 @@ export default function MonitorPage({
                   {
                     key: "media",
                     label: t("monitor.openMedia"),
-                    disabled: !onOpenMedia,
+                    disabled: !onOpenRoomFiles,
                     separatorBefore: true,
-                    onSelect: () => onOpenMedia?.(room.id),
+                    onSelect: () => onOpenRoomFiles?.(room),
                   },
                   {
                     key: "tasks",
@@ -1576,6 +1613,16 @@ export default function MonitorPage({
               </div>
             </div>
 
+            <button
+              type="button"
+              disabled={!onOpenRoomFiles}
+              onClick={() => onOpenRoomFiles?.(view.room)}
+              className="focus-ring mt-2 flex w-full items-center justify-between rounded-[8px] border border-line px-3 py-2 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50"
+            >
+              <span>{t("monitor.viewFiles")}</span>
+              <span aria-hidden>→</span>
+            </button>
+
             <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
               {t("monitor.panelSettings")}
               <InfoTip content={t("monitor.tip.panelSettings")} />
@@ -1738,7 +1785,7 @@ export default function MonitorPage({
         </div>
       </PageToolbar>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex min-w-0 flex-1 flex-col">
           {loaded && views.length > 0 ? (
             <div
@@ -1805,8 +1852,88 @@ export default function MonitorPage({
             )}
           </div>
         </div>
-
+        {removed.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setRemovedOpen(true)}
+            className="focus-ring flex shrink-0 items-center gap-2 border-t border-line px-5 py-2 text-left text-[11.5px] text-faint transition-colors hover:bg-raised hover:text-ink"
+          >
+            <span>{t("monitor.removedEntry", { n: removed.length })}</span>
+            <span className="text-line">·</span>
+            <span>{t("monitor.removedHint")}</span>
+          </button>
+        ) : null}
       </div>
+
+      {removedOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <div className="absolute inset-0 bg-black/35 backdrop-blur-[2px]" onClick={() => setRemovedOpen(false)} />
+              <section className="relative flex max-h-[78vh] w-[min(560px,94vw)] flex-col overflow-hidden rounded-panel border border-line bg-surface shadow-2xl">
+                <header className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+                  <div>
+                    <h2 className="text-[14px] font-semibold text-ink">{t("monitor.removedTitle")}</h2>
+                    <p className="mt-1 text-[11.5px] leading-5 text-muted">{t("monitor.removedBody")}</p>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={() => setRemovedOpen(false)}>
+                    {t("monitor.close")}
+                  </Button>
+                </header>
+                <div className="min-h-0 flex-1 overflow-auto p-2">
+                  {removed.map((item) => (
+                    <div
+                      key={item.room.id}
+                      className="flex items-center gap-3 rounded-ctl px-3 py-2.5 hover:bg-raised"
+                    >
+                      {item.room.avatarUrl ? (
+                        <img
+                          src={item.room.avatarUrl}
+                          alt=""
+                          draggable={false}
+                          className="h-9 w-9 shrink-0 rounded-full border border-line object-cover"
+                        />
+                      ) : (
+                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-line bg-raised text-[12px] font-semibold text-muted">
+                          {(item.room.hostName || item.room.roomKey).slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12.5px] font-medium text-ink">
+                          {item.room.hostName || item.room.title || item.room.roomKey}
+                        </div>
+                        <div className="mt-0.5 truncate font-mono text-[10.5px] tabular-nums text-faint">
+                          {t("monitor.sessionsBytes", { n: item.sessionCount, size: size(item.totalBytes) })}
+                          {item.room.removedAt
+                            ? " · " + t("monitor.removedAt", { time: formatWhen(item.room.removedAt) })
+                            : ""}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setRemovedOpen(false);
+                          onOpenRoomFiles?.(item.room);
+                        }}
+                      >
+                        {t("monitor.viewFiles")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={removedBusy === item.room.id}
+                        onClick={() => void restoreRoom(item)}
+                      >
+                        {t("monitor.restore")}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {picked.size > 0 ? (
         <div className="absolute bottom-6 left-1/2 z-40 -translate-x-1/2">
