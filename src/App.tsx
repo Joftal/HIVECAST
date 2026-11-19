@@ -102,7 +102,13 @@ export default function App() {
 
   const requestTab = useCallback(
     async (next: TabKey) => {
-      if (next === tab) return;
+      if (next === tab) {
+        // “录制文件”是监控 tab 的子页；再点当前 tab 应回到监控列表根级。
+        if (next === "monitor" && roomFiles) setRoomFiles(null);
+        return;
+      }
+      // 离开监控去别的 tab 时收起子页，避免下次回来还停在某个房间的录像里。
+      if (tab === "monitor" && roomFiles) setRoomFiles(null);
       if (tab === "settings" && settingsDirty) {
         // 未保存就离开：默认保存，成功后才切页；失败则留在设置页由页面错误提示接管。
         if (settingsSaving) return;
@@ -118,7 +124,7 @@ export default function App() {
       if (next === "settings") setSettingsUndo(null);
       setTab(next);
     },
-    [tab, settingsDirty, settingsSaving, settingsChangedCount],
+    [tab, roomFiles, settingsDirty, settingsSaving, settingsChangedCount],
   );
 
   const dismissSettingsUndo = useCallback(() => setSettingsUndo(null), []);
@@ -488,7 +494,11 @@ export default function App() {
       >
         {tab === "monitor" ? (
           roomFiles ? (
-            <RoomRecordingsPage room={roomFiles} onClose={() => setRoomFiles(null)} />
+            <RoomRecordingsPage
+              key={roomFiles.id}
+              room={roomFiles}
+              onClose={() => setRoomFiles(null)}
+            />
           ) : (
             <MonitorPage
               onOpenWatch={(ids, kind) => {

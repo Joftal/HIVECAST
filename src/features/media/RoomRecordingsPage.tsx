@@ -182,6 +182,9 @@ export default function RoomRecordingsPage({
   // —— 这个房间的录像 ——
   const [items, setItems] = useState<MediaItem[]>([]);
   const [total, setTotal] = useState(0);
+  // 已从服务端消费的片段数。点「+N」补组会往 items 里塞额外片段，
+  // 不能用 items.length 当分页 offset，否则会跳过或重复后面的片段。
+  const [loadedRows, setLoadedRows] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [groupLoading, setGroupLoading] = useState<string | null>(null);
@@ -195,7 +198,6 @@ export default function RoomRecordingsPage({
   const [sort, setSort] = useState<SortKey>("recent");
 
   const [busy, setBusy] = useState<string | null>(null);
-  const [progress] = useState<{ done: number; total: number } | null>(null);
   // 后处理进度按 sessionId 存：自动收尾、手动转封装、重试互不覆盖。
   const [postJobs, setPostJobs] = useState<Record<string, PostProgress>>({});
   const [confirmSourceDelete, setConfirmSourceDelete] = useState(false);
@@ -217,6 +219,8 @@ export default function RoomRecordingsPage({
 
   // 缩略图事件可能比列表先到，先记在 ref 里，下次合并进 items。
   const thumbsRef = useRef<Record<string, string>>({});
+  // 筛选/排序连续变化时只认最后一次请求，避免慢响应覆盖新结果。
+  const loadSeq = useRef(0);
   const playingRef = useRef(playing);
   playingRef.current = playing;
 
@@ -281,6 +285,7 @@ export default function RoomRecordingsPage({
         setLoading(false);
         return true;
       }
+      const seq = ++loadSeq.current;
       if (offset > 0) setLoadingMore(true);
       else setLoading(true);
       try {
@@ -293,19 +298,29 @@ export default function RoomRecordingsPage({
           limit: PAGE_SIZE,
           offset,
         });
+        if (seq !== loadSeq.current) return false;
         const withThumbs = page.items.map((item) => ({
           ...item,
           thumbnailUrl: item.thumbnailUrl ?? thumbsRef.current[item.id] ?? null,
         }));
-        setItems((prev) => (offset > 0 ? [...prev, ...withThumbs] : withThumbs));
+        setItems((prev) => {
+          if (offset === 0) return withThumbs;
+          // 「+N」可能已经提前补进了这一页的片段，按 id 去重，避免卡片重复。
+          const byId = new Map(prev.map((item) => [item.id, item]));
+          for (const item of withThumbs) byId.set(item.id, item);
+          return Array.from(byId.values());
+        });
+        setLoadedRows((prev) => (offset > 0 ? prev + page.items.length : page.items.length));
         setTotal(page.total);
         return true;
       } catch (err) {
         notify.error(err);
         return false;
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        if (seq === loadSeq.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
     [hostId, keyword, range, onlyDanmaku, sort, notify],
@@ -403,7 +418,7 @@ export default function RoomRecordingsPage({
     };
   }, [hostId, loadFiles]);
 
-  // 离开媒体库时把回放停掉：缓存目录要清，不能留 ffmpeg 在后台。
+  // 离开房间录制文件页时把回放停掉：缓存目录要清，不能留 ffmpeg 在后台。
   useEffect(
     () => () => {
       const current = playingRef.current;
@@ -526,7 +541,7 @@ export default function RoomRecordingsPage({
     }
   };
 
-  // Esc 先关回放抽屉，其次退回主播墙。
+  // Esc 先关回放抽屉，其次退回监控列表。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -659,6 +674,8 @@ export default function RoomRecordingsPage({
       await refreshAll();
     } catch (err) {
       notify.error(err);
+      // 整场删除是逐段进行的：某一段失败时前面可能已经删掉，重拉一次避免列表残留。
+      await refreshAll();
     } finally {
       setBusy(null);
     }
@@ -688,11 +705,7 @@ export default function RoomRecordingsPage({
     { key: 30, label: t("media.range30") },
   ];
 
-  const statusLine = busy
-    ? progress
-      ? t("media.batchRunning", { done: progress.done, total: progress.total })
-      : t("common.loading")
-    : null;
+  const statusLine = busy ? t("common.loading") : null;
 
   return (
     <PageShell>
@@ -801,6 +814,8 @@ export default function RoomRecordingsPage({
               // 封面优先播放第一个真的有文件的片段：首片段被单独删掉/文件丢失时，
               // 后面仍在的片段不能因为 primary 不可播而整组都点不开。
               const playable = group.clips.find((clip) => clip.hasFile) ?? group.primary;
+              // 分段场次里首片段的缩略图可能还没生成；封面取第一个有图的片段，避免整组一直显示占位。
+              const cover = group.clips.find((clip) => clip.thumbnailUrl)?.thumbnailUrl ?? item.thumbnailUrl;
               const isPlaying = group.clips.some((clip) => clip.id === playing?.item.id);
               const isBusy = group.clips.some((clip) => clip.id === playBusy);
               const job = postJobs[playable.id] ?? postJobs[item.id];
@@ -816,9 +831,9 @@ export default function RoomRecordingsPage({
                   )}
                 >
                   <div className="relative aspect-video w-full overflow-hidden bg-raised">
-                    {item.thumbnailUrl ? (
+                    {cover ? (
                       <img
-                        src={item.thumbnailUrl}
+                        src={cover}
                         alt=""
                         draggable={false}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
@@ -983,9 +998,9 @@ export default function RoomRecordingsPage({
         )
       }
 
-      {!loading && items.length > 0 && items.length < total ? (
+      {!loading && items.length > 0 && loadedRows < total ? (
         <div className="flex justify-center pb-2">
-          <Button size="sm" variant="secondary" disabled={loadingMore} onClick={() => void loadFiles(items.length)}>
+          <Button size="sm" variant="secondary" disabled={loadingMore} onClick={() => void loadFiles(loadedRows)}>
             {loadingMore ? t("common.loading") : t("media.loadMore")}
           </Button>
         </div>

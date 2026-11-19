@@ -863,7 +863,8 @@ impl Db {
     ///
     /// record_session.room_id 是 ON DELETE CASCADE：真删会把该房间的全部录像历史
     /// 一起带走（文件还在磁盘上，媒体库却再也看不到）。这里只打 removed_at，
-    /// 监控列表把它过滤掉，媒体库仍按房间聚合历史；重新添加同一房间会恢复它。
+    /// 监控列表把它过滤掉，历史录像仍能从该房间的「录制文件」里找到；
+    /// 重新添加同一房间会清掉标记并恢复它。
     pub fn delete_room(&self, id: &str) -> Result<(), AppError> {
         let now = now_ts();
         self.lock()
