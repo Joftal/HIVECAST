@@ -773,7 +773,7 @@ fn parse_timestamp_ms(raw: &str) -> Option<i64> {
     ms.is_finite().then_some(ms as i64)
 }
 
-async fn media_duration_ms(path: &Path) -> Option<u64> {
+pub(crate) async fn media_duration_ms(path: &Path) -> Option<u64> {
     let probe = ffmpeg::probe_binary()?;
     let output = tokio::time::timeout(
         Duration::from_secs(20),

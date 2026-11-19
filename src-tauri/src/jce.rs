@@ -117,6 +117,13 @@ impl Enc {
         self.head(tag, T_STRUCT_BEGIN);
     }
 
+    /// 普通 list 头 + 元素个数；元素逐个按自己的类型追加（目前只用于测试）。
+    #[cfg(test)]
+    pub fn begin_list(&mut self, tag: u8, size: usize) {
+        self.head(tag, T_LIST);
+        self.int(0, size as i64);
+    }
+
     pub fn end_struct(&mut self) {
         self.head(0, T_STRUCT_END);
     }
@@ -129,6 +136,8 @@ pub enum Value {
     Text(String),
     Bytes(Vec<u8>),
     Struct(Vec<(u8, Value)>),
+    /// 普通 list；虎牙 cmd22 用它一次下发多条消息。
+    List(Vec<Value>),
 }
 
 pub fn get_int(fields: &[(u8, Value)], tag: u8) -> Option<i64> {
@@ -155,6 +164,13 @@ pub fn get_bytes(fields: &[(u8, Value)], tag: u8) -> Option<&[u8]> {
 pub fn get_struct<'a>(fields: &'a [(u8, Value)], tag: u8) -> Option<&'a [(u8, Value)]> {
     fields.iter().find_map(|(t, value)| match (t, value) {
         (t, Value::Struct(inner)) if *t == tag => Some(inner.as_slice()),
+        _ => None,
+    })
+}
+
+pub fn get_list<'a>(fields: &'a [(u8, Value)], tag: u8) -> Option<&'a [Value]> {
+    fields.iter().find_map(|(t, value)| match (t, value) {
+        (t, Value::List(items)) if *t == tag => Some(items.as_slice()),
         _ => None,
     })
 }
@@ -281,11 +297,14 @@ impl<'a> Dec<'a> {
             }
             T_LIST => {
                 let size = self.counted()?;
+                let mut items = Vec::new();
                 for _ in 0..size.max(0) {
                     let (_, inner) = self.head()?;
-                    self.value(inner)?;
+                    if let Some(value) = self.value(inner)? {
+                        items.push(value);
+                    }
                 }
-                Ok(None)
+                Ok(Some(Value::List(items)))
             }
             T_MAP => {
                 let size = self.counted()?;
@@ -360,6 +379,24 @@ mod tests {
         assert_eq!(get_int(nested, 0), Some(42));
         assert_eq!(get_str(nested, 2), Some("昵称"));
         assert_eq!(get_int(&fields, 1), Some(7));
+    }
+
+    #[test]
+    fn decode_reads_struct_list() {
+        let mut enc = Enc::new();
+        enc.begin_list(1, 2);
+        for value in [11, 22] {
+            enc.begin_struct(0);
+            enc.int(0, value);
+            enc.end_struct();
+        }
+        let fields = decode(enc.as_slice()).expect("应该解析成功");
+        let items = get_list(&fields, 1).expect("应该有 list");
+        assert_eq!(items.len(), 2);
+        let Value::Struct(first) = &items[0] else {
+            panic!("list 元素应该是结构体");
+        };
+        assert_eq!(get_int(first, 0), Some(11));
     }
 
     #[test]

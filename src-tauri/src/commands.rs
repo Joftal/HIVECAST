@@ -1619,8 +1619,11 @@ pub async fn room_merge_sessions(
         .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
     let plan = merge_plan(sessions);
-    let total_ms = plan.total_ms;
     let files = plan.files;
+    // 弹幕偏移跟视频容器时长走；ffprobe 失败时才退回数据库时长。
+    let durations = probe_merge_durations(&files).await;
+    let sources = retime_danmaku_sources(plan.danmaku, &durations);
+    let total_ms = actual_total_ms(&durations).unwrap_or(plan.total_ms);
     let title = state
         .db
         .get_room(&room_id)?
@@ -1633,7 +1636,7 @@ pub async fn room_merge_sessions(
     let result = postprocess::merge(&files, None).await;
     match &result {
         Ok(merged) => {
-            let danmaku = merge_danmaku_files(&plan.danmaku, &merged.path);
+            let danmaku = merge_danmaku_files(&sources, &merged.path);
             register_merged_session(&state.db, &room_id, merged, danmaku.as_deref(), total_ms);
             job.finish("done", None);
         }
@@ -1658,17 +1661,31 @@ pub async fn sessions_merge(
         if session.status == "recording" {
             return Err(AppError::User("有录像还在录制，先停下再合并".into()));
         }
+        if session.reason.as_deref() == Some("merge") {
+            return Err(AppError::User(
+                "合并产物不能再参与合并，请选择原始录像".into(),
+            ));
+        }
         sessions.push(session);
     }
     // 缺文件的片段必须与它的时长一起剔除。旧实现先按全部片段累加时长推进
     // 弹幕偏移，再过滤视频，少一段就会让后面的弹幕整体错位。
     let plan = merge_plan(sessions);
-    let total_ms = plan.total_ms;
     let merged_room_id = plan.room_id.clone().unwrap_or_default();
     let files = plan.files;
     if files.len() < 2 {
         return Err(AppError::User("选中的录像里可用文件不足两段".into()));
     }
+    // 弹幕偏移必须跟视频容器时长走，不能跟数据库里的墙钟时长走。
+    // 分片按 60 秒收尾时，单个容器常比数据库多 0.2–0.5 秒；九段累计就能差出 7 秒，
+    // 合并后后半段弹幕会整体晚到。ffprobe 拿不到时长时才退回数据库值。
+    let durations = probe_merge_durations(&files).await;
+    let sources = retime_danmaku_sources(plan.danmaku, &durations);
+    let total_ms = if let Some(actual) = actual_total_ms(&durations) {
+        actual
+    } else {
+        plan.total_ms
+    };
     let job = state.jobs.begin("merge", file_label(&files[0]), None);
     tracing::info!(target: "hivecast_lib::commands", count = files.len(), "开始合并选中录像");
     let progress = postprocess::Progress {
@@ -1679,7 +1696,7 @@ pub async fn sessions_merge(
     let result = postprocess::merge(&files, Some(&progress)).await;
     match &result {
         Ok(merged) => {
-            let danmaku = merge_danmaku_files(&plan.danmaku, &merged.path);
+            let danmaku = merge_danmaku_files(&sources, &merged.path);
             register_merged_session(
                 &state.db,
                 &merged_room_id,
@@ -1813,6 +1830,40 @@ fn merge_plan(mut sessions: Vec<RecordSession>) -> MergePlan {
         total_ms,
         room_id,
     }
+}
+
+/// 逐个 ffprobe 合并源；数组顺序与 `merge_plan.files` 一致。
+async fn probe_merge_durations(files: &[PathBuf]) -> Vec<Option<i64>> {
+    let mut durations = Vec::with_capacity(files.len());
+    for file in files {
+        let duration = crate::post::media_duration_ms(file)
+            .await
+            .map(|ms| ms as i64)
+            .filter(|ms| *ms > 0);
+        durations.push(duration);
+    }
+    durations
+}
+
+/// 只有所有源都探测成功才使用容器时长，避免一段失败后偏移半新半旧。
+fn actual_total_ms(durations: &[Option<i64>]) -> Option<i64> {
+    if durations.is_empty() || durations.iter().any(Option::is_none) {
+        return None;
+    }
+    Some(durations.iter().map(|value| value.unwrap_or(0)).sum())
+}
+
+fn retime_danmaku_sources(
+    mut sources: Vec<postprocess::DanmakuSource>,
+    durations: &[Option<i64>],
+) -> Vec<postprocess::DanmakuSource> {
+    if sources.len() != durations.len() || durations.iter().any(Option::is_none) {
+        return sources;
+    }
+    for (source, duration) in sources.iter_mut().zip(durations) {
+        source.duration_ms = duration.unwrap_or(source.duration_ms);
+    }
+    sources
 }
 
 #[cfg(test)]
@@ -1980,6 +2031,34 @@ mod tests {
             assert!(!sidecar.exists(), "{} 应被清理", sidecar.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retimes_danmaku_offsets_to_actual_container_durations() {
+        let source = |duration_ms| postprocess::DanmakuSource {
+            jsonl: None,
+            duration_ms,
+        };
+        let sources = vec![source(60_000), source(60_000)];
+        let durations = vec![Some(60_384), Some(62_100)];
+        let retimed = retime_danmaku_sources(sources, &durations);
+        assert_eq!(retimed[0].duration_ms, 60_384);
+        assert_eq!(retimed[1].duration_ms, 62_100);
+        assert_eq!(actual_total_ms(&durations), Some(122_484));
+    }
+
+    #[test]
+    fn merge_duration_falls_back_when_one_probe_fails() {
+        let source = |duration_ms| postprocess::DanmakuSource {
+            jsonl: None,
+            duration_ms,
+        };
+        let sources = vec![source(60_000), source(60_000)];
+        let durations = vec![Some(61_000), None];
+        let retimed = retime_danmaku_sources(sources, &durations);
+        assert_eq!(retimed[0].duration_ms, 60_000);
+        assert_eq!(retimed[1].duration_ms, 60_000);
+        assert_eq!(actual_total_ms(&durations), None);
     }
 
     #[test]

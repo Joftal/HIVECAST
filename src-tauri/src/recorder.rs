@@ -2578,6 +2578,25 @@ impl Recorder {
             }
         }
         drop(_post_job);
+        // 分片容器时长通常比标称 60 秒多出 0.2–0.5 秒，六段累计就能差出几秒。
+        // 切弹幕必须按实际容器时长推进，否则片段越靠后，弹幕相对画面越早。
+        let mut actual_durations: Vec<Option<i64>> = Vec::with_capacity(rendered.len());
+        if rendered.len() > 1 {
+            for clip in &rendered {
+                let probe = if clip.source_path.is_file() {
+                    &clip.source_path
+                } else {
+                    &clip.path
+                };
+                actual_durations.push(
+                    crate::post::media_duration_ms(probe)
+                        .await
+                        .map(|ms| ms as i64)
+                        .filter(|ms| *ms > 0),
+                );
+            }
+        }
+        let clip_windows = clip_windows(&actual_durations);
         let first = rendered.first().cloned().unwrap_or(RenderedClip {
             source_path: source_path.clone(),
             path: source_path.clone(),
@@ -2634,13 +2653,24 @@ impl Recorder {
                 } else {
                     let mut first_sliced = false;
                     for (index, clip) in rendered.iter().enumerate() {
-                        let start =
-                            (clip.started_at * 1000 - recording_started_ms - writer_shift).max(0);
-                        // 最后一段也要用结束时刻封口：停止录制后合并/收尾期间
-                        // 弹幕连接还活着，继续到达的事件不属于这段视频。
-                        let end = Some(
-                            (clip.ended_at * 1000 - recording_started_ms - writer_shift).max(start),
-                        );
+                        let (start, end) = match clip_windows.as_ref().and_then(|w| w.get(index)) {
+                            Some((actual_start, actual_end)) => (
+                                (*actual_start - writer_shift).max(0),
+                                Some((*actual_end - writer_shift).max(0)),
+                            ),
+                            None => {
+                                let start =
+                                    (clip.started_at * 1000 - recording_started_ms - writer_shift)
+                                        .max(0);
+                                // 最后一段也要用结束时刻封口：停止录制后合并/收尾期间
+                                // 弹幕连接还活着，继续到达的事件不属于这段视频。
+                                let end = Some(
+                                    (clip.ended_at * 1000 - recording_started_ms - writer_shift)
+                                        .max(start),
+                                );
+                                (start, end)
+                            }
+                        };
                         let out = if index == 0 {
                             first_jsonl.clone()
                         } else {
@@ -2683,11 +2713,15 @@ impl Recorder {
             (danmaku_path.clone(), danmaku_count)
         };
 
+        let first_ended_at = clip_windows
+            .as_ref()
+            .map(|windows| first.started_at + (windows[0].1 + 999) / 1000)
+            .unwrap_or(first.ended_at);
         match self.db.finish_session_with_post(
             &active.recording.session_id,
             final_status,
             reason,
-            first.ended_at,
+            first_ended_at,
             &stored_path.display().to_string(),
             file_size,
             Some(&first.source_path.display().to_string()),
@@ -2749,7 +2783,10 @@ impl Recorder {
                     reason: Some(reason.to_string()),
                     file_path: Some(clip.path.display().to_string()),
                     file_size: clip.size,
-                    duration_ms: (clip.ended_at - clip.started_at).max(0) * 1000,
+                    duration_ms: actual_durations
+                        .get(index)
+                        .and_then(|value| *value)
+                        .unwrap_or_else(|| (clip.ended_at - clip.started_at).max(0) * 1000),
                     quality: Some(active.recording.quality.clone()),
                     quality_history: active.quality_history.clone(),
                     line: Some(active.recording.line.clone()),
@@ -3560,6 +3597,21 @@ fn clip_output_path(source: &Path, index: usize) -> PathBuf {
         .unwrap_or("ts");
     let candidate = parent.join(format!("{stem}.clip{index:02}.{ext}"));
     crate::filename::reserve_unique_path(&candidate).unwrap_or(candidate)
+}
+
+/// 把每个片段容器的实际时长累加成视频时间轴区间；任一段探测失败就整体退回标称时间。
+fn clip_windows(durations: &[Option<i64>]) -> Option<Vec<(i64, i64)>> {
+    if durations.is_empty() || durations.iter().any(Option::is_none) {
+        return None;
+    }
+    let mut cursor = 0i64;
+    let mut windows = Vec::with_capacity(durations.len());
+    for duration in durations {
+        let duration = duration.unwrap_or(0).max(0);
+        windows.push((cursor, cursor + duration));
+        cursor += duration;
+    }
+    Some(windows)
 }
 
 fn manifest_path(source: &Path) -> PathBuf {
@@ -4824,6 +4876,17 @@ mod tests {
         assert_eq!(candidate_qn(&candidate(1080)), 250);
         assert_eq!(candidate_qn(&candidate(720)), 150);
         assert_eq!(candidate_qn(&candidate(480)), 80);
+    }
+
+    #[test]
+    fn clip_windows_follow_actual_container_durations() {
+        let windows = clip_windows(&[Some(60_384), Some(60_500), Some(19_150)]).unwrap();
+        assert_eq!(
+            windows,
+            vec![(0, 60_384), (60_384, 120_884), (120_884, 140_034)]
+        );
+        assert!(clip_windows(&[Some(60_384), None]).is_none());
+        assert!(clip_windows(&[]).is_none());
     }
 
     #[test]

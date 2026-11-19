@@ -2346,18 +2346,27 @@ mod douyu_tests {
 // 协议是 JCE/TARS：WS 上每条消息都是一个 WebSocketCommand{iCmdType, vData}。
 // - 注册：命令 1，vData = WSUserInfo（房间三元组 + 分组类型 3）
 // - 心跳：命令 3，vData = Wup 信封（onlineui / OnUserHeartBeat）
-// - 弹幕：命令 7，vData = WSPushMessage{iUri, sMsg}：iUri 1400 聊天、6501 礼物。
+// - 弹幕：命令 7（单条 WSPushMessage）与命令 22（WSPushMessage_V2 批量）；
+//   iUri 1400 聊天、6501 礼物。
 // 房间三元组（lUid / lChannelId / lSubChannelId）只能从移动版页面里抠。
 // ---------------------------------------------------------------------------
 
-const HUYA_WS: &str = "ws://ws.api.huya.com";
+// cdnws.api.huya.com 的证书覆盖 *.cdn.huya.com，可以走 TLS；ws.api.huya.com 的证书
+// 不匹配，只能明文，不能把账号 Cookie 放进去。
+const HUYA_WS: &str = "wss://cdnws.api.huya.com";
 const HUYA_HEARTBEAT: Duration = Duration::from_secs(60);
 const HUYA_UA: &str = "Mozilla/5.0 (Linux; Android 5.1.1; Nexus 6 Build/LYZ28E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Mobile Safari/537.36";
 const HUYA_CMD_REGISTER: i64 = 1;
 const HUYA_CMD_WUP_REQ: i64 = 3;
 const HUYA_CMD_MSG_PUSH: i64 = 7;
+const HUYA_CMD_MSG_PUSH_V2: i64 = 22;
+const HUYA_CMD_VERIFY_COOKIE: i64 = 10;
 const HUYA_URI_CHAT: i64 = 1400;
 const HUYA_URI_GIFT: i64 = 6501;
+/// 虎牙会把同一条聊天在极短时间内推两遍：同一 lMsgId 去重窗口给足 10 秒；
+/// 没有 lMsgId 的旧帧退回「用户 + 内容」1 秒窗口。
+const HUYA_DUP_ID_WINDOW: Duration = Duration::from_secs(10);
+const HUYA_DUP_TEXT_WINDOW: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HuyaIds {
@@ -2406,6 +2415,68 @@ fn huya_command(cmd: i64, data: Vec<u8>) -> Vec<u8> {
     enc.int(0, cmd);
     enc.bytes(1, &data);
     enc.into_vec()
+}
+
+fn huya_ws_request(
+    cookie: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    let mut request = HUYA_WS
+        .to_string()
+        .into_client_request()
+        .map_err(|err| format!("虎牙弹幕握手请求构建失败：{err}"))?;
+    request
+        .headers_mut()
+        .insert("Origin", HeaderValue::from_static("https://www.huya.com"));
+    request
+        .headers_mut()
+        .insert("User-Agent", HeaderValue::from_static(HUYA_UA));
+    if let Some(cookie) = cookie.filter(|value| !value.trim().is_empty()) {
+        if let Ok(value) = HeaderValue::from_str(cookie) {
+            request.headers_mut().insert("Cookie", value);
+        }
+    }
+    Ok(request)
+}
+
+/// 从 Cookie 里取登录 uid；只有拿到 uid 才发 VerifyCookie，匿名连接保持匿名。
+fn huya_cookie_uid(cookie: &str) -> Option<i64> {
+    for key in ["yyuid", "udb_uid"] {
+        for part in cookie.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim() == key {
+                if let Ok(uid) = value.trim().parse::<i64>() {
+                    if uid > 0 {
+                        return Some(uid);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 与 Web 端 sendVerifyCookie 相同的请求：登录态下让服务端把这条 WS 与账号绑定。
+fn huya_verify_cookie_packet(cookie: &str, uid: i64) -> Vec<u8> {
+    let mut info = jce::Enc::new();
+    info.int(0, uid);
+    info.string(1, HUYA_UA);
+    info.string(2, cookie);
+    info.string(3, "");
+    info.int(4, 1);
+    info.string(5, "webh5");
+    huya_command(HUYA_CMD_VERIFY_COOKIE, info.into_vec())
+}
+
+fn huya_verify_result(payload: &[u8]) -> Option<i64> {
+    let fields = jce::decode(payload).ok()?;
+    if jce::get_int(&fields, 0) != Some(11) {
+        return None;
+    }
+    let body = jce::get_bytes(&fields, 1)?;
+    let response = jce::decode(body).ok()?;
+    jce::get_int(&response, 0)
 }
 
 fn huya_register_packet(ids: &HuyaIds) -> Vec<u8> {
@@ -2472,40 +2543,25 @@ fn huya_heartbeat_packet(ids: &HuyaIds) -> Vec<u8> {
     huya_command(HUYA_CMD_WUP_REQ, wup)
 }
 
-/// 虎牙的字体颜色是 0xBBGGRR，转成前端用的 0xRRGGBB；<= 0 表示默认白色。
+/// 虎牙的 iFontColor 按 0xRRGGBB 下发（网页端直接转 #RRGGBB）；
+/// <= 0 表示默认白色。
 fn huya_color(raw: i64) -> u32 {
     if raw <= 0 {
         return 0xFF_FF_FF;
     }
-    let value = raw as u32;
-    let red = value & 0xFF;
-    let green = (value >> 8) & 0xFF;
-    let blue = (value >> 16) & 0xFF;
-    (red << 16) | (green << 8) | blue
+    (raw as u32) & 0x00FF_FFFF
 }
 
-fn huya_messages(payload: &[u8]) -> Vec<DanmakuMessage> {
-    let mut out = Vec::new();
-    let Ok(fields) = jce::decode(payload) else {
-        return out;
-    };
-    if jce::get_int(&fields, 0) != Some(HUYA_CMD_MSG_PUSH) {
-        return out;
-    }
-    let Some(body) = jce::get_bytes(&fields, 1) else {
-        return out;
-    };
-    let Ok(push) = jce::decode(body) else {
-        return out;
-    };
-    let uri = jce::get_int(&push, 1).unwrap_or(0);
-    let Some(data) = jce::get_bytes(&push, 2) else {
-        return out;
-    };
-    let Ok(notice) = jce::decode(data) else {
-        return out;
-    };
+#[derive(Debug, Clone)]
+struct HuyaEvent {
+    /// WSPushMessage.lMsgId；服务端重发同一帧时值不变，用于精确去重。
+    msg_id: i64,
+    message: DanmakuMessage,
+}
 
+/// 解析单条消息体（WSPushMessage 与 WSPushMessage_V2 的 WSMsgItem 共用）。
+fn huya_message(uri: i64, msg_id: i64, data: &[u8], room_uid: i64) -> Option<HuyaEvent> {
+    let notice = jce::decode(data).ok()?;
     match uri {
         HUYA_URI_CHAT => {
             let user = jce::get_struct(&notice, 0)
@@ -2514,37 +2570,154 @@ fn huya_messages(payload: &[u8]) -> Vec<DanmakuMessage> {
                 .to_string();
             let content = jce::get_str(&notice, 3).unwrap_or("").trim().to_string();
             if content.is_empty() {
-                return out;
+                return None;
             }
-            let color = jce::get_struct(&notice, 6)
+            // 聊天列表优先用 tFormat(5)，弹幕浮层用 tBulletFormat(6)；
+            // 两者通常只填一个，取第一个有效值，避免把彩色弹幕写成白色。
+            let bullet = jce::get_struct(&notice, 6)
                 .and_then(|fields| jce::get_int(fields, 0))
                 .unwrap_or(-1);
-            out.push(DanmakuMessage {
-                offset_ms: 0,
-                kind: "chat".into(),
-                user: if user.is_empty() { None } else { Some(user) },
-                content,
-                color: huya_color(color),
-            });
+            let color = if bullet > 0 {
+                bullet
+            } else {
+                jce::get_struct(&notice, 5)
+                    .and_then(|fields| jce::get_int(fields, 0))
+                    .unwrap_or(-1)
+            };
+            Some(HuyaEvent {
+                msg_id,
+                message: DanmakuMessage {
+                    offset_ms: 0,
+                    kind: "chat".into(),
+                    user: if user.is_empty() { None } else { Some(user) },
+                    content,
+                    color: huya_color(color),
+                },
+            })
         }
         HUYA_URI_GIFT => {
+            // 6501 是「本房间的礼物」广播；同一条 WS 会收到同平台其它房间的礼物，
+            // 必须用 lPresenterUid 过滤，否则弹幕文件会混入别的主播收礼记录。
+            let presenter = jce::get_int(&notice, 3).unwrap_or(0);
+            if presenter > 0 && room_uid > 0 && presenter != room_uid {
+                return None;
+            }
             let user = jce::get_str(&notice, 6).unwrap_or("").to_string();
-            let name = jce::get_str(&notice, 7).unwrap_or("").trim().to_string();
+            // 20 是道具名（sPropsName），7 是发送文案（sSendContent）；优先用道具名。
+            let props = jce::get_str(&notice, 20).unwrap_or("").trim();
+            let name = if props.is_empty() {
+                jce::get_str(&notice, 7).unwrap_or("").trim()
+            } else {
+                props
+            };
             if name.is_empty() {
-                return out;
+                return None;
             }
             let count = jce::get_int(&notice, 2).unwrap_or(1).max(1);
-            out.push(DanmakuMessage {
-                offset_ms: 0,
-                kind: "gift".into(),
-                user: if user.is_empty() { None } else { Some(user) },
-                content: format!("{name} x{count}"),
-                color: 0xFF_C8_5C,
-            });
+            Some(HuyaEvent {
+                msg_id,
+                message: DanmakuMessage {
+                    offset_ms: 0,
+                    kind: "gift".into(),
+                    user: if user.is_empty() { None } else { Some(user) },
+                    content: format!("{name} x{count}"),
+                    color: 0xFF_C8_5C,
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn huya_events(payload: &[u8], room_uid: i64) -> Vec<HuyaEvent> {
+    let mut out = Vec::new();
+    let Ok(fields) = jce::decode(payload) else {
+        return out;
+    };
+    let Some(cmd) = jce::get_int(&fields, 0) else {
+        return out;
+    };
+    let Some(body) = jce::get_bytes(&fields, 1) else {
+        return out;
+    };
+    match cmd {
+        HUYA_CMD_MSG_PUSH => {
+            let Ok(push) = jce::decode(body) else {
+                return out;
+            };
+            let uri = jce::get_int(&push, 1).unwrap_or(0);
+            let msg_id = jce::get_int(&push, 5).unwrap_or(0);
+            if let Some(data) = jce::get_bytes(&push, 2) {
+                if let Some(event) = huya_message(uri, msg_id, data, room_uid) {
+                    out.push(event);
+                }
+            }
+        }
+        HUYA_CMD_MSG_PUSH_V2 => {
+            // WSPushMessage_V2 { sGroupId(0), vMsgItem(1) }，
+            // WSMsgItem { iUri(0), sMsg(1), lMsgId(2) }。
+            let Ok(push) = jce::decode(body) else {
+                return out;
+            };
+            let Some(items) = jce::get_list(&push, 1) else {
+                return out;
+            };
+            for item in items {
+                let jce::Value::Struct(fields) = item else {
+                    continue;
+                };
+                let uri = jce::get_int(fields, 0).unwrap_or(0);
+                let msg_id = jce::get_int(fields, 2).unwrap_or(0);
+                let Some(data) = jce::get_bytes(fields, 1) else {
+                    continue;
+                };
+                if let Some(event) = huya_message(uri, msg_id, data, room_uid) {
+                    out.push(event);
+                }
+            }
         }
         _ => {}
     }
     out
+}
+
+/// 虎牙聊天重复帧去重。lMsgId 优先；没有 id 时退回「用户 + 内容」短窗口。
+#[derive(Default)]
+struct HuyaDeduper {
+    seen: HashMap<String, Instant>,
+    checks: u64,
+}
+
+impl HuyaDeduper {
+    fn allow(&mut self, event: &HuyaEvent, now: Instant) -> bool {
+        self.checks += 1;
+        if self.checks % 256 == 0 {
+            self.seen
+                .retain(|_, at| now.saturating_duration_since(*at) < HUYA_DUP_ID_WINDOW);
+        }
+        // 同一条聊天可能以新的 lMsgId 重发，单看 id 抓不住；文本窗口是兜底。
+        let text_key = format!(
+            "c:{}\u{1f}{}",
+            event.message.user.as_deref().unwrap_or(""),
+            event.message.content
+        );
+        if let Some(last) = self.seen.get(&text_key) {
+            if now.saturating_duration_since(*last) < HUYA_DUP_TEXT_WINDOW {
+                return false;
+            }
+        }
+        if event.msg_id > 0 {
+            let id_key = format!("i:{}", event.msg_id);
+            if let Some(last) = self.seen.get(&id_key) {
+                if now.saturating_duration_since(*last) < HUYA_DUP_ID_WINDOW {
+                    return false;
+                }
+            }
+            self.seen.insert(id_key, now);
+        }
+        self.seen.insert(text_key, now);
+        true
+    }
 }
 
 async fn run_huya_room(app: AppHandle, conn: Arc<RoomConn>) {
@@ -2576,7 +2749,12 @@ async fn huya_once(
     backoff: &mut Duration,
 ) -> Result<(), String> {
     let ids = huya_ids(&conn.room.room_key).await?;
-    let (mut ws, _) = tokio_tungstenite::connect_async(HUYA_WS)
+    // 房间页请求走 get_text，共享 HTTP 层会自动注入登录 Cookie；WS 走 WSS 才允许
+    // 带 Cookie。ws.api.huya.com 的证书不匹配，若降级回明文就不要再加 Cookie。
+    let cookie = crate::credential::cookie_for_url("https://www.huya.com/")
+        .filter(|value| !value.trim().is_empty());
+    let request = huya_ws_request(cookie.as_deref())?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|err| format!("虎牙弹幕连接失败：{err}"))?;
     ws.send(WsMessage::Binary(huya_register_packet(&ids)))
@@ -2585,6 +2763,16 @@ async fn huya_once(
     ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
         .await
         .map_err(|err| format!("发送心跳失败：{err}"))?;
+    if let Some(cookie) = cookie.as_deref() {
+        if let Some(uid) = huya_cookie_uid(cookie) {
+            ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+                .await
+                .map_err(|err| format!("发送 Cookie 校验包失败：{err}"))?;
+            tracing::info!(room = %conn.room.room_key, uid, "虎牙弹幕使用登录态");
+        }
+    } else {
+        tracing::debug!(room = %conn.room.room_key, "虎牙弹幕使用匿名连接");
+    }
     *backoff = Duration::from_secs(1);
 
     let mut heartbeat = tokio::time::interval(HUYA_HEARTBEAT);
@@ -2595,6 +2783,7 @@ async fn huya_once(
     let mut window_start = Instant::now();
     let mut count = 0u32;
     let mut batch: Vec<DanmakuMessage> = Vec::new();
+    let mut deduper = HuyaDeduper::default();
 
     loop {
         tokio::select! {
@@ -2606,8 +2795,14 @@ async fn huya_once(
             incoming = ws.next() => {
                 match incoming {
                     Some(Ok(WsMessage::Binary(data))) => {
-                        for message in huya_messages(&data) {
-                            accept(conn, &mut window_start, &mut count, &mut batch, message);
+                        if let Some(valid) = huya_verify_result(&data) {
+                            tracing::info!(room = %conn.room.room_key, valid, "虎牙弹幕 Cookie 校验响应");
+                        }
+                        let now = Instant::now();
+                        for event in huya_events(&data, ids.uid) {
+                            if deduper.allow(&event, now) {
+                                accept(conn, &mut window_start, &mut count, &mut batch, event.message);
+                            }
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) => return Err("虎牙弹幕连接被服务端关闭".into()),
@@ -2687,11 +2882,16 @@ mod huya_tests {
     }
 
     fn push_packet(uri: i64, body: Vec<u8>) -> Vec<u8> {
+        push_packet_with_id(uri, body, 0)
+    }
+
+    fn push_packet_with_id(uri: i64, body: Vec<u8>, msg_id: i64) -> Vec<u8> {
         let mut push = jce::Enc::new();
         push.int(0, 0);
         push.int(1, uri);
         push.bytes(2, &body);
         push.int(3, 0);
+        push.int(5, msg_id);
         huya_command(HUYA_CMD_MSG_PUSH, push.into_vec())
     }
 
@@ -2716,12 +2916,78 @@ mod huya_tests {
         notice.raw(bullet.as_slice());
         notice.end_struct();
 
-        let messages = huya_messages(&push_packet(HUYA_URI_CHAT, notice.into_vec()));
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].kind, "chat");
-        assert_eq!(messages[0].user.as_deref(), Some("测试用户"));
-        assert_eq!(messages[0].content, "这波很强");
-        assert_eq!(messages[0].color, 0x00_FF_00_00);
+        let events = huya_events(
+            &push_packet_with_id(HUYA_URI_CHAT, notice.into_vec(), 9001),
+            1_346_609_715,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].msg_id, 9001);
+        assert_eq!(events[0].message.kind, "chat");
+        assert_eq!(events[0].message.user.as_deref(), Some("测试用户"));
+        assert_eq!(events[0].message.content, "这波很强");
+        assert_eq!(events[0].message.color, 0x00_00_FF);
+    }
+
+    #[test]
+    fn parses_v2_batch_push() {
+        let mut notices = Vec::new();
+        for (user, content) in [("甲", "一"), ("乙", "二")] {
+            let mut sender = jce::Enc::new();
+            sender.int(0, 1);
+            sender.string(2, user);
+            let mut notice = jce::Enc::new();
+            notice.begin_struct(0);
+            notice.raw(sender.as_slice());
+            notice.end_struct();
+            notice.string(3, content);
+            let mut bullet = jce::Enc::new();
+            bullet.int(0, 0xFF_CC_00);
+            notice.begin_struct(6);
+            notice.raw(bullet.as_slice());
+            notice.end_struct();
+            notices.push(notice.into_vec());
+        }
+
+        let mut list = jce::Enc::new();
+        list.begin_list(1, notices.len());
+        for (index, notice) in notices.iter().enumerate() {
+            list.begin_struct(0);
+            list.int(0, HUYA_URI_CHAT);
+            list.bytes(1, notice);
+            list.int(2, 100 + index as i64);
+            list.end_struct();
+        }
+        let mut v2 = jce::Enc::new();
+        v2.string(0, "group");
+        v2.raw(list.as_slice());
+        let packet = huya_command(HUYA_CMD_MSG_PUSH_V2, v2.into_vec());
+
+        let events = huya_events(&packet, 1_346_609_715);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].msg_id, 100);
+        assert_eq!(events[0].message.content, "一");
+        assert_eq!(events[0].message.color, 0xFF_CC_00);
+        assert_eq!(events[1].msg_id, 101);
+        assert_eq!(events[1].message.content, "二");
+    }
+
+    #[test]
+    fn falls_back_to_chat_format_color() {
+        let mut sender = jce::Enc::new();
+        sender.string(2, "彩色");
+        let mut notice = jce::Enc::new();
+        notice.begin_struct(0);
+        notice.raw(sender.as_slice());
+        notice.end_struct();
+        notice.string(3, "紫色弹幕");
+        let mut format = jce::Enc::new();
+        format.int(0, 0x7C_5F_D2);
+        notice.begin_struct(5);
+        notice.raw(format.as_slice());
+        notice.end_struct();
+        let events = huya_events(&push_packet(HUYA_URI_CHAT, notice.into_vec()), 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message.color, 0x7C_5F_D2);
     }
 
     #[test]
@@ -2735,11 +3001,98 @@ mod huya_tests {
         notice.string(5, "主播");
         notice.string(6, "老板");
         notice.string(7, "荧光棒");
-        let messages = huya_messages(&push_packet(HUYA_URI_GIFT, notice.into_vec()));
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].kind, "gift");
-        assert_eq!(messages[0].user.as_deref(), Some("老板"));
-        assert_eq!(messages[0].content, "荧光棒 x3");
+        let events = huya_events(
+            &push_packet(HUYA_URI_GIFT, notice.into_vec()),
+            1_346_609_715,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message.kind, "gift");
+        assert_eq!(events[0].message.user.as_deref(), Some("老板"));
+        assert_eq!(events[0].message.content, "荧光棒 x3");
+    }
+
+    #[test]
+    fn prefers_gift_props_name_over_send_text() {
+        let mut notice = jce::Enc::new();
+        notice.int(2, 2);
+        notice.int(3, 1_346_609_715);
+        notice.string(6, "老板");
+        notice.string(7, "送出礼物");
+        notice.string(20, "荧光棒");
+        let events = huya_events(
+            &push_packet(HUYA_URI_GIFT, notice.into_vec()),
+            1_346_609_715,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message.content, "荧光棒 x2");
+    }
+
+    #[test]
+    fn drops_gift_from_another_room() {
+        let mut notice = jce::Enc::new();
+        notice.int(0, 520);
+        notice.string(1, "pay-id");
+        notice.int(2, 1);
+        notice.int(3, 999_999);
+        notice.int(4, 777);
+        notice.string(5, "别的主播");
+        notice.string(6, "老板");
+        notice.string(7, "荧光棒");
+        let packet = push_packet(HUYA_URI_GIFT, notice.into_vec());
+        assert!(huya_events(&packet, 1_346_609_715).is_empty());
+        assert_eq!(huya_events(&packet, 999_999).len(), 1);
+    }
+
+    #[test]
+    fn huya_deduper_prefers_msg_id_then_text_window() {
+        use std::time::{Duration, Instant};
+        let mut deduper = HuyaDeduper::default();
+        let now = Instant::now();
+        let event = HuyaEvent {
+            msg_id: 77,
+            message: DanmakuMessage {
+                offset_ms: 0,
+                kind: "chat".into(),
+                user: Some("甲".into()),
+                content: "666".into(),
+                color: 0xFF_FF_FF,
+            },
+        };
+        assert!(deduper.allow(&event, now));
+        assert!(!deduper.allow(&event, now + Duration::from_secs(5)));
+        assert!(deduper.allow(&event, now + Duration::from_secs(11)));
+
+        let legacy = HuyaEvent {
+            msg_id: 0,
+            message: DanmakuMessage {
+                offset_ms: 0,
+                kind: "chat".into(),
+                user: Some("乙".into()),
+                content: "哈哈".into(),
+                color: 0xFF_FF_FF,
+            },
+        };
+        assert!(deduper.allow(&legacy, now));
+        assert!(!deduper.allow(&legacy, now + Duration::from_millis(900)));
+        assert!(deduper.allow(&legacy, now + Duration::from_millis(1100)));
+
+        // 服务端换了一个 lMsgId 重发同一句话，也要被文本窗口拦住。
+        let resent = HuyaEvent {
+            msg_id: 78,
+            message: legacy.message.clone(),
+        };
+        assert!(!deduper.allow(&resent, now + Duration::from_millis(1200)));
+        assert!(deduper.allow(&resent, now + Duration::from_millis(2200)));
+    }
+
+    #[test]
+    fn reads_login_uid_from_cookie() {
+        assert_eq!(
+            huya_cookie_uid("a=1; yyuid=1199573670219; b=2"),
+            Some(1_199_573_670_219)
+        );
+        assert_eq!(huya_cookie_uid("udb_uid=42"), Some(42));
+        assert_eq!(huya_cookie_uid("acf_uid=42"), None);
     }
 
     #[test]
@@ -2747,7 +3100,7 @@ mod huya_tests {
         let mut command = jce::Enc::new();
         command.int(0, 2);
         command.bytes(1, &[]);
-        assert!(huya_messages(command.as_slice()).is_empty());
+        assert!(huya_events(command.as_slice(), 1).is_empty());
     }
 
     #[tokio::test]
@@ -2756,7 +3109,20 @@ mod huya_tests {
         use futures_util::SinkExt;
         let room = std::env::var("HUYA_PROBE_ROOM").unwrap_or_else(|_| "660000".to_string());
         let ids = huya_ids(&room).await.expect("抓不到房间三元组");
-        let (mut ws, _) = tokio_tungstenite::connect_async(HUYA_WS)
+        if let Ok(path) = std::env::var("HUYA_PROBE_DB") {
+            let db = crate::db::Db::open(std::path::Path::new(&path)).expect("打不开探针数据库");
+            crate::credential::load_from_db(&db);
+        }
+        let cookie = if std::env::var("HUYA_PROBE_ANON").is_ok() {
+            None
+        } else {
+            std::env::var("HUYA_PROBE_COOKIE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| crate::credential::cookie_for_url("https://www.huya.com/"))
+        };
+        let request = huya_ws_request(cookie.as_deref()).expect("握手请求构建失败");
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("连不上虎牙弹幕");
         ws.send(WsMessage::Binary(huya_register_packet(&ids)))
@@ -2765,6 +3131,13 @@ mod huya_tests {
         ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
             .await
             .expect("心跳发送失败");
+        if let Some(cookie) = cookie.as_deref() {
+            if let Some(uid) = huya_cookie_uid(cookie) {
+                ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+                    .await
+                    .expect("Cookie 校验包发送失败");
+            }
+        }
 
         // 赛事房间会有系统公告，平时房间则是观众发言，两者都走 1400。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -2780,13 +3153,13 @@ mod huya_tests {
             }
             match tokio::time::timeout(left, ws.next()).await {
                 Ok(Some(Ok(WsMessage::Binary(data)))) => {
-                    for message in huya_messages(&data) {
+                    for event in huya_events(&data, ids.uid) {
                         chats += 1;
                         if samples.len() < 5 {
                             samples.push(format!(
                                 "{}: {}",
-                                message.user.unwrap_or_default(),
-                                message.content
+                                event.message.user.unwrap_or_default(),
+                                event.message.content
                             ));
                         }
                     }
@@ -2799,6 +3172,160 @@ mod huya_tests {
         }
         println!("收到虎牙弹幕 {chats} 条，样例：{samples:#?}");
         assert!(chats > 0, "30 秒内没有收到任何虎牙弹幕");
+    }
+
+    /// 统计型探针：打印命令/URI 分布、原始颜色值、重复内容，用来核对解析是否漏帧与配色字节序。
+    #[tokio::test]
+    #[ignore = "需要联网与活跃直播间（HUYA_PROBE_ROOM / HUYA_PROBE_SECS）"]
+    async fn live_probe_stats() {
+        use futures_util::SinkExt;
+        use std::collections::BTreeMap;
+        let room = std::env::var("HUYA_PROBE_ROOM").unwrap_or_else(|_| "660000".to_string());
+        let secs: u64 = std::env::var("HUYA_PROBE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let ids = huya_ids(&room).await.expect("抓不到房间三元组");
+        if let Ok(path) = std::env::var("HUYA_PROBE_DB") {
+            let db = crate::db::Db::open(std::path::Path::new(&path)).expect("打不开探针数据库");
+            crate::credential::load_from_db(&db);
+        }
+        let cookie = if std::env::var("HUYA_PROBE_ANON").is_ok() {
+            None
+        } else {
+            std::env::var("HUYA_PROBE_COOKIE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| crate::credential::cookie_for_url("https://www.huya.com/"))
+        };
+        let request = huya_ws_request(cookie.as_deref()).expect("握手请求构建失败");
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("连不上虎牙弹幕");
+        ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+            .await
+            .expect("注册包发送失败");
+        ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+            .await
+            .expect("心跳发送失败");
+        if let Some(cookie) = cookie.as_deref() {
+            if let Some(uid) = huya_cookie_uid(cookie) {
+                ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+                    .await
+                    .expect("Cookie 校验包发送失败");
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        let mut frames = 0usize;
+        let mut cmds: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut uris: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut colors: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut format_colors: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut chats = 0usize;
+        let mut gifts = 0usize;
+        let mut empty = 0usize;
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        let mut ids_seen: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut gift_other_room = 0usize;
+        let mut verify: Option<i64> = None;
+        let mut samples: Vec<String> = Vec::new();
+        let mut deduper = HuyaDeduper::default();
+        let mut events = 0usize;
+        let mut accepted = 0usize;
+        let mut dropped = 0usize;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let Ok(Some(Ok(WsMessage::Binary(data)))) = tokio::time::timeout(left, ws.next()).await
+            else {
+                break;
+            };
+            frames += 1;
+            if let Some(valid) = huya_verify_result(&data) {
+                verify = Some(valid);
+            }
+            for event in huya_events(&data, ids.uid) {
+                events += 1;
+                if deduper.allow(&event, std::time::Instant::now()) {
+                    accepted += 1;
+                } else {
+                    dropped += 1;
+                }
+            }
+            let Ok(fields) = jce::decode(&data) else {
+                continue;
+            };
+            let cmd = jce::get_int(&fields, 0).unwrap_or(-1);
+            *cmds.entry(cmd).or_default() += 1;
+            if cmd != HUYA_CMD_MSG_PUSH {
+                continue;
+            }
+            let Some(body) = jce::get_bytes(&fields, 1) else {
+                continue;
+            };
+            let Ok(push) = jce::decode(body) else {
+                continue;
+            };
+            let uri = jce::get_int(&push, 1).unwrap_or(-1);
+            let msg_id = jce::get_int(&push, 5).unwrap_or(0);
+            *uris.entry(uri).or_default() += 1;
+            if msg_id > 0 {
+                *ids_seen.entry(msg_id).or_default() += 1;
+            }
+            let Some(notice_bytes) = jce::get_bytes(&push, 2) else {
+                continue;
+            };
+            let Ok(notice) = jce::decode(notice_bytes) else {
+                continue;
+            };
+            match uri {
+                HUYA_URI_CHAT => {
+                    chats += 1;
+                    let user = jce::get_struct(&notice, 0)
+                        .and_then(|f| jce::get_str(f, 2))
+                        .unwrap_or("")
+                        .to_string();
+                    let content = jce::get_str(&notice, 3).unwrap_or("").trim().to_string();
+                    if content.is_empty() {
+                        empty += 1;
+                    }
+                    let color = jce::get_struct(&notice, 6)
+                        .and_then(|f| jce::get_int(f, 0))
+                        .unwrap_or(-1);
+                    *colors.entry(color).or_default() += 1;
+                    let format_color = jce::get_struct(&notice, 5)
+                        .and_then(|f| jce::get_int(f, 0))
+                        .unwrap_or(-1);
+                    *format_colors.entry(format_color).or_default() += 1;
+                    *seen.entry(format!("{user}\u{1f}{content}")).or_default() += 1;
+                    if samples.len() < 8 {
+                        samples.push(format!(
+                            "raw_color=0x{color:06X} -> rgb=0x{:06X} {}: {}",
+                            huya_color(color),
+                            user,
+                            content
+                        ));
+                    }
+                }
+                HUYA_URI_GIFT => {
+                    gifts += 1;
+                    let presenter = jce::get_int(&notice, 3).unwrap_or(0);
+                    if presenter > 0 && presenter != ids.uid {
+                        gift_other_room += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let dups = seen.values().filter(|n| **n > 1).count();
+        let dup_ids = ids_seen.values().filter(|n| **n > 1).count();
+        println!(
+            "authed={} verify={verify:?} frames={frames} chats={chats} gifts={gifts} gift_other_room={gift_other_room} empty={empty} dup_keys={dups} dup_ids={dup_ids} events={events} accepted={accepted} dropped={dropped}\ncmds={cmds:?}\nuris={uris:?}\ncolors={colors:?}\nformat_colors={format_colors:?}\nsamples={samples:#?}",
+            cookie.is_some()
+        );
     }
 }
 
