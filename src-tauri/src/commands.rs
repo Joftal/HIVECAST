@@ -7,8 +7,8 @@ use hivecast_ipc::{
     FollowingPage, HuyaFollowingPage, ImportFailure, ImportRoomInput, ImportRoomsResult, LineInfo,
     LiveStatus, LogStatus, MediaFile, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
     QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RemovedRoom, RoomRecord,
-    RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskRecord,
-    TrashInfo, ViewSlotInfo,
+    RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskCenter,
+    TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -1525,7 +1525,7 @@ pub async fn post_retry(
         .source_path
         .clone()
         .or_else(|| session.file_path.clone())
-        .ok_or_else(|| AppError::Internal("这段录像没有可处理的源文件".into()))?;
+        .ok_or_else(|| AppError::User("这段录像没有可处理的源文件".into()))?;
     let source_path = PathBuf::from(&source);
     if !source_path.is_file() {
         return Err(AppError::User("源封装文件已不存在，无法重试".into()));
@@ -3032,6 +3032,23 @@ fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
 }
 
 // ---- 任务中心 ----
+
+/// 任务中心全链路快照：把录制、收尾、后处理、历史场次聚合成 Run。
+#[tauri::command]
+pub fn task_center(
+    state: State<'_, AppState>,
+    history: Option<usize>,
+) -> Result<TaskCenter, AppError> {
+    crate::task_center::build(
+        &state.db,
+        &state.recorder,
+        &state.jobs,
+        &state.monitor_status,
+        state.info.ffmpeg_path.as_deref(),
+        &state.media_root,
+        history.unwrap_or(100),
+    )
+}
 
 /// 任务中心的运行中列表 = 录制（含开录中）+ 后处理/合并/弹幕导出；历史来自 task_history。
 #[tauri::command]

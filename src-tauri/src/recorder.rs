@@ -2314,7 +2314,14 @@ impl Recorder {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| active.recording.session_id.clone());
-        let _post_job = jobs.begin("post", post_label, Some(active.recording.quality.clone()));
+        let post_job = jobs.begin(
+            "finalize",
+            post_label,
+            Some(active.recording.quality.clone()),
+        );
+        // 收尾不是后处理槽位里的任务：它负责合并分片、导出弹幕、写分片清单。
+        // 单独一个阶段，任务中心才能把「录制结束但文件还没落定」画出来。
+        post_job.progress(0, "finalizing", Some("合并分片并生成文件"));
         // 状态先算出来：分割清单要把最终状态写进去，崩溃恢复才能还原。
         let (mut final_status, mut reason, mut error) = match stop_reason.as_deref() {
             Some("stopped") => ("finished", "stopped", None),
@@ -2577,7 +2584,7 @@ impl Recorder {
                 }
             }
         }
-        drop(_post_job);
+        drop(post_job);
         // 分片容器时长通常比标称 60 秒多出 0.2–0.5 秒，六段累计就能差出几秒。
         // 切弹幕必须按实际容器时长推进，否则片段越靠后，弹幕相对画面越早。
         let mut actual_durations: Vec<Option<i64>> = Vec::with_capacity(rendered.len());

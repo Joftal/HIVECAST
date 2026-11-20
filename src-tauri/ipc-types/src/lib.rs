@@ -806,6 +806,196 @@ pub struct TaskBoard {
     pub history: Vec<TaskRecord>,
 }
 
+/// 任务中心的一条 Run：从监控/开录到后处理入库的一条完整链路。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskCenter {
+    #[ts(type = "number")]
+    pub generated_at: i64,
+    pub summary: TaskSummary,
+    pub platforms: Vec<PlatformHealth>,
+    pub system: SystemHealth,
+    /// 正在录制或正在后处理的 Run（按开始时间倒序）
+    pub running: Vec<RunView>,
+    /// 正在等后处理槽位的任务（不伪造队列序号）
+    pub queued: Vec<TaskView>,
+    /// 最近完成的 Run（按结束时间倒序）
+    pub history: Vec<RunView>,
+    pub incidents: Vec<Incident>,
+}
+
+/// 系统行：ffmpeg 是否可用，以及媒体库磁盘剩余。P1 只读，不单独建表。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct SystemHealth {
+    pub ffmpeg_ok: bool,
+    #[ts(type = "number | null")]
+    pub disk_free_bytes: Option<i64>,
+    pub disk_low: bool,
+    pub media_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskSummary {
+    #[ts(type = "number")]
+    pub rooms: i64,
+    #[ts(type = "number")]
+    pub live: i64,
+    #[ts(type = "number")]
+    pub recording: i64,
+    #[ts(type = "number")]
+    pub queued: i64,
+    #[ts(type = "number")]
+    pub running: i64,
+    /// 最近 24 小时失败的 Run 数
+    #[ts(type = "number")]
+    pub failed: i64,
+    #[ts(type = "number")]
+    pub incidents: i64,
+}
+
+/// Run 关联的直播间；房间被移除后历史 Run 仍然保留标题。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RunRoom {
+    pub id: String,
+    pub platform: String,
+    pub room_key: String,
+    pub host_name: String,
+    pub title: String,
+    pub avatar_url: Option<String>,
+}
+
+/// 一条 Run 的阶段快照；只有可量化阶段才带 percent。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct StageView {
+    /// record | finalize | post | commit，或 merging / exporting
+    pub key: String,
+    /// pending | active | done | failed | cancelled | skipped
+    pub state: String,
+    pub detail: Option<String>,
+    #[ts(type = "number | null")]
+    pub percent: Option<i64>,
+}
+
+/// 一条 Run 展示所需的全部信息。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct RunView {
+    /// session:{id} 或 task:{id}，前端做 key 与详情选择
+    pub id: String,
+    pub room: Option<RunRoom>,
+    /// recording | finalizing | running | queued | done | failed | partial | cancelled | interrupted
+    pub state: String,
+    /// recording / starting / finalizing / postprocessing / merging / exporting / queued / done / failed / cancelled / interrupted
+    pub stage: String,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub ended_at: Option<i64>,
+    #[ts(type = "number")]
+    pub duration_ms: i64,
+    #[ts(type = "number")]
+    pub bytes: i64,
+    pub quality: Option<String>,
+    pub tasks: Vec<TaskView>,
+    pub stages: Vec<StageView>,
+}
+
+/// Run 下的一个可执行任务（录制、转封装、合并、弹幕导出）。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskView {
+    pub id: String,
+    /// record | post | remux | merge | danmaku | finalize
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    /// running | queued | done | failed | cancelled | interrupted
+    pub state: String,
+    /// queued / preparing / running / validating / committing / done / failed / cancelled
+    pub stage: Option<String>,
+    #[ts(type = "number")]
+    pub percent: i64,
+    pub message: Option<String>,
+    pub session_id: Option<String>,
+    pub room_id: Option<String>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub finished_at: Option<i64>,
+    /// 多片段收尾时的片段序号（从 1 开始）；单片段或非分片任务为 null。
+    #[ts(type = "number | null")]
+    pub clip_index: Option<u32>,
+    /// 同一条 Run 的片段总数；0 表示未知/不适用。
+    #[ts(type = "number")]
+    pub clip_count: u32,
+    /// auto | manual | merge | record
+    pub queue: String,
+    #[ts(type = "number | null")]
+    pub queued_at: Option<i64>,
+}
+
+/// 四平台运行态势：登录态、房间/直播/录制数、批量关注与监控退避。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct PlatformHealth {
+    pub platform: String,
+    /// ok | expired | none
+    pub auth: String,
+    #[ts(type = "number")]
+    pub rooms: i64,
+    #[ts(type = "number")]
+    pub live: i64,
+    #[ts(type = "number")]
+    pub recording: i64,
+    #[ts(type = "number")]
+    pub paused: i64,
+    #[ts(type = "number")]
+    pub batch_rooms: i64,
+    pub checking: bool,
+    pub backoff: bool,
+    #[ts(type = "number | null")]
+    pub last_checked_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub next_check_in_secs: Option<i64>,
+    /// ok | warn | error | idle
+    pub level: String,
+    pub message: Option<String>,
+}
+
+/// 需要处理的一条异常；id 稳定，前端可去重。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct Incident {
+    pub id: String,
+    /// task_failed | record_failed | monitor_backoff | login_expired | ffmpeg_missing | disk_low
+    pub code: String,
+    /// error | warn
+    pub severity: String,
+    /// task | record | monitor | platform | system
+    pub scope: String,
+    pub platform: Option<String>,
+    pub room_id: Option<String>,
+    pub task_id: Option<String>,
+    pub title: String,
+    pub detail: Option<String>,
+    #[ts(type = "number")]
+    pub at: i64,
+    /// retry_post | open_room | open_account | open_storage | open_task
+    pub action: String,
+}
 /// 一条录像登记在册的文件（主文件、源封装母带、派生文件）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

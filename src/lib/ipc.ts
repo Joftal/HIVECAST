@@ -33,7 +33,16 @@ import type { Playback } from "./bindings/Playback";
 import type { QualityInfo } from "./bindings/QualityInfo";
 import type { Settings } from "./bindings/Settings";
 import type { PostProgress } from "./bindings/PostProgress";
+import type { Incident } from "./bindings/Incident";
+import type { PlatformHealth } from "./bindings/PlatformHealth";
+import type { RunRoom } from "./bindings/RunRoom";
+import type { RunView } from "./bindings/RunView";
+import type { StageView } from "./bindings/StageView";
 import type { TaskBoard } from "./bindings/TaskBoard";
+import type { TaskCenter } from "./bindings/TaskCenter";
+import type { TaskSummary } from "./bindings/TaskSummary";
+import type { SystemHealth } from "./bindings/SystemHealth";
+import type { TaskView } from "./bindings/TaskView";
 import type { TaskRecord } from "./bindings/TaskRecord";
 import type { TrashInfo } from "./bindings/TrashInfo";
 import type { PostResult } from "./bindings/PostResult";
@@ -80,7 +89,16 @@ export type {
   PostResult,
   QualityInfo,
   TaskBoard,
+  TaskCenter,
   TaskRecord,
+  TaskSummary,
+  SystemHealth,
+  TaskView,
+  RunRoom,
+  RunView,
+  StageView,
+  PlatformHealth,
+  Incident,
   TrashInfo,
   AppNotice,
   RecordSession,
@@ -611,6 +629,11 @@ export async function activeTasks(): Promise<ActiveTask[]> {
 /** 任务中心：运行中 + 历史任务。 */
 export async function taskBoard(limit = 100): Promise<TaskBoard> {
   return invoke<TaskBoard>("task_board", { limit });
+}
+
+/// 任务中心全链路快照：Run、平台态势、异常与最近完成。
+export async function taskCenter(limit = 100): Promise<TaskCenter> {
+  return invoke<TaskCenter>("task_center", { history: limit });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

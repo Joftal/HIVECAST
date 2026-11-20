@@ -31,6 +31,7 @@ mod segment;
 mod settings;
 mod state;
 mod stream;
+mod task_center;
 mod thumbs;
 mod tray;
 mod view;
@@ -342,6 +343,7 @@ pub fn run() {
             commands::media_stop,
             commands::active_tasks,
             commands::task_board,
+            commands::task_center,
             commands::media_files,
             commands::trash_info,
             commands::trash_open,

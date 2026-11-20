@@ -21,6 +21,7 @@ import {
   ffmpegStatus,
   isTauri,
   onAppNotice,
+  roomsList,
   onCloseBlocked,
   onCloseReady,
   settingsGet,
@@ -519,7 +520,25 @@ export default function App() {
             onImmersiveChange={setImmersive}
           />
         ) : tab === "tasks" ? (
-          <TasksPage seed={taskSeed} onSeedApplied={() => setTaskSeed(null)} />
+          <TasksPage
+            seed={taskSeed}
+            onSeedApplied={() => setTaskSeed(null)}
+            onOpenSettings={(page) => openSettings(page)}
+            onOpenMonitor={() => setTab("monitor")}
+            onOpenRoomFiles={async (roomId) => {
+              try {
+                const view = (await roomsList()).find((item) => item.room.id === roomId);
+                if (!view) {
+                  notify.error(t("tasks.openFilesMissing"));
+                  return;
+                }
+                setRoomFiles(view.room);
+                setTab("monitor");
+              } catch (err) {
+                notify.error(err);
+              }
+            }}
+          />
         ) : (
           <SettingsView
             initialPage={settingsPage ?? undefined}

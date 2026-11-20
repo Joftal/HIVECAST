@@ -289,6 +289,12 @@ pub struct JobGuard {
 }
 
 impl JobGuard {
+    /// 给包装型任务推进阶段（录制收尾用它把「收尾中」显示出来）。
+    pub fn progress(&self, percent: i64, stage: &str, message: Option<&str>) {
+        self.jobs
+            .progress(&self.id, percent, stage, "running", message);
+    }
+
     pub fn finish(mut self, state: &str, message: Option<&str>) {
         self.jobs.finish(&self.id, state, message);
         self.finished = true;
