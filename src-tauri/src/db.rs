@@ -78,11 +78,33 @@ CREATE TABLE IF NOT EXISTS task_history (
     session_id TEXT,
     room_id TEXT,
     started_at INTEGER NOT NULL,
+    -- 入队与真正开始执行分开记：排队时长不能被任务创建时间糊掉
+    queued_at INTEGER,
+    started_running_at INTEGER,
     finished_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_history_started
     ON task_history (started_at DESC);
+
+-- 阶段事件：只记转换与 25/50/75/100 里程碑，不按秒膨胀。
+CREATE TABLE IF NOT EXISTS task_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    kind TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    state TEXT NOT NULL,
+    percent INTEGER NOT NULL DEFAULT 0,
+    message TEXT,
+    at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_event_run
+    ON task_event (run_id, at);
+
+CREATE INDEX IF NOT EXISTS idx_task_event_task
+    ON task_event (task_id, at);
 
 -- 一条录像登记在册的全部文件：主文件、源封装母带、后处理派生文件。
 -- record_session 的 file_path/source_path 仍是播放与兼容的主索引，这张表负责完整清单。
@@ -1637,13 +1659,14 @@ impl Db {
             .execute(
                 "INSERT INTO task_history (
                     id, kind, title, detail, state, percent, stage, message,
-                    session_id, room_id, started_at, finished_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)
+                    session_id, room_id, started_at, queued_at, started_running_at, finished_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, NULL, NULL)
                  ON CONFLICT(id) DO UPDATE SET
                     kind = excluded.kind, title = excluded.title, detail = excluded.detail,
                     state = excluded.state, percent = excluded.percent, stage = excluded.stage,
                     message = excluded.message, session_id = excluded.session_id,
                     room_id = excluded.room_id, started_at = excluded.started_at,
+                    queued_at = excluded.queued_at, started_running_at = NULL,
                     finished_at = NULL",
                 params![
                     task.id,
@@ -1663,21 +1686,100 @@ impl Db {
         Ok(())
     }
 
+    /// 进度落库；queue→running 的边沿同时补 started_running_at（只写一次）。
     pub fn task_progress(
         &self,
         id: &str,
         percent: i64,
         stage: Option<&str>,
+        state: &str,
         message: Option<&str>,
+        at: i64,
     ) -> Result<(), AppError> {
         self.lock()
             .execute(
-                "UPDATE task_history SET state = 'running', percent = ?2, stage = ?3, message = ?4
-                  WHERE id = ?1 AND state = 'running'",
-                params![id, percent.clamp(0, 100), stage, message],
+                "UPDATE task_history SET state = ?2, percent = ?3, stage = ?4, message = ?5,
+                    started_running_at = CASE
+                        WHEN started_running_at IS NULL AND ?2 = 'running' AND ?4 <> 'queued'
+                        THEN ?6 ELSE started_running_at END
+                  WHERE id = ?1 AND state IN ('running', 'queued')",
+                params![id, state, percent.clamp(0, 100), stage, message, at],
             )
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// 追加一条阶段事件。id 由 SQLite 自增，传入值会被忽略。
+    pub fn task_event(&self, event: &hivecast_ipc::TaskEvent) -> Result<(), AppError> {
+        self.lock()
+            .execute(
+                "INSERT INTO task_event (task_id, run_id, kind, stage, state, percent, message, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    event.task_id,
+                    event.run_id,
+                    event.kind,
+                    event.stage,
+                    event.state,
+                    event.percent.clamp(0, 100),
+                    event.message,
+                    event.at,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 一批 Run 的事件；按时间正序，前端直接铺时间线。
+    pub fn task_events(
+        &self,
+        run_ids: &[String],
+        limit: usize,
+    ) -> Result<Vec<hivecast_ipc::TaskEvent>, AppError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 20_000);
+        let conn = self.lock();
+        // SQLite 默认只有 999 个绑定变量；任务中心一次可能拿到上千条 Run，
+        // 按 400 个一组查，避免 IN (...) 直接报 "too many SQL variables"。
+        let mut events = Vec::new();
+        for chunk in run_ids.chunks(400) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT id, task_id, run_id, kind, stage, state, percent, message, at
+                   FROM task_event WHERE run_id IN ({placeholders})
+                  ORDER BY at ASC, id ASC LIMIT ?{}",
+                chunk.len() + 1
+            );
+            let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+            let mut values: Vec<SqlValue> =
+                chunk.iter().map(|id| SqlValue::Text(id.clone())).collect();
+            values.push(SqlValue::Integer(limit as i64));
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(values), |row| {
+                    Ok(hivecast_ipc::TaskEvent {
+                        id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        stage: row.get(4)?,
+                        state: row.get(5)?,
+                        percent: row.get(6)?,
+                        message: row.get(7)?,
+                        at: row.get(8)?,
+                    })
+                })
+                .map_err(db_err)?;
+            for row in rows {
+                events.push(row.map_err(db_err)?);
+            }
+        }
+        events.sort_by_key(|event| (event.at, event.id));
+        events.truncate(limit);
+        Ok(events)
     }
 
     pub fn task_finish(
@@ -1706,8 +1808,9 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT id, kind, title, detail, state, percent, stage, message,
-                        session_id, room_id, started_at, finished_at
-                   FROM task_history WHERE state <> 'running'
+                        session_id, room_id, started_at, queued_at, started_running_at,
+                        finished_at
+                   FROM task_history WHERE state NOT IN ('running', 'queued')
                   ORDER BY started_at DESC LIMIT ?1",
             )
             .map_err(db_err)?;
@@ -1819,7 +1922,9 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         session_id: row.get(8)?,
         room_id: row.get(9)?,
         started_at: row.get(10)?,
-        finished_at: row.get(11)?,
+        queued_at: row.get(11)?,
+        started_running_at: row.get(12)?,
+        finished_at: row.get(13)?,
     })
 }
 
@@ -2298,6 +2403,30 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             column = "record_session.danmaku_count",
             "数据库迁移：新增列"
         );
+    }
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(task_history)")
+        .map_err(db_err)?;
+    let task_columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    for (name, ddl) in [
+        (
+            "queued_at",
+            "ALTER TABLE task_history ADD COLUMN queued_at INTEGER",
+        ),
+        (
+            "started_running_at",
+            "ALTER TABLE task_history ADD COLUMN started_running_at INTEGER",
+        ),
+    ] {
+        if !task_columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
     }
 
     let mut stmt = conn.prepare("PRAGMA table_info(room)").map_err(db_err)?;
@@ -3551,5 +3680,98 @@ mod tests {
             1
         );
         assert!(db.list_douyin_follows().expect("读取关注池失败").is_empty());
+    }
+
+    #[test]
+    fn task_events_and_running_start_are_persisted_in_order() {
+        let (db, _path) = temp_db("task-events");
+        let record = hivecast_ipc::TaskRecord {
+            id: "finalize:s1".into(),
+            kind: "finalize".into(),
+            title: "a.flv".into(),
+            detail: None,
+            state: "running".into(),
+            percent: 0,
+            stage: Some("queued".into()),
+            message: None,
+            session_id: Some("s1".into()),
+            room_id: None,
+            started_at: 100,
+            queued_at: Some(100),
+            started_running_at: None,
+            finished_at: None,
+        };
+        db.task_start(&record).expect("写任务失败");
+        // 仍在 queued 阶段：不能把入队时间当成真正开始执行。
+        db.task_progress("finalize:s1", 0, Some("queued"), "running", None, 150)
+            .expect("更新队列进度失败");
+        db.task_progress(
+            "finalize:s1",
+            5,
+            Some("merging"),
+            "running",
+            Some("合并分片"),
+            160,
+        )
+        .expect("更新运行进度失败");
+        for (at, stage, state, percent) in [
+            (100, "queued", "queued", 0),
+            (160, "merging", "running", 5),
+            (200, "done", "done", 100),
+        ] {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: "finalize:s1".into(),
+                run_id: Some("session:s1".into()),
+                kind: "finalize".into(),
+                stage: stage.into(),
+                state: state.into(),
+                percent,
+                message: None,
+                at,
+            })
+            .expect("写事件失败");
+        }
+        db.task_finish("finalize:s1", "done", None, 200)
+            .expect("写结束失败");
+
+        let events = db
+            .task_events(&["session:s1".into()], 10)
+            .expect("读事件失败");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].stage, "queued");
+        assert_eq!(events[1].stage, "merging");
+        assert_eq!(events[2].state, "done");
+        assert!(db
+            .task_events(&["session:other".into()], 10)
+            .unwrap()
+            .is_empty());
+
+        let history = db.task_history(10).expect("读历史失败");
+        assert_eq!(history[0].queued_at, Some(100));
+        assert_eq!(history[0].started_running_at, Some(160));
+        assert_eq!(history[0].finished_at, Some(200));
+    }
+
+    #[test]
+    fn task_events_batches_run_ids_under_the_bind_limit() {
+        let (db, _path) = temp_db("task-event-chunks");
+        let ids: Vec<String> = (0..1_200).map(|i| format!("session:{i}")).collect();
+        // 只给最后一个 Run 写事件；1200 个 IN 绑定必须自动分组，不能直接报错。
+        db.task_event(&hivecast_ipc::TaskEvent {
+            id: 0,
+            task_id: "phase:thumbnail:1199".into(),
+            run_id: Some("session:1199".into()),
+            kind: "thumbnail".into(),
+            stage: "thumbnail".into(),
+            state: "done".into(),
+            percent: 100,
+            message: None,
+            at: 1,
+        })
+        .expect("写事件失败");
+        let events = db.task_events(&ids, 100).expect("分批读事件失败");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run_id.as_deref(), Some("session:1199"));
     }
 }

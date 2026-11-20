@@ -19,4 +19,12 @@ state: string, percent: number,
 /**
  * queued / preparing / running / validating / committing / done / failed / cancelled
  */
-stage: string | null, message: string | null, sessionId: string | null, roomId: string | null, startedAt: number, finishedAt: number, };
+stage: string | null, message: string | null, sessionId: string | null, roomId: string | null, startedAt: number,
+/**
+ * 进入队列的时刻；与 started_at 分开，排队等待时长才准确。
+ */
+queuedAt: number | null,
+/**
+ * 真正开始执行（离开 queued）的时刻；排队中被取消时为空。
+ */
+startedRunningAt: number | null, finishedAt: number, };

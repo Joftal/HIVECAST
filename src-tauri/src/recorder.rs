@@ -355,7 +355,7 @@ impl Recorder {
         let Some(path) = session.file_path.filter(|one| !one.is_empty()) else {
             return;
         };
-        thumbs.ensure(app.clone(), vec![(session.id, path, session.duration_ms)]);
+        thumbs.ensure_tracked(app.clone(), vec![(session.id, path, session.duration_ms)]);
     }
 
     pub fn media_root(&self) -> PathBuf {
@@ -1172,6 +1172,14 @@ impl Recorder {
             .insert(room.id.clone(), entry);
         slot.mark_inserted();
         drop(slot);
+        app.state::<crate::state::AppState>().jobs.emit_session(
+            &recording.session_id,
+            "record",
+            "recording",
+            "running",
+            0,
+            Some(&recording.quality),
+        );
 
         // 开录在途时用户点了停录：会话既然已经挂上，就立刻按这个原因收尾（C5）。
         let pending = self
@@ -2314,13 +2322,26 @@ impl Recorder {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| active.recording.session_id.clone());
-        let post_job = jobs.begin(
+        // 收尾任务必须挂到 session 上：任务中心按 `session:<id>` 聚合 Run，
+        // 否则 finalizing/merging/splitting/danmaku/commit 这些事件会落到
+        // `task:job:N` 这一条孤立的 run 上，详情时间线看不到。
+        let post_job = jobs.begin_for(
             "finalize",
             post_label,
             Some(active.recording.quality.clone()),
+            Some(active.recording.session_id.clone()),
+            Some(room_id.to_string()),
         );
         // 收尾不是后处理槽位里的任务：它负责合并分片、导出弹幕、写分片清单。
         // 单独一个阶段，任务中心才能把「录制结束但文件还没落定」画出来。
+        jobs.emit_session(
+            &active.recording.session_id,
+            "record",
+            "recording",
+            "done",
+            100,
+            None,
+        );
         post_job.progress(0, "finalizing", Some("合并分片并生成文件"));
         // 状态先算出来：分割清单要把最终状态写进去，崩溃恢复才能还原。
         let (mut final_status, mut reason, mut error) = match stop_reason.as_deref() {
@@ -2430,6 +2451,19 @@ impl Recorder {
         // 阶段一（封口）：只做分片合并/按边界切片段，不跑后处理。
         // 后处理可能转码几分钟，不能把同房间的新一场挡在 finalizing 外面。
         let mut prepared: Vec<PreparedClip> = Vec::new();
+        post_job.progress(
+            5,
+            if plans.len() > 1 {
+                "splitting"
+            } else {
+                "merging"
+            },
+            Some(if plans.len() > 1 {
+                "合并分片并按边界切片段"
+            } else {
+                "合并分片"
+            }),
+        );
         for (index, plan) in plans.iter().enumerate() {
             let output = PathBuf::from(&manifest.as_ref().expect("有清单").clips[index].output);
             let (source_clip, source_size) =
@@ -2473,6 +2507,15 @@ impl Recorder {
                     tracing::warn!(%err, file = %file.display(), "更新分割清单失败");
                 }
             }
+            post_job.progress(
+                5 + ((index + 1) as i64 * 25 / plans.len().max(1) as i64),
+                if plans.len() > 1 {
+                    "splitting"
+                } else {
+                    "merging"
+                },
+                Some(&format!("已完成 {}/{} 段", index + 1, plans.len())),
+            );
         }
 
         // 0 字节不能算「录制完成」：在释放 finalizing 之前就定案，
@@ -2584,7 +2627,9 @@ impl Recorder {
                 }
             }
         }
-        drop(post_job);
+        // 后处理结束后还有切弹幕、写库、封面三件收尾事：finalize 任务保持到
+        // 它们全部完成，详情时间线才不会在「后处理 100%」后突然断掉。
+        post_job.progress(75, "danmaku", Some("切分并导出弹幕"));
         // 分片容器时长通常比标称 60 秒多出 0.2–0.5 秒，六段累计就能差出几秒。
         // 切弹幕必须按实际容器时长推进，否则片段越靠后，弹幕相对画面越早。
         let mut actual_durations: Vec<Option<i64>> = Vec::with_capacity(rendered.len());
@@ -2720,6 +2765,7 @@ impl Recorder {
             (danmaku_path.clone(), danmaku_count)
         };
 
+        post_job.progress(90, "commit", Some("写入录像库"));
         let first_ended_at = clip_windows
             .as_ref()
             .map(|windows| first.started_at + (windows[0].1 + 999) / 1000)
@@ -2893,8 +2939,18 @@ impl Recorder {
         }
 
         if final_status == "finished" {
+            post_job.progress(98, "thumbnail", Some("生成封面缩略图"));
             self.queue_thumb(app, &active.recording.session_id);
         }
+        let finish_message = error.as_deref().or(Some("录制收尾完成"));
+        post_job.finish(
+            if final_status == "failed" {
+                "failed"
+            } else {
+                "done"
+            },
+            finish_message,
+        );
 
         // 每次收尾跑一次保留策略：录制是媒体库唯一的增长来源。
         crate::retention::enforce_from_settings(&self.db);

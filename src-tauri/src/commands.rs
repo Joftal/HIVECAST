@@ -3074,6 +3074,8 @@ pub fn task_board(state: State<'_, AppState>, limit: Option<usize>) -> TaskBoard
             session_id: Some(recording.session_id),
             room_id: Some(recording.room_id),
             started_at: recording.started_at,
+            queued_at: Some(recording.started_at),
+            started_running_at: Some(recording.started_at),
             finished_at: None,
         });
     }
@@ -3098,6 +3100,8 @@ pub fn task_board(state: State<'_, AppState>, limit: Option<usize>) -> TaskBoard
             session_id: None,
             room_id: Some(room_id),
             started_at: now_ts(),
+            queued_at: Some(now_ts()),
+            started_running_at: None,
             finished_at: None,
         });
     }

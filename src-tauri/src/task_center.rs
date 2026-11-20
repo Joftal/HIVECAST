@@ -226,6 +226,18 @@ pub fn build(
 
     all_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
+    // 一次性把这一屏 Run 的事件读出来再分发，避免每条 Run 单独查库。
+    let run_ids: Vec<String> = all_runs.iter().map(|run| run.id.clone()).collect();
+    let mut event_map: HashMap<String, Vec<hivecast_ipc::TaskEvent>> = HashMap::new();
+    for event in db.task_events(&run_ids, 4_000).unwrap_or_default() {
+        if let Some(run_id) = &event.run_id {
+            event_map.entry(run_id.clone()).or_default().push(event);
+        }
+    }
+    for run in &mut all_runs {
+        run.events = event_map.remove(&run.id).unwrap_or_default();
+    }
+
     for run in all_runs {
         if matches!(
             run.state.as_str(),
@@ -561,6 +573,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         quality,
         tasks,
         stages,
+        events: Vec::new(),
     }
 }
 
@@ -975,11 +988,7 @@ fn task_view(task: &hivecast_ipc::TaskRecord) -> TaskView {
         clip_index,
         clip_count: 0,
         queue,
-        queued_at: if task.state == "queued" {
-            Some(task.started_at)
-        } else {
-            None
-        },
+        queued_at: task.queued_at,
     }
 }
 
@@ -1112,6 +1121,8 @@ mod tests {
             session_id: Some("session-1".into()),
             room_id: Some("room-1".into()),
             started_at: 100,
+            queued_at: Some(100),
+            started_running_at: None,
             finished_at: None,
         }
     }

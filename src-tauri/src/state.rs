@@ -236,6 +236,7 @@ impl AppState {
         let thumbs = Arc::new(crate::thumbs::Thumbs::new(
             cache_root.join("thumbs"),
             server.clone(),
+            jobs.clone(),
         ));
         tokio::fs::create_dir_all(thumbs.dir())
             .await

@@ -36,6 +36,9 @@ const STAGE_KEYS: Record<string, string> = {
   post: "tasks.stagePost",
   commit: "tasks.stageCommit",
   merging: "tasks.stageMerging",
+  splitting: "tasks.stageSplitting",
+  danmaku: "tasks.stageDanmaku",
+  thumbnail: "tasks.stageThumbnail",
   exporting: "tasks.stageExporting",
   postprocessing: "tasks.stagePostprocessing",
   starting: "tasks.stageStarting",
@@ -106,6 +109,13 @@ function formatDuration(ms: number): string {
   const s = total % 60;
   const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
   return h > 0 ? `${h}:${mm}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`;
+}
+
+function formatClock(seconds: number): string {
+  if (!seconds) return "—";
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function formatBytes(bytes: number): string {
@@ -658,6 +668,51 @@ function DetailDrawer({
                   </div>
                 );
               })}
+            </div>
+          </section>
+
+          <section className="mt-4">
+            <h3 className="text-[12px] font-semibold text-ink">{t("tasks.detailTimeline")}</h3>
+            <div className="mt-2">
+              {run.events.length === 0 ? (
+                <div className="px-1 py-2 text-[11px] text-faint">{t("tasks.timelineEmpty")}</div>
+              ) : (
+                run.events.map((event, index) => {
+                  const tone =
+                    event.state === "failed"
+                      ? "bg-rec"
+                      : event.state === "done"
+                        ? "bg-live"
+                        : event.state === "queued"
+                          ? "bg-line-strong"
+                          : "bg-accent";
+                  return (
+                    <div key={event.id} className="flex gap-2.5">
+                      <div className="flex flex-col items-center">
+                        <span className={cx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", tone)} />
+                        {index < run.events.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
+                      </div>
+                      <div className="min-w-0 flex-1 pb-2.5">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-[11px] font-medium text-ink">
+                            {stageLabel(t, event.stage)}
+                          </span>
+                          <span className="text-[10px] text-faint">{stateLabel(t, event.state)}</span>
+                          {event.percent > 0 && event.percent < 100 ? (
+                            <span className="text-[10px] tabular-nums text-faint">{event.percent}%</span>
+                          ) : null}
+                          <span className="ml-auto shrink-0 text-[10px] tabular-nums text-faint">
+                            {formatClock(event.at)}
+                          </span>
+                        </div>
+                        {event.message ? (
+                          <div className="mt-0.5 break-all text-[10.5px] leading-4 text-muted">{event.message}</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </section>
 

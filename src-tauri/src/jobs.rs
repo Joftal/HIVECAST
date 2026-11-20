@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hivecast_ipc::{ActiveTask, TaskBoard, TaskRecord};
+use hivecast_ipc::{ActiveTask, TaskBoard, TaskEvent, TaskRecord};
 
 use crate::db::Db;
 
@@ -24,7 +24,13 @@ struct Job {
     stage: Option<String>,
     message: Option<String>,
     started_at: i64,
+    queued_at: i64,
+    started_running_at: Option<i64>,
+    /// 是否写入 task_history；启动恢复这类静默任务不参与时间线。
+    persisted: bool,
     last_write_ms: i64,
+    /// 上一条事件 (stage,state,进度桶)，用来去重 4 Hz 的进度回调。
+    last_event_key: (String, String, i64),
 }
 
 impl Job {
@@ -41,8 +47,17 @@ impl Job {
             session_id: self.session_id.clone(),
             room_id: self.room_id.clone(),
             started_at: self.started_at,
+            queued_at: Some(self.queued_at),
+            started_running_at: self.started_running_at,
             finished_at: None,
         }
+    }
+
+    fn run_id(&self) -> String {
+        self.session_id
+            .as_deref()
+            .map(|id| format!("session:{id}"))
+            .unwrap_or_else(|| format!("task:{}", self.id))
     }
 }
 
@@ -124,7 +139,11 @@ impl Jobs {
                 stage: Some("queued".into()),
                 message: None,
                 started_at: now_ts(),
+                queued_at: now_ts(),
+                started_running_at: None,
+                persisted: persist,
                 last_write_ms: now_ms(),
+                last_event_key: ("queued".into(), "queued".into(), 0),
             },
             persist,
         );
@@ -167,13 +186,19 @@ impl Jobs {
                 stage: Some("queued".into()),
                 message: None,
                 started_at: now_ts(),
+                queued_at: now_ts(),
+                started_running_at: None,
+                persisted: true,
                 last_write_ms: 0,
+                last_event_key: ("queued".into(), "queued".into(), 0),
             },
             true,
         );
     }
 
     /// 更新运行中任务；同一任务最多每秒落库一次，进度事件本身是 4 Hz。
+    ///
+    /// 阶段/状态转换与 25/50/75/100 里程碑才追加 task_event，避免把时间线冲成日志。
     pub fn progress(
         &self,
         id: &str,
@@ -182,16 +207,29 @@ impl Jobs {
         state: &str,
         message: Option<&str>,
     ) {
-        let now = now_ms();
+        let now_ms = now_ms();
+        let now = now_ts();
         let mut to_persist = None;
+        let mut event = None;
         if let Ok(mut guard) = self.inner.lock() {
             if let Some(job) = guard.iter_mut().find(|job| job.id == id) {
                 job.percent = percent.clamp(0, 100);
                 job.stage = Some(stage.to_string());
                 job.state = state.to_string();
                 job.message = message.map(str::to_string);
-                if now - job.last_write_ms >= 1_000 || job.percent == 100 {
-                    job.last_write_ms = now;
+                let started_edge =
+                    state == "running" && stage != "queued" && job.started_running_at.is_none();
+                if started_edge {
+                    job.started_running_at = Some(now);
+                }
+                let bucket = job.percent / 25;
+                let key = (stage.to_string(), state.to_string(), bucket);
+                if key != job.last_event_key {
+                    job.last_event_key = key;
+                    event = Some((job.clone(), now));
+                }
+                if now_ms - job.last_write_ms >= 1_000 || job.percent == 100 || started_edge {
+                    job.last_write_ms = now_ms;
                     to_persist = Some(job.record());
                 }
             }
@@ -201,10 +239,45 @@ impl Jobs {
                 &record.id,
                 record.percent,
                 record.stage.as_deref(),
+                &record.state,
                 record.message.as_deref(),
+                now,
             ) {
                 tracing::warn!(task = %record.id, error = %err, "更新任务进度失败");
             }
+        }
+        if let (Some(db), Some((job, at))) = (self.db(), event) {
+            if let Err(err) = db.task_event(&event_of(&job, &job.stage, &job.state, at)) {
+                tracing::warn!(task = %job.id, error = %err, "写入任务事件失败");
+            }
+        }
+    }
+
+    /// 给某个 session 的 Run 追加一条阶段事件；异步子任务（缩略图）用它补时间线。
+    /// 不写 task_history，也不会出现在运行中列表里。
+    pub fn emit_session(
+        &self,
+        session_id: &str,
+        kind: &str,
+        stage: &str,
+        state: &str,
+        percent: i64,
+        message: Option<&str>,
+    ) {
+        let Some(db) = self.db() else { return };
+        let event = TaskEvent {
+            id: 0,
+            task_id: format!("phase:{kind}:{session_id}"),
+            run_id: Some(format!("session:{session_id}")),
+            kind: kind.to_string(),
+            stage: stage.to_string(),
+            state: state.to_string(),
+            percent: percent.clamp(0, 100),
+            message: message.map(str::to_string),
+            at: now_ts(),
+        };
+        if let Err(err) = db.task_event(&event) {
+            tracing::warn!(session = %session_id, stage, error = %err, "写入阶段事件失败");
         }
     }
 
@@ -214,13 +287,41 @@ impl Jobs {
     }
 
     fn finish(&self, id: &str, state: &str, message: Option<&str>) {
-        if let Ok(mut guard) = self.inner.lock() {
+        let finished = self.inner.lock().ok().and_then(|mut guard| {
+            let job = guard.iter().find(|job| job.id == id).cloned();
             guard.retain(|job| job.id != id);
             tracing::debug!(id, remaining = guard.len(), "注销后台任务");
-        }
+            job
+        });
+        let now = now_ts();
         if let Some(db) = self.db() {
-            if let Err(err) = db.task_finish(id, state, message, now_ts()) {
+            if let Err(err) = db.task_finish(id, state, message, now) {
                 tracing::warn!(task = id, error = %err, "写入任务结束状态失败");
+            }
+        }
+        if let (Some(db), Some(mut job)) = (self.db(), finished) {
+            if !job.persisted {
+                return;
+            }
+            job.started_running_at =
+                job.started_running_at
+                    .or(if state == "running" { Some(now) } else { None });
+            let stage = match state {
+                "done" | "failed" | "cancelled" | "interrupted" => state,
+                other => job.stage.as_deref().unwrap_or(other),
+            };
+            if state == "done" {
+                job.percent = 100;
+            }
+            // progress 已经写过同一个终态（100% done / 0% failed 等）时不再追加，
+            // 否则时间线尾部会出现两条一模一样的 done。
+            let already_emitted = job.state == state && job.last_event_key.0 == stage;
+            if !already_emitted {
+                if let Err(err) =
+                    db.task_event(&event_of(&job, &Some(stage.to_string()), state, now))
+                {
+                    tracing::warn!(task = id, error = %err, "写入任务结束事件失败");
+                }
             }
         }
     }
@@ -277,6 +378,14 @@ impl Jobs {
                 if let Err(err) = db.task_start(&record) {
                     tracing::warn!(task = %job.id, error = %err, "写入任务记录失败");
                 }
+                if let Err(err) = db.task_event(&event_of(
+                    &job,
+                    &Some("queued".to_string()),
+                    "queued",
+                    job.queued_at,
+                )) {
+                    tracing::warn!(task = %job.id, error = %err, "写入任务入队事件失败");
+                }
             }
         }
     }
@@ -307,6 +416,21 @@ impl Drop for JobGuard {
             return;
         }
         self.jobs.finish(&self.id, "done", None);
+    }
+}
+
+/// 事件统一从 Job 取快照，避免各处漏字段。
+fn event_of(job: &Job, stage: &Option<String>, state: &str, at: i64) -> TaskEvent {
+    TaskEvent {
+        id: 0,
+        task_id: job.id.clone(),
+        run_id: Some(job.run_id()),
+        kind: job.kind.clone(),
+        stage: stage.clone().unwrap_or_else(|| "queued".into()),
+        state: state.to_string(),
+        percent: job.percent,
+        message: job.message.clone(),
+        at,
     }
 }
 

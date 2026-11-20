@@ -793,8 +793,35 @@ pub struct TaskRecord {
     pub room_id: Option<String>,
     #[ts(type = "number")]
     pub started_at: i64,
+    /// 进入队列的时刻；与 started_at 分开，排队等待时长才准确。
+    #[ts(type = "number | null")]
+    pub queued_at: Option<i64>,
+    /// 真正开始执行（离开 queued）的时刻；排队中被取消时为空。
+    #[ts(type = "number | null")]
+    pub started_running_at: Option<i64>,
     #[ts(type = "number")]
     pub finished_at: Option<i64>,
+}
+
+/// 一条阶段事件：只记录阶段/状态转换与进度里程碑，不按秒存进度。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskEvent {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub task_id: String,
+    pub run_id: Option<String>,
+    /// record | finalize | post | remux | merge | danmaku | thumbnail | commit
+    pub kind: String,
+    pub stage: String,
+    /// queued | running | done | failed | cancelled | interrupted
+    pub state: String,
+    #[ts(type = "number")]
+    pub percent: i64,
+    pub message: Option<String>,
+    #[ts(type = "number")]
+    pub at: i64,
 }
 
 /// 任务中心首页：运行中 + 最近历史。
@@ -910,6 +937,8 @@ pub struct RunView {
     pub quality: Option<String>,
     pub tasks: Vec<TaskView>,
     pub stages: Vec<StageView>,
+    /// 按时间正序的阶段事件；P2 之前的旧记录可能为空。
+    pub events: Vec<TaskEvent>,
 }
 
 /// Run 下的一个可执行任务（录制、转封装、合并、弹幕导出）。

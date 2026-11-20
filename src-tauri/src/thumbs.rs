@@ -46,16 +46,18 @@ pub struct Thumbs {
     /// 缩略图也走回环 HTTP：前端 img 直接吃 http://127.0.0.1，
     /// 不用为 asset 协议单独开权限，CSP 里现成的 img-src 就够。
     server: Arc<StreamServer>,
+    jobs: Arc<crate::jobs::Jobs>,
 }
 
 impl Thumbs {
-    pub fn new(dir: PathBuf, server: Arc<StreamServer>) -> Self {
+    pub fn new(dir: PathBuf, server: Arc<StreamServer>, jobs: Arc<crate::jobs::Jobs>) -> Self {
         // 把缩略图目录登记成回环服务的一个只读会话。
         server.register("thumbs", dir.clone());
         Self {
             dir,
             slots: Arc::new(Semaphore::new(CONCURRENCY)),
             server,
+            jobs,
         }
     }
 
@@ -85,11 +87,35 @@ impl Thumbs {
 
     /// 给这一页里缺缩略图的录像排队生成；调用方不等结果，完成后走事件。
     pub fn ensure(self: &Arc<Self>, app: AppHandle, items: Vec<(String, String, i64)>) {
+        self.ensure_inner(app, items, false);
+    }
+
+    /// 录制收尾自带的封面：同时把 thumbnail 阶段写进任务时间线。
+    pub fn ensure_tracked(self: &Arc<Self>, app: AppHandle, items: Vec<(String, String, i64)>) {
+        self.ensure_inner(app, items, true);
+    }
+
+    fn ensure_inner(
+        self: &Arc<Self>,
+        app: AppHandle,
+        items: Vec<(String, String, i64)>,
+        tracked: bool,
+    ) {
         for (session_id, source, duration_ms) in items {
             if self.url_for(&session_id).is_some() {
                 continue;
             }
             tracing::debug!(id = %session_id, duration_ms, "缩略图已排队");
+            if tracked {
+                self.jobs.emit_session(
+                    &session_id,
+                    "thumbnail",
+                    "thumbnail",
+                    "running",
+                    0,
+                    Some("生成封面缩略图"),
+                );
+            }
             let this = self.clone();
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -99,6 +125,16 @@ impl Thumbs {
                 };
                 // 排队期间可能已经被别的请求生成好了。
                 if this.url_for(&session_id).is_some() {
+                    if tracked {
+                        this.jobs.emit_session(
+                            &session_id,
+                            "thumbnail",
+                            "thumbnail",
+                            "done",
+                            100,
+                            None,
+                        );
+                    }
                     return;
                 }
                 match this
@@ -106,6 +142,16 @@ impl Thumbs {
                     .await
                 {
                     Ok(_) => {
+                        if tracked {
+                            this.jobs.emit_session(
+                                &session_id,
+                                "thumbnail",
+                                "thumbnail",
+                                "done",
+                                100,
+                                None,
+                            );
+                        }
                         if let Some(url) = this.url_for(&session_id) {
                             let event = ThumbReady {
                                 session_id: session_id.clone(),
@@ -119,6 +165,16 @@ impl Thumbs {
                         }
                     }
                     Err(err) => {
+                        if tracked {
+                            this.jobs.emit_session(
+                                &session_id,
+                                "thumbnail",
+                                "thumbnail",
+                                "failed",
+                                0,
+                                Some(&err.to_string()),
+                            );
+                        }
                         tracing::warn!(id = %session_id, error = %err, "缩略图生成失败");
                     }
                 }
