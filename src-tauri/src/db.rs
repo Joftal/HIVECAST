@@ -933,10 +933,10 @@ impl Db {
             "INSERT INTO record_session (
                     id, room_id, started_at, ended_at, status, reason, file_path,
                     file_size, duration_ms, quality, line, error,
-                    danmaku_path, danmaku_count, source_path, post_mode, post_state,
-                    source_deleted, post_error, quality_history
+                    danmaku_path, danmaku_count, group_id, clip_index, source_path,
+                    post_mode, post_state, source_deleted, post_error, quality_history
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                          ?15, ?16, ?17, ?18, ?19, ?20)",
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 session.id,
                 session.room_id,
@@ -952,6 +952,8 @@ impl Db {
                 session.error,
                 session.danmaku_path,
                 session.danmaku_count,
+                session.id,
+                0_i64,
                 session.source_path,
                 session.post_mode,
                 session.post_state,
@@ -2657,7 +2659,7 @@ const SESSION_SELECT: &str = "SELECT
     id, room_id, started_at, ended_at, status, reason, file_path, file_size,
     duration_ms, quality, line, error, danmaku_path, danmaku_count,
     source_path, post_mode, post_state, source_deleted, post_error,
-    quality_history
+    quality_history, group_id, clip_index
   FROM record_session";
 
 /// 平台内部房间号：抖音 follow/feed 只认 19 位 room_id，不认页面上的 web_rid。
@@ -2784,6 +2786,8 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<RecordSession> {
             .get::<_, Option<String>>(19)?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
+        group_id: row.get(20)?,
+        clip_index: row.get(21)?,
     })
 }
 

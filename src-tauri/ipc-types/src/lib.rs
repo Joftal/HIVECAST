@@ -474,6 +474,11 @@ pub struct RecordSession {
     pub source_deleted: bool,
     /// 后处理失败原因；失败时 file_path 仍指向可播放的源文件
     pub post_error: Option<String>,
+    /// 分割录制：同一场直播的片段共享 group_id（首片段 id）；普通录制为空
+    pub group_id: Option<String>,
+    /// 分割录制：片段序号，从 0 递增
+    #[ts(type = "number")]
+    pub clip_index: i64,
 }
 
 /// 本地后处理的产物：转封装 / 截图 / 弹幕 ASS / 合并。

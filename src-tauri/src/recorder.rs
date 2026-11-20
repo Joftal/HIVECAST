@@ -1085,6 +1085,8 @@ impl Recorder {
             post_state: crate::post::STATE_RECORDING.to_string(),
             source_deleted: false,
             post_error: None,
+            group_id: None,
+            clip_index: 0,
         });
         if let Err(err) = created {
             tracing::error!(
@@ -2851,6 +2853,8 @@ impl Recorder {
                     post_state: clip.post_state.clone(),
                     source_deleted: false,
                     post_error: clip.post_error.clone(),
+                    group_id: Some(group_id.clone()),
+                    clip_index: index as i64,
                 };
                 match self
                     .db
@@ -4060,6 +4064,8 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 post_state: post_state.clone(),
                 source_deleted: false,
                 post_error: post_error.clone(),
+                group_id: None,
+                clip_index: 0,
             };
             // 首片段行不存在通常意味着数据库被重建过；create_clip 会补上
             // group_id/clip_index，finish_session_with_post 对不存在的行是静默 0 行更新。
@@ -5524,6 +5530,8 @@ mod tests {
             post_state: "done".into(),
             source_deleted: false,
             post_error: None,
+            group_id: None,
+            clip_index: 0,
         };
         db.create_session(&first).expect("建会话");
 
@@ -5679,6 +5687,8 @@ mod tests {
             post_state: "done".into(),
             source_deleted: false,
             post_error: None,
+            group_id: None,
+            clip_index: 0,
         })
         .expect("建会话");
     }

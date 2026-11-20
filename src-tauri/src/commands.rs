@@ -1772,6 +1772,8 @@ fn register_merged_session(
         post_state: "done".into(),
         source_deleted: false,
         post_error: None,
+        group_id: None,
+        clip_index: 0,
     };
     if let Err(err) = db.create_session(&session) {
         tracing::warn!(target: "hivecast_lib::commands", %err, "合并录像登记失败");
@@ -1922,6 +1924,8 @@ mod tests {
             post_state: "done".into(),
             source_deleted: false,
             post_error: None,
+            group_id: None,
+            clip_index: 0,
         }
     }
 

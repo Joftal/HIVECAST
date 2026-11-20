@@ -48,4 +48,12 @@ sourceDeleted: boolean,
 /**
  * 后处理失败原因；失败时 file_path 仍指向可播放的源文件
  */
-postError: string | null, };
+postError: string | null,
+/**
+ * 分割录制：同一场直播的片段共享 group_id（首片段 id）；普通录制为空
+ */
+groupId: string | null,
+/**
+ * 分割录制：片段序号，从 0 递增
+ */
+clipIndex: number, };

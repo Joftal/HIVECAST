@@ -43,8 +43,15 @@ pub fn build(
 
     let sessions = db.list_sessions(None, (history * 4).clamp(200, 1200), 0)?;
     let mut session_cache: HashMap<String, RecordSession> = HashMap::new();
+    // 分割录制的一场直播会写成多条 record_session；任务中心必须按 group_id
+    // 聚成一条 Run，否则三个片段会出现三张卡、三个「最近完成」。
+    let mut group_cache: HashMap<String, Vec<RecordSession>> = HashMap::new();
     for session in &sessions {
         session_cache.insert(session.id.clone(), session.clone());
+        group_cache
+            .entry(session_group_key(session))
+            .or_default()
+            .push(session.clone());
     }
 
     // 任务历史一次多取一些：一个 Run 可能包含多个片段任务，只取 history 条会把
@@ -57,12 +64,17 @@ pub fn build(
     // 1. 正在录制 / 开录中的房间先建 Run。开录中还没有 session，用 room id 做临时键。
     for recording in recorder.active_all() {
         let room = room_of(db, &mut room_cache, &recording.room_id);
-        let key = format!("session:{}", recording.session_id);
+        let group_key = session_cache
+            .get(&recording.session_id)
+            .map(session_group_key)
+            .unwrap_or_else(|| recording.session_id.clone());
+        let key = format!("session:{group_key}");
         let draft = drafts
             .entry(key.clone())
             .or_insert_with(|| RunDraft::new(key));
         draft.room = room;
         draft.session = session_cache.get(&recording.session_id).cloned();
+        draft.sessions = group_cache.get(&group_key).cloned().unwrap_or_default();
         let title = draft
             .room
             .as_ref()
@@ -126,48 +138,82 @@ pub fn build(
 
     // 2. 所有处于 recording 的 session 都要有 Run：录制进程刚退出、正在收尾时
     //    recorder 的 active 已经摘掉，但 session 仍然是 recording，不能让它从页面消失。
+    let mut seen_groups: HashSet<String> = HashSet::new();
     for session in &sessions {
         if session.status != "recording" {
             continue;
         }
-        let key = format!("session:{}", session.id);
+        let group_key = session_group_key(session);
+        if !seen_groups.insert(group_key.clone()) {
+            continue;
+        }
+        let members = group_cache.get(&group_key).cloned().unwrap_or_default();
+        let key = format!("session:{group_key}");
         let draft = drafts
             .entry(key.clone())
             .or_insert_with(|| RunDraft::new(key));
         draft.room = room_of(db, &mut room_cache, &session.room_id);
-        draft.session = Some(session.clone());
-        draft.started_at = session.started_at;
+        draft.session = members
+            .iter()
+            .find(|member| member.status == "recording")
+            .cloned()
+            .or_else(|| Some(session.clone()));
+        draft.sessions = members;
+        draft.started_at = draft
+            .sessions
+            .iter()
+            .map(|member| member.started_at)
+            .min()
+            .unwrap_or(session.started_at);
     }
 
-    // 3. 历史场次：倒序取满 history 条。最新的失败/中断也在这批里。
-    let mut history_sessions: Vec<&RecordSession> = Vec::new();
+    // 3. 历史场次：按场（group）倒序取满 history 条。最新的失败/中断也在这批里。
+    let mut history_sessions: Vec<RecordSession> = Vec::new();
+    let mut seen_history_groups: HashSet<String> = HashSet::new();
     for session in &sessions {
         if session.status == "recording" {
+            continue;
+        }
+        let group_key = session_group_key(session);
+        if !seen_history_groups.insert(group_key.clone()) {
+            continue;
+        }
+        let members = group_cache.get(&group_key).cloned().unwrap_or_default();
+        if members.iter().any(|member| member.status == "recording") {
             continue;
         }
         if history_sessions.len() >= history {
             break;
         }
-        history_sessions.push(session);
-        let key = format!("session:{}", session.id);
+        let key = format!("session:{group_key}");
         let draft = drafts
             .entry(key.clone())
             .or_insert_with(|| RunDraft::new(key));
         draft.room = room_of(db, &mut room_cache, &session.room_id);
-        draft.session = Some(session.clone());
-        draft.started_at = session.started_at;
-        draft.ended_at = session.ended_at;
+        let representative = group_representative(&members).unwrap_or_else(|| session.clone());
+        draft.session = Some(representative.clone());
+        draft.sessions = members.clone();
+        draft.started_at = members
+            .iter()
+            .map(|member| member.started_at)
+            .min()
+            .unwrap_or(session.started_at);
+        draft.ended_at = members.iter().filter_map(|member| member.ended_at).max();
+        history_sessions.push(representative);
     }
 
     // 4. 挂任务：同一 session 的转封装/重试归到对应 Run；合并与单独导出没有 session，
     //    各自成一条独立 Run。finalize 不是独立任务，只用于把阶段推进到「收尾」。
     for task in board.running.iter().chain(board.history.iter()) {
         let is_finalize = is_finalize(task);
-        let session_key = task
-            .session_id
-            .as_deref()
-            .map(|id| format!("session:{id}"))
-            .filter(|key| drafts.contains_key(key));
+        let session_key = task.session_id.as_deref().and_then(|id| {
+            let group_key = session_cache
+                .get(id)
+                .map(session_group_key)
+                .unwrap_or_else(|| id.to_string());
+            let key = format!("session:{group_key}");
+            drafts.contains_key(&key).then_some(key)
+        });
 
         if is_finalize {
             if let Some(key) = session_key {
@@ -176,6 +222,10 @@ pub fn build(
                     // 用「或」合并，避免后读到的旧 done 把正在收尾的状态抹掉。
                     draft.finalizing |= task.state == "running" || task.state == "queued";
                     draft.finalize_finished |= task.state == "done";
+                    draft.finalize_failed |= task.state == "failed";
+                    if task.state == "failed" {
+                        draft.finalize_message = task.message.clone();
+                    }
                 }
             }
             continue;
@@ -227,12 +277,31 @@ pub fn build(
     all_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
     // 一次性把这一屏 Run 的事件读出来再分发，避免每条 Run 单独查库。
+    // 分割录制的片段任务/阶段事件仍按 session_id 落库；先把片段 id 映射回
+    // group run，否则详情时间线只会显示首片段的事件。
     let run_ids: Vec<String> = all_runs.iter().map(|run| run.id.clone()).collect();
-    let mut event_map: HashMap<String, Vec<hivecast_ipc::TaskEvent>> = HashMap::new();
-    for event in db.task_events(&run_ids, 4_000).unwrap_or_default() {
-        if let Some(run_id) = &event.run_id {
-            event_map.entry(run_id.clone()).or_default().push(event);
+    let mut event_run_ids = run_ids.clone();
+    let mut event_aliases: HashMap<String, String> = HashMap::new();
+    for (group_key, members) in &group_cache {
+        let run_id = format!("session:{group_key}");
+        for member in members {
+            let alias = format!("session:{}", member.id);
+            if !event_run_ids.contains(&alias) {
+                event_run_ids.push(alias.clone());
+            }
+            event_aliases.insert(alias, run_id.clone());
         }
+    }
+    let mut event_map: HashMap<String, Vec<hivecast_ipc::TaskEvent>> = HashMap::new();
+    for event in db.task_events(&event_run_ids, 4_000).unwrap_or_default() {
+        let Some(run_id) = event.run_id.as_deref() else {
+            continue;
+        };
+        let target = event_aliases
+            .get(run_id)
+            .map(String::as_str)
+            .unwrap_or(run_id);
+        event_map.entry(target.to_string()).or_default().push(event);
     }
     for run in &mut all_runs {
         run.events = event_map.remove(&run.id).unwrap_or_default();
@@ -276,7 +345,7 @@ pub fn build(
 
     let incidents = build_incidents(
         &history_runs,
-        &sessions,
+        &history_sessions,
         &room_cache,
         statuses,
         &credentials,
@@ -338,11 +407,15 @@ struct RunDraft {
     id: String,
     room: Option<RoomRecord>,
     session: Option<RecordSession>,
+    /// 同一场直播的所有片段；普通录制只有一条。
+    sessions: Vec<RecordSession>,
     record_task: Option<TaskView>,
     tasks: Vec<TaskView>,
     standalone_stage: Option<String>,
     finalizing: bool,
     finalize_finished: bool,
+    finalize_failed: bool,
+    finalize_message: Option<String>,
     started_at: i64,
     ended_at: Option<i64>,
 }
@@ -353,11 +426,14 @@ impl RunDraft {
             id,
             room: None,
             session: None,
+            sessions: Vec::new(),
             record_task: None,
             tasks: Vec::new(),
             standalone_stage: None,
             finalizing: false,
             finalize_finished: false,
+            finalize_failed: false,
+            finalize_message: None,
             started_at: 0,
             ended_at: None,
         }
@@ -396,14 +472,25 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         task.clip_count = clip_count;
     }
 
-    let session_active = draft
-        .session
-        .as_ref()
-        .is_some_and(|session| session.status == "recording");
-    let session_failed = draft
-        .session
-        .as_ref()
-        .is_some_and(|session| session.status == "failed");
+    let group_members: Vec<RecordSession> = if draft.sessions.is_empty() {
+        draft.session.clone().into_iter().collect()
+    } else {
+        draft.sessions.clone()
+    };
+    let session_active = group_members
+        .iter()
+        .any(|session| session.status == "recording");
+    // aborted 只表示「没有正常收尾」，磁盘满/掉盘要算失败；app_exit 单独算中断。
+    let session_failed = group_members.iter().any(|session| {
+        session.status == "failed"
+            || (session.status == "aborted" && session.reason.as_deref() != Some("app_exit"))
+    });
+    let session_interrupted = group_members
+        .iter()
+        .any(|session| session.reason.as_deref() == Some("app_exit"));
+    let session_cancelled = group_members
+        .iter()
+        .any(|session| session.status == "cancelled");
     let starting_active = draft
         .record_task
         .as_ref()
@@ -418,6 +505,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     let has_done = draft.tasks.iter().any(|task| task.state == "done");
     let has_cancelled = draft.tasks.iter().any(|task| task.state == "cancelled");
     let has_interrupted = draft.tasks.iter().any(|task| task.state == "interrupted");
+    let failed = has_failed || session_failed || draft.finalize_failed;
 
     // 录制、收尾、后处理是三种不同的活动态：任务页要能一眼看出「在录」还是「在转」。
     let state = if draft.finalizing {
@@ -428,26 +516,16 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         "running"
     } else if has_queued {
         "queued"
-    } else if has_failed || session_failed {
+    } else if failed {
         // 有成功也有失败片段时是「部分失败」，不能整条 Run 记成成功或全失败。
-        if has_failed && has_done && !session_failed {
+        if has_failed && has_done && !session_failed && !draft.finalize_failed {
             "partial"
         } else {
             "failed"
         }
-    } else if has_interrupted
-        || draft
-            .session
-            .as_ref()
-            .is_some_and(|session| session.reason.as_deref() == Some("app_exit"))
-    {
+    } else if has_interrupted || session_interrupted {
         "interrupted"
-    } else if has_cancelled
-        || draft
-            .session
-            .as_ref()
-            .is_some_and(|session| session.status == "cancelled")
-    {
+    } else if has_cancelled || session_cancelled {
         "cancelled"
     } else {
         "done"
@@ -500,28 +578,34 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
                 .as_ref()
                 .and_then(|task| task.detail.clone())
         });
-    let bytes = if matches!(state, "recording" | "finalizing") {
-        session
-            .and_then(|session| {
-                session.file_path.as_deref().map(|path| {
-                    let path = Path::new(path);
-                    let master = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-                    master.max(crate::segment::parts_total(path))
-                })
-            })
-            .unwrap_or_else(|| session.map(|session| session.file_size as u64).unwrap_or(0))
-    } else {
-        session.map(|session| session.file_size as u64).unwrap_or(0)
-    };
-    let duration_ms = session
-        .map(|session| {
-            if session.status == "recording" {
-                ((now - session.started_at).max(0)) * 1000
+    let bytes: u64 = group_members
+        .iter()
+        .map(|member| {
+            if member.status == "recording" {
+                member
+                    .file_path
+                    .as_deref()
+                    .map(|path| {
+                        let path = Path::new(path);
+                        let master = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+                        master.max(crate::segment::parts_total(path))
+                    })
+                    .unwrap_or_else(|| member.file_size.max(0) as u64)
             } else {
-                session.duration_ms
+                member.file_size.max(0) as u64
             }
         })
-        .unwrap_or(0);
+        .sum();
+    let duration_ms: i64 = group_members
+        .iter()
+        .map(|member| {
+            if member.status == "recording" {
+                (now - member.started_at).max(0) * 1000
+            } else {
+                member.duration_ms.max(0)
+            }
+        })
+        .sum();
 
     let room = draft.room.as_ref().map(|room| RunRoom {
         id: room.id.clone(),
@@ -560,13 +644,17 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         stage,
         started_at: draft.started_at,
         ended_at: draft.ended_at.or_else(|| {
-            session.and_then(|session| {
-                if session.status == "recording" {
-                    None
-                } else {
-                    session.ended_at
-                }
-            })
+            if group_members
+                .iter()
+                .any(|member| member.status == "recording")
+            {
+                None
+            } else {
+                group_members
+                    .iter()
+                    .filter_map(|member| member.ended_at)
+                    .max()
+            }
         }),
         duration_ms,
         bytes: bytes.min(i64::MAX as u64) as i64,
@@ -604,13 +692,32 @@ fn build_stages(
     session_active: bool,
     starting_active: bool,
 ) -> Vec<StageView> {
-    let session = draft.session.as_ref();
-    let record_state = if session_active && draft.record_task.as_ref().is_some_and(is_active) {
-        "active"
-    } else if session.is_some_and(|session| session.status == "failed") {
+    let members: Vec<&RecordSession> = if draft.sessions.is_empty() {
+        draft.session.iter().collect()
+    } else {
+        draft.sessions.iter().collect()
+    };
+    let any_failed = members.iter().any(|session| {
+        session.status == "failed"
+            || (session.status == "aborted" && session.reason.as_deref() != Some("app_exit"))
+    });
+    let all_ended = !members.is_empty()
+        && members
+            .iter()
+            .all(|session| session.status != "recording" && session.ended_at.is_some());
+    let abnormal_abort = members.iter().any(|session| {
+        session.status == "aborted" && session.reason.as_deref() != Some("app_exit")
+    });
+    let interrupted_abort = members.iter().any(|session| {
+        session.status == "aborted" && session.reason.as_deref() == Some("app_exit")
+    });
+    let record_state = if any_failed {
         "failed"
-    } else if session.is_some_and(|session| session.ended_at.is_some()) || draft.ended_at.is_some()
-    {
+    } else if session_active || draft.record_task.as_ref().is_some_and(is_active) {
+        // recorder 可能已经把 active 摘掉，但 session 仍是 recording（正在收尾）；
+        // 这时候录制阶段不能因为 record_task 不存在就显示成「已跳过」。
+        "active"
+    } else if all_ended || draft.ended_at.is_some() {
         "done"
     } else if draft.record_task.is_some() {
         "active"
@@ -620,7 +727,16 @@ fn build_stages(
 
     let finalize_state = if draft.finalizing {
         "active"
-    } else if session.is_some_and(|session| session.ended_at.is_some()) || draft.finalize_finished {
+    } else if draft.finalize_failed {
+        "failed"
+    } else if draft.finalize_finished {
+        "done"
+    } else if abnormal_abort {
+        // 磁盘满/掉盘等异常中断没有正常收尾，不能因为 session 已有结束时间就报「完成」。
+        "failed"
+    } else if interrupted_abort {
+        "skipped"
+    } else if all_ended {
         "done"
     } else if session_active || starting_active {
         "pending"
@@ -634,7 +750,12 @@ fn build_stages(
         .iter()
         .filter(|task| task.kind == "post" || task.kind == "remux")
         .collect();
-    let post_state = if post_tasks.iter().any(|task| task.state == "failed") {
+    let member_post_failed = members.iter().any(|session| session.post_state == "failed");
+    let member_post_done =
+        !members.is_empty() && members.iter().all(|session| session.post_state == "done");
+    let all_source =
+        !members.is_empty() && members.iter().all(|session| session.post_mode == "source");
+    let post_state = if post_tasks.iter().any(|task| task.state == "failed") || member_post_failed {
         "failed"
     } else if post_tasks.iter().any(|task| is_active(task)) {
         "active"
@@ -642,25 +763,26 @@ fn build_stages(
         "cancelled"
     } else if !post_tasks.is_empty() && post_tasks.iter().all(|task| task.state == "done") {
         "done"
-    } else if session.is_some_and(|session| session.post_state == "done") {
-        if session.is_some_and(|session| session.post_mode == "source") {
+    } else if member_post_done {
+        if all_source {
             "skipped"
         } else {
             "done"
         }
-    } else if session.is_some_and(|session| session.post_state == "failed") {
-        "failed"
     } else if session_active || starting_active {
         "pending"
-    } else {
+    } else if members.is_empty() {
         "skipped"
+    } else {
+        "pending"
     };
 
-    let commit_state = if session.is_some_and(|session| session.post_state == "done") {
-        "done"
-    } else if post_state == "skipped"
-        && session.is_some_and(|session| session.status != "recording")
+    let commit_state = if member_post_failed || post_tasks.iter().any(|task| task.state == "failed")
     {
+        "pending"
+    } else if member_post_done {
+        "done"
+    } else if post_state == "skipped" && all_ended {
         "done"
     } else if post_state == "active"
         && post_tasks.iter().any(|task| {
@@ -675,6 +797,7 @@ fn build_stages(
         "pending"
     };
 
+    let session = draft.session.as_ref().or_else(|| members.first().copied());
     let record_detail = session
         .and_then(|session| session.quality.clone())
         .or_else(|| {
@@ -696,7 +819,7 @@ fn build_stages(
         StageView {
             key: "finalize".into(),
             state: finalize_state.into(),
-            detail: None,
+            detail: draft.finalize_message.clone(),
             percent: None,
         },
         StageView {
@@ -844,7 +967,9 @@ fn build_incidents(
     for session in sessions {
         // 长录制可能超过 24 小时；失败是否「最近」要看结束时间，而不是开始时间。
         let failed_at = session.ended_at.unwrap_or(session.started_at);
-        if session.status != "failed"
+        let record_failed = session.status == "failed"
+            || (session.status == "aborted" && session.reason.as_deref() != Some("app_exit"));
+        if !record_failed
             || failed_at < now - DAY_SECS
             || failed_task_sessions.contains(&session.id)
         {
@@ -1014,6 +1139,31 @@ fn parse_task_id(id: &str, kind: &str) -> (Option<u32>, String) {
     (None, "manual".into())
 }
 
+/// 分割录制的片段共享 group_id（首片段 id）；普通录制回退到自己的 id。
+fn session_group_key(session: &RecordSession) -> String {
+    session
+        .group_id
+        .clone()
+        .unwrap_or_else(|| session.id.clone())
+}
+
+/// 一场直播里优先拿失败/异常片段做代表，否则取最后一个结束的片段。
+fn group_representative(members: &[RecordSession]) -> Option<RecordSession> {
+    members
+        .iter()
+        .find(|session| {
+            session.status == "failed"
+                || (session.status == "aborted" && session.reason.as_deref() != Some("app_exit"))
+        })
+        .cloned()
+        .or_else(|| {
+            members
+                .iter()
+                .max_by_key(|session| session.ended_at.unwrap_or(session.started_at))
+                .cloned()
+        })
+}
+
 fn is_finalize(task: &hivecast_ipc::TaskRecord) -> bool {
     task.kind == "finalize" || (task.kind == "post" && task.id.starts_with("job:"))
 }
@@ -1156,6 +1306,96 @@ mod tests {
         assert_eq!(clips, vec![1, 3]);
     }
 
+    #[test]
+    fn recording_session_without_active_task_keeps_record_stage_active() {
+        let mut session = recorded_session("source");
+        session.status = "recording".into();
+        session.ended_at = None;
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.session = Some(session);
+        let run = finish_run(draft, 200);
+
+        assert_eq!(run.state, "recording");
+        assert_eq!(run.stages[0].state, "active");
+        assert_eq!(run.stages[1].state, "pending");
+    }
+
+    #[test]
+    fn grouped_clips_aggregate_bytes_duration_and_end() {
+        let mut first = recorded_session("done");
+        first.group_id = Some("group-1".into());
+        first.file_size = 1_000_000;
+        first.duration_ms = 600_000;
+        first.started_at = 100;
+        first.ended_at = Some(700);
+        let mut second = first.clone();
+        second.id = "session-2".into();
+        second.clip_index = 1;
+        second.file_size = 2_000_000;
+        second.duration_ms = 700_000;
+        second.started_at = 700;
+        second.ended_at = Some(1_400);
+
+        let mut draft = RunDraft::new("session:group-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(1_400);
+        draft.session = Some(second.clone());
+        draft.sessions = vec![first, second];
+        let run = finish_run(draft, 1_500);
+
+        assert_eq!(run.state, "done");
+        assert_eq!(run.bytes, 3_000_000);
+        assert_eq!(run.duration_ms, 1_300_000);
+        assert_eq!(run.ended_at, Some(1_400));
+    }
+
+    #[test]
+    fn aborted_disk_full_is_a_failed_run_and_record_stage() {
+        let mut session = recorded_session("source");
+        session.status = "aborted".into();
+        session.reason = Some("disk_full".into());
+        session.file_size = 3_000_000;
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(session);
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.stages[0].state, "failed");
+        assert_eq!(run.stages[1].state, "failed");
+    }
+
+    #[test]
+    fn aborted_on_app_exit_is_interrupted_not_failed() {
+        let mut session = recorded_session("source");
+        session.status = "aborted".into();
+        session.reason = Some("app_exit".into());
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(session);
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "interrupted");
+        assert_eq!(run.stages[0].state, "done");
+        assert_eq!(run.stages[1].state, "skipped");
+    }
+
+    #[test]
+    fn failed_finalize_task_is_a_failed_run_and_stage() {
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(recorded_session("source"));
+        draft.finalize_failed = true;
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.stages[1].state, "failed");
+    }
+
     fn recorded_session(post_state: &str) -> RecordSession {
         RecordSession {
             id: "session-1".into(),
@@ -1178,6 +1418,8 @@ mod tests {
             post_state: post_state.into(),
             source_deleted: false,
             post_error: None,
+            group_id: None,
+            clip_index: 0,
         }
     }
 
