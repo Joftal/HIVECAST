@@ -209,17 +209,15 @@ function failedTask(run: RunView): TaskView | undefined {
   return run.tasks.find((task) => task.state === "failed" && task.sessionId);
 }
 
-/// 收尾失败可能已经重试过：只认最新一条仍失败的收尾任务。
+/// 收尾失败可能已经重试过：先找最新一条收尾任务，只有它仍失败才允许重试。
 function failedFinalizeTask(run: RunView): TaskView | undefined {
-  return run.tasks
-    .filter(
-      (task) =>
-        task.kind === "finalize" &&
-        !!task.sessionId &&
-        (task.state === "failed" || task.state === "interrupted"),
-    )
+  const latest = run.tasks
+    .filter((task) => task.kind === "finalize" && !!task.sessionId)
     .sort((a, b) => a.startedAt - b.startedAt)
     .at(-1);
+  return latest && (latest.state === "failed" || latest.state === "interrupted")
+    ? latest
+    : undefined;
 }
 
 function clipText(t: (key: string, options?: Record<string, unknown>) => string, task: TaskView): string | null {
@@ -948,6 +946,19 @@ export default function TasksPage({
   );
   const queuedCount = queuedRuns.length;
   const runCount = activeRuns.length + queuedCount;
+  // 失败 Run 同时出现在「需要处理」和历史里，不能把两张卡算成两条记录。
+  // 只有找不到对应 Run 的异常（例如登录失效）才是额外的一条。
+  const orphanIncidentCount = useMemo(
+    () =>
+      incidents.filter((incident) => {
+        if (incident.taskId) {
+          return !allRuns.some((run) => run.tasks.some((task) => task.id === incident.taskId));
+        }
+        if (incident.roomId) return !allRuns.some((run) => run.room?.id === incident.roomId);
+        return true;
+      }).length,
+    [allRuns, incidents],
+  );
 
   // 平台/直播间筛选后，顶部统计卡必须跟着筛选走；否则会出现
   // 「列表 0 条，但统计仍显示 1 个房间在录」的自相矛盾。
@@ -1082,7 +1093,7 @@ export default function TasksPage({
       <PageToolbar>
         <PageChip active={filter === "all"} onClick={() => setFilter("all")}>
           {t("tasks.filterAll")}
-          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{runCount + historyRuns.length + incidents.length}</span>
+          <span className="tnum ml-1.5 text-[11.5px] opacity-60">{runCount + historyRuns.length + orphanIncidentCount}</span>
         </PageChip>
         <PageChip active={filter === "running"} onClick={() => setFilter("running")}>
           {t("tasks.filterRunning")}
@@ -1271,6 +1282,9 @@ export default function TasksPage({
                 <div className="mb-2 flex items-baseline gap-2">
                   <h2 className="text-[12.5px] font-semibold text-ink">{t("tasks.history")}</h2>
                   <span className="text-[11px] tabular-nums text-faint">{historyRuns.length}</span>
+                  {center.history.length >= 100 ? (
+                    <span className="ml-auto text-[10.5px] text-faint">{t("tasks.historyLimit")}</span>
+                  ) : null}
                 </div>
                 {!loaded ? (
                   <div className="rounded-panel border border-line bg-surface px-5 py-8 text-center text-[12px] text-faint">

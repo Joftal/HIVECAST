@@ -3873,18 +3873,19 @@ async fn finish_file(path: &Path) -> (PathBuf, i64) {
     }
 }
 
-/// 同一场次只允许一个手动收尾重试，避免两个任务同时写清单/片段。
+/// 同一份收尾清单只允许一个手动重试，避免两个任务同时写清单/片段。
+/// 分组录制的多个片段共用一份清单，锁必须按清单而不是 session id。
 static FINALIZE_RETRYING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 struct FinalizeRetryLease {
-    session_id: String,
+    manifest: String,
 }
 
 impl Drop for FinalizeRetryLease {
     fn drop(&mut self) {
         if let Some(set) = FINALIZE_RETRYING.get() {
             if let Ok(mut guard) = set.lock() {
-                guard.remove(&self.session_id);
+                guard.remove(&self.manifest);
             }
         }
     }
@@ -3916,12 +3917,12 @@ pub async fn retry_finalize(db: &Db, session_id: &str) -> Result<(), AppError> {
         let mut guard = set
             .lock()
             .map_err(|_| AppError::Internal("收尾重试锁被污染".into()))?;
-        if !guard.insert(session_id.to_string()) {
+        if !guard.insert(manifest.clone()) {
             return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
         }
     }
     let _lease = FinalizeRetryLease {
-        session_id: session_id.to_string(),
+        manifest: manifest.clone(),
     };
 
     tracing::info!(

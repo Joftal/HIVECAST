@@ -439,13 +439,20 @@ impl RunDraft {
 }
 
 fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
+    let group_members: Vec<RecordSession> = if draft.sessions.is_empty() {
+        draft.session.clone().into_iter().collect()
+    } else {
+        draft.sessions.clone()
+    };
+
     // 后处理重试成功后，session.post_state 会回到 done；同一 Run 里上一次失败的
-    // post/remux 任务不应继续把整条 Run 标成失败，否则「需要处理」会一直留着。
-    if draft
-        .session
-        .as_ref()
-        .is_some_and(|session| session.post_state == "done")
-    {
+    // post/remux 任务不应继续把整条 Run 标成失败。分组录制必须等所有片段都 done
+    // 才隐藏失败，否则一个片段的成功重试会掩盖另一个片段的真实失败。
+    let all_members_post_done = !group_members.is_empty()
+        && group_members
+            .iter()
+            .all(|session| session.post_state == "done");
+    if all_members_post_done {
         draft.tasks.retain(|task| {
             !(matches!(task.kind.as_str(), "post" | "remux") && task.state == "failed")
         });
@@ -458,6 +465,16 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
             .cmp(&b.started_at)
             .then_with(|| a.finished_at.cmp(&b.finished_at))
     });
+    // 详情只保留最新一次收尾尝试：旧的 failed 记录留在 task_history 里，
+    // 若继续放进 Run.tasks，重试成功后详情仍会出现「收尾失败」和重试按钮。
+    if draft.finalize_tasks.len() > 1 {
+        let latest = draft
+            .finalize_tasks
+            .pop()
+            .expect("finalize_tasks 刚检查过长度");
+        draft.finalize_tasks.clear();
+        draft.finalize_tasks.push(latest);
+    }
     if let Some(task) = draft.finalize_tasks.last() {
         draft.finalizing = task.state == "running" || task.state == "queued";
         draft.finalize_finished = task.state == "done";
@@ -488,11 +505,6 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         task.clip_count = clip_count;
     }
 
-    let group_members: Vec<RecordSession> = if draft.sessions.is_empty() {
-        draft.session.clone().into_iter().collect()
-    } else {
-        draft.sessions.clone()
-    };
     let session_active = group_members
         .iter()
         .any(|session| session.status == "recording");
@@ -1192,7 +1204,9 @@ fn load_sessions(db: &Db, history: usize) -> Result<Vec<RecordSession>, AppError
     const MAX_ROWS: usize = 5_000;
     let target = history.saturating_add(8);
     let mut sessions = Vec::new();
-    let mut closed_groups: HashSet<String> = HashSet::new();
+    let mut closed_seen: HashSet<String> = HashSet::new();
+    let mut closed_order: Vec<String> = Vec::new();
+    let mut capped = false;
     let mut offset = 0usize;
     loop {
         let batch = db.list_sessions(None, PAGE, offset)?;
@@ -1201,18 +1215,26 @@ fn load_sessions(db: &Db, history: usize) -> Result<Vec<RecordSession>, AppError
         }
         for session in &batch {
             if session.status != "recording" {
-                closed_groups.insert(session_group_key(session));
+                let key = session_group_key(session);
+                if closed_seen.insert(key.clone()) {
+                    closed_order.push(key);
+                }
             }
         }
         let fetched = batch.len();
         sessions.extend(batch);
-        if closed_groups.len() >= target || fetched < PAGE {
+        if fetched < PAGE {
+            break;
+        }
+        // 必须多读一个分组：目标分组可能正好跨页，读到下一组才能确认它已经完整。
+        if closed_order.len() > target {
             break;
         }
         if sessions.len() >= MAX_ROWS {
+            capped = true;
             tracing::warn!(
                 rows = sessions.len(),
-                groups = closed_groups.len(),
+                groups = closed_order.len(),
                 target,
                 "任务中心历史分页达到上限，较早场次可能未纳入"
             );
@@ -1220,7 +1242,37 @@ fn load_sessions(db: &Db, history: usize) -> Result<Vec<RecordSession>, AppError
         }
         offset += PAGE;
     }
+
+    if capped {
+        // 达到行数上限时最后一组可能被截断，宁可少一组，也不要把半场聚合成整场。
+        if let Some(last) = closed_order.last() {
+            sessions.retain(|session| {
+                session.status == "recording" || session_group_key(session) != *last
+            });
+        }
+    } else if closed_order.len() > target {
+        trim_to_target_groups(&mut sessions, target);
+    }
     Ok(sessions)
+}
+
+/// 只保留最前面的 target 个分组；多读的末尾分组可能不完整，直接丢弃。
+fn trim_to_target_groups(sessions: &mut Vec<RecordSession>, target: usize) {
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for session in sessions.iter().filter(|s| s.status != "recording") {
+        let key = session_group_key(session);
+        if seen.insert(key.clone()) {
+            order.push(key);
+        }
+    }
+    if order.len() <= target {
+        return;
+    }
+    let keep: HashSet<String> = order.into_iter().take(target).collect();
+    sessions.retain(|session| {
+        session.status == "recording" || keep.contains(&session_group_key(session))
+    });
 }
 
 fn session_group_key(session: &RecordSession) -> String {
@@ -1471,11 +1523,10 @@ mod tests {
 
         assert_eq!(run.state, "done");
         assert_eq!(run.stages[1].state, "done");
-        // 收尾任务要出现在详情任务列表里，且排在录制/后处理之间。
-        assert_eq!(run.tasks.len(), 2);
+        // 只把最新一次收尾尝试放进详情，旧失败仍留在 task_history。
+        assert_eq!(run.tasks.len(), 1);
         assert_eq!(run.tasks[0].kind, "finalize");
-        assert_eq!(run.tasks[0].state, "failed");
-        assert_eq!(run.tasks[1].state, "done");
+        assert_eq!(run.tasks[0].state, "done");
     }
 
     #[test]
@@ -1546,6 +1597,69 @@ mod tests {
         assert_eq!(run.state, "done");
         assert_eq!(run.tasks.len(), 1);
         assert_eq!(run.tasks[0].id, "manual:sess:retry");
+    }
+
+    #[test]
+    fn grouped_post_retry_hides_failure_only_after_every_clip_is_done() {
+        let mut failed_clip = recorded_session("failed");
+        failed_clip.id = "s1".into();
+        failed_clip.group_id = Some("g1".into());
+        let mut done_clip = recorded_session("done");
+        done_clip.id = "s2".into();
+        done_clip.group_id = Some("g1".into());
+
+        let mut failed_task = task("auto:s1:0", "post", "failed", Some(1));
+        failed_task.session_id = Some("s1".into());
+
+        let mut draft = RunDraft::new("session:g1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(done_clip.clone());
+        draft.sessions = vec![failed_clip.clone(), done_clip.clone()];
+        draft.tasks = vec![failed_task];
+        let run = finish_run(draft, 300);
+        // 另一个片段成功了，不能把这一段的失败藏掉。
+        assert_eq!(run.state, "failed");
+        assert!(run.tasks.iter().any(|task| task.state == "failed"));
+
+        failed_clip.post_state = "done".into();
+        let mut draft = RunDraft::new("session:g1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(done_clip.clone());
+        draft.sessions = vec![failed_clip, done_clip];
+        draft.tasks = vec![task("auto:s1:0", "post", "failed", Some(1))];
+        let run = finish_run(draft, 300);
+        assert_eq!(run.state, "done");
+        assert!(run.tasks.iter().all(|task| task.state != "failed"));
+    }
+
+    #[test]
+    fn trim_to_target_groups_drops_the_extra_partial_group() {
+        let mut a1 = recorded_session("done");
+        a1.id = "a1".into();
+        a1.group_id = Some("a".into());
+        let mut a2 = recorded_session("done");
+        a2.id = "a2".into();
+        a2.group_id = Some("a".into());
+        let mut b = recorded_session("done");
+        b.id = "b1".into();
+        b.group_id = Some("b".into());
+        let mut c = recorded_session("done");
+        c.id = "c1".into();
+        c.group_id = Some("c".into());
+        let mut c_recording = recorded_session("source");
+        c_recording.id = "c2".into();
+        c_recording.group_id = Some("c".into());
+        c_recording.status = "recording".into();
+        c_recording.ended_at = None;
+
+        let mut sessions = vec![a1, a2, b, c, c_recording];
+        trim_to_target_groups(&mut sessions, 2);
+
+        let ids: Vec<_> = sessions.iter().map(|session| session.id.as_str()).collect();
+        // 两个完整分组保留，多读的 c 丢掉；正在录制的 session 不参与截断。
+        assert_eq!(ids, vec!["a1", "a2", "b1", "c2"]);
     }
 
     #[test]

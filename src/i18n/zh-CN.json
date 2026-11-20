@@ -128,6 +128,7 @@
     "cancelRequested": "已请求取消任务",
     "running": "进行中",
     "history": "最近完成",
+    "historyLimit": "最多显示最近 100 场",
     "emptyRunning": "现在没有运行中的任务",
     "emptyRunningHint": "开播录制、转封装或合并时会自动出现在这里。",
     "emptyHistory": "还没有任务记录",
