@@ -487,10 +487,14 @@ function SortHead({
 }
 
 export default function MonitorPage({
+  seed,
+  onSeedApplied,
   onOpenWatch,
   onOpenRoomFiles,
   onOpenTasks,
 }: {
+  seed?: { roomId: string; nonce: number } | null;
+  onSeedApplied?: () => void;
   onOpenWatch?: (roomIds?: string[], kind?: LayoutKind) => void;
   onOpenRoomFiles?: (room: RoomRecord) => void;
   onOpenTasks?: (roomId: string) => void;
@@ -535,6 +539,15 @@ export default function MonitorPage({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // 同一个抽屉既展示录制详情，也承载行菜单的「直播间设置」。
   const [detailMode, setDetailMode] = useState<"detail" | "settings">("detail");
+  // 任务中心的「打开直播间」跳过来时直接展开该房间详情。
+  useEffect(() => {
+    if (!seed) return;
+    setSelectedId(seed.roomId);
+    setDetailMode("detail");
+    onSeedApplied?.();
+    // 只响应新的跳转请求；回调换引用不应重新打开抽屉。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.nonce]);
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。

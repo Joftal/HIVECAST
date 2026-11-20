@@ -290,7 +290,11 @@ pub fn build(
             .values()
             .filter(|room| room.removed_at.is_none() && room.is_live)
             .count() as i64,
-        recording: recorder.active_count() as i64,
+        // 含「开录中」：recorder.active 还没建立，但页面的 Run 已经显示为录制中。
+        recording: running
+            .iter()
+            .filter(|run| run.state == "recording")
+            .count() as i64,
         // 与页面的「排队」筛选一致：按 Run 计数，而不是按片段任务计数。
         queued: queued_runs,
         running: running.len() as i64,
@@ -388,6 +392,10 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         .session
         .as_ref()
         .is_some_and(|session| session.status == "failed");
+    let starting_active = draft
+        .record_task
+        .as_ref()
+        .is_some_and(|task| is_active(task) && task.stage.as_deref() == Some("starting"));
     let record_active = draft
         .record_task
         .as_ref()
@@ -402,7 +410,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     // 录制、收尾、后处理是三种不同的活动态：任务页要能一眼看出「在录」还是「在转」。
     let state = if draft.finalizing {
         "finalizing"
-    } else if record_active || session_active {
+    } else if record_active || session_active || starting_active {
         "recording"
     } else if processing_active {
         "running"
@@ -434,7 +442,11 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     };
 
     let stage = if state == "recording" {
-        "recording".into()
+        if starting_active && !record_active && !session_active {
+            "starting".into()
+        } else {
+            "recording".into()
+        }
     } else if state == "finalizing" {
         "finalizing".into()
     } else if state == "running" {
@@ -506,6 +518,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         host_name: room.host_name.clone(),
         title: room.title.clone(),
         avatar_url: room.avatar_url.clone(),
+        is_live: room.is_live,
     });
 
     let stages = if draft.standalone_stage.is_some() {
@@ -520,7 +533,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
                 .filter(|percent| *percent > 0),
         }]
     } else {
-        build_stages(&draft, state, session_active)
+        build_stages(&draft, state, session_active, starting_active)
     };
 
     let mut tasks = draft.tasks;
@@ -572,7 +585,12 @@ fn current_processing_stage(draft: &RunDraft) -> String {
         .unwrap_or_else(|| "postprocessing".into())
 }
 
-fn build_stages(draft: &RunDraft, run_state: &str, session_active: bool) -> Vec<StageView> {
+fn build_stages(
+    draft: &RunDraft,
+    run_state: &str,
+    session_active: bool,
+    starting_active: bool,
+) -> Vec<StageView> {
     let session = draft.session.as_ref();
     let record_state = if session_active && draft.record_task.as_ref().is_some_and(is_active) {
         "active"
@@ -591,7 +609,7 @@ fn build_stages(draft: &RunDraft, run_state: &str, session_active: bool) -> Vec<
         "active"
     } else if session.is_some_and(|session| session.ended_at.is_some()) || draft.finalize_finished {
         "done"
-    } else if session_active {
+    } else if session_active || starting_active {
         "pending"
     } else {
         let _ = run_state;
@@ -619,7 +637,7 @@ fn build_stages(draft: &RunDraft, run_state: &str, session_active: bool) -> Vec<
         }
     } else if session.is_some_and(|session| session.post_state == "failed") {
         "failed"
-    } else if session_active {
+    } else if session_active || starting_active {
         "pending"
     } else {
         "skipped"
@@ -708,13 +726,19 @@ fn build_platforms(
                 .iter()
                 .filter_map(|room| statuses.get(&room.id))
                 .collect();
+            // 暂停监控的房间可能保留最后一次退避状态；它不应继续把平台卡染成警告。
+            let active_statuses: Vec<_> = list
+                .iter()
+                .filter(|room| !room.monitor_paused)
+                .filter_map(|room| statuses.get(&room.id))
+                .collect();
             let auth = credentials
                 .iter()
                 .find(|credential| credential.platform == *platform)
                 .map(|credential| credential.status.clone())
                 .unwrap_or_else(|| "none".into());
-            let backoff = room_statuses.iter().any(|status| status.backoff);
-            let checking = room_statuses.iter().any(|status| status.inflight);
+            let backoff = active_statuses.iter().any(|status| status.backoff);
+            let checking = active_statuses.iter().any(|status| status.inflight);
             let level = if auth == "expired" {
                 "error"
             } else if backoff {
@@ -741,7 +765,7 @@ fn build_platforms(
                     .iter()
                     .filter_map(|status| status.last_checked_at)
                     .max(),
-                next_check_in_secs: room_statuses
+                next_check_in_secs: active_statuses
                     .iter()
                     .map(|status| status.next_check_in_secs)
                     .filter(|secs| *secs > 0)
@@ -764,6 +788,7 @@ fn build_incidents(
     now: i64,
 ) -> Vec<Incident> {
     let mut incidents: Vec<Incident> = Vec::new();
+    let mut failed_task_sessions: HashSet<String> = HashSet::new();
     let statuses = statuses
         .lock()
         .map(|guard| guard.clone())
@@ -777,6 +802,9 @@ fn build_incidents(
             continue;
         }
         if let Some(task) = run.tasks.iter().find(|task| task.state == "failed") {
+            if let Some(session_id) = task.session_id.as_deref() {
+                failed_task_sessions.insert(session_id.to_string());
+            }
             incidents.push(Incident {
                 id: format!("task:{}", task.id),
                 code: "task_failed".into(),
@@ -797,15 +825,15 @@ fn build_incidents(
         }
     }
 
-    // 录制失败但没有任何后处理任务时，单独报一条；否则会和上面的 task_failed 重复。
-    let task_rooms: HashSet<String> = incidents
-        .iter()
-        .filter_map(|incident| incident.room_id.clone())
-        .collect();
+    // 录制失败但同一场次没有任何后处理任务时，单独报一条；否则会和上面的
+    // task_failed 重复。按 session 去重，不能按房间：同一房间的另一场失败
+    // 不应把这一场的录制失败藏掉。
     for session in sessions {
+        // 长录制可能超过 24 小时；失败是否「最近」要看结束时间，而不是开始时间。
+        let failed_at = session.ended_at.unwrap_or(session.started_at);
         if session.status != "failed"
-            || session.started_at < now - DAY_SECS
-            || task_rooms.contains(&session.room_id)
+            || failed_at < now - DAY_SECS
+            || failed_task_sessions.contains(&session.id)
         {
             continue;
         }
@@ -830,17 +858,28 @@ fn build_incidents(
     }
 
     for status in statuses.values().filter(|status| status.backoff) {
+        // 已移除 / 暂停监控的房间不应该继续占着「需要处理」；旧退避也不再提示。
+        let Some(room) = rooms.get(&status.room_id) else {
+            continue;
+        };
+        if room.removed_at.is_some() || room.monitor_paused {
+            continue;
+        }
+        let at = status.last_checked_at.unwrap_or(now);
+        if now - at > DAY_SECS {
+            continue;
+        }
         incidents.push(Incident {
             id: format!("backoff:{}", status.room_id),
             code: "monitor_backoff".into(),
             severity: "warn".into(),
             scope: "monitor".into(),
-            platform: rooms.get(&status.room_id).map(|room| room.platform.clone()),
+            platform: Some(room.platform.clone()),
             room_id: Some(status.room_id.clone()),
             task_id: None,
             title: String::new(),
             detail: status.last_outcome.clone(),
-            at: status.last_checked_at.unwrap_or(now),
+            at,
             action: "open_room".into(),
         });
     }
@@ -1143,6 +1182,33 @@ mod tests {
         assert_eq!(run.state, "done");
         assert_eq!(run.tasks.len(), 1);
         assert_eq!(run.tasks[0].id, "manual:sess:retry");
+    }
+
+    #[test]
+    fn starting_record_is_running_not_done() {
+        let mut record = task("record:room-1", "record", "running", None);
+        record.stage = Some("starting".into());
+        record.session_id = None;
+        let mut draft = RunDraft::new("task:record:room-1".into());
+        draft.started_at = 100;
+        draft.record_task = Some(record);
+
+        let run = finish_run(draft, 150);
+        assert_eq!(run.state, "recording");
+        assert_eq!(run.stage, "starting");
+        // 还没拿到 session，收尾/后处理/入库都应等待，而不是提前标成 skipped。
+        assert_eq!(
+            run.stages
+                .iter()
+                .map(|stage| (stage.key.as_str(), stage.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("record", "active"),
+                ("finalize", "pending"),
+                ("post", "pending"),
+                ("commit", "pending"),
+            ]
+        );
     }
 
     #[test]

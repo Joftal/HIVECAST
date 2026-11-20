@@ -3,4 +3,8 @@
 /**
  * Run 关联的直播间；房间被移除后历史 Run 仍然保留标题。
  */
-export type RunRoom = { id: string, platform: string, roomKey: string, hostName: string, title: string, avatarUrl: string | null, };
+export type RunRoom = { id: string, platform: string, roomKey: string, hostName: string, title: string, avatarUrl: string | null,
+/**
+ * 当前是否直播中；用于筛选单个直播间后的统计卡。
+ */
+isLive: boolean, };

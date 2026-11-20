@@ -869,6 +869,8 @@ pub struct RunRoom {
     pub host_name: String,
     pub title: String,
     pub avatar_url: Option<String>,
+    /// 当前是否直播中；用于筛选单个直播间后的统计卡。
+    pub is_live: bool,
 }
 
 /// 一条 Run 的阶段快照；只有可量化阶段才带 percent。

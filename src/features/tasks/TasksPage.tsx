@@ -353,6 +353,7 @@ function RunCard({
   const detail =
     task?.message ||
     task?.detail ||
+    (run.stage === "starting" ? t("tasks.actionStarting") : null) ||
     (run.stage === "finalizing" ? t("tasks.actionFinalizing") : null) ||
     (queued ? t("tasks.waitingSlot", { time: formatElapsed(wait) }) : null) ||
     t("tasks.actionWaiting");
@@ -461,12 +462,16 @@ function IncidentRow({
   busy,
   onRetry,
   onOpenSettings,
+  onOpenRun,
+  onOpenRoom,
 }: {
   incident: Incident;
   run: RunView | undefined;
   busy: boolean;
   onRetry: (task: TaskView) => void;
   onOpenSettings: (page: "account" | "storage" | "system") => void;
+  onOpenRun: (run: RunView) => void;
+  onOpenRoom: (roomId: string) => void;
 }) {
   const { t } = useTranslation();
   const task = incident.taskId ? run?.tasks.find((item) => item.id === incident.taskId) : undefined;
@@ -474,7 +479,14 @@ function IncidentRow({
     incident.code === "login_expired"
       ? t("tasks.incidentLoginExpiredPlatform", { platform: platformName(t, incident.platform) })
       : incident.code === "monitor_backoff" || incident.code === "record_failed"
-        ? run?.room?.hostName || incident.detail || t(INCIDENT_KEYS[incident.code] ?? "tasks.incidentUnknown")
+        ? run?.room?.hostName
+          ? t(
+              incident.code === "record_failed"
+                ? "tasks.incidentRecordFailedHost"
+                : "tasks.incidentMonitorBackoffHost",
+              { host: run.room.hostName },
+            )
+          : t(INCIDENT_KEYS[incident.code] ?? "tasks.incidentUnknown")
         : t(INCIDENT_KEYS[incident.code] ?? "tasks.incidentUnknown");
   const detail =
     incident.code === "login_expired"
@@ -491,7 +503,11 @@ function IncidentRow({
         ? { label: t("tasks.actionOpenAccount"), run: () => onOpenSettings("account") }
         : incident.action === "open_storage"
           ? { label: t("tasks.actionOpenStorage"), run: () => onOpenSettings("storage") }
-          : null;
+          : incident.action === "open_room" && incident.roomId
+            ? { label: t("tasks.actionOpenRoom"), run: () => onOpenRoom(incident.roomId!) }
+            : incident.action === "open_task" && run
+              ? { label: t("tasks.actionOpenTask"), run: () => onOpenRun(run) }
+              : null;
   return (
     <div className="flex items-start gap-3 border-b border-line px-4 py-3 last:border-b-0">
       <span
@@ -535,6 +551,12 @@ function DetailDrawer({
   const { t } = useTranslation();
   const cancelTask = canCancel(run);
   const retryTask = failedTask(run);
+  // Run id 的前缀是内部键：session:/task:/starting:。详情里不要把技术前缀直接当「场次」。
+  const runRef = run.id.startsWith("session:")
+    ? { label: t("tasks.detailSession"), value: run.id.slice("session:".length) }
+    : run.id.startsWith("task:")
+      ? { label: t("tasks.detailTask"), value: run.id.slice("task:".length) }
+      : { label: t("tasks.detailStarting"), value: run.id.slice("starting:".length) };
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -671,8 +693,8 @@ function DetailDrawer({
             <h3 className="text-[12px] font-semibold text-ink">{t("tasks.detailContext")}</h3>
             <dl className="mt-2 space-y-2 text-[11px]">
               <div className="flex gap-3">
-                <dt className="w-[64px] shrink-0 text-faint">{t("tasks.detailSession")}</dt>
-                <dd className="min-w-0 flex-1 break-all text-muted">{run.id}</dd>
+                <dt className="w-[64px] shrink-0 text-faint">{runRef.label}</dt>
+                <dd className="min-w-0 flex-1 break-all text-muted">{runRef.value}</dd>
               </div>
               <div className="flex gap-3">
                 <dt className="w-[64px] shrink-0 text-faint">{t("tasks.detailStarted")}</dt>
@@ -720,12 +742,14 @@ export default function TasksPage({
   onOpenSettings,
   onOpenRoomFiles,
   onOpenMonitor,
+  onOpenRoom,
 }: {
   seed?: { roomId: string; nonce: number } | null;
   onSeedApplied?: () => void;
   onOpenSettings?: (page: "account" | "storage" | "system") => void;
   onOpenRoomFiles?: (roomId: string) => void;
   onOpenMonitor?: () => void;
+  onOpenRoom?: (roomId: string) => void;
 }) {
   const { t } = useTranslation();
   const notify = useNotify();
@@ -737,6 +761,7 @@ export default function TasksPage({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const loadErrorShown = useRef(false);
+  const loadSeq = useRef(0);
 
   useEffect(() => {
     if (!seed) return;
@@ -752,19 +777,23 @@ export default function TasksPage({
       setLoaded(true);
       return true;
     }
+    // 2 秒轮询和手动刷新可能重叠；只接受最后一次请求的结果，避免旧快照覆盖新状态。
+    const seq = ++loadSeq.current;
     try {
       const next = await taskCenter(100);
+      if (seq !== loadSeq.current) return false;
       setCenter(next);
       loadErrorShown.current = false;
       return true;
     } catch (err) {
+      if (seq !== loadSeq.current) return false;
       if (!loadErrorShown.current) {
         loadErrorShown.current = true;
         notify.error(err);
       }
       return false;
     } finally {
-      setLoaded(true);
+      if (seq === loadSeq.current) setLoaded(true);
     }
   }, [notify]);
 
@@ -784,6 +813,12 @@ export default function TasksPage({
       (!roomFilter || run.room?.id === roomFilter),
     [platformFilter, roomFilter],
   );
+
+  // 筛选变化后，已经打开的抽屉如果不再属于当前筛选，就关掉，避免
+  // 背景列表显示斗鱼、右侧却还挂着哔哩哔哩的 Run。
+  useEffect(() => {
+    if (selectedId && (!selected || !matches(selected))) setSelectedId(null);
+  }, [matches, selected, selectedId]);
 
   const activeRuns = useMemo(
     () =>
@@ -810,6 +845,46 @@ export default function TasksPage({
   );
   const queuedCount = queuedRuns.length;
   const runCount = activeRuns.length + queuedCount;
+
+  // 平台/直播间筛选后，顶部统计卡必须跟着筛选走；否则会出现
+  // 「列表 0 条，但统计仍显示 1 个房间在录」的自相矛盾。
+  const shownSummary = useMemo(() => {
+    if (!platformFilter && !roomFilter) return center.summary;
+    const health = platformFilter
+      ? center.platforms.find((item) => item.platform === platformFilter)
+      : undefined;
+    const room = roomFilter
+      ? allRuns.map((run) => run.room).find((item) => item?.id === roomFilter)
+      : undefined;
+    const now = center.generatedAt || Math.floor(Date.now() / 1000);
+    const recentFailed = historyRuns.filter(
+      (run) =>
+        (run.state === "failed" || run.state === "partial") &&
+        run.endedAt !== null &&
+        now - run.endedAt <= 86400,
+    ).length;
+    // 直播间筛选可能和平台筛选同时存在（从设置页跳转后又会点平台卡），
+    // 此时房间必须同时属于该平台，否则统计会和列表一样归零。
+    const roomMatches = !!room && (!platformFilter || room.platform === platformFilter);
+    return {
+      ...center.summary,
+      rooms: roomFilter ? (roomMatches ? 1 : 0) : (health?.rooms ?? 0),
+      live: roomFilter ? (roomMatches && room?.isLive ? 1 : 0) : (health?.live ?? 0),
+      recording: activeRuns.filter((run) => run.state === "recording").length,
+      queued: queuedCount,
+      failed: recentFailed,
+    };
+  }, [
+    activeRuns,
+    allRuns,
+    center.generatedAt,
+    center.platforms,
+    center.summary,
+    historyRuns,
+    platformFilter,
+    queuedCount,
+    roomFilter,
+  ]);
 
   const refresh = async () => {
     if (await load()) notify.success(t("tasks.refreshed"));
@@ -946,11 +1021,11 @@ export default function TasksPage({
           <>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
               {[
-                { label: t("tasks.summaryRooms"), value: center.summary.rooms, tone: "text-ink" },
-                { label: t("tasks.summaryLive"), value: center.summary.live, tone: "text-live" },
-                { label: t("tasks.summaryRecording"), value: center.summary.recording, tone: "text-rec" },
-                { label: t("tasks.summaryQueued"), value: center.summary.queued, tone: "text-warn" },
-                { label: t("tasks.summaryFailed"), value: center.summary.failed, tone: center.summary.failed > 0 ? "text-rec" : "text-ink" },
+                { label: t("tasks.summaryRooms"), value: shownSummary.rooms, tone: "text-ink" },
+                { label: t("tasks.summaryLive"), value: shownSummary.live, tone: "text-live" },
+                { label: t("tasks.summaryRecording"), value: shownSummary.recording, tone: "text-rec" },
+                { label: t("tasks.summaryQueued"), value: shownSummary.queued, tone: "text-warn" },
+                { label: t("tasks.summaryFailed"), value: shownSummary.failed, tone: shownSummary.failed > 0 ? "text-rec" : "text-ink" },
               ].map((item) => (
                 <div key={item.label} className="rounded-panel border border-line bg-surface px-3 py-2.5">
                   <div className="text-[10px] text-faint">{item.label}</div>
@@ -1009,8 +1084,23 @@ export default function TasksPage({
                       busy={busyId != null}
                       onRetry={(task) => void retry(task)}
                       onOpenSettings={(page) => onOpenSettings?.(page)}
+                      onOpenRun={(run) => setSelectedId(run.id)}
+                      onOpenRoom={(roomId) => onOpenRoom?.(roomId)}
                     />
                   ))}
+                </div>
+              </section>
+            ) : null}
+
+            {showIncidents && filter === "incidents" && incidents.length === 0 ? (
+              <section className="mt-5">
+                <div className="mb-2 flex items-baseline gap-2">
+                  <h2 className="text-[12.5px] font-semibold text-ink">{t("tasks.incidentsTitle")}</h2>
+                  <span className="text-[11px] tabular-nums text-faint">0</span>
+                </div>
+                <div className="rounded-panel border border-line bg-surface px-5 py-7 text-center">
+                  <p className="text-[12.5px] text-muted">{t("tasks.emptyIncidents")}</p>
+                  <p className="mt-1 text-[11px] text-faint">{t("tasks.emptyIncidentsHint")}</p>
                 </div>
               </section>
             ) : null}

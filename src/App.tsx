@@ -68,6 +68,7 @@ export default function App() {
   // 监控页推入的“录制文件”页；null 时显示监控列表。
   const [roomFiles, setRoomFiles] = useState<RoomRecord | null>(null);
   const [taskSeed, setTaskSeed] = useState<{ roomId: string; nonce: number } | null>(null);
+  const [monitorSeed, setMonitorSeed] = useState<{ roomId: string; nonce: number } | null>(null);
   // 通知开关按事件分三类：录制、异常、登录失效。
   const notifyRef = useRef<Settings | null>(null);
   // 退出被任务拦下：null = 没有提示；[] = 任务已清空，可以安全退出。
@@ -502,6 +503,8 @@ export default function App() {
             />
           ) : (
             <MonitorPage
+              seed={monitorSeed}
+              onSeedApplied={() => setMonitorSeed(null)}
               onOpenWatch={(ids, kind) => {
                 if (ids && ids.length > 0) setWatchSeed({ ids, nonce: Date.now(), kind });
                 setTab("watch");
@@ -525,6 +528,11 @@ export default function App() {
             onSeedApplied={() => setTaskSeed(null)}
             onOpenSettings={(page) => openSettings(page)}
             onOpenMonitor={() => setTab("monitor")}
+            onOpenRoom={(roomId) => {
+              setRoomFiles(null);
+              setMonitorSeed({ roomId, nonce: Date.now() });
+              setTab("monitor");
+            }}
             onOpenRoomFiles={async (roomId) => {
               try {
                 const view = (await roomsList()).find((item) => item.room.id === roomId);
