@@ -172,8 +172,10 @@ pub fn build(
         if is_finalize {
             if let Some(key) = session_key {
                 if let Some(draft) = drafts.get_mut(&key) {
-                    draft.finalizing = task.state == "running" || task.state == "queued";
-                    draft.finalize_finished = task.state == "done";
+                    // 同一 session 可能留下多条收尾记录（崩溃恢复、手动重试）。
+                    // 用「或」合并，避免后读到的旧 done 把正在收尾的状态抹掉。
+                    draft.finalizing |= task.state == "running" || task.state == "queued";
+                    draft.finalize_finished |= task.state == "done";
                 }
             }
             continue;
@@ -216,6 +218,7 @@ pub fn build(
     let mut running = Vec::new();
     let mut history_runs = Vec::new();
     let mut queued = Vec::new();
+    let mut queued_runs = 0i64;
     let mut all_runs: Vec<RunView> = drafts
         .into_values()
         .map(|draft| finish_run(draft, now))
@@ -228,6 +231,9 @@ pub fn build(
             run.state.as_str(),
             "recording" | "finalizing" | "running" | "queued"
         ) {
+            if run.state == "queued" {
+                queued_runs += 1;
+            }
             for task in &run.tasks {
                 if task.state == "queued" {
                     queued.push(task.clone());
@@ -285,7 +291,8 @@ pub fn build(
             .filter(|room| room.removed_at.is_none() && room.is_live)
             .count() as i64,
         recording: recorder.active_count() as i64,
-        queued: queued.len() as i64,
+        // 与页面的「排队」筛选一致：按 Run 计数，而不是按片段任务计数。
+        queued: queued_runs,
         running: running.len() as i64,
         failed: failed_24h,
         incidents: incidents.len() as i64,
@@ -1051,6 +1058,32 @@ mod tests {
         assert_eq!(run.stage, "queued");
         // 排队不是「运行中」，否则任务页会把它画成有进度的活动 Run。
         assert!(run.tasks.iter().all(|task| !is_active(task)));
+    }
+
+    fn record(id: &str, kind: &str) -> hivecast_ipc::TaskRecord {
+        hivecast_ipc::TaskRecord {
+            id: id.into(),
+            kind: kind.into(),
+            title: id.into(),
+            detail: None,
+            state: "running".into(),
+            percent: 0,
+            stage: Some("finalizing".into()),
+            message: None,
+            session_id: Some("session-1".into()),
+            room_id: Some("room-1".into()),
+            started_at: 100,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn finalize_tasks_are_recognized_and_never_listed_as_post_work() {
+        assert!(is_finalize(&record("finalize:session-1", "finalize")));
+        // 旧版本把收尾父任务写成 post + job: 前缀，升级后仍要识别。
+        assert!(is_finalize(&record("job:legacy", "post")));
+        // 片段后处理必须继续作为独立任务显示。
+        assert!(!is_finalize(&record("auto:sess:0", "post")));
     }
 
     #[test]

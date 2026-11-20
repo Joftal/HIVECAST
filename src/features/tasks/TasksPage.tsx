@@ -168,8 +168,12 @@ function activeTask(run: RunView): TaskView | undefined {
   return run.tasks.find((task) => task.state === "running");
 }
 
+function queuedTasks(run: RunView): TaskView[] {
+  return run.tasks.filter((task) => task.state === "queued");
+}
+
 function queuedTask(run: RunView): TaskView | undefined {
-  return run.tasks.find((task) => task.state === "queued");
+  return queuedTasks(run)[0];
 }
 
 function progressOf(run: RunView): number | null {
@@ -424,8 +428,13 @@ function RunCard({
 
 function QueuedRow({ run, now, onOpen }: { run: RunView; now: number; onOpen: () => void }) {
   const { t } = useTranslation();
-  const task = queuedTask(run);
+  const tasks = queuedTasks(run);
+  const task = tasks[0];
   const wait = task ? Math.max(0, now - (task.queuedAt ?? task.startedAt)) : 0;
+  const kind = task ? t(KIND_KEYS[task.kind] ?? "tasks.kindPost") : t("tasks.stateQueued");
+  const clip = task ? clipText(t, task) : null;
+  const more = tasks.length > 1 ? ` +${tasks.length - 1}` : "";
+  const waiting = t("tasks.waitingSlot", { time: formatElapsed(wait) });
   return (
     <button
       type="button"
@@ -433,10 +442,14 @@ function QueuedRow({ run, now, onOpen }: { run: RunView; now: number; onOpen: ()
       className="focus-ring flex w-full items-center gap-3 border-b border-line px-4 py-2.5 text-left last:border-b-0 hover:bg-raised/50"
     >
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
-      <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-        {run.room?.hostName || run.room?.title || t("tasks.detailNoRoom")}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12px] text-ink">
+          {run.room?.hostName || run.room?.title || t("tasks.detailNoRoom")}
+        </span>
+        <span className="mt-0.5 block truncate text-[10.5px] text-faint">
+          {kind}{clip ? ` · ${clip}` : ""}{more} · {waiting}
+        </span>
       </span>
-      <span className="hidden shrink-0 text-[10.5px] text-muted sm:block">{t("tasks.waitingSlot", { time: formatElapsed(wait) })}</span>
       <span className="w-[92px] shrink-0 truncate text-right text-[10px] text-faint">{platformName(t, run.room?.platform)}</span>
     </button>
   );
