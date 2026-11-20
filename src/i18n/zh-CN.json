@@ -225,6 +225,8 @@
     "copied": "诊断信息已复制",
     "retry": "重试后处理",
     "retryRequested": "已请求重试",
+    "retryFinalize": "重试收尾",
+    "retryFinalizeRequested": "已请求重试收尾",
     "detailNoRoom": "房间已移除",
     "detailDuration": "时长",
     "detailBytes": "体积",

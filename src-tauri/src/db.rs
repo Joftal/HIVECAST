@@ -271,6 +271,15 @@ impl Db {
             Ok(_) => {}
             Err(err) => tracing::warn!(error = %err, "回填媒体文件登记失败"),
         }
+        // 早期版本只给后续片段写 group_id，首片段为空；COALESCE 已经能兼容，
+        // 这里把首片段也指向自己，让所有旧场次都有稳定的分组键。
+        match db.backfill_session_groups() {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "数据库迁移：补全旧录制场次分组")
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "补全旧录制场次分组失败"),
+        }
         Ok(db)
     }
 
@@ -1908,6 +1917,43 @@ impl Db {
             }
         }
         Ok(count)
+    }
+
+    /// 早期分割录制只在后续片段写 group_id，首片段为空。任务中心用
+    /// COALESCE(group_id, id) 已经能正确分组，但补上首片段自身 id 后，
+    /// 所有按 group_id 精确查询的路径也能覆盖旧数据。
+    ///
+    /// 只处理「已有片段明确指向它」的行，不猜测哪些 session 属于同一场。
+    pub fn backfill_session_groups(&self) -> Result<usize, AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session
+                    SET group_id = id
+                  WHERE group_id IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM record_session AS clip
+                         WHERE clip.group_id = record_session.id
+                           AND clip.id <> record_session.id
+                    )",
+                [],
+            )
+            .map_err(db_err)
+    }
+
+    /// 某场次待恢复的分割清单：片段 id 或同组任意片段上的清单都算。
+    pub fn split_manifest_for(&self, session_id: &str) -> Result<Option<String>, AppError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT split_manifest FROM record_session
+              WHERE split_manifest IS NOT NULL AND split_manifest <> ''
+                AND (id = ?1 OR COALESCE(group_id, id) = COALESCE(
+                    (SELECT COALESCE(group_id, id) FROM record_session WHERE id = ?1), ?1))
+              ORDER BY started_at ASC LIMIT 1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_err)
     }
 }
 
@@ -3777,5 +3823,63 @@ mod tests {
         let events = db.task_events(&ids, 100).expect("分批读事件失败");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].run_id.as_deref(), Some("session:1199"));
+    }
+
+    #[test]
+    fn backfills_group_of_a_legacy_first_clip_only() {
+        let (db, _path) = temp_db("backfill-groups");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-a', 'bilibili', '1', 'https://live.bilibili.com/1', '主播甲', '房间甲', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, group_id, clip_index)
+                 VALUES ('s1', 'rm-a', 100, 'finished', '/tmp/s1.flv', 10, 100, NULL, 0),
+                        ('s2', 'rm-a', 200, 'finished', '/tmp/s2.flv', 10, 100, 's1', 1),
+                        ('s3', 'rm-a', 300, 'finished', '/tmp/s3.flv', 10, 100, NULL, 0);",
+            )
+            .expect("播种场次失败");
+
+        assert_eq!(db.backfill_session_groups().expect("回填失败"), 1);
+        let conn = db.lock();
+        let group = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT group_id FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("读分组失败")
+        };
+        assert_eq!(group("s1").as_deref(), Some("s1"));
+        assert_eq!(group("s2").as_deref(), Some("s1"));
+        assert_eq!(group("s3"), None, "没有片段指向的旧场次不能猜分组");
+        drop(conn);
+        // 幂等：再跑一次不会改任何行。
+        assert_eq!(db.backfill_session_groups().expect("再次回填失败"), 0);
+    }
+
+    #[test]
+    fn split_manifest_falls_back_to_any_clip_in_the_group() {
+        let (db, _path) = temp_db("split-manifest-group");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-a', 'bilibili', '1', 'https://live.bilibili.com/1', '主播甲', '房间甲', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, group_id, clip_index)
+                 VALUES ('s1', 'rm-a', 100, 'failed', '/tmp/s1.flv', 10, 100, 'g1', 0),
+                        ('s2', 'rm-a', 200, 'finished', '/tmp/s2.flv', 10, 100, 'g1', 1);",
+            )
+            .expect("播种场次失败");
+        db.set_split_manifest("s1", Some("/tmp/s1.json"))
+            .expect("写清单失败");
+
+        assert_eq!(
+            db.split_manifest_for("s2").expect("读清单失败").as_deref(),
+            Some("/tmp/s1.json"),
+            "从任意片段都能找到整组的收尾清单"
+        );
+        assert_eq!(
+            db.split_manifest_for("s1").unwrap().as_deref(),
+            Some("/tmp/s1.json")
+        );
     }
 }

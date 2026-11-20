@@ -9,6 +9,7 @@ import {
   isTauri,
   postCancel,
   postRetry,
+  finalizeRetry,
   taskCenter,
   type Incident,
   type PlatformHealth,
@@ -208,6 +209,19 @@ function failedTask(run: RunView): TaskView | undefined {
   return run.tasks.find((task) => task.state === "failed" && task.sessionId);
 }
 
+/// 收尾失败可能已经重试过：只认最新一条仍失败的收尾任务。
+function failedFinalizeTask(run: RunView): TaskView | undefined {
+  return run.tasks
+    .filter(
+      (task) =>
+        task.kind === "finalize" &&
+        !!task.sessionId &&
+        (task.state === "failed" || task.state === "interrupted"),
+    )
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .at(-1);
+}
+
 function clipText(t: (key: string, options?: Record<string, unknown>) => string, task: TaskView): string | null {
   if (!task.clipIndex || task.clipCount <= 1) return null;
   return t("tasks.clipOf", { index: task.clipIndex, count: task.clipCount });
@@ -243,6 +257,7 @@ function StageRail({ run }: { run: RunView }) {
           done: "border-live/40 bg-live text-white",
           active: "border-accent bg-accent text-white",
           failed: "border-rec bg-rec text-white",
+          partial: "border-warn/40 bg-warn text-white",
           cancelled: "border-line bg-raised text-faint",
           skipped: "border-line bg-surface text-faint",
           pending: "border-line bg-surface text-faint",
@@ -264,7 +279,15 @@ function StageRail({ run }: { run: RunView }) {
               )}
               aria-hidden
             >
-              {stage.state === "done" ? "✓" : stage.state === "failed" ? "!" : stage.state === "active" ? "•" : ""}
+              {stage.state === "done"
+                ? "✓"
+                : stage.state === "failed"
+                  ? "!"
+                  : stage.state === "partial"
+                    ? "~"
+                    : stage.state === "active"
+                      ? "•"
+                      : ""}
             </span>
             <span
               className={cx(
@@ -273,7 +296,9 @@ function StageRail({ run }: { run: RunView }) {
                   ? "font-medium text-accent-text"
                   : stage.state === "failed"
                     ? "text-rec"
-                    : stage.state === "done"
+                    : stage.state === "partial"
+                      ? "text-warn"
+                      : stage.state === "done"
                       ? "text-ink-soft"
                       : "text-faint",
               )}
@@ -507,9 +532,11 @@ function IncidentRow({
           ? t("tasks.incidentDiskLowDetail")
           : incident.detail;
   const action =
-    incident.action === "retry_post" && task?.sessionId
-      ? { label: t("tasks.retry"), run: () => onRetry(task) }
-      : incident.action === "open_account"
+    incident.action === "retry_finalize" && task?.sessionId
+      ? { label: t("tasks.retryFinalize"), run: () => onRetry(task) }
+      : incident.action === "retry_post" && task?.sessionId
+        ? { label: t("tasks.retry"), run: () => onRetry(task) }
+        : incident.action === "open_account"
         ? { label: t("tasks.actionOpenAccount"), run: () => onOpenSettings("account") }
         : incident.action === "open_storage"
           ? { label: t("tasks.actionOpenStorage"), run: () => onOpenSettings("storage") }
@@ -561,6 +588,7 @@ function DetailDrawer({
   const { t } = useTranslation();
   const cancelTask = canCancel(run);
   const retryTask = failedTask(run);
+  const retryFinalizeTask = failedFinalizeTask(run);
   // Run id 的前缀是内部键：session:/task:/starting:。详情里不要把技术前缀直接当「场次」。
   const runRef = run.id.startsWith("session:")
     ? { label: t("tasks.detailSession"), value: run.id.slice("session:".length) }
@@ -648,12 +676,22 @@ function DetailDrawer({
                       ? "border-accent bg-accent text-white"
                       : stage.state === "failed"
                         ? "border-rec bg-rec text-white"
-                        : "border-line bg-surface text-faint";
+                        : stage.state === "partial"
+                          ? "border-warn/40 bg-warn text-white"
+                          : "border-line bg-surface text-faint";
                 return (
                   <div key={stage.key} className="flex gap-3">
                     <div className="flex flex-col items-center">
                       <span className={cx("flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold", tone)}>
-                        {stage.state === "done" ? "✓" : stage.state === "failed" ? "!" : stage.state === "active" ? "•" : index + 1}
+                        {stage.state === "done"
+                          ? "✓"
+                          : stage.state === "failed"
+                            ? "!"
+                            : stage.state === "partial"
+                              ? "~"
+                              : stage.state === "active"
+                                ? "•"
+                                : index + 1}
                       </span>
                       {index < run.stages.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
                     </div>
@@ -770,6 +808,16 @@ function DetailDrawer({
             </Button>
           ) : null}
           <div className="ml-auto flex items-center gap-2">
+            {retryFinalizeTask ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => onRetry(retryFinalizeTask)}
+              >
+                {t("tasks.retryFinalize")}
+              </Button>
+            ) : null}
             {retryTask ? (
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => onRetry(retryTask)}>
                 {t("tasks.retry")}
@@ -963,8 +1011,13 @@ export default function TasksPage({
     if (!task.sessionId) return;
     setBusyId(task.id);
     try {
-      await postRetry(task.sessionId);
-      notify.info(t("tasks.retryRequested"));
+      if (task.kind === "finalize") {
+        await finalizeRetry(task.sessionId);
+        notify.info(t("tasks.retryFinalizeRequested"));
+      } else {
+        await postRetry(task.sessionId);
+        notify.info(t("tasks.retryRequested"));
+      }
       await load();
     } catch (err) {
       notify.error(err);

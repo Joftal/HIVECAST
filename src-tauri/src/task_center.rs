@@ -41,7 +41,7 @@ pub fn build(
         .map(|room| (room.id.clone(), room))
         .collect();
 
-    let sessions = db.list_sessions(None, (history * 4).clamp(200, 1200), 0)?;
+    let sessions = load_sessions(db, history)?;
     let mut session_cache: HashMap<String, RecordSession> = HashMap::new();
     // 分割录制的一场直播会写成多条 record_session；任务中心必须按 group_id
     // 聚成一条 Run，否则三个片段会出现三张卡、三个「最近完成」。
@@ -218,14 +218,9 @@ pub fn build(
         if is_finalize {
             if let Some(key) = session_key {
                 if let Some(draft) = drafts.get_mut(&key) {
-                    // 同一 session 可能留下多条收尾记录（崩溃恢复、手动重试）。
-                    // 用「或」合并，避免后读到的旧 done 把正在收尾的状态抹掉。
-                    draft.finalizing |= task.state == "running" || task.state == "queued";
-                    draft.finalize_finished |= task.state == "done";
-                    draft.finalize_failed |= task.state == "failed";
-                    if task.state == "failed" {
-                        draft.finalize_message = task.message.clone();
-                    }
+                    // 同一 session 可能留下多条收尾记录（崩溃恢复、手动重试），
+                    // 状态由最新一条决定，见 finish_run。
+                    draft.finalize_tasks.push(task_view(task));
                 }
             }
             continue;
@@ -411,6 +406,8 @@ struct RunDraft {
     sessions: Vec<RecordSession>,
     record_task: Option<TaskView>,
     tasks: Vec<TaskView>,
+    /// 收尾任务单独收集：它们不参与后处理成功/失败的聚合，但要在详情里可见、可重试。
+    finalize_tasks: Vec<TaskView>,
     standalone_stage: Option<String>,
     finalizing: bool,
     finalize_finished: bool,
@@ -429,6 +426,7 @@ impl RunDraft {
             sessions: Vec::new(),
             record_task: None,
             tasks: Vec::new(),
+            finalize_tasks: Vec::new(),
             standalone_stage: None,
             finalizing: false,
             finalize_finished: false,
@@ -451,6 +449,24 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         draft.tasks.retain(|task| {
             !(matches!(task.kind.as_str(), "post" | "remux") && task.state == "failed")
         });
+    }
+
+    // 收尾可能失败后重试：只认最新一条收尾任务。若用「或」合并，重试成功后
+    // 旧的 failed 会永远把收尾阶段钉在失败。
+    draft.finalize_tasks.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.finished_at.cmp(&b.finished_at))
+    });
+    if let Some(task) = draft.finalize_tasks.last() {
+        draft.finalizing = task.state == "running" || task.state == "queued";
+        draft.finalize_finished = task.state == "done";
+        draft.finalize_failed = matches!(task.state.as_str(), "failed" | "interrupted");
+        draft.finalize_message = if draft.finalize_failed {
+            task.message.clone()
+        } else {
+            None
+        };
     }
 
     draft.tasks.sort_by(|a, b| {
@@ -632,10 +648,15 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         build_stages(&draft, state, session_active, starting_active)
     };
 
-    let mut tasks = draft.tasks;
+    // 任务列表顺序与链路一致：录制 → 收尾 → 后处理。
+    let mut tasks = Vec::with_capacity(
+        draft.tasks.len() + draft.finalize_tasks.len() + usize::from(draft.record_task.is_some()),
+    );
     if let Some(record_task) = draft.record_task {
-        tasks.insert(0, record_task);
+        tasks.push(record_task);
     }
+    tasks.extend(draft.finalize_tasks);
+    tasks.extend(draft.tasks);
 
     RunView {
         id: draft.id,
@@ -777,13 +798,33 @@ fn build_stages(
         "pending"
     };
 
+    // 异常中断（磁盘满/掉盘）时文件可能已经部分落库，入库只能算「部分完成」；
+    // 完全没有产物才算失败。正常结束仍然走 done。
+    let normal_commit = if abnormal_abort {
+        if members.iter().any(|session| {
+            session.file_size > 0
+                || session
+                    .file_path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).is_file())
+        }) {
+            "partial"
+        } else {
+            "failed"
+        }
+    } else {
+        "done"
+    };
     let commit_state = if member_post_failed || post_tasks.iter().any(|task| task.state == "failed")
     {
         "pending"
     } else if member_post_done {
-        "done"
+        normal_commit
     } else if post_state == "skipped" && all_ended {
-        "done"
+        normal_commit
+    } else if abnormal_abort && all_ended {
+        // 异常中断的场次不会再有正常的后处理/入库，直接给它最终态。
+        normal_commit
     } else if post_state == "active"
         && post_tasks.iter().any(|task| {
             matches!(
@@ -952,7 +993,9 @@ fn build_incidents(
                 title: task.title.clone(),
                 detail: task.message.clone(),
                 at: task.finished_at.unwrap_or(task.started_at),
-                action: if task.session_id.is_some() {
+                action: if task.kind == "finalize" && task.session_id.is_some() {
+                    "retry_finalize".into()
+                } else if task.session_id.is_some() {
                     "retry_post".into()
                 } else {
                     "open_task".into()
@@ -1140,6 +1183,46 @@ fn parse_task_id(id: &str, kind: &str) -> (Option<u32>, String) {
 }
 
 /// 分割录制的片段共享 group_id（首片段 id）；普通录制回退到自己的 id。
+/// 分页读到足够的已结束场次为止，避免 history*4 的固定上限把长分割场截断。
+///
+/// 一场直播可能有很多片段；固定条数既可能不够，也可能一次读太多。这里按
+/// 唯一 group 数收敛，正常库通常 1–3 页就停。硬上限防止异常数据拖慢 2 秒轮询。
+fn load_sessions(db: &Db, history: usize) -> Result<Vec<RecordSession>, AppError> {
+    const PAGE: usize = 200;
+    const MAX_ROWS: usize = 5_000;
+    let target = history.saturating_add(8);
+    let mut sessions = Vec::new();
+    let mut closed_groups: HashSet<String> = HashSet::new();
+    let mut offset = 0usize;
+    loop {
+        let batch = db.list_sessions(None, PAGE, offset)?;
+        if batch.is_empty() {
+            break;
+        }
+        for session in &batch {
+            if session.status != "recording" {
+                closed_groups.insert(session_group_key(session));
+            }
+        }
+        let fetched = batch.len();
+        sessions.extend(batch);
+        if closed_groups.len() >= target || fetched < PAGE {
+            break;
+        }
+        if sessions.len() >= MAX_ROWS {
+            tracing::warn!(
+                rows = sessions.len(),
+                groups = closed_groups.len(),
+                target,
+                "任务中心历史分页达到上限，较早场次可能未纳入"
+            );
+            break;
+        }
+        offset += PAGE;
+    }
+    Ok(sessions)
+}
+
 fn session_group_key(session: &RecordSession) -> String {
     session
         .group_id
@@ -1365,6 +1448,34 @@ mod tests {
         assert_eq!(run.state, "failed");
         assert_eq!(run.stages[0].state, "failed");
         assert_eq!(run.stages[1].state, "failed");
+        // 已经写进库的字节还在，入库只能算部分完成，不能显示成完成。
+        assert_eq!(run.stages[3].state, "partial");
+    }
+
+    #[test]
+    fn latest_finalize_task_wins_over_an_older_failure() {
+        let mut failed = task("finalize:session-1", "finalize", "failed", None);
+        failed.started_at = 100;
+        failed.finished_at = Some(150);
+        failed.message = Some("合并失败".into());
+        let mut retried = task("finalize:session-1:retry", "finalize", "done", None);
+        retried.started_at = 200;
+        retried.finished_at = Some(250);
+
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(recorded_session("done"));
+        draft.finalize_tasks = vec![failed, retried];
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "done");
+        assert_eq!(run.stages[1].state, "done");
+        // 收尾任务要出现在详情任务列表里，且排在录制/后处理之间。
+        assert_eq!(run.tasks.len(), 2);
+        assert_eq!(run.tasks[0].kind, "finalize");
+        assert_eq!(run.tasks[0].state, "failed");
+        assert_eq!(run.tasks[1].state, "done");
     }
 
     #[test]

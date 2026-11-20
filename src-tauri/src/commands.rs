@@ -1504,6 +1504,42 @@ pub async fn session_remux(
     })
 }
 
+/// 手动重试一次失败的录制收尾；只处理该场次留下的分割清单。
+#[tauri::command]
+pub async fn finalize_retry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    let session = state.db.get_session(&session_id)?;
+    let room_id = session.as_ref().map(|session| session.room_id.clone());
+    let title = room_id
+        .as_deref()
+        .and_then(|id| state.db.get_room(id).ok().flatten())
+        .map(|room| room.host_name)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "重试录制收尾".into());
+    let job = state.jobs.begin_for(
+        "finalize",
+        title,
+        Some("重新合并分片并执行后处理".into()),
+        Some(session_id.clone()),
+        room_id,
+    );
+    job.progress(5, "finalizing", Some("重新合并分片并执行后处理"));
+    match crate::recorder::retry_finalize(&state.db, &session_id).await {
+        Ok(()) => {
+            job.finish("done", Some("收尾完成"));
+            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+            Ok(())
+        }
+        Err(err) => {
+            job.finish("failed", Some(&err.to_string()));
+            Err(err)
+        }
+    }
+}
+
 /// 重试一条失败/取消的后处理：仍按当前设置执行，成功的派生文件重新写库。
 #[tauri::command]
 pub async fn post_retry(

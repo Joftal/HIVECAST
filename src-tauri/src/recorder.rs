@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -3869,6 +3869,90 @@ async fn finish_file(path: &Path) -> (PathBuf, i64) {
                 "分片拼接失败，保留分片等待恢复"
             );
             (path.to_path_buf(), 0)
+        }
+    }
+}
+
+/// 同一场次只允许一个手动收尾重试，避免两个任务同时写清单/片段。
+static FINALIZE_RETRYING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct FinalizeRetryLease {
+    session_id: String,
+}
+
+impl Drop for FinalizeRetryLease {
+    fn drop(&mut self) {
+        if let Some(set) = FINALIZE_RETRYING.get() {
+            if let Ok(mut guard) = set.lock() {
+                guard.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// 手动重试一次失败的收尾：只处理该场次留下的分割清单，不碰其它录像。
+///
+/// 收尾失败时清单会保留，里面记着每个片段的分片范围、已生成的源封装和
+/// 后处理状态；这里复用启动恢复的逻辑，已完成的片段直接沿用，缺失的补齐。
+pub async fn retry_finalize(db: &Db, session_id: &str) -> Result<(), AppError> {
+    let Some(session) = db.get_session(session_id)? else {
+        return Err(AppError::User("这段录像不存在，可能已被清理".into()));
+    };
+    if session.status == "recording" {
+        return Err(AppError::User("这段还在录制，先停下再重试收尾".into()));
+    }
+    let Some(manifest) = db.split_manifest_for(session_id)? else {
+        return Err(AppError::User(
+            "这段录像没有待恢复的收尾清单，可能已经收尾完成".into(),
+        ));
+    };
+    let manifest_path = PathBuf::from(&manifest);
+    if !manifest_path.is_file() {
+        return Err(AppError::User("收尾清单文件已不存在，无法继续重试".into()));
+    }
+
+    let set = FINALIZE_RETRYING.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let mut guard = set
+            .lock()
+            .map_err(|_| AppError::Internal("收尾重试锁被污染".into()))?;
+        if !guard.insert(session_id.to_string()) {
+            return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
+        }
+    }
+    let _lease = FinalizeRetryLease {
+        session_id: session_id.to_string(),
+    };
+
+    tracing::info!(
+        session = %session_id,
+        manifest = %manifest_path.display(),
+        "手动重试录制收尾"
+    );
+    match recover_split_manifest(db, &manifest_path).await {
+        Some((recovered, bytes)) if !manifest_path.exists() => {
+            tracing::info!(
+                session = %session_id,
+                clips = recovered,
+                bytes,
+                "手动重试收尾完成"
+            );
+            Ok(())
+        }
+        Some((recovered, bytes)) => {
+            tracing::warn!(
+                session = %session_id,
+                clips = recovered,
+                bytes,
+                "手动重试收尾仍未完成，清单已保留"
+            );
+            Err(AppError::User(
+                "收尾仍未完成，缺失的分片或源文件可能已被清理".into(),
+            ))
+        }
+        None => {
+            tracing::warn!(session = %session_id, "手动重试收尾失败：清单不可读");
+            Err(AppError::User("收尾清单损坏，无法继续重试".into()))
         }
     }
 }

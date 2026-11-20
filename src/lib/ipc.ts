@@ -290,6 +290,11 @@ export async function postRetry(sessionId: string): Promise<PostResult> {
   return invoke<PostResult>("post_retry", { sessionId });
 }
 
+/** 重试一次失败的录制收尾（仍按场次留下的分割清单恢复）。 */
+export async function finalizeRetry(sessionId: string): Promise<void> {
+  return invoke<void>("finalize_retry", { sessionId });
+}
+
 /** 取消一条排队/执行中的后处理，返回命中的任务数。 */
 export async function postCancel(sessionId: string): Promise<number> {
   return invoke<number>("post_cancel", { sessionId });

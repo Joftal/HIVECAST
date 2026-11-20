@@ -225,6 +225,8 @@
     "copied": "Diagnostics copied",
     "retry": "Retry post-processing",
     "retryRequested": "Retry requested",
+    "retryFinalize": "Retry finalize",
+    "retryFinalizeRequested": "Finalize retry requested",
     "detailNoRoom": "Room removed",
     "detailDuration": "Duration",
     "detailBytes": "Size",
