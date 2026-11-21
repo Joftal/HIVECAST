@@ -1347,8 +1347,17 @@ export default function TasksPage({
                         {historyRuns.map((run) => (
                           <tr
                             key={run.id}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`${t("tasks.detailOpen")} ${run.room?.hostName || run.room?.title || run.id}`}
                             onClick={() => setSelectedId(run.id)}
-                            className="cursor-pointer border-b border-line last:border-b-0 hover:bg-raised/50"
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                setSelectedId(run.id);
+                              }
+                            }}
+                            className="cursor-pointer border-b border-line last:border-b-0 hover:bg-raised/50 focus-ring"
                           >
                             <td className="min-w-0 px-4 py-2.5">
                               <div className="flex min-w-0 items-center gap-2">

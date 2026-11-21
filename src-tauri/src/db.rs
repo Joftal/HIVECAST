@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
+-- 同一秒内的多条场次必须有稳定次序，否则 OFFSET 分页可能重复或漏行。
+CREATE INDEX IF NOT EXISTS idx_record_session_started_id
+    ON record_session (started_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS app_setting (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -1159,7 +1163,7 @@ impl Db {
             Some(id) => {
                 let mut stmt = conn
                     .prepare(&format!(
-                        "{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3"
+                        "{SESSION_SELECT} WHERE room_id = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2 OFFSET ?3"
                     ))
                     .map_err(db_err)?;
                 let rows = stmt
@@ -1172,7 +1176,7 @@ impl Db {
             None => {
                 let mut stmt = conn
                     .prepare(&format!(
-                        "{SESSION_SELECT} ORDER BY started_at DESC LIMIT ?1 OFFSET ?2"
+                        "{SESSION_SELECT} ORDER BY started_at DESC, id DESC LIMIT ?1 OFFSET ?2"
                     ))
                     .map_err(db_err)?;
                 let rows = stmt
@@ -1759,10 +1763,12 @@ impl Db {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
+            // 先取每个分块里最新的事件，汇总后再裁掉最旧的。任务中心一次会读
+            // 上千条 Run 的事件，若按 ASC 截断，最近完成的 Run 会整条没有时间线。
             let sql = format!(
                 "SELECT id, task_id, run_id, kind, stage, state, percent, message, at
                    FROM task_event WHERE run_id IN ({placeholders})
-                  ORDER BY at ASC, id ASC LIMIT ?{}",
+                  ORDER BY at DESC, id DESC LIMIT ?{}",
                 chunk.len() + 1
             );
             let mut stmt = conn.prepare(&sql).map_err(db_err)?;
@@ -1789,7 +1795,9 @@ impl Db {
             }
         }
         events.sort_by_key(|event| (event.at, event.id));
-        events.truncate(limit);
+        if events.len() > limit {
+            events.drain(..events.len() - limit);
+        }
         Ok(events)
     }
 
@@ -3804,6 +3812,31 @@ mod tests {
         assert_eq!(history[0].queued_at, Some(100));
         assert_eq!(history[0].started_running_at, Some(160));
         assert_eq!(history[0].finished_at, Some(200));
+    }
+
+    #[test]
+    fn task_events_keeps_the_newest_events_when_capped() {
+        let (db, _path) = temp_db("task-event-newest");
+        for at in 1..=5 {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: "post:s1".into(),
+                run_id: Some("session:s1".into()),
+                kind: "post".into(),
+                stage: "postprocessing".into(),
+                state: "running".into(),
+                percent: at * 10,
+                message: None,
+                at,
+            })
+            .expect("写事件失败");
+        }
+        let events = db
+            .task_events(&["session:s1".into()], 3)
+            .expect("读事件失败");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.first().map(|event| event.at), Some(3));
+        assert_eq!(events.last().map(|event| event.at), Some(5));
     }
 
     #[test]

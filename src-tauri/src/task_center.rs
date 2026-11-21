@@ -291,7 +291,7 @@ pub fn build(
         }
     }
     let mut event_map: HashMap<String, Vec<hivecast_ipc::TaskEvent>> = HashMap::new();
-    for event in db.task_events(&event_run_ids, 4_000).unwrap_or_default() {
+    for event in db.task_events(&event_run_ids, 20_000).unwrap_or_default() {
         let Some(run_id) = event.run_id.as_deref() else {
             continue;
         };
@@ -449,18 +449,32 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         draft.sessions.clone()
     };
 
-    // 后处理重试成功后，session.post_state 会回到 done；同一 Run 里上一次失败的
-    // post/remux 任务不应继续把整条 Run 标成失败。分组录制必须等所有片段都 done
-    // 才隐藏失败，否则一个片段的成功重试会掩盖另一个片段的真实失败。
-    let all_members_post_done = !group_members.is_empty()
-        && group_members
-            .iter()
-            .all(|session| session.post_state == "done");
-    if all_members_post_done {
-        draft.tasks.retain(|task| {
-            !(matches!(task.kind.as_str(), "post" | "remux") && task.state == "failed")
-        });
-    }
+    // 后处理重试成功后，session.post_state 会回到 done；同一 Run 里上一次失败或
+    // 被退出打断的 post/remux 任务不应继续把整条 Run 标成失败、也不应继续提供
+    // 重复的重试入口。
+    //
+    // 分组录制必须按片段判断，而不是等所有片段都 done：两个片段都失败时，重试
+    // 好第一段之后如果仍保留它的旧失败任务，异常卡会一直指向已经成功的片段，
+    // 再点「重试后处理」只会得到「只有失败或已取消的后处理才能重试」，真正失败
+    // 的第二段反而没有入口。这里逐个片段清掉已经 done 的旧失败。
+    let post_done: HashSet<&str> = group_members
+        .iter()
+        .filter(|session| session.post_state == "done")
+        .map(|session| session.id.as_str())
+        .collect();
+    let all_members_post_done = !group_members.is_empty() && post_done.len() == group_members.len();
+    draft.tasks.retain(|task| {
+        if !matches!(task.kind.as_str(), "post" | "remux")
+            || !matches!(task.state.as_str(), "failed" | "interrupted")
+        {
+            return true;
+        }
+        match task.session_id.as_deref() {
+            Some(session_id) => !post_done.contains(session_id),
+            // 没有场次归属的旧任务无法逐段判断，退回原来的保守行为。
+            None => !all_members_post_done,
+        }
+    });
 
     // 收尾可能失败后重试：只认最新一条收尾任务。若用「或」合并，重试成功后
     // 旧的 failed 会永远把收尾阶段钉在失败。
@@ -1734,10 +1748,72 @@ mod tests {
         draft.ended_at = Some(200);
         draft.session = Some(done_clip.clone());
         draft.sessions = vec![failed_clip, done_clip];
-        draft.tasks = vec![task("auto:s1:0", "post", "failed", Some(1))];
+        let mut failed_task = task("auto:s1:0", "post", "failed", Some(1));
+        failed_task.session_id = Some("s1".into());
+        draft.tasks = vec![failed_task];
         let run = finish_run(draft, 300);
         assert_eq!(run.state, "done");
         assert!(run.tasks.iter().all(|task| task.state != "failed"));
+    }
+
+    #[test]
+    fn retrying_one_failed_clip_keeps_the_other_clip_actionable() {
+        let mut first = recorded_session("done");
+        first.id = "s1".into();
+        first.group_id = Some("g1".into());
+        let mut second = recorded_session("failed");
+        second.id = "s2".into();
+        second.group_id = Some("g1".into());
+
+        let mut first_task = task("auto:s1:0", "post", "failed", Some(1));
+        first_task.session_id = Some("s1".into());
+        let mut second_task = task("auto:s2:0", "post", "failed", Some(2));
+        second_task.session_id = Some("s2".into());
+
+        let mut draft = RunDraft::new("session:g1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(second.clone());
+        draft.sessions = vec![first, second];
+        draft.tasks = vec![first_task, second_task];
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.tasks
+                .iter()
+                .all(|task| task.session_id.as_deref() != Some("s1")),
+            "已经重试成功的片段不应继续占用异常入口"
+        );
+        assert!(
+            run.tasks
+                .iter()
+                .any(|task| task.session_id.as_deref() == Some("s2") && task.state == "failed"),
+            "真正失败的片段必须保留可重试任务"
+        );
+    }
+
+    #[test]
+    fn retrying_an_interrupted_post_hides_the_old_task_when_session_is_done() {
+        let mut session = recorded_session("done");
+        session.id = "s1".into();
+        session.group_id = Some("g1".into());
+        let mut task = task("auto:s1:0", "post", "interrupted", Some(1));
+        task.session_id = Some("s1".into());
+
+        let mut draft = RunDraft::new("session:g1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(session.clone());
+        draft.sessions = vec![session];
+        draft.tasks = vec![task];
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "done");
+        assert!(
+            run.tasks.is_empty(),
+            "已恢复完成的中断后处理任务不应继续提供重试入口"
+        );
     }
 
     #[test]
