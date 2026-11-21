@@ -11,11 +11,13 @@ import {
   postRetry,
   finalizeRetry,
   taskCenter,
+  taskRunEvents,
   type Incident,
   type PlatformHealth,
   type RunRoom,
   type RunView,
   type TaskCenter,
+  type TaskEvent,
   type TaskView,
 } from "../../lib/ipc";
 import { useNotify } from "../../lib/notify";
@@ -581,6 +583,9 @@ function IncidentRow({
 
 function DetailDrawer({
   run,
+  events,
+  eventsLoading,
+  eventsError,
   busy,
   canOpenFiles,
   onClose,
@@ -590,6 +595,9 @@ function DetailDrawer({
   onCopy,
 }: {
   run: RunView;
+  events: TaskEvent[];
+  eventsLoading: boolean;
+  eventsError: boolean;
   busy: boolean;
   canOpenFiles: boolean;
   onClose: () => void;
@@ -725,10 +733,14 @@ function DetailDrawer({
           <section className="mt-4">
             <h3 className="text-[12px] font-semibold text-ink">{t("tasks.detailTimeline")}</h3>
             <div className="mt-2">
-              {run.events.length === 0 ? (
+              {events.length === 0 && eventsLoading ? (
+                <div className="px-1 py-2 text-[11px] text-faint">{t("tasks.timelineLoading")}</div>
+              ) : events.length === 0 && eventsError ? (
+                <div className="px-1 py-2 text-[11px] text-muted">{t("tasks.timelineError")}</div>
+              ) : events.length === 0 ? (
                 <div className="px-1 py-2 text-[11px] text-faint">{t("tasks.timelineEmpty")}</div>
               ) : (
-                run.events.map((event, index) => {
+                events.map((event, index) => {
                   const tone =
                     event.state === "failed"
                       ? "bg-rec"
@@ -741,7 +753,7 @@ function DetailDrawer({
                     <div key={event.id} className="flex gap-2.5">
                       <div className="flex flex-col items-center">
                         <span className={cx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", tone)} />
-                        {index < run.events.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
+                        {index < events.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
                       </div>
                       <div className="min-w-0 flex-1 pb-2.5">
                         <div className="flex items-baseline gap-2">
@@ -959,6 +971,45 @@ export default function TasksPage({
   useEffect(() => {
     if (selectedId && (!selected || !matches(selected))) setSelectedId(null);
   }, [matches, selected, selectedId]);
+
+  // 时间线按需读取：首屏不再携带上千场的事件。抽屉打开时先取一次，之后
+  // 每 5 秒刷新一次，录制中的 Run 也能看到阶段推进；关闭后立即停表。
+  const [detailEvents, setDetailEvents] = useState<TaskEvent[]>([]);
+  const [detailEventsLoading, setDetailEventsLoading] = useState(false);
+  const [detailEventsError, setDetailEventsError] = useState(false);
+  useEffect(() => {
+    if (!selectedId || !isTauri()) {
+      setDetailEvents([]);
+      setDetailEventsLoading(false);
+      setDetailEventsError(false);
+      return;
+    }
+    let cancelled = false;
+    let first = true;
+    setDetailEvents([]);
+    const fetchEvents = async () => {
+      if (first) {
+        first = false;
+        setDetailEventsLoading(true);
+      }
+      try {
+        const events = await taskRunEvents(selectedId);
+        if (cancelled) return;
+        setDetailEvents(events);
+        setDetailEventsError(false);
+      } catch {
+        if (!cancelled) setDetailEventsError(true);
+      } finally {
+        if (!cancelled) setDetailEventsLoading(false);
+      }
+    };
+    void fetchEvents();
+    const timer = window.setInterval(() => void fetchEvents(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedId]);
 
   const activeRuns = useMemo(
     () =>
@@ -1347,17 +1398,8 @@ export default function TasksPage({
                         {historyRuns.map((run) => (
                           <tr
                             key={run.id}
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`${t("tasks.detailOpen")} ${run.room?.hostName || run.room?.title || run.id}`}
                             onClick={() => setSelectedId(run.id)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                setSelectedId(run.id);
-                              }
-                            }}
-                            className="cursor-pointer border-b border-line last:border-b-0 hover:bg-raised/50 focus-ring"
+                            className="cursor-pointer border-b border-line last:border-b-0 hover:bg-raised/50"
                           >
                             <td className="min-w-0 px-4 py-2.5">
                               <div className="flex min-w-0 items-center gap-2">
@@ -1374,9 +1416,22 @@ export default function TasksPage({
                             <td className="truncate px-2 py-2.5 text-[10.5px] tabular-nums text-muted">{formatBytes(run.bytes)}</td>
                             <td className="truncate px-2 py-2.5 text-[10.5px] tabular-nums text-faint">{formatTime(run.endedAt ?? run.startedAt)}</td>
                             <td className="px-4 py-2.5 text-right">
-                              <Chip tone={stateTone(run.state)} dot>
-                                {stateLabel(t, run.state)}
-                              </Chip>
+                              <div className="flex items-center justify-end gap-1.5">
+                                <Chip tone={stateTone(run.state)} dot>
+                                  {stateLabel(t, run.state)}
+                                </Chip>
+                                <button
+                                  type="button"
+                                  aria-label={`${t("tasks.detailOpen")} ${run.room?.hostName || run.room?.title || run.id}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setSelectedId(run.id);
+                                  }}
+                                  className="focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-ctl text-[14px] leading-none text-faint transition-colors hover:bg-raised hover:text-ink"
+                                >
+                                  <span aria-hidden="true">›</span>
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -1404,6 +1459,9 @@ export default function TasksPage({
       {selected ? (
         <DetailDrawer
           run={selected}
+          events={detailEvents}
+          eventsLoading={detailEventsLoading}
+          eventsError={detailEventsError}
           busy={busyId != null}
           canOpenFiles={!!selected.room && !!onOpenRoomFiles}
           onClose={() => setSelectedId(null)}

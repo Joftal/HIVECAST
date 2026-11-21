@@ -3107,6 +3107,25 @@ pub fn task_center(
     )
 }
 
+/// 任务中心详情的时间线：只读当前 Run，避免首屏把上千场事件全部拉进内存。
+/// session:group 会展开为同组所有片段的 session 事件；单场上限 2000 条。
+#[tauri::command]
+pub fn task_run_events(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<hivecast_ipc::TaskEvent>, AppError> {
+    let mut event_run_ids = vec![run_id.clone()];
+    if let Some(group_id) = run_id.strip_prefix("session:") {
+        for member in state.db.session_group_ids(group_id)? {
+            let alias = format!("session:{member}");
+            if !event_run_ids.contains(&alias) {
+                event_run_ids.push(alias);
+            }
+        }
+    }
+    state.db.task_events(&event_run_ids, 2_000)
+}
+
 /// 任务中心的运行中列表 = 录制（含开录中）+ 后处理/合并/弹幕导出；历史来自 task_history。
 #[tauri::command]
 pub fn task_board(state: State<'_, AppState>, limit: Option<usize>) -> TaskBoard {

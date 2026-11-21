@@ -40,6 +40,7 @@ import type { RunView } from "./bindings/RunView";
 import type { StageView } from "./bindings/StageView";
 import type { TaskBoard } from "./bindings/TaskBoard";
 import type { TaskCenter } from "./bindings/TaskCenter";
+import type { TaskEvent } from "./bindings/TaskEvent";
 import type { TaskSummary } from "./bindings/TaskSummary";
 import type { SystemHealth } from "./bindings/SystemHealth";
 import type { TaskView } from "./bindings/TaskView";
@@ -90,6 +91,7 @@ export type {
   QualityInfo,
   TaskBoard,
   TaskCenter,
+  TaskEvent,
   TaskRecord,
   TaskSummary,
   SystemHealth,
@@ -639,6 +641,11 @@ export async function taskBoard(limit = 100): Promise<TaskBoard> {
 /// 任务中心全链路快照：Run、平台态势、异常与最近完成。
 export async function taskCenter(limit = 100): Promise<TaskCenter> {
   return invoke<TaskCenter>("task_center", { history: limit });
+}
+
+/** 任务中心详情时间线：只取一个 Run 的阶段事件，打开抽屉时按需加载。 */
+export async function taskRunEvents(runId: string): Promise<TaskEvent[]> {
+  return invoke<TaskEvent[]>("task_run_events", { runId });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

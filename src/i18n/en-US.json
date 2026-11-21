@@ -236,6 +236,8 @@
     "detailEnded": "Ended",
     "detailStages": "Chain",
     "detailTimeline": "Stage timeline",
+    "timelineLoading": "Loading timeline…",
+    "timelineError": "Could not load the timeline. Retrying automatically.",
     "timelineEmpty": "No stage events yet",
     "detailTasks": "Tasks",
     "detailNoTasks": "No post-processing task yet",

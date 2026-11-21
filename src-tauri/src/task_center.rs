@@ -274,36 +274,9 @@ pub fn build(
 
     all_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-    // 一次性把这一屏 Run 的事件读出来再分发，避免每条 Run 单独查库。
-    // 分割录制的片段任务/阶段事件仍按 session_id 落库；先把片段 id 映射回
-    // group run，否则详情时间线只会显示首片段的事件。
-    let run_ids: Vec<String> = all_runs.iter().map(|run| run.id.clone()).collect();
-    let mut event_run_ids = run_ids.clone();
-    let mut event_aliases: HashMap<String, String> = HashMap::new();
-    for (group_key, members) in &group_cache {
-        let run_id = format!("session:{group_key}");
-        for member in members {
-            let alias = format!("session:{}", member.id);
-            if !event_run_ids.contains(&alias) {
-                event_run_ids.push(alias.clone());
-            }
-            event_aliases.insert(alias, run_id.clone());
-        }
-    }
-    let mut event_map: HashMap<String, Vec<hivecast_ipc::TaskEvent>> = HashMap::new();
-    for event in db.task_events(&event_run_ids, 20_000).unwrap_or_default() {
-        let Some(run_id) = event.run_id.as_deref() else {
-            continue;
-        };
-        let target = event_aliases
-            .get(run_id)
-            .map(String::as_str)
-            .unwrap_or(run_id);
-        event_map.entry(target.to_string()).or_default().push(event);
-    }
-    for run in &mut all_runs {
-        run.events = event_map.remove(&run.id).unwrap_or_default();
-    }
+    // 时间线不再随首屏一次性读取：1000 场历史会把 task_event 全部拉进内存，
+    // 还会让一个超长任务挤掉其它 Run 的事件。详情抽屉打开时用
+    // task_run_events 只读当前 Run，首屏只保留状态与四段链路。
 
     for run in all_runs {
         if matches!(
@@ -722,7 +695,6 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         tasks,
         stages,
         finalize_retry_ready,
-        events: Vec::new(),
     }
 }
 

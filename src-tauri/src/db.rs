@@ -1745,6 +1745,39 @@ impl Db {
         Ok(())
     }
 
+    /// 把 session id 或 group id 解析成同一场录制的所有片段 id。
+    /// 任务中心懒加载时间线时用它把 session:group 展开成每个片段的
+    /// session:id，否则分割录制的详情只能看到首片段事件。
+    pub fn session_group_ids(&self, session_or_group_id: &str) -> Result<Vec<String>, AppError> {
+        let conn = self.lock();
+        // 调用方可能传 group id，也可能传组内某个片段 id；后者要先找到它
+        // 所属的 group，否则只会返回该片段自己。
+        let group_id: Option<String> = conn
+            .query_row(
+                "SELECT COALESCE(group_id, id) FROM record_session WHERE id = ?1 LIMIT 1",
+                [session_or_group_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let group_id = group_id.as_deref().unwrap_or(session_or_group_id);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM record_session
+                  WHERE id = ?1 OR group_id = ?1
+                  ORDER BY started_at ASC, id ASC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([group_id], |row| row.get::<_, String>(0))
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(db_err)?);
+        }
+        Ok(ids)
+    }
+
     /// 一批 Run 的事件；按时间正序，前端直接铺时间线。
     pub fn task_events(
         &self,
@@ -3812,6 +3845,35 @@ mod tests {
         assert_eq!(history[0].queued_at, Some(100));
         assert_eq!(history[0].started_running_at, Some(160));
         assert_eq!(history[0].finished_at, Some(200));
+    }
+
+    #[test]
+    fn session_group_ids_expands_every_clip_in_the_group() {
+        let (db, _path) = temp_db("session-group-ids");
+        seed_media(&db);
+        db.lock()
+            .execute(
+                "UPDATE record_session SET group_id = 's-a1' WHERE id IN ('s-a1', 's-a2')",
+                [],
+            )
+            .expect("写分组失败");
+
+        assert_eq!(
+            db.session_group_ids("s-a1").expect("展开分组失败"),
+            vec!["s-a1".to_string(), "s-a2".to_string()]
+        );
+        assert_eq!(
+            db.session_group_ids("s-a2").expect("按片段展开失败"),
+            vec!["s-a1".to_string(), "s-a2".to_string()]
+        );
+        assert_eq!(
+            db.session_group_ids("s-b1").expect("单场展开失败"),
+            vec!["s-b1".to_string()]
+        );
+        assert!(db
+            .session_group_ids("missing")
+            .expect("未知场次应返回空")
+            .is_empty());
     }
 
     #[test]
