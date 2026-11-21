@@ -21,6 +21,10 @@ state: string,
  */
 stage: string, startedAt: number, endedAt: number | null, durationMs: number, bytes: number, quality: string | null, tasks: Array<TaskView>, stages: Array<StageView>,
 /**
+ * 收尾阶段失败/中断且还有可恢复的分片清单，才允许「重试收尾」。
+ */
+finalizeRetryReady: boolean,
+/**
  * 按时间正序的阶段事件；P2 之前的旧记录可能为空。
  */
 events: Array<TaskEvent>, };

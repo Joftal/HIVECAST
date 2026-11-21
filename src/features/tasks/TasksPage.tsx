@@ -210,11 +210,17 @@ function canCancel(run: RunView): TaskView | undefined {
 }
 
 function failedTask(run: RunView): TaskView | undefined {
-  return run.tasks.find((task) => task.state === "failed" && task.sessionId);
+  return run.tasks.find(
+    (task) =>
+      (task.state === "failed" || task.state === "interrupted") &&
+      !!task.sessionId &&
+      (task.kind === "post" || task.kind === "remux"),
+  );
 }
 
 /// 收尾失败可能已经重试过：先找最新一条收尾任务，只有它仍失败才允许重试。
 function failedFinalizeTask(run: RunView): TaskView | undefined {
+  if (!run.finalizeRetryReady) return undefined;
   const latest = run.tasks
     .filter((task) => task.kind === "finalize" && !!task.sessionId)
     .sort((a, b) => a.startedAt - b.startedAt)
@@ -525,11 +531,16 @@ function IncidentRow({
             )
           : t(INCIDENT_KEYS[incident.code] ?? "tasks.incidentUnknown")
         : t(INCIDENT_KEYS[incident.code] ?? "tasks.incidentUnknown");
+  // last_outcome 是内部枚举（failed/retry/throttled），不是给用户看的文案。
+  const backoffDetail =
+    incident.detail && !["failed", "retry", "throttled"].includes(incident.detail)
+      ? incident.detail
+      : t("tasks.incidentMonitorBackoffDetail");
   const detail =
     incident.code === "login_expired"
       ? t("tasks.incidentLoginExpiredDetail")
       : incident.code === "monitor_backoff"
-        ? incident.detail || t("tasks.incidentMonitorBackoffDetail")
+        ? backoffDetail
         : incident.code === "disk_low"
           ? t("tasks.incidentDiskLowDetail")
           : incident.detail;
@@ -868,6 +879,7 @@ export default function TasksPage({
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
   const [loadingMore, setLoadingMore] = useState(false);
   const historyLimitRef = useRef(HISTORY_PAGE);
+  const loadingMoreRef = useRef(false);
   const loadErrorShown = useRef(false);
   const loadSeq = useRef(0);
 
@@ -915,13 +927,21 @@ export default function TasksPage({
   // 历史分页：先拿 100 场，按钮每次多取 100 场；轮询始终沿用当前已展开的数量，
   // 避免加载更多后下一次轮询又缩回 100 场。
   const loadMore = useCallback(async () => {
+    // 双击「加载更多」时两次点击都会进到这里；用 ref 而不是 state 拦截，
+    // 避免第二次在 setLoadingMore 生效前又把上限推进一页。
+    if (loadingMoreRef.current) return;
     const next = Math.min(historyLimitRef.current + HISTORY_PAGE, HISTORY_MAX);
     if (next <= historyLimitRef.current) return;
     historyLimitRef.current = next;
     setHistoryLimit(next);
     setLoadingMore(true);
-    await load(next);
-    setLoadingMore(false);
+    loadingMoreRef.current = true;
+    try {
+      await load(next);
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
   }, [load]);
 
   const allRuns = useMemo(() => [...center.running, ...center.history], [center.running, center.history]);

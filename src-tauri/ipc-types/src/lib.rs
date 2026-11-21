@@ -944,6 +944,8 @@ pub struct RunView {
     pub quality: Option<String>,
     pub tasks: Vec<TaskView>,
     pub stages: Vec<StageView>,
+    /// 收尾阶段失败/中断且还有可恢复的分片清单，才允许「重试收尾」。
+    pub finalize_retry_ready: bool,
     /// 按时间正序的阶段事件；P2 之前的旧记录可能为空。
     pub events: Vec<TaskEvent>,
 }

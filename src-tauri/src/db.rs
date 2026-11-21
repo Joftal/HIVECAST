@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS douyin_follow (
 CREATE INDEX IF NOT EXISTS idx_douyin_follow_pending
     ON douyin_follow (promoted_room_id, last_checked_at);
 
-CREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n";
+CREATE TABLE IF NOT EXISTS record_session (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,\n    started_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    status TEXT NOT NULL,\n    reason TEXT,\n    file_path TEXT,\n    file_size INTEGER NOT NULL DEFAULT 0,\n    duration_ms INTEGER NOT NULL DEFAULT 0,\n    quality TEXT,\n    line TEXT,\n    error TEXT,\n    danmaku_path TEXT,\n    danmaku_count INTEGER NOT NULL DEFAULT 0,\n    -- 分割录制：同一场直播的片段共享 group_id，clip_index 从 0 递增\n    group_id TEXT,\n    clip_index INTEGER NOT NULL DEFAULT 0,\n    split_reason TEXT,\n    -- 后处理：源封装母带 + 派生文件。source_deleted 只表示源已进回收站。\n    source_path TEXT,\n    post_mode TEXT NOT NULL DEFAULT 'source',\n    post_state TEXT NOT NULL DEFAULT 'done',\n    source_deleted INTEGER NOT NULL DEFAULT 0,\n    post_error TEXT,\n    quality_history TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_room\n    ON record_session (room_id, started_at DESC);\n\nCREATE INDEX IF NOT EXISTS idx_record_session_status\n    ON record_session (status, started_at DESC);\n\n-- 任务中心按开始时间倒序扫全表；没有这个索引时每次轮询都会临时排序。\nCREATE INDEX IF NOT EXISTS idx_record_session_started\n    ON record_session (started_at DESC);\n";
 
 /// 后续里程碑追加的表：与初始 SCHEMA 分开，避免每次都要改那一行超长字符串。
 const EXTRA_SCHEMA: &str = "
@@ -1826,12 +1826,15 @@ impl Db {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map(params![limit.clamp(1, 500) as i64], map_task)
+            .query_map(params![limit.clamp(1, 2_000) as i64], map_task)
             .map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
     /// 启动时把上次没来得及收尾的任务标成 interrupted；它们不会再继续跑。
+    ///
+    /// 排队中的任务也必须一起处理：它们已经不可能被本轮进程执行，但留在
+    /// queued 会被 `task_history` 的过滤条件排除，Run 会被误判为「完成」。
     pub fn mark_tasks_interrupted(&self) -> Result<usize, AppError> {
         let changed = self
             .lock()
@@ -1839,7 +1842,7 @@ impl Db {
                 "UPDATE task_history SET state = 'interrupted',
                     message = COALESCE(message, '应用上次退出时任务未完成'),
                     finished_at = ?1
-                  WHERE state = 'running'",
+                  WHERE state IN ('running', 'queued')",
                 params![now_ts()],
             )
             .map_err(db_err)?;
@@ -3823,6 +3826,52 @@ mod tests {
         let events = db.task_events(&ids, 100).expect("分批读事件失败");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].run_id.as_deref(), Some("session:1199"));
+    }
+
+    #[test]
+    fn task_history_keeps_more_than_five_hundred_for_task_center() {
+        let (db, _path) = temp_db("task-history-cap");
+        {
+            let conn = db.lock();
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO task_history (id, kind, title, state, started_at, finished_at)
+                     VALUES (?1, 'post', 'clip', 'done', ?2, ?2)",
+                )
+                .expect("prepare");
+            for i in 0..600 {
+                stmt.execute(params![format!("t{i}"), i])
+                    .expect("insert task");
+            }
+        }
+        let history = db.task_history(600).expect("read history");
+        assert_eq!(history.len(), 600);
+        assert_eq!(history[0].started_at, 599);
+    }
+
+    #[test]
+    fn queued_tasks_are_interrupted_on_startup() {
+        let (db, _path) = temp_db("task-queued-interrupted");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO task_history (id, kind, title, state, started_at, queued_at)
+                 VALUES ('running-1', 'post', 'a', 'running', 10, 10),
+                        ('queued-1', 'post', 'b', 'queued', 20, 20),
+                        ('done-1', 'post', 'c', 'done', 30, 30);",
+            )
+            .expect("播种任务失败");
+
+        assert_eq!(db.mark_tasks_interrupted().expect("标记中断失败"), 2);
+        let history = db.task_history(10).expect("读任务历史失败");
+        let state = |id: &str| {
+            history
+                .iter()
+                .find(|task| task.id == id)
+                .map(|task| task.state.as_str())
+        };
+        assert_eq!(state("running-1"), Some("interrupted"));
+        assert_eq!(state("queued-1"), Some("interrupted"));
+        assert_eq!(state("done-1"), Some("done"));
     }
 
     #[test]

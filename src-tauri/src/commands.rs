@@ -1511,8 +1511,25 @@ pub async fn finalize_retry(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<(), AppError> {
-    let session = state.db.get_session(&session_id)?;
-    let room_id = session.as_ref().map(|session| session.room_id.clone());
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| AppError::User("这段录像不存在，可能已被清理".into()))?;
+    // 先把「没有可恢复清单」这类确定失败挡在任务创建之前，避免留下一条
+    // 永远不会成功的 finalize 失败任务，进而变成常驻的「重试收尾」异常。
+    if session.status == "recording" {
+        return Err(AppError::User("这段还在录制，先停下再重试收尾".into()));
+    }
+    let manifest = state.db.split_manifest_for(&session_id)?;
+    let manifest_ready = manifest
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty() && Path::new(path).is_file());
+    if !manifest_ready {
+        return Err(AppError::User(
+            "这段录像没有待恢复的收尾清单，可能已经收尾完成".into(),
+        ));
+    }
+    let room_id = Some(session.room_id.clone());
     let title = room_id
         .as_deref()
         .and_then(|id| state.db.get_room(id).ok().flatten())

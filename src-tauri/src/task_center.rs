@@ -674,6 +674,15 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     tasks.extend(draft.finalize_tasks);
     tasks.extend(draft.tasks);
 
+    // 场次已经 finished 说明收尾产物已落库；这时残留的旧 finalize 失败任务
+    // 没有可恢复的清单，不能继续给用户一个点了只会报错的「重试收尾」。
+    let finalize_retry_ready = stages
+        .iter()
+        .any(|stage| stage.key == "finalize" && stage.state == "failed")
+        && group_members
+            .iter()
+            .any(|member| member.status != "finished");
+
     RunView {
         id: draft.id,
         room,
@@ -698,6 +707,7 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         quality,
         tasks,
         stages,
+        finalize_retry_ready,
         events: Vec::new(),
     }
 }
@@ -808,6 +818,9 @@ fn build_stages(
         }
     } else if session_active || starting_active {
         "pending"
+    } else if interrupted_abort && all_ended {
+        // 上次退出时被强行打断的录制不会有后处理接力，不能永远停在「等待中」。
+        "skipped"
     } else if members.is_empty() {
         "skipped"
     } else {
@@ -816,7 +829,7 @@ fn build_stages(
 
     // 异常中断（磁盘满/掉盘）时文件可能已经部分落库，入库只能算「部分完成」；
     // 完全没有产物才算失败。正常结束仍然走 done。
-    let normal_commit = if abnormal_abort {
+    let normal_commit = if abnormal_abort || interrupted_abort {
         if members.iter().any(|session| {
             session.file_size > 0
                 || session
@@ -838,7 +851,7 @@ fn build_stages(
         normal_commit
     } else if post_state == "skipped" && all_ended {
         normal_commit
-    } else if abnormal_abort && all_ended {
+    } else if (abnormal_abort || interrupted_abort) && all_ended {
         // 异常中断的场次不会再有正常的后处理/入库，直接给它最终态。
         normal_commit
     } else if post_state == "active"
@@ -991,10 +1004,16 @@ fn build_incidents(
         if run.ended_at.is_some_and(|at| now - at > DAY_SECS) {
             continue;
         }
-        if !matches!(run.state.as_str(), "failed" | "partial") {
+        if !matches!(run.state.as_str(), "failed" | "partial" | "interrupted") {
             continue;
         }
-        if let Some(task) = run.tasks.iter().find(|task| task.state == "failed") {
+        // 后处理/收尾任务被上次退出打断时，工作确实没有完成，也要给出重试入口。
+        // 录制任务的中断由 session 自身表达，不能当成后处理失败去重试。
+        if let Some(task) = run.tasks.iter().find(|task| {
+            task.state == "failed"
+                || (task.state == "interrupted"
+                    && matches!(task.kind.as_str(), "post" | "remux" | "finalize"))
+        }) {
             if let Some(session_id) = task.session_id.as_deref() {
                 failed_task_sessions.insert(session_id.to_string());
             }
@@ -1009,8 +1028,14 @@ fn build_incidents(
                 title: task.title.clone(),
                 detail: task.message.clone(),
                 at: task.finished_at.unwrap_or(task.started_at),
-                action: if task.kind == "finalize" && task.session_id.is_some() {
+                action: if task.kind == "finalize"
+                    && task.session_id.is_some()
+                    && run.finalize_retry_ready
+                {
                     "retry_finalize".into()
+                } else if task.kind == "finalize" {
+                    // 清单已消费，没有可重试的收尾工作，只看详情即可。
+                    "open_task".into()
                 } else if task.session_id.is_some() {
                     "retry_post".into()
                 } else {
@@ -1142,7 +1167,8 @@ fn build_incidents(
             .cmp(&severity_rank(&b.severity))
             .then_with(|| b.at.cmp(&a.at))
     });
-    incidents.truncate(8);
+    // 不要把「需要处理」硬截断成 8 条：计数和列表必须一致，否则用户会以为
+    // 已经处理完，实际仍有被隐藏的失败/中断任务。
     incidents
 }
 
@@ -1534,6 +1560,35 @@ mod tests {
     }
 
     #[test]
+    fn stale_finalize_failure_on_finished_session_is_not_retryable() {
+        let mut failed = task("finalize:session-1", "finalize", "interrupted", None);
+        failed.session_id = Some("session-1".into());
+        failed.started_at = 100;
+        failed.finished_at = Some(150);
+
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(recorded_session("done"));
+        draft.finalize_tasks = vec![failed.clone()];
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.stages[1].state, "failed");
+        assert!(!run.finalize_retry_ready);
+
+        // 同一条收尾任务落在未完成的场次上时，才是真的可以恢复。
+        let mut broken = recorded_session("pending");
+        broken.status = "failed".into();
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(broken);
+        draft.finalize_tasks = vec![failed];
+        let run = finish_run(draft, 300);
+        assert!(run.finalize_retry_ready);
+    }
+
+    #[test]
     fn aborted_on_app_exit_is_interrupted_not_failed() {
         let mut session = recorded_session("source");
         session.status = "aborted".into();
@@ -1547,6 +1602,53 @@ mod tests {
         assert_eq!(run.state, "interrupted");
         assert_eq!(run.stages[0].state, "done");
         assert_eq!(run.stages[1].state, "skipped");
+        assert_eq!(run.stages[2].state, "skipped");
+        assert_eq!(run.stages[3].state, "partial");
+    }
+
+    #[test]
+    fn interrupted_without_product_fails_commit_instead_of_waiting() {
+        let mut session = recorded_session("pending");
+        session.status = "aborted".into();
+        session.reason = Some("app_exit".into());
+        session.file_path = None;
+        session.file_size = 0;
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(session);
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "interrupted");
+        assert_eq!(run.stages[2].state, "skipped");
+        assert_eq!(run.stages[3].state, "failed");
+    }
+
+    #[test]
+    fn interrupted_postprocessing_becomes_a_retryable_incident() {
+        let mut post = task("auto:sess:0", "post", "interrupted", Some(1));
+        post.finished_at = Some(200);
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(recorded_session("pending"));
+        draft.tasks = vec![post];
+        let run = finish_run(draft, 300);
+        assert_eq!(run.state, "interrupted");
+
+        let incidents = build_incidents(
+            &[run],
+            &[recorded_session("pending")],
+            &HashMap::new(),
+            &Default::default(),
+            &[],
+            Some("/opt/ffmpeg"),
+            Path::new("/tmp"),
+            300,
+        );
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].code, "task_failed");
+        assert_eq!(incidents[0].action, "retry_post");
     }
 
     #[test]
