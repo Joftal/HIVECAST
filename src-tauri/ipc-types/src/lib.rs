@@ -854,6 +854,8 @@ pub struct TaskCenter {
     pub queued: Vec<TaskView>,
     /// 最近完成的 Run（按结束时间倒序）
     pub history: Vec<RunView>,
+    /// 当前 history 之外是否还有更早的已结束分组
+    pub history_has_more: bool,
     pub incidents: Vec<Incident>,
 }
 

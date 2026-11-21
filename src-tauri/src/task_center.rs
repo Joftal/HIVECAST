@@ -32,7 +32,7 @@ pub fn build(
     history: usize,
 ) -> Result<TaskCenter, AppError> {
     let now = now_ts();
-    let history = history.clamp(1, 500);
+    let history = history.clamp(1, 1_000);
 
     // 房间缓存：主列表只含未移除的房间；历史场次所属房间可能已经移除，需要按 id 补查。
     let mut room_cache: HashMap<String, RoomRecord> = db
@@ -170,6 +170,7 @@ pub fn build(
     // 3. 历史场次：按场（group）倒序取满 history 条。最新的失败/中断也在这批里。
     let mut history_sessions: Vec<RecordSession> = Vec::new();
     let mut seen_history_groups: HashSet<String> = HashSet::new();
+    let mut closed_group_count = 0usize;
     for session in &sessions {
         if session.status == "recording" {
             continue;
@@ -182,6 +183,8 @@ pub fn build(
         if members.iter().any(|member| member.status == "recording") {
             continue;
         }
+        // 先记数再判断是否截断：正好多出的这一组用来告诉前端「还有更多」。
+        closed_group_count += 1;
         if history_sessions.len() >= history {
             break;
         }
@@ -393,6 +396,7 @@ pub fn build(
         running,
         queued,
         history: history_runs,
+        history_has_more: closed_group_count > history,
         incidents,
     })
 }

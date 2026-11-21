@@ -20,6 +20,9 @@ import {
 } from "../../lib/ipc";
 import { useNotify } from "../../lib/notify";
 
+const HISTORY_PAGE = 100;
+const HISTORY_MAX = 1_000;
+
 const EMPTY_CENTER: TaskCenter = {
   generatedAt: 0,
   summary: { rooms: 0, live: 0, recording: 0, queued: 0, running: 0, failed: 0, incidents: 0 },
@@ -28,6 +31,7 @@ const EMPTY_CENTER: TaskCenter = {
   running: [],
   queued: [],
   history: [],
+  historyHasMore: false,
   incidents: [],
 };
 
@@ -861,6 +865,9 @@ export default function TasksPage({
   const [roomFilter, setRoomFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const historyLimitRef = useRef(HISTORY_PAGE);
   const loadErrorShown = useRef(false);
   const loadSeq = useRef(0);
 
@@ -873,7 +880,7 @@ export default function TasksPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed?.nonce]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (limit = historyLimitRef.current) => {
     if (!isTauri()) {
       setLoaded(true);
       return true;
@@ -881,7 +888,7 @@ export default function TasksPage({
     // 2 秒轮询和手动刷新可能重叠；只接受最后一次请求的结果，避免旧快照覆盖新状态。
     const seq = ++loadSeq.current;
     try {
-      const next = await taskCenter(100);
+      const next = await taskCenter(limit);
       if (seq !== loadSeq.current) return false;
       setCenter(next);
       loadErrorShown.current = false;
@@ -903,6 +910,18 @@ export default function TasksPage({
     if (!isTauri()) return;
     const timer = window.setInterval(() => void load(), 2000);
     return () => window.clearInterval(timer);
+  }, [load]);
+
+  // 历史分页：先拿 100 场，按钮每次多取 100 场；轮询始终沿用当前已展开的数量，
+  // 避免加载更多后下一次轮询又缩回 100 场。
+  const loadMore = useCallback(async () => {
+    const next = Math.min(historyLimitRef.current + HISTORY_PAGE, HISTORY_MAX);
+    if (next <= historyLimitRef.current) return;
+    historyLimitRef.current = next;
+    setHistoryLimit(next);
+    setLoadingMore(true);
+    await load(next);
+    setLoadingMore(false);
   }, [load]);
 
   const allRuns = useMemo(() => [...center.running, ...center.history], [center.running, center.history]);
@@ -1282,9 +1301,6 @@ export default function TasksPage({
                 <div className="mb-2 flex items-baseline gap-2">
                   <h2 className="text-[12.5px] font-semibold text-ink">{t("tasks.history")}</h2>
                   <span className="text-[11px] tabular-nums text-faint">{historyRuns.length}</span>
-                  {center.history.length >= 100 ? (
-                    <span className="ml-auto text-[10.5px] text-faint">{t("tasks.historyLimit")}</span>
-                  ) : null}
                 </div>
                 {!loaded ? (
                   <div className="rounded-panel border border-line bg-surface px-5 py-8 text-center text-[12px] text-faint">
@@ -1339,6 +1355,17 @@ export default function TasksPage({
                     </table>
                   </div>
                 )}
+                {loaded && center.historyHasMore ? (
+                  <div className="mt-3 flex justify-center">
+                    {historyLimit < HISTORY_MAX ? (
+                      <Button size="sm" variant="secondary" disabled={loadingMore} onClick={() => void loadMore()}>
+                        {loadingMore ? t("tasks.loadingMore") : t("tasks.loadMore")}
+                      </Button>
+                    ) : (
+                      <span className="text-[10.5px] text-faint">{t("tasks.historyMax", { n: HISTORY_MAX })}</span>
+                    )}
+                  </div>
+                ) : null}
               </section>
             ) : null}
           </>

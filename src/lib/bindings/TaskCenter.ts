@@ -21,4 +21,8 @@ queued: Array<TaskView>,
 /**
  * 最近完成的 Run（按结束时间倒序）
  */
-history: Array<RunView>, incidents: Array<Incident>, };
+history: Array<RunView>,
+/**
+ * 当前 history 之外是否还有更早的已结束分组
+ */
+historyHasMore: boolean, incidents: Array<Incident>, };

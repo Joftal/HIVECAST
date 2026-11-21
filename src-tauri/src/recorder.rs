@@ -3891,6 +3891,20 @@ impl Drop for FinalizeRetryLease {
     }
 }
 
+/// 尝试占用一份收尾清单；成功时返回的 lease 在离开作用域后自动释放。
+fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLease, AppError> {
+    let set = FINALIZE_RETRYING.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = set
+        .lock()
+        .map_err(|_| AppError::Internal("收尾重试锁被污染".into()))?;
+    if !guard.insert(manifest.to_string()) {
+        return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
+    }
+    Ok(FinalizeRetryLease {
+        manifest: manifest.to_string(),
+    })
+}
+
 /// 手动重试一次失败的收尾：只处理该场次留下的分割清单，不碰其它录像。
 ///
 /// 收尾失败时清单会保留，里面记着每个片段的分片范围、已生成的源封装和
@@ -3912,18 +3926,7 @@ pub async fn retry_finalize(db: &Db, session_id: &str) -> Result<(), AppError> {
         return Err(AppError::User("收尾清单文件已不存在，无法继续重试".into()));
     }
 
-    let set = FINALIZE_RETRYING.get_or_init(|| Mutex::new(HashSet::new()));
-    {
-        let mut guard = set
-            .lock()
-            .map_err(|_| AppError::Internal("收尾重试锁被污染".into()))?;
-        if !guard.insert(manifest.clone()) {
-            return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
-        }
-    }
-    let _lease = FinalizeRetryLease {
-        manifest: manifest.clone(),
-    };
+    let _lease = acquire_finalize_retry(&manifest)?;
 
     tracing::info!(
         session = %session_id,
@@ -6123,6 +6126,25 @@ mod tests {
         assert!(!dir.join(".live.clip00.merging.mp4").exists());
         assert!(!dir.join("live.clip00.concat.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_retry_lock_is_per_manifest_and_released_on_drop() {
+        let manifest = format!("test-finalize-lock-{}", std::process::id());
+        let first = acquire_finalize_retry(&manifest).expect("第一份锁应成功");
+        assert!(
+            acquire_finalize_retry(&manifest).is_err(),
+            "同一份清单不能同时重试"
+        );
+        // 不同清单互不影响，避免一个房间的收尾挡住另一个房间。
+        let other = format!("{manifest}-other");
+        let other_lease = acquire_finalize_retry(&other).expect("另一份清单应成功");
+        drop(other_lease);
+        drop(first);
+        assert!(
+            acquire_finalize_retry(&manifest).is_ok(),
+            "lease 释放后应能再次占用"
+        );
     }
 
     #[test]
