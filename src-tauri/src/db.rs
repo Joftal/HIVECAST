@@ -1778,16 +1778,20 @@ impl Db {
         Ok(ids)
     }
 
-    /// 一批 Run 的事件；按时间正序，前端直接铺时间线。
-    pub fn task_events(
+    /// 一页事件：before 为 (at, id) 游标，只取更早的事件；返回是否还有更早页。
+    pub fn task_event_page(
         &self,
         run_ids: &[String],
+        before: Option<(i64, i64)>,
         limit: usize,
-    ) -> Result<Vec<hivecast_ipc::TaskEvent>, AppError> {
+    ) -> Result<hivecast_ipc::TaskEventPage, AppError> {
         if run_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(hivecast_ipc::TaskEventPage {
+                events: Vec::new(),
+                has_more: false,
+            });
         }
-        let limit = limit.clamp(1, 20_000);
+        let limit = limit.clamp(1, 1_000);
         let conn = self.lock();
         // SQLite 默认只有 999 个绑定变量；任务中心一次可能拿到上千条 Run，
         // 按 400 个一组查，避免 IN (...) 直接报 "too many SQL variables"。
@@ -1796,18 +1800,22 @@ impl Db {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            // 先取每个分块里最新的事件，汇总后再裁掉最旧的。任务中心一次会读
-            // 上千条 Run 的事件，若按 ASC 截断，最近完成的 Run 会整条没有时间线。
-            let sql = format!(
-                "SELECT id, task_id, run_id, kind, stage, state, percent, message, at
-                   FROM task_event WHERE run_id IN ({placeholders})
-                  ORDER BY at DESC, id DESC LIMIT ?{}",
-                chunk.len() + 1
-            );
-            let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+            let mut where_sql = format!("run_id IN ({placeholders})");
             let mut values: Vec<SqlValue> =
                 chunk.iter().map(|id| SqlValue::Text(id.clone())).collect();
-            values.push(SqlValue::Integer(limit as i64));
+            if let Some((at, id)) = before {
+                where_sql.push_str(" AND (at < ? OR (at = ? AND id < ?))");
+                values.push(SqlValue::Integer(at));
+                values.push(SqlValue::Integer(at));
+                values.push(SqlValue::Integer(id));
+            }
+            let sql = format!(
+                "SELECT id, task_id, run_id, kind, stage, state, percent, message, at
+                   FROM task_event WHERE {where_sql}
+                  ORDER BY at DESC, id DESC LIMIT ?"
+            );
+            values.push(SqlValue::Integer(limit as i64 + 1));
+            let mut stmt = conn.prepare(&sql).map_err(db_err)?;
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(values), |row| {
                     Ok(hivecast_ipc::TaskEvent {
@@ -1827,11 +1835,12 @@ impl Db {
                 events.push(row.map_err(db_err)?);
             }
         }
-        events.sort_by_key(|event| (event.at, event.id));
-        if events.len() > limit {
-            events.drain(..events.len() - limit);
-        }
-        Ok(events)
+        // 跨分块合并后仍只保留最新的一页；多取 1 条判断是否还有更早。
+        events.sort_by(|a, b| (b.at, b.id).cmp(&(a.at, a.id)));
+        let has_more = events.len() > limit;
+        events.truncate(limit);
+        events.reverse();
+        Ok(hivecast_ipc::TaskEventPage { events, has_more })
     }
 
     pub fn task_finish(
@@ -3830,15 +3839,17 @@ mod tests {
             .expect("写结束失败");
 
         let events = db
-            .task_events(&["session:s1".into()], 10)
-            .expect("读事件失败");
+            .task_event_page(&["session:s1".into()], None, 10)
+            .expect("读事件失败")
+            .events;
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].stage, "queued");
         assert_eq!(events[1].stage, "merging");
         assert_eq!(events[2].state, "done");
         assert!(db
-            .task_events(&["session:other".into()], 10)
-            .unwrap()
+            .task_event_page(&["session:other".into()], None, 10)
+            .expect("读事件失败")
+            .events
             .is_empty());
 
         let history = db.task_history(10).expect("读历史失败");
@@ -3894,11 +3905,67 @@ mod tests {
             .expect("写事件失败");
         }
         let events = db
-            .task_events(&["session:s1".into()], 3)
-            .expect("读事件失败");
+            .task_event_page(&["session:s1".into()], None, 3)
+            .expect("读事件失败")
+            .events;
         assert_eq!(events.len(), 3);
         assert_eq!(events.first().map(|event| event.at), Some(3));
         assert_eq!(events.last().map(|event| event.at), Some(5));
+    }
+
+    #[test]
+    fn task_event_page_walks_older_with_a_stable_cursor() {
+        let (db, _path) = temp_db("task-event-page");
+        for at in 1..=5 {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: "post:s1".into(),
+                run_id: Some("session:s1".into()),
+                kind: "post".into(),
+                stage: "postprocessing".into(),
+                state: "running".into(),
+                percent: at * 10,
+                message: None,
+                at,
+            })
+            .expect("写事件失败");
+        }
+        let first = db
+            .task_event_page(&["session:s1".into()], None, 2)
+            .expect("读第一页失败");
+        assert!(first.has_more);
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.at)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+
+        let oldest = first.events.first().expect("第一页为空");
+        let second = db
+            .task_event_page(&["session:s1".into()], Some((oldest.at, oldest.id)), 2)
+            .expect("读第二页失败");
+        assert!(second.has_more);
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event.at)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let oldest = second.events.first().expect("第二页为空");
+        let last = db
+            .task_event_page(&["session:s1".into()], Some((oldest.at, oldest.id)), 2)
+            .expect("读最后一页失败");
+        assert!(!last.has_more);
+        assert_eq!(
+            last.events.iter().map(|event| event.at).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -3918,7 +3985,10 @@ mod tests {
             at: 1,
         })
         .expect("写事件失败");
-        let events = db.task_events(&ids, 100).expect("分批读事件失败");
+        let events = db
+            .task_event_page(&ids, None, 100)
+            .expect("分批读事件失败")
+            .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].run_id.as_deref(), Some("session:1199"));
     }

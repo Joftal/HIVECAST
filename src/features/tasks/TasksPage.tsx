@@ -24,6 +24,16 @@ import { useNotify } from "../../lib/notify";
 
 const HISTORY_PAGE = 100;
 const HISTORY_MAX = 1_000;
+const EVENT_PAGE = 200;
+const ACTIVE_RUN_STATES = new Set(["recording", "running", "finalizing", "queued"]);
+
+/** 合并两段按时间正序的事件，按 id 去重；后传入的覆盖旧状态。 */
+function mergeEvents(current: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
+  const map = new Map<number, TaskEvent>();
+  for (const event of current) map.set(event.id, event);
+  for (const event of incoming) map.set(event.id, event);
+  return [...map.values()].sort((a, b) => a.at - b.at || a.id - b.id);
+}
 
 const EMPTY_CENTER: TaskCenter = {
   generatedAt: 0,
@@ -584,8 +594,11 @@ function IncidentRow({
 function DetailDrawer({
   run,
   events,
+  eventsHasMore,
   eventsLoading,
+  eventsLoadingMore,
   eventsError,
+  onLoadEarlier,
   busy,
   canOpenFiles,
   onClose,
@@ -596,8 +609,11 @@ function DetailDrawer({
 }: {
   run: RunView;
   events: TaskEvent[];
+  eventsHasMore: boolean;
   eventsLoading: boolean;
+  eventsLoadingMore: boolean;
   eventsError: boolean;
+  onLoadEarlier: () => void;
   busy: boolean;
   canOpenFiles: boolean;
   onClose: () => void;
@@ -733,6 +749,16 @@ function DetailDrawer({
           <section className="mt-4">
             <h3 className="text-[12px] font-semibold text-ink">{t("tasks.detailTimeline")}</h3>
             <div className="mt-2">
+              {eventsHasMore ? (
+                <div className="mb-2">
+                  <Button size="sm" variant="ghost" disabled={eventsLoadingMore} onClick={onLoadEarlier}>
+                    {eventsLoadingMore ? t("tasks.timelineLoadingEarlier") : t("tasks.timelineLoadEarlier")}
+                  </Button>
+                </div>
+              ) : null}
+              {eventsError && events.length > 0 ? (
+                <div className="mb-2 text-[11px] text-muted">{t("tasks.timelineError")}</div>
+              ) : null}
               {events.length === 0 && eventsLoading ? (
                 <div className="px-1 py-2 text-[11px] text-faint">{t("tasks.timelineLoading")}</div>
               ) : events.length === 0 && eventsError ? (
@@ -972,44 +998,81 @@ export default function TasksPage({
     if (selectedId && (!selected || !matches(selected))) setSelectedId(null);
   }, [matches, selected, selectedId]);
 
-  // 时间线按需读取：首屏不再携带上千场的事件。抽屉打开时先取一次，之后
-  // 每 5 秒刷新一次，录制中的 Run 也能看到阶段推进；关闭后立即停表。
+  // 时间线按需读取：首屏不再携带上千场的事件。抽屉打开时先取最近 200 条，
+  // 之后只有运行中的 Run 每 5 秒刷新；已结束的 Run 只取一次，避免无意义轮询。
   const [detailEvents, setDetailEvents] = useState<TaskEvent[]>([]);
+  const [detailEventsHasMore, setDetailEventsHasMore] = useState(false);
   const [detailEventsLoading, setDetailEventsLoading] = useState(false);
+  const [detailEventsLoadingMore, setDetailEventsLoadingMore] = useState(false);
   const [detailEventsError, setDetailEventsError] = useState(false);
+  const detailActive = selected ? ACTIVE_RUN_STATES.has(selected.state) : false;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const lastDetailRun = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedId || !isTauri()) {
+      lastDetailRun.current = null;
       setDetailEvents([]);
+      setDetailEventsHasMore(false);
       setDetailEventsLoading(false);
+      setDetailEventsLoadingMore(false);
       setDetailEventsError(false);
       return;
     }
     let cancelled = false;
-    let first = true;
-    setDetailEvents([]);
-    const fetchEvents = async () => {
-      if (first) {
-        first = false;
-        setDetailEventsLoading(true);
-      }
+    const isNewRun = lastDetailRun.current !== selectedId;
+    lastDetailRun.current = selectedId;
+    if (isNewRun) {
+      setDetailEvents([]);
+      setDetailEventsHasMore(false);
+      setDetailEventsLoading(true);
+      setDetailEventsLoadingMore(false);
+      setDetailEventsError(false);
+    }
+    const fetchLatest = async (replace: boolean) => {
       try {
-        const events = await taskRunEvents(selectedId);
+        const page = await taskRunEvents(selectedId, undefined, EVENT_PAGE);
         if (cancelled) return;
-        setDetailEvents(events);
+        setDetailEvents((previous) => (replace ? page.events : mergeEvents(previous, page.events)));
+        // 刷新只补最新事件，不能把用户已经翻完的更早页重新标成「还有更多」。
+        setDetailEventsHasMore((previous) => (replace ? page.hasMore : previous));
         setDetailEventsError(false);
       } catch {
         if (!cancelled) setDetailEventsError(true);
       } finally {
-        if (!cancelled) setDetailEventsLoading(false);
+        if (!cancelled && replace) setDetailEventsLoading(false);
       }
     };
-    void fetchEvents();
-    const timer = window.setInterval(() => void fetchEvents(), 5_000);
+    void fetchLatest(isNewRun);
+    if (!detailActive) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(() => void fetchLatest(false), 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedId]);
+  }, [selectedId, detailActive]);
+
+  const loadEarlierDetailEvents = async () => {
+    const oldest = detailEvents[0];
+    const runId = selectedId;
+    if (!runId || !oldest || detailEventsLoadingMore) return;
+    setDetailEventsLoadingMore(true);
+    try {
+      const page = await taskRunEvents(runId, { at: oldest.at, id: oldest.id }, EVENT_PAGE);
+      if (selectedIdRef.current !== runId) return;
+      setDetailEvents((previous) => mergeEvents(page.events, previous));
+      setDetailEventsHasMore(page.hasMore);
+      setDetailEventsError(false);
+    } catch {
+      if (selectedIdRef.current === runId) setDetailEventsError(true);
+    } finally {
+      if (selectedIdRef.current === runId) setDetailEventsLoadingMore(false);
+    }
+  };
 
   const activeRuns = useMemo(
     () =>
@@ -1460,8 +1523,11 @@ export default function TasksPage({
         <DetailDrawer
           run={selected}
           events={detailEvents}
+          eventsHasMore={detailEventsHasMore}
           eventsLoading={detailEventsLoading}
+          eventsLoadingMore={detailEventsLoadingMore}
           eventsError={detailEventsError}
+          onLoadEarlier={() => void loadEarlierDetailEvents()}
           busy={busyId != null}
           canOpenFiles={!!selected.room && !!onOpenRoomFiles}
           onClose={() => setSelectedId(null)}

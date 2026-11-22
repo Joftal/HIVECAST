@@ -41,6 +41,7 @@ import type { StageView } from "./bindings/StageView";
 import type { TaskBoard } from "./bindings/TaskBoard";
 import type { TaskCenter } from "./bindings/TaskCenter";
 import type { TaskEvent } from "./bindings/TaskEvent";
+import type { TaskEventPage } from "./bindings/TaskEventPage";
 import type { TaskSummary } from "./bindings/TaskSummary";
 import type { SystemHealth } from "./bindings/SystemHealth";
 import type { TaskView } from "./bindings/TaskView";
@@ -92,6 +93,7 @@ export type {
   TaskBoard,
   TaskCenter,
   TaskEvent,
+  TaskEventPage,
   TaskRecord,
   TaskSummary,
   SystemHealth,
@@ -643,9 +645,18 @@ export async function taskCenter(limit = 100): Promise<TaskCenter> {
   return invoke<TaskCenter>("task_center", { history: limit });
 }
 
-/** 任务中心详情时间线：只取一个 Run 的阶段事件，打开抽屉时按需加载。 */
-export async function taskRunEvents(runId: string): Promise<TaskEvent[]> {
-  return invoke<TaskEvent[]>("task_run_events", { runId });
+/** 任务中心详情时间线：只取一个 Run 的阶段事件，按 (at, id) 游标向更早翻页。 */
+export async function taskRunEvents(
+  runId: string,
+  before?: { at: number; id: number },
+  limit = 200,
+): Promise<TaskEventPage> {
+  return invoke<TaskEventPage>("task_run_events", {
+    runId,
+    beforeAt: before?.at ?? null,
+    beforeId: before?.id ?? null,
+    limit,
+  });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

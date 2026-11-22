@@ -829,6 +829,15 @@ pub struct TaskEvent {
     pub at: i64,
 }
 
+/// 一页阶段事件：按 (at, id) 游标向更早翻页。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskEventPage {
+    pub events: Vec<TaskEvent>,
+    pub has_more: bool,
+}
+
 /// 任务中心首页：运行中 + 最近历史。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
