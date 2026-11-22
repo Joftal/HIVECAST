@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
+use fs4::fs_std::FileExt;
 use hivecast_ipc::{AppNotice, QualitySegment, RecordSession, RecordingInfo, RoomRecord};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -3877,8 +3878,10 @@ async fn finish_file(path: &Path) -> (PathBuf, i64) {
 /// 分组录制的多个片段共用一份清单，锁必须按清单而不是 session id。
 static FINALIZE_RETRYING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-struct FinalizeRetryLease {
+pub(crate) struct FinalizeRetryLease {
     manifest: String,
+    /// 跨进程文件锁：进程退出时由内核释放，锁文件本身可以留着。
+    _lock: std::fs::File,
 }
 
 impl Drop for FinalizeRetryLease {
@@ -3892,7 +3895,10 @@ impl Drop for FinalizeRetryLease {
 }
 
 /// 尝试占用一份收尾清单；成功时返回的 lease 在离开作用域后自动释放。
-fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLease, AppError> {
+///
+/// 公开给命令层，让「重试收尾」在创建任务之前就拿到锁：拿不到锁时直接
+/// 返回错误，不会留下一条假的失败任务。
+pub(crate) fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLease, AppError> {
     let set = FINALIZE_RETRYING.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = set
         .lock()
@@ -3900,34 +3906,50 @@ fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLease, AppError
     if !guard.insert(manifest.to_string()) {
         return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
     }
+    // 内存锁只覆盖当前进程；两个应用实例（或调试包与正式包）指向同一媒体目录时，
+    // 还要靠清单旁边的文件锁互斥。锁失败时把刚才的内存标记撤回，免得泄漏。
+    let lock = match lock_manifest_file(manifest) {
+        Ok(lock) => lock,
+        Err(err) => {
+            guard.remove(manifest);
+            return Err(err);
+        }
+    };
     Ok(FinalizeRetryLease {
         manifest: manifest.to_string(),
+        _lock: lock,
     })
+}
+
+fn lock_manifest_file(manifest: &str) -> Result<std::fs::File, AppError> {
+    let path = format!("{manifest}.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| AppError::from_io(err, Path::new(&path)))?;
+    match file.try_lock_exclusive() {
+        Ok(true) => Ok(file),
+        Ok(false) => Err(AppError::User("这一场正在别的窗口重试收尾，请稍候".into())),
+        Err(err) => Err(AppError::from_io(err, Path::new(&path))),
+    }
 }
 
 /// 手动重试一次失败的收尾：只处理该场次留下的分割清单，不碰其它录像。
 ///
 /// 收尾失败时清单会保留，里面记着每个片段的分片范围、已生成的源封装和
 /// 后处理状态；这里复用启动恢复的逻辑，已完成的片段直接沿用，缺失的补齐。
-pub async fn retry_finalize(db: &Db, session_id: &str) -> Result<(), AppError> {
-    let Some(session) = db.get_session(session_id)? else {
-        return Err(AppError::User("这段录像不存在，可能已被清理".into()));
-    };
-    if session.status == "recording" {
-        return Err(AppError::User("这段还在录制，先停下再重试收尾".into()));
-    }
-    let Some(manifest) = db.split_manifest_for(session_id)? else {
-        return Err(AppError::User(
-            "这段录像没有待恢复的收尾清单，可能已经收尾完成".into(),
-        ));
-    };
-    let manifest_path = PathBuf::from(&manifest);
-    if !manifest_path.is_file() {
-        return Err(AppError::User("收尾清单文件已不存在，无法继续重试".into()));
-    }
-
-    let _lease = acquire_finalize_retry(&manifest)?;
-
+///
+/// 调用方必须先通过 acquire_finalize_retry 拿到清单锁，并在创建任务之前
+/// 完成这一步；这样锁冲突会直接返回错误，不会留下假的失败任务。
+pub(crate) async fn retry_finalize_with_lease(
+    db: &Db,
+    session_id: &str,
+    lease: FinalizeRetryLease,
+) -> Result<(), AppError> {
+    let manifest_path = PathBuf::from(&lease.manifest);
     tracing::info!(
         session = %session_id,
         manifest = %manifest_path.display(),
@@ -6133,7 +6155,13 @@ mod tests {
         use std::sync::Barrier;
         use std::thread;
 
-        let manifest = format!("test-finalize-race-{}", std::process::id());
+        let manifest = std::env::temp_dir()
+            .join(format!(
+                "hivecast-test-finalize-race-{}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
         let start = Arc::new(Barrier::new(3));
         let mut handles = Vec::new();
         for _ in 0..2 {
@@ -6159,11 +6187,41 @@ mod tests {
             .filter(|acquired| *acquired)
             .count();
         assert_eq!(acquired, 1, "同一份清单只能有一个线程拿到锁");
+        // 锁文件落在临时目录，测试结束顺手清掉，避免污染工作区。
+        let _ = std::fs::remove_file(format!("{manifest}.lock"));
+    }
+
+    #[test]
+    fn finalize_retry_file_lock_is_exclusive_across_handles() {
+        let manifest = std::env::temp_dir()
+            .join(format!(
+                "hivecast-test-finalize-file-lock-{}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        let first = lock_manifest_file(&manifest).expect("第一把文件锁应成功");
+        assert!(
+            lock_manifest_file(&manifest).is_err(),
+            "另一个文件句柄不能同时锁住同一份清单"
+        );
+        drop(first);
+        assert!(
+            lock_manifest_file(&manifest).is_ok(),
+            "文件锁释放后应能再次占用"
+        );
+        let _ = std::fs::remove_file(format!("{manifest}.lock"));
     }
 
     #[test]
     fn finalize_retry_lock_is_per_manifest_and_released_on_drop() {
-        let manifest = format!("test-finalize-lock-{}", std::process::id());
+        let manifest = std::env::temp_dir()
+            .join(format!(
+                "hivecast-test-finalize-lock-{}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
         let first = acquire_finalize_retry(&manifest).expect("第一份锁应成功");
         assert!(
             acquire_finalize_retry(&manifest).is_err(),
@@ -6178,6 +6236,8 @@ mod tests {
             acquire_finalize_retry(&manifest).is_ok(),
             "lease 释放后应能再次占用"
         );
+        let _ = std::fs::remove_file(format!("{manifest}.lock"));
+        let _ = std::fs::remove_file(format!("{other}.lock"));
     }
 
     #[test]

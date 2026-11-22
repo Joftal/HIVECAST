@@ -524,9 +524,13 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         task.clip_count = clip_count;
     }
 
-    let session_active = group_members
-        .iter()
-        .any(|session| session.status == "recording");
+    // 收尾开始后，session.status 仍会在整个后处理期间保持 recording；只要已经登记了
+    // 收尾任务，就说明录制阶段结束，活动态应交给收尾/后处理/排队判定。
+    let has_finalize_attempt = !draft.finalize_tasks.is_empty();
+    let session_active = !has_finalize_attempt
+        && group_members
+            .iter()
+            .any(|session| session.status == "recording");
     // aborted 只表示「没有正常收尾」，磁盘满/掉盘要算失败；app_exit 单独算中断。
     let session_failed = group_members.iter().any(|session| {
         session.status == "failed"
@@ -546,7 +550,12 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         .record_task
         .as_ref()
         .is_some_and(|task| is_active(task) && task.stage.as_deref() != Some("starting"));
-    let processing_active = draft.tasks.iter().any(is_active);
+    // 收尾任务也是一种 running，但它只是挂在后台等所有片段后处理完成；
+    // 真正的处理活动看 post/remux 片段任务，否则「收尾中 + post 排队」会被吞成运行中。
+    let processing_active = draft
+        .tasks
+        .iter()
+        .any(|task| is_active(task) && task.kind != "finalize");
     let has_queued = draft.tasks.iter().any(|task| task.state == "queued");
     let has_failed = draft.tasks.iter().any(|task| task.state == "failed");
     let has_done = draft.tasks.iter().any(|task| task.state == "done");
@@ -555,14 +564,16 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     let failed = has_failed || session_failed || draft.finalize_failed;
 
     // 录制、收尾、后处理是三种不同的活动态：任务页要能一眼看出「在录」还是「在转」。
-    let state = if draft.finalizing {
-        "finalizing"
-    } else if record_active || session_active || starting_active {
+    // 收尾任务会一直挂到本场所有片段的后处理结束，所以「收尾中 + 有 post 排队」时必须先报排队，
+    // 否则用户只看到「收尾中」，队列里的任务永远不可见。
+    let state = if record_active || session_active || starting_active {
         "recording"
     } else if processing_active {
         "running"
     } else if has_queued {
         "queued"
+    } else if draft.finalizing {
+        "finalizing"
     } else if failed {
         // 有成功也有失败片段时是「部分失败」，不能整条 Run 记成成功或全失败。
         if has_failed && has_done && !session_failed && !draft.finalize_failed {
@@ -736,11 +747,11 @@ fn current_processing_stage(draft: &RunDraft) -> String {
     {
         return stage;
     }
-    if draft.finalizing {
-        return "finalizing".into();
-    }
     if draft.tasks.iter().any(|task| task.state == "queued") {
         return "queued".into();
+    }
+    if draft.finalizing {
+        return "finalizing".into();
     }
     draft
         .standalone_stage
@@ -1432,6 +1443,36 @@ mod tests {
             (None, "manual".into())
         );
         assert_eq!(parse_task_id("merge:room", "merge"), (None, "merge".into()));
+    }
+
+    #[test]
+    fn queued_post_wins_over_a_still_running_finalize_holder() {
+        // 收尾父任务会一直挂到本场所有片段的后处理结束；第二个自动后处理在排队时，
+        // 不能因为 finalizing 还亮着就把它吞掉。
+        let mut d = draft(vec![task("auto:sess:0", "post", "queued", Some(1))]);
+        d.finalizing = true;
+        let run = finish_run(d, 200);
+        assert_eq!(run.state, "queued");
+        assert_eq!(run.stage, "queued");
+    }
+
+    #[test]
+    fn recording_session_with_a_finalize_task_is_not_reported_as_recording() {
+        // 收尾父任务存在时，DB 里的 session.status 仍是 recording（直到后处理结束），
+        // 任务页不能因此把整条 Run 继续画成录制中，否则排队任务永远不可见。
+        let mut session = recorded_session("pending");
+        session.status = "recording".into();
+        let finalize = task("finalize:sess", "finalize", "running", None);
+        let mut d = draft(vec![
+            finalize.clone(),
+            task("auto:sess:0", "post", "queued", Some(1)),
+        ]);
+        d.finalize_tasks = vec![finalize];
+        d.session = Some(session);
+        d.finalizing = true;
+        let run = finish_run(d, 200);
+        assert_eq!(run.state, "queued");
+        assert_eq!(run.stage, "queued");
     }
 
     #[test]

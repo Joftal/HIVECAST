@@ -1529,6 +1529,9 @@ pub async fn finalize_retry(
             "这段录像没有待恢复的收尾清单，可能已经收尾完成".into(),
         ));
     }
+    // 先占清单锁再登记任务：另一个窗口正在重试时直接返回，不留下假的失败任务。
+    let manifest = manifest.expect("manifest_ready 已确认清单存在");
+    let lease = crate::recorder::acquire_finalize_retry(&manifest)?;
     let room_id = Some(session.room_id.clone());
     let title = room_id
         .as_deref()
@@ -1544,7 +1547,7 @@ pub async fn finalize_retry(
         room_id,
     );
     job.progress(5, "finalizing", Some("重新合并分片并执行后处理"));
-    match crate::recorder::retry_finalize(&state.db, &session_id).await {
+    match crate::recorder::retry_finalize_with_lease(&state.db, &session_id, lease).await {
         Ok(()) => {
             job.finish("done", Some("收尾完成"));
             let _ = app.emit(EVENT_ROOMS_CHANGED, ());
