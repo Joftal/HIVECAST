@@ -196,6 +196,13 @@ pub fn build(
         let representative = group_representative(&members).unwrap_or_else(|| session.clone());
         draft.session = Some(representative.clone());
         draft.sessions = members.clone();
+        // 只有清单还在磁盘上时才允许重试收尾：清单记录存在但文件已被清理时，
+        // 点击同样只会得到「没有待恢复的收尾清单」。
+        draft.finalize_manifest_ready = db
+            .split_manifest_for(&representative.id)
+            .ok()
+            .flatten()
+            .is_some_and(|path| !path.trim().is_empty() && std::path::Path::new(&path).exists());
         draft.started_at = members
             .iter()
             .map(|member| member.started_at)
@@ -390,6 +397,8 @@ struct RunDraft {
     finalize_finished: bool,
     finalize_failed: bool,
     finalize_message: Option<String>,
+    /// 这一组是否还有可恢复的收尾清单；没有清单时不能给出点了只会报错的重试入口。
+    finalize_manifest_ready: bool,
     started_at: i64,
     ended_at: Option<i64>,
 }
@@ -409,6 +418,7 @@ impl RunDraft {
             finalize_finished: false,
             finalize_failed: false,
             finalize_message: None,
+            finalize_manifest_ready: false,
             started_at: 0,
             ended_at: None,
         }
@@ -466,15 +476,33 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         draft.finalize_tasks.clear();
         draft.finalize_tasks.push(latest);
     }
+    // 场次全部 finished 说明收尾产物与历史已经落库。此时仍挂着 failed/interrupted
+    // 的收尾任务只剩一种可能：进程在写库之后、post_job.finish 之前退出（或旧版本
+    // 留下的重试残留）。它不是当前状态，继续把 Run 标成失败会让用户看到一条永远
+    // 无法重试的「收尾失败」。保留历史记录在 task_history，Run 本身按已完成处理。
+    let all_members_finished = !group_members.is_empty()
+        && group_members
+            .iter()
+            .all(|session| session.status == "finished");
     if let Some(task) = draft.finalize_tasks.last() {
-        draft.finalizing = task.state == "running" || task.state == "queued";
-        draft.finalize_finished = task.state == "done";
-        draft.finalize_failed = matches!(task.state.as_str(), "failed" | "interrupted");
-        draft.finalize_message = if draft.finalize_failed {
-            task.message.clone()
+        let stale_failure =
+            all_members_finished && matches!(task.state.as_str(), "failed" | "interrupted");
+        if stale_failure {
+            draft.finalize_tasks.clear();
+            draft.finalizing = false;
+            draft.finalize_finished = true;
+            draft.finalize_failed = false;
+            draft.finalize_message = None;
         } else {
-            None
-        };
+            draft.finalizing = task.state == "running" || task.state == "queued";
+            draft.finalize_finished = task.state == "done";
+            draft.finalize_failed = matches!(task.state.as_str(), "failed" | "interrupted");
+            draft.finalize_message = if draft.finalize_failed {
+                task.message.clone()
+            } else {
+                None
+            };
+        }
     }
 
     draft.tasks.sort_by(|a, b| {
@@ -663,9 +691,10 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
 
     // 场次已经 finished 说明收尾产物已落库；这时残留的旧 finalize 失败任务
     // 没有可恢复的清单，不能继续给用户一个点了只会报错的「重试收尾」。
-    let finalize_retry_ready = stages
-        .iter()
-        .any(|stage| stage.key == "finalize" && stage.state == "failed")
+    let finalize_retry_ready = draft.finalize_manifest_ready
+        && stages
+            .iter()
+            .any(|stage| stage.key == "finalize" && stage.state == "failed")
         && group_members
             .iter()
             .any(|member| member.status != "finished");
@@ -1168,9 +1197,17 @@ fn severity_rank(severity: &str) -> u8 {
 
 fn task_view(task: &hivecast_ipc::TaskRecord) -> TaskView {
     let (clip_index, queue) = parse_task_id(&task.id, &task.kind);
+    // 旧版本把收尾任务记成 kind=post + `job:` 前缀。前端按 kind 区分
+    // 「重试收尾」和「重试后处理」，不归一化会把旧收尾失败显示成后处理失败，
+    // 点下去只会报「没有可处理的源文件」。
+    let kind = if is_finalize(task) {
+        "finalize"
+    } else {
+        task.kind.as_str()
+    };
     TaskView {
         id: task.id.clone(),
-        kind: task.kind.clone(),
+        kind: kind.into(),
         title: task.title.clone(),
         detail: task.detail.clone(),
         state: task.state.clone(),
@@ -1431,6 +1468,8 @@ mod tests {
     #[test]
     fn finalize_tasks_are_recognized_and_never_listed_as_post_work() {
         assert!(is_finalize(&record("finalize:session-1", "finalize")));
+        assert_eq!(task_view(&record("job:legacy", "post")).kind, "finalize");
+        assert_eq!(task_view(&record("auto:sess:0", "post")).kind, "post");
         // 旧版本把收尾父任务写成 post + job: 前缀，升级后仍要识别。
         assert!(is_finalize(&record("job:legacy", "post")));
         // 片段后处理必须继续作为独立任务显示。
@@ -1559,7 +1598,10 @@ mod tests {
         draft.finalize_tasks = vec![failed.clone()];
         let run = finish_run(draft, 300);
 
-        assert_eq!(run.stages[1].state, "failed");
+        // 场次已 finished：产物和历史都落库了，收尾任务的残留失败不能污染 Run。
+        assert_eq!(run.state, "done");
+        assert_eq!(run.stages[1].state, "done");
+        assert!(run.tasks.is_empty());
         assert!(!run.finalize_retry_ready);
 
         // 同一条收尾任务落在未完成的场次上时，才是真的可以恢复。
@@ -1570,6 +1612,74 @@ mod tests {
         draft.ended_at = Some(200);
         draft.session = Some(broken);
         draft.finalize_tasks = vec![failed];
+        draft.finalize_manifest_ready = true;
+        let run = finish_run(draft, 300);
+        assert!(run.finalize_retry_ready);
+    }
+
+    #[test]
+    fn stale_finalize_failure_is_cleared_only_when_every_group_member_finished() {
+        let mut failed = task("finalize:session-1", "finalize", "failed", None);
+        failed.session_id = Some("session-1".into());
+        failed.finished_at = Some(150);
+
+        let mut first = recorded_session("done");
+        first.id = "session-1".into();
+        let mut second = recorded_session("done");
+        second.id = "session-2".into();
+        second.group_id = Some("session-1".into());
+        second.clip_index = 1;
+
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(first.clone());
+        draft.sessions = vec![first.clone(), second.clone()];
+        draft.finalize_tasks = vec![failed.clone()];
+        let run = finish_run(draft, 300);
+        assert_eq!(run.state, "done");
+        assert!(run.tasks.is_empty());
+        assert!(!run.finalize_retry_ready);
+
+        // 分组里还有片段没 finished：收尾确实没完成，必须保留失败与重试入口。
+        second.status = "failed".into();
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(first);
+        draft.sessions = vec![recorded_session("done"), second];
+        draft.finalize_tasks = vec![failed];
+        draft.finalize_manifest_ready = true;
+        let run = finish_run(draft, 300);
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.stages[1].state, "failed");
+        assert!(run.finalize_retry_ready);
+    }
+
+    #[test]
+    fn finalize_retry_requires_a_live_manifest() {
+        let mut failed = task("finalize:session-1", "finalize", "failed", None);
+        failed.session_id = Some("session-1".into());
+        failed.finished_at = Some(150);
+
+        let mut broken = recorded_session("pending");
+        broken.status = "failed".into();
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(broken.clone());
+        draft.finalize_tasks = vec![failed.clone()];
+        // 清单已被清理：即使收尾阶段失败，也不该出现一个点了只会报错的重试入口。
+        let run = finish_run(draft, 300);
+        assert_eq!(run.stages[1].state, "failed");
+        assert!(!run.finalize_retry_ready);
+
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(broken);
+        draft.finalize_tasks = vec![failed];
+        draft.finalize_manifest_ready = true;
         let run = finish_run(draft, 300);
         assert!(run.finalize_retry_ready);
     }

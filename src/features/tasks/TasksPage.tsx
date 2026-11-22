@@ -1188,23 +1188,23 @@ export default function TasksPage({
   const load = useCallback(async (limit = historyLimitRef.current) => {
     if (!isTauri()) {
       setLoaded(true);
-      return true;
+      return { ok: true, stale: false };
     }
     // 2 秒轮询和手动刷新可能重叠；只接受最后一次请求的结果，避免旧快照覆盖新状态。
     const seq = ++loadSeq.current;
     try {
       const next = await taskCenter(limit);
-      if (seq !== loadSeq.current) return false;
+      if (seq !== loadSeq.current) return { ok: false, stale: true };
       setCenter(next);
       loadErrorShown.current = false;
-      return true;
+      return { ok: true, stale: false };
     } catch (err) {
-      if (seq !== loadSeq.current) return false;
+      if (seq !== loadSeq.current) return { ok: false, stale: true };
       if (!loadErrorShown.current) {
         loadErrorShown.current = true;
         notify.error(err);
       }
-      return false;
+      return { ok: false, stale: false };
     } finally {
       if (seq === loadSeq.current) setLoaded(true);
     }
@@ -1223,14 +1223,22 @@ export default function TasksPage({
     // 双击「加载更多」时两次点击都会进到这里；用 ref 而不是 state 拦截，
     // 避免第二次在 setLoadingMore 生效前又把上限推进一页。
     if (loadingMoreRef.current) return;
-    const next = Math.min(historyLimitRef.current + HISTORY_PAGE, HISTORY_MAX);
-    if (next <= historyLimitRef.current) return;
+    const previous = historyLimitRef.current;
+    const next = Math.min(previous + HISTORY_PAGE, HISTORY_MAX);
+    if (next <= previous) return;
     historyLimitRef.current = next;
     setHistoryLimit(next);
     setLoadingMore(true);
     loadingMoreRef.current = true;
     try {
-      await load(next);
+      const result = await load(next);
+      // 请求真的失败时把上限退回：否则下一次点击会从 200 直接跳到 300，
+      // 中间那一页被永久跳过。旧快照（stale）说明另一拍已经用新上限取到数据，
+      // 保留推进后的值，等下一拍继续。
+      if (!result.ok && !result.stale) {
+        historyLimitRef.current = previous;
+        setHistoryLimit(previous);
+      }
     } finally {
       loadingMoreRef.current = false;
       setLoadingMore(false);
@@ -1423,7 +1431,7 @@ export default function TasksPage({
   ]);
 
   const refresh = async () => {
-    if (await load()) notify.success(t("tasks.refreshed"));
+    if ((await load()).ok) notify.success(t("tasks.refreshed"));
   };
 
   const cancel = async (task: TaskView) => {
