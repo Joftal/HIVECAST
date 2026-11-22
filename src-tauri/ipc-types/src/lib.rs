@@ -838,6 +838,43 @@ pub struct TaskEventPage {
     pub has_more: bool,
 }
 
+/// 跨 Run 检索到的一条阶段事件。带房间信息，结果不依赖任务页当前已加载的历史。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskEventHit {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub task_id: String,
+    pub run_id: Option<String>,
+    pub kind: String,
+    pub stage: String,
+    pub state: String,
+    #[ts(type = "number")]
+    pub percent: i64,
+    pub message: Option<String>,
+    #[ts(type = "number")]
+    pub at: i64,
+    pub session_id: Option<String>,
+    pub group_id: Option<String>,
+    pub room_id: Option<String>,
+    /// 平台房间号；room_id 是本地房间主键，导出给人看时优先用这个。
+    pub room_key: Option<String>,
+    pub platform: Option<String>,
+    pub host_name: Option<String>,
+    pub room_title: Option<String>,
+}
+
+/// 跨 Run 事件检索结果。total 是过滤后的总条数，hits 只返回一页。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskEventSearch {
+    #[ts(type = "number")]
+    pub total: i64,
+    pub hits: Vec<TaskEventHit>,
+}
+
 /// 任务中心首页：运行中 + 最近历史。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

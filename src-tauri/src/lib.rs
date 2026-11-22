@@ -346,6 +346,8 @@ pub fn run() {
             commands::task_board,
             commands::task_center,
             commands::task_run_events,
+            commands::task_event_search,
+            commands::task_events_export,
             commands::media_files,
             commands::trash_info,
             commands::trash_open,

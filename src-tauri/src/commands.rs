@@ -8,7 +8,7 @@ use hivecast_ipc::{
     LiveStatus, LogStatus, MediaFile, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
     QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RemovedRoom, RoomRecord,
     RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskCenter,
-    TaskRecord, TrashInfo, ViewSlotInfo,
+    TaskEventSearch, TaskRecord, TrashInfo, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -3130,6 +3130,112 @@ pub fn task_run_events(
     state
         .db
         .task_event_page(&event_run_ids, before, limit.unwrap_or(200))
+}
+
+/// 跨 Run 检索阶段事件，供任务页搜索；结果带房间信息，不受历史窗口限制。
+#[tauri::command]
+pub fn task_event_search(
+    state: State<'_, AppState>,
+    query: Option<String>,
+    only_failed: Option<bool>,
+    platform: Option<String>,
+    limit: Option<usize>,
+) -> Result<TaskEventSearch, AppError> {
+    state.db.task_event_search(
+        query.as_deref().unwrap_or_default(),
+        only_failed.unwrap_or(false),
+        platform.as_deref(),
+        limit.unwrap_or(200),
+    )
+}
+
+fn csv_cell(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// 把当前检索条件下的阶段事件导出为 CSV，返回写入条数。
+#[tauri::command]
+pub fn task_events_export(
+    state: State<'_, AppState>,
+    path: String,
+    query: Option<String>,
+    only_failed: Option<bool>,
+    platform: Option<String>,
+) -> Result<usize, AppError> {
+    use chrono::TimeZone;
+    use std::io::Write;
+
+    let target = PathBuf::from(path.trim());
+    if target.as_os_str().is_empty() {
+        return Err(AppError::User("导出路径为空".into()));
+    }
+    if target.is_dir() {
+        return Err(AppError::User(
+            "导出路径是一个目录，请选择 .csv 文件".into(),
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(AppError::User(format!(
+                "导出目录不存在：{}",
+                parent.display()
+            )));
+        }
+    }
+    let result = state.db.task_event_search(
+        query.as_deref().unwrap_or_default(),
+        only_failed.unwrap_or(false),
+        platform.as_deref(),
+        50_000,
+    )?;
+    let mut file = std::fs::File::create(&target)
+        .map_err(|err| AppError::User(format!("无法创建导出文件：{err}")))?;
+    // 带 BOM，Excel 直接打开不会把中文表头显示成乱码。
+    file.write_all("\u{feff}".as_bytes())
+        .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
+    writeln!(
+        file,
+        "时间,平台,房间号,主播,直播间标题,阶段,状态,进度,消息,任务,Run"
+    )
+    .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
+    for hit in &result.hits {
+        let time = chrono::Local
+            .timestamp_opt(hit.at, 0)
+            .single()
+            .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| hit.at.to_string());
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{},{},{},{},{}",
+            csv_cell(&time),
+            csv_cell(hit.platform.as_deref().unwrap_or_default()),
+            csv_cell(
+                hit.room_key
+                    .as_deref()
+                    .or(hit.room_id.as_deref())
+                    .unwrap_or_default()
+            ),
+            csv_cell(hit.host_name.as_deref().unwrap_or_default()),
+            csv_cell(hit.room_title.as_deref().unwrap_or_default()),
+            csv_cell(&hit.stage),
+            csv_cell(&hit.state),
+            hit.percent,
+            csv_cell(hit.message.as_deref().unwrap_or_default()),
+            csv_cell(&hit.task_id),
+            csv_cell(hit.run_id.as_deref().unwrap_or_default()),
+        )
+        .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
+    }
+    if result.total > result.hits.len() as i64 {
+        tracing::warn!(
+            path = %target.display(),
+            written = result.hits.len(),
+            total = result.total,
+            "任务事件导出达到上限，只写入最近的事件"
+        );
+    }
+    tracing::info!(path = %target.display(), count = result.hits.len(), "任务事件已导出");
+    Ok(result.hits.len())
 }
 
 /// 任务中心的运行中列表 = 录制（含开录中）+ 后处理/合并/弹幕导出；历史来自 task_history。

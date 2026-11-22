@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Button, Chip, cx } from "../../components/ui/Controls";
+import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
+import { Button, Chip, Switch, cx } from "../../components/ui/Controls";
 import EmptyArt from "../../components/ui/EmptyArt";
 import PageEmpty from "../../components/ui/PageEmpty";
 import { PageBody, PageChip, PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
@@ -11,6 +12,8 @@ import {
   postRetry,
   finalizeRetry,
   taskCenter,
+  taskEventSearch,
+  taskEventsExport,
   taskRunEvents,
   type Incident,
   type PlatformHealth,
@@ -18,6 +21,8 @@ import {
   type RunView,
   type TaskCenter,
   type TaskEvent,
+  type TaskEventHit,
+  type TaskEventSearch,
   type TaskView,
 } from "../../lib/ipc";
 import { useNotify } from "../../lib/notify";
@@ -25,6 +30,10 @@ import { useNotify } from "../../lib/notify";
 const HISTORY_PAGE = 100;
 const HISTORY_MAX = 1_000;
 const EVENT_PAGE = 200;
+const HISTORY_VIEWPORT = 420;
+const HISTORY_ROW = 56;
+const HISTORY_OVERSCAN = 6;
+const TIMELINE_WINDOW = 200;
 const ACTIVE_RUN_STATES = new Set(["recording", "running", "finalizing", "queued"]);
 
 /** 合并两段按时间正序的事件，按 id 去重；后传入的覆盖旧状态。 */
@@ -613,7 +622,7 @@ function DetailDrawer({
   eventsLoading: boolean;
   eventsLoadingMore: boolean;
   eventsError: boolean;
-  onLoadEarlier: () => void;
+  onLoadEarlier: () => Promise<void>;
   busy: boolean;
   canOpenFiles: boolean;
   onClose: () => void;
@@ -626,6 +635,33 @@ function DetailDrawer({
   const cancelTask = canCancel(run);
   const retryTask = failedTask(run);
   const retryFinalizeTask = failedFinalizeTask(run);
+  // 时间线一次只挂一个 200 条的窗口；2100 条事件如果全部进 DOM，
+  // 可访问性树和滚动布局都会明显变慢。
+  const timelinePages = Math.max(1, Math.ceil(events.length / TIMELINE_WINDOW));
+  const [timelinePage, setTimelinePage] = useState(0);
+  const timelineRunRef = useRef<string | null>(null);
+  const pendingOlder = useRef(false);
+  useEffect(() => {
+    if (timelineRunRef.current !== run.id) {
+      timelineRunRef.current = run.id;
+      setTimelinePage(0);
+    }
+  }, [run.id]);
+  useEffect(() => {
+    setTimelinePage((page) => Math.min(page, timelinePages - 1));
+  }, [timelinePages]);
+  useEffect(() => {
+    if (!pendingOlder.current) return;
+    pendingOlder.current = false;
+    setTimelinePage((page) => Math.min(page + 1, timelinePages - 1));
+  }, [events.length, timelinePages]);
+  const timelineEnd = Math.max(0, events.length - timelinePage * TIMELINE_WINDOW);
+  const timelineStart = Math.max(0, timelineEnd - TIMELINE_WINDOW);
+  const visibleTimeline = events.slice(timelineStart, timelineEnd);
+  const loadOlder = async () => {
+    pendingOlder.current = true;
+    await onLoadEarlier();
+  };
   // Run id 的前缀是内部键：session:/task:/starting:。详情里不要把技术前缀直接当「场次」。
   const runRef = run.id.startsWith("session:")
     ? { label: t("tasks.detailSession"), value: run.id.slice("session:".length) }
@@ -749,11 +785,29 @@ function DetailDrawer({
           <section className="mt-4">
             <h3 className="text-[12px] font-semibold text-ink">{t("tasks.detailTimeline")}</h3>
             <div className="mt-2">
-              {eventsHasMore ? (
-                <div className="mb-2">
-                  <Button size="sm" variant="ghost" disabled={eventsLoadingMore} onClick={onLoadEarlier}>
-                    {eventsLoadingMore ? t("tasks.timelineLoadingEarlier") : t("tasks.timelineLoadEarlier")}
-                  </Button>
+              {events.length > 0 ? (
+                <div className="mb-2 flex items-center gap-1.5">
+                  {timelinePage < timelinePages - 1 ? (
+                    <Button size="sm" variant="ghost" onClick={() => setTimelinePage((page) => page + 1)}>
+                      {t("tasks.timelineOlder")}
+                    </Button>
+                  ) : eventsHasMore ? (
+                    <Button size="sm" variant="ghost" disabled={eventsLoadingMore} onClick={() => void loadOlder()}>
+                      {eventsLoadingMore ? t("tasks.timelineLoadingEarlier") : t("tasks.timelineLoadEarlier")}
+                    </Button>
+                  ) : null}
+                  {timelinePage > 0 ? (
+                    <Button size="sm" variant="ghost" onClick={() => setTimelinePage((page) => Math.max(0, page - 1))}>
+                      {t("tasks.timelineNewer")}
+                    </Button>
+                  ) : null}
+                  <span className="ml-auto text-[10px] tabular-nums text-faint">
+                    {t("tasks.timelineWindow", {
+                      from: timelineStart + 1,
+                      to: timelineEnd,
+                      total: events.length,
+                    })}
+                  </span>
                 </div>
               ) : null}
               {eventsError && events.length > 0 ? (
@@ -766,7 +820,7 @@ function DetailDrawer({
               ) : events.length === 0 ? (
                 <div className="px-1 py-2 text-[11px] text-faint">{t("tasks.timelineEmpty")}</div>
               ) : (
-                events.map((event, index) => {
+                visibleTimeline.map((event, index) => {
                   const tone =
                     event.state === "failed"
                       ? "bg-rec"
@@ -779,7 +833,7 @@ function DetailDrawer({
                     <div key={event.id} className="flex gap-2.5">
                       <div className="flex flex-col items-center">
                         <span className={cx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", tone)} />
-                        {index < events.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
+                        {index < visibleTimeline.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
                       </div>
                       <div className="min-w-0 flex-1 pb-2.5">
                         <div className="flex items-baseline gap-2">
@@ -890,6 +944,199 @@ function DetailDrawer({
   );
 }
 
+function EventSearchDialog({
+  open,
+  onOpenChange,
+  initialPlatform,
+  onOpenFiles,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initialPlatform: string | null;
+  onOpenFiles?: (roomId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const notify = useNotify();
+  const [query, setQuery] = useState("");
+  const [onlyFailed, setOnlyFailed] = useState(false);
+  const [platform, setPlatform] = useState<string | null>(initialPlatform);
+  const [result, setResult] = useState<TaskEventSearch | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const seq = useRef(0);
+  const wasOpen = useRef(false);
+
+  // 每次打开都从当前平台筛选开始，但不要在输入过程中被外部筛选重置。
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setQuery("");
+      setOnlyFailed(false);
+      setPlatform(initialPlatform);
+      setResult(null);
+      setFailed(false);
+    }
+    wasOpen.current = open;
+  }, [open, initialPlatform]);
+
+  const runSearch = useCallback(async () => {
+    if (!isTauri()) return;
+    const id = ++seq.current;
+    setLoading(true);
+    setFailed(false);
+    try {
+      const next = await taskEventSearch(query, onlyFailed, platform);
+      if (id === seq.current) setResult(next);
+    } catch {
+      if (id === seq.current) setFailed(true);
+    } finally {
+      if (id === seq.current) setLoading(false);
+    }
+  }, [query, onlyFailed, platform]);
+
+  useEffect(() => {
+    if (!open || !isTauri()) return;
+    const timer = window.setTimeout(() => void runSearch(), 250);
+    return () => window.clearTimeout(timer);
+  }, [open, runSearch]);
+
+  const exportCsv = async () => {
+    if (!isTauri() || exporting) return;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await save({
+        defaultPath: `hivecast-events-${stamp}.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (typeof path !== "string" || !path) return;
+      setExporting(true);
+      const count = await taskEventsExport(path, query, onlyFailed, platform);
+      notify.success(t("tasks.eventSearchExported", { n: count }));
+    } catch (err) {
+      notify.error(err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const platforms: Array<string | null> = [null, "bilibili", "douyu", "douyin", "huya"];
+  const hitLabel = (hit: TaskEventHit) =>
+    hit.hostName || hit.roomTitle || t("tasks.eventSearchNoRoom");
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        title={t("tasks.eventSearchTitle")}
+        description={t("tasks.eventSearchHint")}
+        size="lg"
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runSearch();
+          }}
+          className="flex gap-2"
+        >
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("tasks.eventSearchPlaceholder")}
+            spellCheck={false}
+            className="focus-ring h-9 min-w-0 flex-1 rounded-ctl border border-line bg-surface px-3 text-[12.5px] text-ink transition-colors placeholder:text-faint hover:border-line-strong"
+          />
+          <Button size="lg" type="submit" variant="primary" disabled={loading}>
+            {loading ? t("tasks.eventSearchLoading") : t("tasks.eventSearchAction")}
+          </Button>
+        </form>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {platforms.map((item) => (
+            <PageChip key={item ?? "all"} active={platform === item} onClick={() => setPlatform(item)}>
+              {item ? platformName(t, item) : t("tasks.eventSearchAllPlatforms")}
+            </PageChip>
+          ))}
+          <label className="ml-1 flex items-center gap-2 text-[11.5px] text-muted">
+            <Switch
+              checked={onlyFailed}
+              onChange={setOnlyFailed}
+              label={t("tasks.eventSearchOnlyFailed")}
+            />
+            {t("tasks.eventSearchOnlyFailed")}
+          </label>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="ml-auto"
+            disabled={!result || result.total === 0 || exporting || loading}
+            onClick={() => void exportCsv()}
+          >
+            {exporting ? t("tasks.eventSearchExporting") : t("tasks.eventSearchExport")}
+          </Button>
+        </div>
+
+        <div className="mt-3 flex items-baseline justify-between gap-3">
+          <span className="text-[11px] text-muted">
+            {result
+              ? t("tasks.eventSearchCount", { total: result.total, shown: result.hits.length })
+              : t("tasks.eventSearchLoading")}
+          </span>
+          {failed ? <span className="text-[11px] text-rec">{t("tasks.eventSearchError")}</span> : null}
+        </div>
+
+        <div className="mt-2 max-h-[48vh] overflow-auto rounded-panel border border-line bg-surface">
+          {result && result.hits.length === 0 ? (
+            <div className="px-4 py-10 text-center text-[12px] text-faint">
+              {t("tasks.eventSearchEmpty")}
+            </div>
+          ) : null}
+          {result?.hits.map((hit) => (
+            <div
+              key={hit.id}
+              className="flex items-start gap-3 border-b border-line px-3 py-2.5 last:border-b-0"
+            >
+              <div className="w-[86px] shrink-0 pt-0.5 font-mono text-[10px] tabular-nums text-faint">
+                {formatTime(hit.at)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2 text-[11px]">
+                  <span className="shrink-0 text-faint">{platformName(t, hit.platform)}</span>
+                  <span className="min-w-0 truncate font-medium text-ink" title={hitLabel(hit)}>
+                    {hitLabel(hit)}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-faint">
+                    {stageLabel(t, hit.stage)} · {stateLabel(t, hit.state)}
+                    {hit.percent > 0 && hit.percent < 100 ? ` ${hit.percent}%` : ""}
+                  </span>
+                </div>
+                <div className="mt-0.5 truncate text-[11.5px] text-ink-soft" title={hit.message ?? undefined}>
+                  {hit.message || "—"}
+                </div>
+                <div className="mt-0.5 truncate font-mono text-[10px] text-faint">
+                  {hit.runId ?? hit.taskId}
+                </div>
+              </div>
+              {hit.roomId && onOpenFiles ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    onOpenChange(false);
+                    onOpenFiles(hit.roomId!);
+                  }}
+                >
+                  {t("tasks.eventSearchFiles")}
+                </Button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function TasksPage({
   seed,
   onSeedApplied,
@@ -913,13 +1160,21 @@ export default function TasksPage({
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
   const [roomFilter, setRoomFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [historyScrollTop, setHistoryScrollTop] = useState(0);
+  const historyScrollRef = useRef<HTMLDivElement | null>(null);
   const historyLimitRef = useRef(HISTORY_PAGE);
   const loadingMoreRef = useRef(false);
   const loadErrorShown = useRef(false);
   const loadSeq = useRef(0);
+
+  useEffect(() => {
+    setHistoryScrollTop(0);
+    historyScrollRef.current?.scrollTo({ top: 0 });
+  }, [platformFilter, roomFilter, filter]);
 
   useEffect(() => {
     if (!seed) return;
@@ -1088,6 +1343,20 @@ export default function TasksPage({
     [center.running, matches],
   );
   const historyRuns = useMemo(() => center.history.filter(matches), [center.history, matches]);
+  // 历史最多 1000 场，全量 DOM 在低配机器上首次布局开销明显。
+  // 表格保持原生语义，用上下 spacer 行撑出滚动高度，只渲染视口附近的行。
+  const historyStart = Math.min(
+    historyRuns.length,
+    Math.max(0, Math.floor(historyScrollTop / HISTORY_ROW) - HISTORY_OVERSCAN),
+  );
+  const historyEnd = Math.max(
+    historyStart,
+    Math.min(
+      historyRuns.length,
+      Math.ceil((historyScrollTop + HISTORY_VIEWPORT) / HISTORY_ROW) + HISTORY_OVERSCAN,
+    ),
+  );
+  const visibleHistory = historyRuns.slice(historyStart, historyEnd);
   const incidents = useMemo(
     () =>
       center.incidents.filter((incident) => {
@@ -1237,9 +1506,14 @@ export default function TasksPage({
           </div>
         }
         actions={
-          <Button size="sm" variant="secondary" onClick={() => void refresh()}>
-            {t("tasks.refresh")}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setSearchOpen(true)}>
+              {t("tasks.eventSearch")}
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => void refresh()}>
+              {t("tasks.refresh")}
+            </Button>
+          </div>
         }
       />
 
@@ -1447,8 +1721,13 @@ export default function TasksPage({
                   </div>
                 ) : (
                   <div className="overflow-hidden rounded-panel border border-line bg-surface">
+                    <div
+                      ref={historyScrollRef}
+                      onScroll={(event) => setHistoryScrollTop(event.currentTarget.scrollTop)}
+                      className="max-h-[420px] overflow-auto"
+                    >
                     <table className="w-full table-fixed border-collapse">
-                      <thead>
+                      <thead className="sticky top-0 z-10 bg-surface">
                         <tr className="border-b border-line text-left text-[10px] text-faint">
                           <th className="w-[36%] px-4 py-2 font-medium">{t("tasks.colRoom")}</th>
                           <th className="w-[13%] px-2 py-2 font-medium">{t("tasks.colDuration")}</th>
@@ -1458,13 +1737,18 @@ export default function TasksPage({
                         </tr>
                       </thead>
                       <tbody>
-                        {historyRuns.map((run) => (
+                        {historyStart > 0 ? (
+                          <tr aria-hidden="true">
+                            <td colSpan={5} style={{ height: historyStart * HISTORY_ROW, padding: 0, border: 0 }} />
+                          </tr>
+                        ) : null}
+                        {visibleHistory.map((run) => (
                           <tr
                             key={run.id}
                             onClick={() => setSelectedId(run.id)}
-                            className="cursor-pointer border-b border-line last:border-b-0 hover:bg-raised/50"
+                            className="h-14 cursor-pointer border-b border-line hover:bg-raised/50"
                           >
-                            <td className="min-w-0 px-4 py-2.5">
+                            <td className="min-w-0 px-4 py-1.5">
                               <div className="flex min-w-0 items-center gap-2">
                                 <span className="shrink-0 text-[10px] text-faint">{platformName(t, run.room?.platform)}</span>
                                 <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink">
@@ -1475,10 +1759,10 @@ export default function TasksPage({
                                 {run.room?.title ?? "—"}
                               </div>
                             </td>
-                            <td className="truncate px-2 py-2.5 text-[10.5px] tabular-nums text-muted">{formatDuration(run.durationMs)}</td>
-                            <td className="truncate px-2 py-2.5 text-[10.5px] tabular-nums text-muted">{formatBytes(run.bytes)}</td>
-                            <td className="truncate px-2 py-2.5 text-[10.5px] tabular-nums text-faint">{formatTime(run.endedAt ?? run.startedAt)}</td>
-                            <td className="px-4 py-2.5 text-right">
+                            <td className="truncate px-2 py-1.5 text-[10.5px] tabular-nums text-muted">{formatDuration(run.durationMs)}</td>
+                            <td className="truncate px-2 py-1.5 text-[10.5px] tabular-nums text-muted">{formatBytes(run.bytes)}</td>
+                            <td className="truncate px-2 py-1.5 text-[10.5px] tabular-nums text-faint">{formatTime(run.endedAt ?? run.startedAt)}</td>
+                            <td className="px-4 py-1.5 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 <Chip tone={stateTone(run.state)} dot>
                                   {stateLabel(t, run.state)}
@@ -1498,8 +1782,14 @@ export default function TasksPage({
                             </td>
                           </tr>
                         ))}
+                        {historyEnd < historyRuns.length ? (
+                          <tr aria-hidden="true">
+                            <td colSpan={5} style={{ height: (historyRuns.length - historyEnd) * HISTORY_ROW, padding: 0, border: 0 }} />
+                          </tr>
+                        ) : null}
                       </tbody>
                     </table>
+                    </div>
                   </div>
                 )}
                 {loaded && center.historyHasMore ? (
@@ -1519,6 +1809,13 @@ export default function TasksPage({
         )}
       </PageBody>
 
+      <EventSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        initialPlatform={platformFilter}
+        onOpenFiles={onOpenRoomFiles}
+      />
+
       {selected ? (
         <DetailDrawer
           run={selected}
@@ -1527,7 +1824,7 @@ export default function TasksPage({
           eventsLoading={detailEventsLoading}
           eventsLoadingMore={detailEventsLoadingMore}
           eventsError={detailEventsError}
-          onLoadEarlier={() => void loadEarlierDetailEvents()}
+          onLoadEarlier={loadEarlierDetailEvents}
           busy={busyId != null}
           canOpenFiles={!!selected.room && !!onOpenRoomFiles}
           onClose={() => setSelectedId(null)}

@@ -41,7 +41,9 @@ import type { StageView } from "./bindings/StageView";
 import type { TaskBoard } from "./bindings/TaskBoard";
 import type { TaskCenter } from "./bindings/TaskCenter";
 import type { TaskEvent } from "./bindings/TaskEvent";
+import type { TaskEventHit } from "./bindings/TaskEventHit";
 import type { TaskEventPage } from "./bindings/TaskEventPage";
+import type { TaskEventSearch } from "./bindings/TaskEventSearch";
 import type { TaskSummary } from "./bindings/TaskSummary";
 import type { SystemHealth } from "./bindings/SystemHealth";
 import type { TaskView } from "./bindings/TaskView";
@@ -93,7 +95,9 @@ export type {
   TaskBoard,
   TaskCenter,
   TaskEvent,
+  TaskEventHit,
   TaskEventPage,
+  TaskEventSearch,
   TaskRecord,
   TaskSummary,
   SystemHealth,
@@ -657,6 +661,31 @@ export async function taskRunEvents(
     beforeId: before?.id ?? null,
     limit,
   });
+}
+
+/** 跨 Run 检索阶段事件：不受任务页历史窗口限制。 */
+export async function taskEventSearch(
+  query: string,
+  onlyFailed: boolean,
+  platform: string | null,
+  limit = 200,
+): Promise<TaskEventSearch> {
+  return invoke<TaskEventSearch>("task_event_search", {
+    query,
+    onlyFailed,
+    platform,
+    limit,
+  });
+}
+
+/** 把当前检索条件下的阶段事件导出为 CSV，返回写入条数。 */
+export async function taskEventsExport(
+  path: string,
+  query: string,
+  onlyFailed: boolean,
+  platform: string | null,
+): Promise<number> {
+  return invoke<number>("task_events_export", { path, query, onlyFailed, platform });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

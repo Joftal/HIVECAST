@@ -1778,6 +1778,77 @@ impl Db {
         Ok(ids)
     }
 
+    /// 跨 Run 检索阶段事件。直接查 task_event，不依赖任务页当前加载的历史窗口。
+    /// 通过 `session:<id>` 关联录像与房间，任务级事件没有房间信息时留空。
+    pub fn task_event_search(
+        &self,
+        query: &str,
+        only_failed: bool,
+        platform: Option<&str>,
+        limit: usize,
+    ) -> Result<hivecast_ipc::TaskEventSearch, AppError> {
+        let query = query.trim();
+        let pattern = like_pattern(query);
+        let has_query = i64::from(!query.is_empty());
+        let only_failed = i64::from(only_failed);
+        let platform = platform.unwrap_or("").trim();
+        let limit = limit.clamp(1, 50_000);
+        let from = "FROM task_event e
+            LEFT JOIN record_session s ON e.run_id = 'session:' || s.id
+            LEFT JOIN room r ON r.id = s.room_id";
+        // ESCAPE 里的反斜杠在 Rust 字符串中要写成 \\。
+        let filter = "WHERE (?2 = 0 OR e.message LIKE ?1 ESCAPE '\\' OR e.stage LIKE ?1 ESCAPE '\\'
+                OR e.state LIKE ?1 ESCAPE '\\' OR e.task_id LIKE ?1 ESCAPE '\\'
+                OR r.host_name LIKE ?1 ESCAPE '\\' OR r.title LIKE ?1 ESCAPE '\\')
+              AND (?3 = 0 OR e.state IN ('failed', 'interrupted'))
+              AND (?4 = '' OR r.platform = ?4)";
+        let conn = self.lock();
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) {from} {filter}"),
+                params![pattern, has_query, only_failed, platform],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        let sql = format!(
+            "SELECT e.id, e.task_id, e.run_id, e.kind, e.stage, e.state, e.percent, e.message, e.at,
+                    s.id, s.group_id, s.room_id, r.room_key, r.platform, r.host_name, r.title
+               {from} {filter}
+              ORDER BY e.at DESC, e.id DESC LIMIT ?5"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(
+                params![pattern, has_query, only_failed, platform, limit as i64],
+                |row| {
+                    Ok(hivecast_ipc::TaskEventHit {
+                        id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        stage: row.get(4)?,
+                        state: row.get(5)?,
+                        percent: row.get(6)?,
+                        message: row.get(7)?,
+                        at: row.get(8)?,
+                        session_id: row.get(9)?,
+                        group_id: row.get(10)?,
+                        room_id: row.get(11)?,
+                        room_key: row.get(12)?,
+                        platform: row.get(13)?,
+                        host_name: row.get(14)?,
+                        room_title: row.get(15)?,
+                    })
+                },
+            )
+            .map_err(db_err)?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row.map_err(db_err)?);
+        }
+        Ok(hivecast_ipc::TaskEventSearch { total, hits })
+    }
+
     /// 一页事件：before 为 (at, id) 游标，只取更早的事件；返回是否还有更早页。
     pub fn task_event_page(
         &self,
@@ -2687,6 +2758,22 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         tracing::info!("数据库迁移：回填 room 最近录制摘要");
     }
     Ok(())
+}
+
+/// 把用户输入转成 LIKE 模式，转义 `%`、`_` 和反斜杠本身。
+fn like_pattern(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('%');
+    for ch in query.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            other => out.push(other),
+        }
+    }
+    out.push('%');
+    out
 }
 
 fn db_err(err: rusqlite::Error) -> AppError {
@@ -3885,6 +3972,86 @@ mod tests {
             .session_group_ids("missing")
             .expect("未知场次应返回空")
             .is_empty());
+    }
+
+    #[test]
+    fn task_event_search_joins_rooms_and_escapes_like_wildcards() {
+        let (db, _path) = temp_db("task-event-search");
+        seed_media(&db);
+        db.lock()
+            .execute(
+                "UPDATE record_session SET group_id = 's-a1' WHERE id IN ('s-a1', 's-a2')",
+                [],
+            )
+            .expect("写分组失败");
+        for (task, run, stage, state, message, at) in [
+            (
+                "post:s-a1",
+                "session:s-a1",
+                "postprocessing",
+                "failed",
+                "磁盘写入失败 100%",
+                100,
+            ),
+            ("merge:x", "task:x", "merging", "failed", "合并失败", 150),
+            (
+                "record:s-b1",
+                "session:s-b1",
+                "recording",
+                "done",
+                "1000 完成",
+                200,
+            ),
+            (
+                "post:s-a2",
+                "session:s-a2",
+                "postprocessing",
+                "done",
+                "普通完成",
+                300,
+            ),
+        ] {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: task.into(),
+                run_id: Some(run.into()),
+                kind: "post".into(),
+                stage: stage.into(),
+                state: state.into(),
+                percent: 100,
+                message: Some(message.into()),
+                at,
+            })
+            .expect("写事件失败");
+        }
+
+        let failed = db
+            .task_event_search("失败", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(failed.total, 2);
+        assert_eq!(failed.hits[0].message.as_deref(), Some("合并失败"));
+        assert_eq!(failed.hits[1].room_title.as_deref(), Some("房间甲"));
+        assert_eq!(failed.hits[1].group_id.as_deref(), Some("s-a1"));
+        assert_eq!(failed.hits[1].room_key.as_deref(), Some("1"));
+        assert_eq!(failed.hits[0].room_key, None, "任务级事件没有房间");
+
+        // `%` 是 LIKE 的通配符，必须按字面量匹配，不能把 1000 也命中。
+        let literal = db
+            .task_event_search("100%", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(literal.total, 1);
+        assert_eq!(literal.hits[0].run_id.as_deref(), Some("session:s-a1"));
+
+        let only = db.task_event_search("", true, None, 100).expect("检索失败");
+        assert_eq!(only.total, 2);
+        let bilibili = db
+            .task_event_search("", false, Some("bilibili"), 100)
+            .expect("检索失败");
+        assert_eq!(bilibili.total, 2, "任务级事件没有房间，不应混入平台筛选");
+        let limited = db.task_event_search("", false, None, 1).expect("检索失败");
+        assert_eq!(limited.total, 4);
+        assert_eq!(limited.hits.len(), 1);
+        assert_eq!(limited.hits[0].at, 300);
     }
 
     #[test]

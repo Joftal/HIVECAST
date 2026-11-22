@@ -6129,6 +6129,39 @@ mod tests {
     }
 
     #[test]
+    fn finalize_retry_lock_serializes_two_threads() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let manifest = format!("test-finalize-race-{}", std::process::id());
+        let start = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let manifest = manifest.clone();
+            let start = start.clone();
+            handles.push(thread::spawn(move || {
+                start.wait();
+                match acquire_finalize_retry(&manifest) {
+                    Ok(lease) => {
+                        // 占住锁一会儿，保证另一个线程一定能撞上。
+                        std::thread::sleep(Duration::from_millis(100));
+                        drop(lease);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }));
+        }
+        start.wait();
+        let acquired = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("线程不应 panic"))
+            .filter(|acquired| *acquired)
+            .count();
+        assert_eq!(acquired, 1, "同一份清单只能有一个线程拿到锁");
+    }
+
+    #[test]
     fn finalize_retry_lock_is_per_manifest_and_released_on_drop() {
         let manifest = format!("test-finalize-lock-{}", std::process::id());
         let first = acquire_finalize_retry(&manifest).expect("第一份锁应成功");
