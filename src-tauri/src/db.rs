@@ -852,7 +852,12 @@ impl Db {
                 "UPDATE room SET online = ?2, last_checked_at = ?3, updated_at = ?3
                   WHERE id = ?1
                     AND (last_checked_at IS NULL OR last_checked_at <= ?3 - ?4)",
-                params![id, online.map(|value| value as i64), now, min_interval.max(0)],
+                params![
+                    id,
+                    online.map(|value| value as i64),
+                    now,
+                    min_interval.max(0)
+                ],
             )
             .map_err(db_err)?;
         Ok(changed > 0)

@@ -154,8 +154,9 @@ pub fn raw(params: &str, body: &str, opts: &SignOptions) -> String {
     dir[56] = 6383;
     dir[57] = 6383 & 0xff;
     dir[58] = (6383 >> 8) & 0xff;
-    dir[59] = (6383 >> 16) & 0xff;
-    dir[60] = (6383 >> 24) & 0xff;
+    // 6383 只有低 16 位，高字节固定为 0；直接写 0 避免无意义的移位。
+    dir[59] = 0;
+    dir[60] = 0;
     dir[64] = opts.fp.len() as i32;
     dir[65] = opts.fp.len() as i32;
 

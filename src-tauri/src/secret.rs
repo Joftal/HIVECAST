@@ -72,8 +72,7 @@ impl Secret {
             return None;
         }
         let (nonce, cipher) = packed.split_at(12);
-        let nonce =
-            Nonce::<aes_gcm::aead::consts::U12>::try_from(nonce).ok()?;
+        let nonce = Nonce::<aes_gcm::aead::consts::U12>::try_from(nonce).ok()?;
         let plain = self.cipher.decrypt(&nonce, cipher).ok()?;
         String::from_utf8(plain).ok()
     }

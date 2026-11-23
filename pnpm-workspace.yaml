@@ -1,0 +1,12 @@
+packages:
+  - .
+
+# pnpm 12 默认拒绝安装发布不足一天的版本。i18next 27.2.5 与
+# lucide-react 1.78.0 是本次升级明确验证过的版本，发布当天需要放行；
+# 其他包仍保留默认的发布年龄保护。
+minimumReleaseAgeExclude:
+  - i18next
+  - lucide-react
+allowBuilds:
+  esbuild: true
+  '@tailwindcss/oxide': true
