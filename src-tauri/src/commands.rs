@@ -3168,49 +3168,13 @@ pub fn task_event_search(
 }
 
 /// 导出的是给人看的 CSV，阶段/状态不能再写内部枚举。
-/// 取值与前端 STAGE_KEYS / STATE_KEYS 的中文文案保持一致。
+/// 与跨 Run 检索共用 labels：两处各写一套映射迟早会漂移。
 fn csv_stage(stage: &str) -> &str {
-    match stage {
-        "record" => "录制",
-        "finalize" => "收尾",
-        "post" => "后处理",
-        "commit" => "入库",
-        "merging" => "合并",
-        "splitting" => "切片",
-        "danmaku" => "弹幕",
-        "thumbnail" => "封面",
-        "exporting" => "弹幕导出",
-        "postprocessing" => "后处理",
-        "starting" => "开录中",
-        "recording" => "录制中",
-        "finalizing" => "收尾中",
-        "queued" => "等槽位",
-        "done" => "完成",
-        "failed" => "失败",
-        "cancelled" => "已取消",
-        "interrupted" => "已中断",
-        "pending" => "等待中",
-        "skipped" => "已跳过",
-        "partial" => "部分完成",
-        other => other,
-    }
+    crate::labels::stage_label(stage)
 }
 
 fn csv_state(state: &str) -> &str {
-    match state {
-        "running" | "active" => "运行中",
-        "queued" => "排队中",
-        "pending" => "等待中",
-        "skipped" => "已跳过",
-        "done" => "完成",
-        "failed" => "失败",
-        "cancelled" => "已取消",
-        "interrupted" => "已中断",
-        "recording" => "录制中",
-        "finalizing" => "收尾中",
-        "partial" => "部分完成",
-        other => other,
-    }
+    crate::labels::state_label(state)
 }
 
 /// RFC 4180 引号转义 + Excel 公式注入防护。

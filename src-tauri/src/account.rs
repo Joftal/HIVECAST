@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn correspond_path_encrypts_refresh_timestamp() {
-        let private = rsa::RsaPrivateKey::new(&mut rand::rng(), 1024).unwrap();
+        let private = rsa::PrivateKey::new(&mut rand::rng(), 1024).unwrap();
         let public = private.to_public_key();
         let path = correspond_path_with_key(&public, 1_700_000_000_123).unwrap();
         assert_eq!(path.len(), 256);

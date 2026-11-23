@@ -1809,12 +1809,21 @@ impl Db {
             LEFT JOIN record_session s ON e.run_id = 'session:' || s.id
             LEFT JOIN task_history th ON th.id = e.task_id
             LEFT JOIN room r ON r.id = COALESCE(s.room_id, th.room_id)";
+        // 界面显示的是「录制 / 封面 / 运行中」，数据库存的是 record/thumbnail/running。
+        // 检索必须同时匹配内部值和用户看到的中文标签，否则输入界面上的阶段名会得到 0 条。
+        let stage_expr = crate::labels::stage_case_sql("e.stage");
+        let state_expr = crate::labels::state_case_sql("e.state");
         // ESCAPE 里的反斜杠在 Rust 字符串中要写成 \\。
-        let filter = "WHERE (?2 = 0 OR e.message LIKE ?1 ESCAPE '\\' OR e.stage LIKE ?1 ESCAPE '\\'
-                OR e.state LIKE ?1 ESCAPE '\\' OR e.task_id LIKE ?1 ESCAPE '\\'
+        let filter = format!(
+            "WHERE (?2 = 0 OR e.message LIKE ?1 ESCAPE '\\' OR e.stage LIKE ?1 ESCAPE '\\'
+                OR {stage_expr} LIKE ?1 ESCAPE '\\'
+                OR e.state LIKE ?1 ESCAPE '\\'
+                OR {state_expr} LIKE ?1 ESCAPE '\\'
+                OR e.task_id LIKE ?1 ESCAPE '\\'
                 OR r.host_name LIKE ?1 ESCAPE '\\' OR r.title LIKE ?1 ESCAPE '\\')
               AND (?3 = 0 OR e.state IN ('failed', 'interrupted'))
-              AND (?4 = '' OR r.platform = ?4)";
+              AND (?4 = '' OR r.platform = ?4)"
+        );
         let conn = self.lock();
         let total: i64 = conn
             .query_row(
@@ -1997,8 +2006,13 @@ impl Db {
             .map_err(db_err)?;
         pruned.events += tx
             .execute(
+                // phase:* 是 Run 的阶段事件（缩略图、收尾等），按设计只挂在
+                // run_id 上、不写 task_history；不能当成孤儿事件删掉，否则每次
+                // 收尾都会把刚写入的时间线清空。真正孤儿的 phase 事件由下面的
+                // 时间窗口兜底。
                 "DELETE FROM task_event
-                  WHERE task_id NOT IN (SELECT id FROM task_history)",
+                  WHERE task_id NOT IN (SELECT id FROM task_history)
+                    AND task_id NOT LIKE 'phase:%'",
                 [],
             )
             .map_err(db_err)?;
@@ -4118,6 +4132,17 @@ mod tests {
         assert_eq!(failed.hits[1].room_key.as_deref(), Some("1"));
         assert_eq!(failed.hits[0].room_key, None, "任务级事件没有房间");
 
+        // 界面显示的是「后处理 / 录制中」，检索输入中文标签也必须命中。
+        let localized = db
+            .task_event_search("后处理", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(localized.total, 2);
+        let recording = db
+            .task_event_search("录制中", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(recording.total, 1);
+        assert_eq!(recording.hits[0].stage, "recording");
+
         // `%` 是 LIKE 的通配符，必须按字面量匹配，不能把 1000 也命中。
         let literal = db
             .task_event_search("100%", false, None, 100)
@@ -4343,6 +4368,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM task_event", [], |row| row.get(0))
             .expect("read events");
         assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn keeps_phase_events_while_pruning_orphan_events() {
+        let (db, _path) = temp_db("task-prune-phase");
+        db.lock()
+            .execute(
+                "INSERT INTO task_history (id, kind, title, state, started_at, finished_at)
+                 VALUES ('job:1', 'post', 'clip', 'done', 2_000, 2_000)",
+                [],
+            )
+            .expect("seed task");
+        for (task, at) in [("job:1", 2_000), ("phase:post:s1", 2_000), ("gone", 2_000)] {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: task.into(),
+                run_id: Some("session:s1".into()),
+                kind: "post".into(),
+                stage: "post".into(),
+                state: "done".into(),
+                percent: 100,
+                message: None,
+                at,
+            })
+            .expect("seed event");
+        }
+
+        let pruned = db
+            .prune_task_data(1_000, 10, 10, 10)
+            .expect("prune task data");
+        assert_eq!(pruned.history, 0);
+        assert_eq!(pruned.events, 1);
+        let phases: i64 = db
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM task_event WHERE task_id LIKE 'phase:%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count phase events");
+        assert_eq!(phases, 1);
     }
 
     #[test]

@@ -681,34 +681,40 @@ async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
     // B 站对匿名 WS 做明显降采样：同一个高人气房间，登录态 60 秒能收到
     // 60+ 条聊天，匿名只有个位数。token 必须用带 Cookie 的请求换取，认证包
     // 再带上同一个 uid/buvid；WS 握手本身不需要 Cookie。
-    if let Some(cookie) = crate::credential::get("bilibili") {
-        if let Some(uid) = uid_from_cookie(&cookie) {
-            // 扫码登录写回的 Cookie 不一定带 buvid3；没有就向 B 站申请一个
-            // 设备指纹。token 由 Cookie 绑定 uid，buvid 只用于 auth 包。
-            let buvid = match crate::credential::value(&cookie, "buvid3")
-                .or_else(|| crate::credential::value(&cookie, "buvid4"))
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-            {
-                Some(value) => Some(value),
-                None => fetch_buvid().await,
-            };
-            if let Some(buvid) = buvid {
-                match fetch_danmu_info_authed(real_id, &buvid).await {
-                    Ok(mut session) => {
-                        session.uid = uid;
-                        session.buvid = buvid;
-                        tracing::debug!(room = real_id, uid, "使用登录态获取弹幕 token");
-                        return Ok(session);
+    // 过期 Cookie 仍能被 getDanmuInfo 换到 token，但 WS 认证后会被服务端
+    // 立刻重置，形成每 30 秒重连一次的循环。状态为 expired 时直接走匿名。
+    if crate::credential::is_ok("bilibili") {
+        if let Some(cookie) = crate::credential::get("bilibili") {
+            if let Some(uid) = uid_from_cookie(&cookie) {
+                // 扫码登录写回的 Cookie 不一定带 buvid3；没有就向 B 站申请一个
+                // 设备指纹。token 由 Cookie 绑定 uid，buvid 只用于 auth 包。
+                let buvid = match crate::credential::value(&cookie, "buvid3")
+                    .or_else(|| crate::credential::value(&cookie, "buvid4"))
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                {
+                    Some(value) => Some(value),
+                    None => fetch_buvid().await,
+                };
+                if let Some(buvid) = buvid {
+                    match fetch_danmu_info_authed(real_id, &buvid).await {
+                        Ok(mut session) => {
+                            session.uid = uid;
+                            session.buvid = buvid;
+                            tracing::debug!(room = real_id, uid, "使用登录态获取弹幕 token");
+                            return Ok(session);
+                        }
+                        Err(err) => {
+                            tracing::warn!(room = real_id, uid, %err, "登录态弹幕 token 获取失败，回退匿名");
+                        }
                     }
-                    Err(err) => {
-                        tracing::warn!(room = real_id, uid, %err, "登录态弹幕 token 获取失败，回退匿名");
-                    }
+                } else {
+                    tracing::warn!(room = real_id, uid, "无法取得 buvid，弹幕回退匿名");
                 }
-            } else {
-                tracing::warn!(room = real_id, uid, "无法取得 buvid，弹幕回退匿名");
             }
         }
+    } else if crate::credential::get("bilibili").is_some() {
+        tracing::debug!("B 站登录态已过期，弹幕使用匿名连接");
     }
 
     // 匿名主接口：网页版 getDanmuInfo（需要 WBI 签名）。风控命中时会返回 -352，
@@ -1715,7 +1721,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn probe_live_danmaku() {
-        let session = match fetch_session("545068").await {
+        let room = std::env::var("BILI_PROBE_ROOM").unwrap_or_else(|_| "545068".to_string());
+        let secs: u64 = std::env::var("BILI_PROBE_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(15);
+        let session = match fetch_session(&room).await {
             Ok(session) => session,
             Err(err) => panic!("fetch_session 失败：{err}"),
         };
@@ -1735,7 +1746,7 @@ mod tests {
             .await
             .expect("认证包发送失败");
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
         let mut frames = 0usize;
         let mut messages = 0usize;
         let mut auth = None;
@@ -1774,7 +1785,7 @@ mod tests {
             }
         }
         println!("frames={frames} messages={messages} auth={auth:?}");
-        assert!(messages > 0, "8 秒内没有解析出任何弹幕");
+        assert!(messages > 0, "{secs} 秒内没有解析出任何弹幕");
     }
 }
 
@@ -2281,10 +2292,13 @@ mod douyu_tests {
     }
 
     #[tokio::test]
-    #[ignore = "需要联网与活跃直播间（9999）"]
+    #[ignore = "需要联网与活跃直播间（DOUYU_PROBE_ROOM，默认 9999）"]
     async fn live_probe() {
         use futures_util::SinkExt;
-        let room: i64 = 9999;
+        let room: i64 = std::env::var("DOUYU_PROBE_ROOM")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(9999);
         let mut ws = douyu_connect(None).await.expect("连不上斗鱼弹幕");
         ws.send(ws_binary(douyu_frame(&format!(
             "type@=loginreq/roomid@={room}/"

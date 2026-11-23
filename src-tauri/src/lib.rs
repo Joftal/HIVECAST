@@ -15,6 +15,7 @@ mod huya_auth;
 mod instance;
 mod jce;
 mod jobs;
+mod labels;
 mod lifecycle;
 mod local;
 mod logging;
