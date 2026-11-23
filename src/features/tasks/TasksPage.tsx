@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { Button, Chip, Switch, cx } from "../../components/ui/Controls";
@@ -251,7 +252,7 @@ function failedFinalizeTask(run: RunView): TaskView | undefined {
     : undefined;
 }
 
-function clipText(t: (key: string, options?: Record<string, unknown>) => string, task: TaskView): string | null {
+function clipText(t: TFunction, task: TaskView): string | null {
   if (!task.clipIndex || task.clipCount <= 1) return null;
   return t("tasks.clipOf", { index: task.clipIndex, count: task.clipCount });
 }
