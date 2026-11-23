@@ -545,7 +545,7 @@ impl Db {
                     info.area_name,
                     info.is_live as i64,
                     info.started_at,
-                    info.online,
+                    info.online.map(|value| value as i64),
                     room.auto_record as i64,
                     room.monitor_paused as i64,
                     room.record_qn,
@@ -584,7 +584,7 @@ impl Db {
                     info.area_name,
                     info.is_live as i64,
                     info.started_at,
-                    info.online,
+                    info.online.map(|value| value as i64),
                     now,
                     platform_uid_of(info),
                     internal_room_id_of(info),
@@ -647,7 +647,7 @@ impl Db {
                     item.title,
                     item.cover_url,
                     item.area_name,
-                    item.online,
+                    item.online.map(|value| value as i64),
                     item.started_at,
                     monitor as i64,
                     auto_record as i64,
@@ -728,7 +728,7 @@ impl Db {
                     item.title,
                     item.cover_url,
                     item.area_name,
-                    item.online,
+                    item.online.map(|value| value as i64),
                     item.started_at,
                     now,
                 ],
@@ -852,7 +852,7 @@ impl Db {
                 "UPDATE room SET online = ?2, last_checked_at = ?3, updated_at = ?3
                   WHERE id = ?1
                     AND (last_checked_at IS NULL OR last_checked_at <= ?3 - ?4)",
-                params![id, online, now, min_interval.max(0)],
+                params![id, online.map(|value| value as i64), now, min_interval.max(0)],
             )
             .map_err(db_err)?;
         Ok(changed > 0)

@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-use fs4::fs_std::FileExt;
 use hivecast_ipc::{AppNotice, QualitySegment, RecordSession, RecordingInfo, RoomRecord};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -3931,10 +3930,12 @@ fn lock_manifest_file(manifest: &str) -> Result<std::fs::File, AppError> {
         .truncate(false)
         .open(&path)
         .map_err(|err| AppError::from_io(err, Path::new(&path)))?;
-    match file.try_lock_exclusive() {
-        Ok(true) => Ok(file),
-        Ok(false) => Err(AppError::User("这一场正在别的窗口重试收尾，请稍候".into())),
-        Err(err) => Err(AppError::from_io(err, Path::new(&path))),
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(AppError::User("这一场正在别的窗口重试收尾，请稍候".into()))
+        }
+        Err(err) => Err(AppError::from_io(err.into(), Path::new(&path))),
     }
 }
 

@@ -1126,8 +1126,12 @@ fn auth_body(session: &DanmuSession) -> Vec<u8> {
     .into_bytes()
 }
 
+fn ws_binary(data: Vec<u8>) -> WsMessage {
+    WsMessage::Binary(data.into())
+}
+
 async fn send_packet(ws: &mut WsStream, op: u32, body: &[u8]) -> Result<(), String> {
-    ws.send(WsMessage::Binary(packet(op, body)))
+    ws.send(ws_binary(packet(op, body)))
         .await
         .map_err(|err| format!("发送弹幕包失败：{err}"))
 }
@@ -2022,12 +2026,12 @@ async fn douyu_once(
     );
     {
         use futures_util::SinkExt;
-        ws.send(WsMessage::Binary(douyu_frame(&format!(
+        ws.send(ws_binary(douyu_frame(&format!(
             "type@=loginreq/roomid@={room_id}/"
         ))))
         .await
         .map_err(|err| format!("发送登录包失败：{err}"))?;
-        ws.send(WsMessage::Binary(douyu_frame(&format!(
+        ws.send(ws_binary(douyu_frame(&format!(
             "type@=joingroup/rid@={room_id}/gid@=-9999/"
         ))))
         .await
@@ -2056,7 +2060,7 @@ async fn douyu_once(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                ws.send(WsMessage::Binary(douyu_frame("type@=mrkl/")))
+                ws.send(ws_binary(douyu_frame("type@=mrkl/")))
                     .await
                     .map_err(|err| format!("弹幕心跳失败：{err}"))?;
             }
@@ -2282,12 +2286,12 @@ mod douyu_tests {
         use futures_util::SinkExt;
         let room: i64 = 9999;
         let mut ws = douyu_connect(None).await.expect("连不上斗鱼弹幕");
-        ws.send(WsMessage::Binary(douyu_frame(&format!(
+        ws.send(ws_binary(douyu_frame(&format!(
             "type@=loginreq/roomid@={room}/"
         ))))
         .await
         .expect("登录包发送失败");
-        ws.send(WsMessage::Binary(douyu_frame(&format!(
+        ws.send(ws_binary(douyu_frame(&format!(
             "type@=joingroup/rid@={room}/gid@=-9999/"
         ))))
         .await
@@ -2757,15 +2761,15 @@ async fn huya_once(
     let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|err| format!("虎牙弹幕连接失败：{err}"))?;
-    ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+    ws.send(ws_binary(huya_register_packet(&ids)))
         .await
         .map_err(|err| format!("发送注册包失败：{err}"))?;
-    ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+    ws.send(ws_binary(huya_heartbeat_packet(&ids)))
         .await
         .map_err(|err| format!("发送心跳失败：{err}"))?;
     if let Some(cookie) = cookie.as_deref() {
         if let Some(uid) = huya_cookie_uid(cookie) {
-            ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+            ws.send(ws_binary(huya_verify_cookie_packet(cookie, uid)))
                 .await
                 .map_err(|err| format!("发送 Cookie 校验包失败：{err}"))?;
             tracing::info!(room = %conn.room.room_key, uid, "虎牙弹幕使用登录态");
@@ -2788,7 +2792,7 @@ async fn huya_once(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+                ws.send(ws_binary(huya_heartbeat_packet(&ids)))
                     .await
                     .map_err(|err| format!("虎牙弹幕心跳失败：{err}"))?;
             }
@@ -3125,15 +3129,15 @@ mod huya_tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("连不上虎牙弹幕");
-        ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+        ws.send(ws_binary(huya_register_packet(&ids)))
             .await
             .expect("注册包发送失败");
-        ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+        ws.send(ws_binary(huya_heartbeat_packet(&ids)))
             .await
             .expect("心跳发送失败");
         if let Some(cookie) = cookie.as_deref() {
             if let Some(uid) = huya_cookie_uid(cookie) {
-                ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+                ws.send(ws_binary(huya_verify_cookie_packet(cookie, uid)))
                     .await
                     .expect("Cookie 校验包发送失败");
             }
@@ -3202,15 +3206,15 @@ mod huya_tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("连不上虎牙弹幕");
-        ws.send(WsMessage::Binary(huya_register_packet(&ids)))
+        ws.send(ws_binary(huya_register_packet(&ids)))
             .await
             .expect("注册包发送失败");
-        ws.send(WsMessage::Binary(huya_heartbeat_packet(&ids)))
+        ws.send(ws_binary(huya_heartbeat_packet(&ids)))
             .await
             .expect("心跳发送失败");
         if let Some(cookie) = cookie.as_deref() {
             if let Some(uid) = huya_cookie_uid(cookie) {
-                ws.send(WsMessage::Binary(huya_verify_cookie_packet(cookie, uid)))
+                ws.send(ws_binary(huya_verify_cookie_packet(cookie, uid)))
                     .await
                     .expect("Cookie 校验包发送失败");
             }

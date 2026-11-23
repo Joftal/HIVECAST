@@ -8,8 +8,6 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-use fs4::fs_std::FileExt;
-
 /// 拿到锁就把它挂在 AppState 里保活；析构（进程退出）时自动释放。
 pub struct InstanceLock {
     _file: File,
@@ -24,12 +22,16 @@ pub fn acquire(dir: &Path) -> io::Result<InstanceLock> {
         .write(true)
         .truncate(false)
         .open(&path)?;
-    // try_lock_exclusive 用 Ok(false) 表示「锁在别人手里」，不是错误。
-    if !file.try_lock_exclusive()? {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "另一个 HIVECAST 实例正持有该锁",
-        ));
+    // try_lock 用 WouldBlock 表示「锁在别人手里」，不是错误。
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "另一个 HIVECAST 实例正持有该锁",
+            ));
+        }
+        Err(err) => return Err(err.into()),
     }
     Ok(InstanceLock { _file: file })
 }
