@@ -468,6 +468,46 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
         }
     });
 
+    // 极端情况下后处理已经失败并写回 session.post_state，但任务历史里没有对应的
+    // post/remux 行（例如写库前进程退出）。只凭任务状态聚合会把这条 Run 显示成
+    // 已完成，而且异常卡没有可点的重试入口。这里按场次补一条合成失败任务，让
+    // 状态与重试链路都和真实失败一致；重新入队时仍使用 session_id 定位源文件。
+    let post_failed = group_members
+        .iter()
+        .any(|session| session.post_state == "failed");
+    let group_clip_count = group_members.len();
+    for member in &group_members {
+        if member.post_state != "failed" {
+            continue;
+        }
+        let has_retryable_task = draft.tasks.iter().any(|task| {
+            matches!(task.kind.as_str(), "post" | "remux")
+                && matches!(task.state.as_str(), "failed" | "interrupted")
+                && task.session_id.as_deref() == Some(member.id.as_str())
+        });
+        if has_retryable_task {
+            continue;
+        }
+        draft.tasks.push(TaskView {
+            id: format!("post:{}", member.id),
+            kind: "post".into(),
+            title: "后处理".into(),
+            detail: Some(member.post_mode.clone()).filter(|mode| !mode.is_empty()),
+            state: "failed".into(),
+            stage: Some("post".into()),
+            percent: 0,
+            message: member.post_error.clone(),
+            session_id: Some(member.id.clone()),
+            room_id: Some(member.room_id.clone()),
+            started_at: member.ended_at.unwrap_or(member.started_at),
+            finished_at: member.ended_at,
+            clip_index: (group_clip_count > 1).then_some(member.clip_index.max(0) as u32 + 1),
+            clip_count: 0,
+            queue: "auto".into(),
+            queued_at: None,
+        });
+    }
+
     // 收尾可能失败后重试：只认最新一条收尾任务。若用「或」合并，重试成功后
     // 旧的 failed 会永远把收尾阶段钉在失败。
     draft.finalize_tasks.sort_by(|a, b| {
@@ -570,7 +610,9 @@ fn finish_run(mut draft: RunDraft, now: i64) -> RunView {
     let has_done = draft.tasks.iter().any(|task| task.state == "done");
     let has_cancelled = draft.tasks.iter().any(|task| task.state == "cancelled");
     let has_interrupted = draft.tasks.iter().any(|task| task.state == "interrupted");
-    let failed = has_failed || session_failed || draft.finalize_failed;
+    // 不能只看任务状态：任务历史可能缺失，而 session 已经把后处理失败写回。
+    // 只要有一段后处理失败，整条 Run 就不能落到 done。
+    let failed = has_failed || session_failed || draft.finalize_failed || post_failed;
 
     // 录制、收尾、后处理是三种不同的活动态：任务页要能一眼看出「在录」还是「在转」。
     // 收尾任务会一直挂到本场所有片段的后处理结束，所以「收尾中 + 有 post 排队」时必须先报排队，
@@ -1846,6 +1888,46 @@ mod tests {
     }
 
     #[test]
+    fn failed_session_post_state_is_not_reported_as_done_without_task_history() {
+        let mut session = recorded_session("failed");
+        session.post_error = Some("ffmpeg exited 1".into());
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(session);
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.tasks.len(), 1);
+        assert_eq!(run.tasks[0].id, "post:session-1");
+        assert_eq!(run.tasks[0].message.as_deref(), Some("ffmpeg exited 1"));
+        assert_eq!(run.stages[2].state, "failed");
+    }
+
+    #[test]
+    fn grouped_missing_post_history_still_reports_failure() {
+        let mut failed_clip = recorded_session("failed");
+        failed_clip.id = "s1".into();
+        failed_clip.group_id = Some("g1".into());
+        let mut done_clip = recorded_session("done");
+        done_clip.id = "s2".into();
+        done_clip.group_id = Some("g1".into());
+        done_clip.clip_index = 1;
+
+        let mut draft = RunDraft::new("session:g1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(done_clip.clone());
+        draft.sessions = vec![failed_clip, done_clip];
+        let run = finish_run(draft, 300);
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.tasks.len(), 1);
+        assert_eq!(run.tasks[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(run.tasks[0].clip_index, Some(1));
+    }
+
+    #[test]
     fn failed_finalize_task_is_a_failed_run_and_stage() {
         let mut draft = RunDraft::new("session:session-1".into());
         draft.started_at = 100;
@@ -2100,7 +2182,10 @@ mod tests {
         draft.tasks = vec![post];
         draft.finalize_failed = true;
         let run = finish_run(draft, 300);
-        assert_eq!(incident_task(&run).map(|task| task.kind.as_str()), Some("post"));
+        assert_eq!(
+            incident_task(&run).map(|task| task.kind.as_str()),
+            Some("post")
+        );
 
         let incidents = build_incidents(
             &[run],

@@ -92,6 +92,7 @@ impl AppState {
         }
         // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
         crate::retention::enforce_from_settings(&db);
+        crate::retention::enforce_tasks(&db);
         // 分片合成搬到后台（I2）：10 GB 残留分片要合并几分钟，不能挡主窗口出现。
         // 收尾后这些会话已是 aborted，recover_parts 会从「失败/中止」列表里捞回来。
         let recovery_db = db.clone();

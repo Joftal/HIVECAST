@@ -2258,6 +2258,21 @@ mod tests {
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn csv_export_uses_readable_labels_and_blocks_formulas() {
+        assert_eq!(csv_stage("merging"), "合并");
+        assert_eq!(csv_stage("postprocessing"), "后处理");
+        assert_eq!(csv_state("running"), "运行中");
+        assert_eq!(csv_state("queued"), "排队中");
+        assert_eq!(csv_stage("unknown"), "unknown");
+
+        assert_eq!(csv_cell("=1+1"), "\"'=1+1\"");
+        assert_eq!(csv_cell("  @cmd"), "\"'  @cmd\"");
+        assert_eq!(csv_cell("-2+3"), "\"'-2+3\"");
+        assert_eq!(csv_cell("正常标题"), "\"正常标题\"");
+        assert_eq!(csv_cell("a\"b"), "\"a\"\"b\"");
+    }
 }
 
 // ---- 设置 ----
@@ -3152,7 +3167,67 @@ pub fn task_event_search(
     )
 }
 
+/// 导出的是给人看的 CSV，阶段/状态不能再写内部枚举。
+/// 取值与前端 STAGE_KEYS / STATE_KEYS 的中文文案保持一致。
+fn csv_stage(stage: &str) -> &str {
+    match stage {
+        "record" => "录制",
+        "finalize" => "收尾",
+        "post" => "后处理",
+        "commit" => "入库",
+        "merging" => "合并",
+        "splitting" => "切片",
+        "danmaku" => "弹幕",
+        "thumbnail" => "封面",
+        "exporting" => "弹幕导出",
+        "postprocessing" => "后处理",
+        "starting" => "开录中",
+        "recording" => "录制中",
+        "finalizing" => "收尾中",
+        "queued" => "等槽位",
+        "done" => "完成",
+        "failed" => "失败",
+        "cancelled" => "已取消",
+        "interrupted" => "已中断",
+        "pending" => "等待中",
+        "skipped" => "已跳过",
+        "partial" => "部分完成",
+        other => other,
+    }
+}
+
+fn csv_state(state: &str) -> &str {
+    match state {
+        "running" | "active" => "运行中",
+        "queued" => "排队中",
+        "pending" => "等待中",
+        "skipped" => "已跳过",
+        "done" => "完成",
+        "failed" => "失败",
+        "cancelled" => "已取消",
+        "interrupted" => "已中断",
+        "recording" => "录制中",
+        "finalizing" => "收尾中",
+        "partial" => "部分完成",
+        other => other,
+    }
+}
+
+/// RFC 4180 引号转义 + Excel 公式注入防护。
+///
+/// 以 = + - @ 或制表/回车开头的单元格会被 Excel 当成公式执行；标题、主播名、
+/// 错误消息都来自平台，必须在写文件前统一加前导单引号变成纯文本。
 fn csv_cell(value: &str) -> String {
+    let unsafe_prefix = value
+        .trim_start_matches([' ', '\t'])
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '=' | '+' | '-' | '@' | '\t' | '\r' | '\n'));
+    let value = if unsafe_prefix {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    };
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
@@ -3220,8 +3295,8 @@ pub fn task_events_export(
             ),
             csv_cell(hit.host_name.as_deref().unwrap_or_default()),
             csv_cell(hit.room_title.as_deref().unwrap_or_default()),
-            csv_cell(&hit.stage),
-            csv_cell(&hit.state),
+            csv_cell(csv_stage(&hit.stage)),
+            csv_cell(csv_state(&hit.state)),
             hit.percent,
             csv_cell(hit.message.as_deref().unwrap_or_default()),
             csv_cell(&hit.task_id),

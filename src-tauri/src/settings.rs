@@ -445,6 +445,7 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     )?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
+    crate::retention::enforce_tasks(db);
     Ok(settings)
 }
 

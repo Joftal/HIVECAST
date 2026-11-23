@@ -8,7 +8,44 @@
 
 use std::path::Path;
 
-use crate::db::Db;
+use crate::db::{Db, PrunedTaskData};
+
+/// 任务中心数据保留 180 天；再按条数封顶，避免一天几百个任务时无限增长。
+/// 时间淘汰仍保留最近 500 条已结束任务，长期不录制也不会把历史清空。
+pub const TASK_HISTORY_DAYS: i64 = 180;
+pub const TASK_HISTORY_KEEP_RECENT: usize = 500;
+pub const TASK_HISTORY_MAX: usize = 20_000;
+pub const TASK_EVENT_MAX: usize = 200_000;
+
+/// 清理任务历史与阶段事件。
+///
+/// 任务事件与历史是任务中心的审计数据，不能跟录像文件共用「0 = 不清理」：
+/// 一张默认开启的页面不应该无限写库。这里固定一个保守窗口，不做定时器，
+/// 跟随应用启动、录制收尾和保存设置三个既有清理时机运行。
+pub fn enforce_tasks(db: &Db) -> PrunedTaskData {
+    let cutoff = crate::db::now_ts() - TASK_HISTORY_DAYS * 86_400;
+    match db.prune_task_data(
+        cutoff,
+        TASK_HISTORY_KEEP_RECENT,
+        TASK_HISTORY_MAX,
+        TASK_EVENT_MAX,
+    ) {
+        Ok(pruned) => {
+            if pruned.history > 0 || pruned.events > 0 {
+                tracing::info!(
+                    history = pruned.history,
+                    events = pruned.events,
+                    "任务中心保留策略：已清理旧任务与阶段事件"
+                );
+            }
+            pruned
+        }
+        Err(err) => {
+            tracing::warn!(%err, "清理任务中心历史失败");
+            PrunedTaskData::default()
+        }
+    }
+}
 
 /// 一条待判定的录像（来自 record_session 左连房间后的最小字段集）。
 pub struct Entry {

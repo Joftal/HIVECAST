@@ -1784,8 +1784,14 @@ export default function TasksPage({
                         {visibleHistory.map((run) => (
                           <tr
                             key={run.id}
+                            tabIndex={0}
                             onClick={() => setSelectedId(run.id)}
-                            className="h-14 cursor-pointer border-b border-line hover:bg-raised/50"
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+                              event.preventDefault();
+                              setSelectedId(run.id);
+                            }}
+                            className="h-14 cursor-pointer border-b border-line hover:bg-raised/50 focus-visible:bg-raised/60 focus-visible:outline-none"
                           >
                             <td className="min-w-0 px-4 py-1.5">
                               <div className="flex min-w-0 items-center gap-2">

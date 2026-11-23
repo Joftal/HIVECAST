@@ -2959,6 +2959,7 @@ impl Recorder {
 
         // 每次收尾跑一次保留策略：录制是媒体库唯一的增长来源。
         crate::retention::enforce_from_settings(&self.db);
+        crate::retention::enforce_tasks(&self.db);
 
         tracing::info!(
             room_id,

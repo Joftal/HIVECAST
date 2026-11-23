@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS credential_refresh (
 );
 ";
 
+/// 任务中心保留策略的删除结果，供日志与测试使用。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PrunedTaskData {
+    pub history: usize,
+    pub events: usize,
+}
+
 /// 媒体库筛选条件：全部下推到 SQL，前端不再把 200 条拉回来自己过滤。
 #[derive(Debug, Clone)]
 pub struct MediaFilter {
@@ -1935,6 +1942,75 @@ impl Db {
             )
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// 清理任务中心的历史数据：先按时间淘汰，再压到条数上限。
+    ///
+    /// 运行中/排队中的任务永远保留；`keep_recent` 保证长期不录制时最近
+    /// 几百条记录不会因为一刀切的时间线而全部消失。事件不设独立时间策略，
+    /// 只跟随已保留的任务，另外再加一道总条数上限，防止单任务事件异常膨胀。
+    pub fn prune_task_data(
+        &self,
+        cutoff: i64,
+        keep_recent: usize,
+        max_history: usize,
+        max_events: usize,
+    ) -> Result<PrunedTaskData, AppError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        let keep_recent = keep_recent.max(1) as i64;
+        let max_history = max_history.max(1) as i64;
+        let max_events = max_events.max(1) as i64;
+        let mut pruned = PrunedTaskData::default();
+
+        pruned.history += tx
+            .execute(
+                "DELETE FROM task_history
+                  WHERE state NOT IN ('running', 'queued')
+                    AND COALESCE(finished_at, started_at) < ?1
+                    AND id NOT IN (
+                        SELECT id FROM task_history
+                         WHERE state NOT IN ('running', 'queued')
+                         ORDER BY COALESCE(finished_at, started_at) DESC, id DESC
+                         LIMIT ?2
+                    )",
+                params![cutoff, keep_recent],
+            )
+            .map_err(db_err)?;
+        pruned.history += tx
+            .execute(
+                "DELETE FROM task_history
+                  WHERE state NOT IN ('running', 'queued')
+                    AND id NOT IN (
+                        SELECT id FROM task_history
+                         WHERE state NOT IN ('running', 'queued')
+                         ORDER BY COALESCE(finished_at, started_at) DESC, id DESC
+                         LIMIT ?1
+                    )",
+                params![max_history],
+            )
+            .map_err(db_err)?;
+        pruned.events += tx
+            .execute(
+                "DELETE FROM task_event
+                  WHERE task_id NOT IN (SELECT id FROM task_history)",
+                [],
+            )
+            .map_err(db_err)?;
+        pruned.events += tx
+            .execute("DELETE FROM task_event WHERE at < ?1", params![cutoff])
+            .map_err(db_err)?;
+        pruned.events += tx
+            .execute(
+                "DELETE FROM task_event
+                  WHERE id NOT IN (
+                      SELECT id FROM task_event ORDER BY at DESC, id DESC LIMIT ?1
+                  )",
+                params![max_events],
+            )
+            .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(pruned)
     }
 
     pub fn task_history(&self, limit: usize) -> Result<Vec<TaskRecord>, AppError> {
@@ -4206,6 +4282,103 @@ mod tests {
         assert_eq!(state("running-1"), Some("interrupted"));
         assert_eq!(state("queued-1"), Some("interrupted"));
         assert_eq!(state("done-1"), Some("done"));
+    }
+
+    #[test]
+    fn prunes_old_tasks_but_never_running_ones() {
+        let (db, _path) = temp_db("task-prune");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO task_history (id, kind, title, state, started_at, finished_at)
+                 VALUES ('old', 'post', 'old', 'done', 100, 100),
+                        ('running', 'post', 'running', 'running', 100, NULL),
+                        ('recent', 'post', 'recent', 'done', 2_000, 2_000);",
+            )
+            .expect("seed tasks");
+        for (task, run, at) in [
+            ("old", "session:1", 100),
+            ("running", "session:2", 100),
+            ("recent", "session:3", 2_000),
+            ("gone", "session:4", 100),
+        ] {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: task.into(),
+                run_id: Some(run.into()),
+                kind: "post".into(),
+                stage: "post".into(),
+                state: "done".into(),
+                percent: 100,
+                message: None,
+                at,
+            })
+            .expect("seed event");
+        }
+
+        let pruned = db
+            .prune_task_data(1_000, 1, 10, 2)
+            .expect("prune task data");
+        assert_eq!(pruned.history, 1);
+        assert_eq!(pruned.events, 3);
+
+        let history = db.task_history(10).expect("read history");
+        let ids: Vec<&str> = history.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, vec!["recent"]);
+        let running: i64 = db
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM task_history WHERE id = 'running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read running");
+        assert_eq!(running, 1);
+        let events: i64 = db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM task_event", [], |row| row.get(0))
+            .expect("read events");
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn prunes_task_history_and_events_to_hard_caps() {
+        let (db, _path) = temp_db("task-prune-caps");
+        for i in 0..5 {
+            db.lock()
+                .execute(
+                    "INSERT INTO task_history (id, kind, title, state, started_at, finished_at)
+                     VALUES (?1, 'post', 'clip', 'done', ?2, ?2)",
+                    params![format!("t{i}"), 1_000 + i],
+                )
+                .expect("seed task");
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: format!("t{i}"),
+                run_id: Some(format!("session:{i}")),
+                kind: "post".into(),
+                stage: "post".into(),
+                state: "done".into(),
+                percent: 100,
+                message: None,
+                at: 1_000 + i,
+            })
+            .expect("seed event");
+        }
+
+        let pruned = db.prune_task_data(0, 100, 3, 2).expect("prune task data");
+        assert_eq!(pruned.history, 2);
+        assert_eq!(pruned.events, 3);
+
+        let history: i64 = db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM task_history", [], |row| row.get(0))
+            .expect("count history");
+        assert_eq!(history, 3);
+        let events: i64 = db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM task_event", [], |row| row.get(0))
+            .expect("count events");
+        assert_eq!(events, 2);
     }
 
     #[test]
