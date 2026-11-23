@@ -1,0 +1,197 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（SemVer，不带 v；正式版例 0.2.0，预发布例 0.2.0-rc.1）'
+        required: true
+        type: string
+      prerelease:
+        description: '发布为预发布版（必须与版本号的 - 后缀一致）'
+        required: true
+        default: false
+        type: boolean
+      publish:
+        description: '创建 GitHub Release（取消勾选则只构建并保留 workflow artifact）'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  validate:
+    name: Validate version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Check SemVer and release channel
+        id: check
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ ! "$VERSION" =~ $SEMVER ]]; then
+            echo "::error::版本号必须是 SemVer，例如 0.2.0 或 0.2.0-rc.1，不能带 v 前缀"
+            exit 1
+          fi
+          if [[ "$VERSION" == *-* ]]; then IS_PRE=true; else IS_PRE=false; fi
+          if [[ "$IS_PRE" != "$PRERELEASE" ]]; then
+            echo "::error::版本号 $VERSION 与 prerelease=$PRERELEASE 不一致：带 - 后缀必须勾选预发布，正式版不能勾选"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macOS-arm64
+            artifact: macos-arm64
+          - os: windows-2022
+            platform: Windows-x64
+            artifact: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        with:
+          version: 10.18.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+          cache: true
+          # 不让无关警告阻断发布；真正的编译错误仍会失败。
+          build-warnings: warn
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Inject version
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: node scripts/ci/set-version.mjs "$VERSION"
+
+      - name: Check docs and i18n
+        shell: bash
+        run: |
+          pnpm check:docs
+          pnpm check:i18n
+
+      - name: Build macOS app and DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          pnpm tauri build --bundles app
+          bash scripts/build-dmg.sh --no-build
+          mkdir -p release-assets
+          cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" \
+            "release-assets/HIVECAST-v${VERSION}-macOS-arm64.dmg"
+
+      - name: Build Windows NSIS installer
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          pnpm tauri build --bundles nsis
+          mkdir -p release-assets
+          installer="$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*.exe' -print -quit)"
+          test -n "$installer"
+          cp "$installer" "release-assets/HIVECAST-v${VERSION}-Windows-x64-setup.exe"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: hivecast-${{ matrix.artifact }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [validate, build]
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          case "$VERSION" in
+            *-*) IS_PRE=true ;;
+            *) IS_PRE=false ;;
+          esac
+          if [[ "$IS_PRE" != "$PRERELEASE" ]]; then
+            echo "::error::版本号与 prerelease 输入不一致"
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag v$VERSION 已存在，拒绝覆盖发布"
+            exit 1
+          fi
+          ls -lh release-assets
+          args=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          gh release create "v$VERSION" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "HIVECAST v$VERSION" \
+            --generate-notes \
+            "${args[@]}"
