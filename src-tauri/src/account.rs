@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use hivecast_ipc::{AppNotice, CredentialInfo, QrPoll, QrTicket, RefreshStatus};
 use rsa::pkcs8::DecodePublicKey;
-use rsa::{Oaep, RsaPublicKey};
+use rsa::PublicKey;
 use serde::Deserialize;
 use sha2::Sha256;
 use tauri::{Emitter, Manager};
@@ -494,17 +494,16 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn correspond_path_with_key(key: &RsaPublicKey, now_ms: i64) -> Result<String, AppError> {
-    let mut rng = rand::thread_rng();
+fn correspond_path_with_key(key: &PublicKey, now_ms: i64) -> Result<String, AppError> {
     let message = format!("refresh_{now_ms}");
     let encrypted = key
-        .encrypt(&mut rng, Oaep::new::<Sha256>(), message.as_bytes())
+        .oaep_encrypt::<Sha256>(message.as_bytes())
         .map_err(|err| AppError::Internal(format!("生成 correspondPath 失败：{err}")))?;
     Ok(encode_hex(&encrypted))
 }
 
 fn correspond_path(now_ms: i64) -> Result<String, AppError> {
-    let key = RsaPublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY)
+    let key = PublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY)
         .map_err(|err| AppError::Internal(format!("B 站续期公钥无效：{err}")))?;
     correspond_path_with_key(&key, now_ms)
 }
@@ -908,7 +907,7 @@ async fn refresh_bilibili_cookie_inner(
 
 /// 后台续期循环：正常每 12 小时问一次，失败按 1h → 6h → 24h 退避，并加抖动。
 pub async fn refresh_loop(db: std::sync::Arc<Db>, app: tauri::AppHandle) {
-    use rand::Rng;
+    use rand::RngExt;
 
     let mut failures = 0u32;
     loop {
@@ -937,7 +936,7 @@ pub async fn refresh_loop(db: std::sync::Arc<Db>, app: tauri::AppHandle) {
         };
         // 抖动只用于错开各客户端的请求，不改变业务语义。
         let jitter = if failures == 0 { 30 * 60 } else { 5 * 60 };
-        let wait = base + Duration::from_secs(rand::thread_rng().gen_range(0..jitter));
+        let wait = base + Duration::from_secs(rand::rng().random_range(0..jitter));
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = REFRESH_WAKE.notified() => {
@@ -1369,8 +1368,7 @@ mod tests {
 
     #[test]
     fn correspond_path_encrypts_refresh_timestamp() {
-        let mut rng = rand::thread_rng();
-        let private = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let private = rsa::RsaPrivateKey::new(&mut rand::rng(), 1024).unwrap();
         let public = private.to_public_key();
         let path = correspond_path_with_key(&public, 1_700_000_000_123).unwrap();
         assert_eq!(path.len(), 256);
@@ -1378,10 +1376,10 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&path[i..i + 2], 16).unwrap())
             .collect();
-        let plain = private.decrypt(Oaep::new::<Sha256>(), &bytes).unwrap();
+        let plain = private.oaep_decrypt::<Sha256>(&bytes).unwrap();
         assert_eq!(String::from_utf8(plain).unwrap(), "refresh_1700000000123");
         // 测试里顺手证明 PEM 公钥可解析（真实路径不走这里）。
-        assert!(RsaPublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY).is_ok());
+        assert!(PublicKey::from_public_key_pem(REFRESH_PUBLIC_KEY).is_ok());
     }
 
     /// 联网冒烟：cargo test --lib account -- --ignored --nocapture

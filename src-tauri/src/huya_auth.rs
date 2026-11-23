@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use hivecast_ipc::{AppNotice, QrPoll, QrTicket, RefreshStatus};
-use rand::Rng;
+use rand::RngExt;
 use reqwest::header::{HeaderMap, ORIGIN, REFERER, SET_COOKIE};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
@@ -117,9 +117,9 @@ fn random_hex(len: usize, upper: bool) -> String {
 }
 
 fn random_digits(len: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
-        .map(|_| char::from(b'0' + rng.gen_range(0..10)))
+        .map(|_| char::from(b'0' + rng.random_range(0..10)))
         .collect()
 }
 

@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 
@@ -46,7 +46,8 @@ impl Secret {
 
     /// 加密：返回 enc:v1:<base64(nonce || 密文)>。
     pub fn seal(&self, plain: &str) -> Result<String, AppError> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce_bytes: [u8; 12] = rand::random();
+        let nonce = Nonce::from(nonce_bytes);
         let bytes = self
             .cipher
             .encrypt(&nonce, plain.as_bytes())
@@ -71,7 +72,9 @@ impl Secret {
             return None;
         }
         let (nonce, cipher) = packed.split_at(12);
-        let plain = self.cipher.decrypt(Nonce::from_slice(nonce), cipher).ok()?;
+        let nonce =
+            Nonce::<aes_gcm::aead::consts::U12>::try_from(nonce).ok()?;
+        let plain = self.cipher.decrypt(&nonce, cipher).ok()?;
         String::from_utf8(plain).ok()
     }
 
@@ -85,8 +88,8 @@ fn io_err(path: &Path, err: std::io::Error) -> AppError {
 }
 
 fn fresh_key(path: &Path) -> Result<Vec<u8>, AppError> {
-    let key = Aes256Gcm::generate_key(&mut OsRng);
-    let bytes: Vec<u8> = key.to_vec();
+    let key: [u8; 32] = rand::random();
+    let bytes = key.to_vec();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| io_err(parent, err))?;
     }
