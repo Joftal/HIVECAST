@@ -321,6 +321,22 @@ pub fn build(
         })
         .count() as i64;
 
+    // 历史名额要优先给真实录像场次，不能被没有 session 的合并/导出任务挤掉。
+    // 同时先截断再算异常，避免「需要处理」引用一个列表里已经不存在的 Run。
+    history_runs.sort_by(|a, b| {
+        b.ended_at
+            .unwrap_or(b.started_at)
+            .cmp(&a.ended_at.unwrap_or(a.started_at))
+    });
+    let kept_sessions = cap_history_runs(&mut history_runs, history);
+    if kept_sessions < closed_group_count {
+        let kept_groups: HashSet<&str> = history_runs
+            .iter()
+            .filter_map(|run| run.id.strip_prefix("session:"))
+            .collect();
+        history_sessions
+            .retain(|session| kept_groups.contains(session_group_key(session).as_str()));
+    }
     let incidents = build_incidents(
         &history_runs,
         &history_sessions,
@@ -361,13 +377,6 @@ pub fn build(
         incidents: incidents.len() as i64,
     };
 
-    history_runs.sort_by(|a, b| {
-        b.ended_at
-            .unwrap_or(b.started_at)
-            .cmp(&a.ended_at.unwrap_or(a.started_at))
-    });
-    history_runs.truncate(history);
-
     Ok(TaskCenter {
         generated_at: now,
         summary,
@@ -376,7 +385,7 @@ pub fn build(
         running,
         queued,
         history: history_runs,
-        history_has_more: closed_group_count > history,
+        history_has_more: closed_group_count > kept_sessions,
         incidents,
     })
 }
@@ -1009,6 +1018,58 @@ fn build_platforms(
         .collect()
 }
 
+/// 历史截断：录像场次优先占名额，剩余名额再按时间给独立任务（合并/导出）。
+/// 返回保留的 session Run 数，用于判断是否还有真实场次没展示。
+fn cap_history_runs(history_runs: &mut Vec<RunView>, history: usize) -> usize {
+    let session_count = history_runs
+        .iter()
+        .filter(|run| run.id.starts_with("session:"))
+        .count();
+    let session_quota = session_count.min(history);
+    let standalone_quota = history.saturating_sub(session_quota);
+    let mut kept_sessions = 0usize;
+    let mut kept_standalone = 0usize;
+    history_runs.retain(|run| {
+        if run.id.starts_with("session:") {
+            if kept_sessions < session_quota {
+                kept_sessions += 1;
+                true
+            } else {
+                false
+            }
+        } else if kept_standalone < standalone_quota {
+            kept_standalone += 1;
+            true
+        } else {
+            false
+        }
+    });
+    kept_sessions
+}
+
+/// 同一 Run 里可能同时有收尾失败和后处理失败。后处理失败通常更可操作
+/// （可以直接重试），先选它；只有没有后处理失败时才回落到收尾任务。
+fn incident_task(run: &RunView) -> Option<&TaskView> {
+    let broken = |task: &TaskView| {
+        task.state == "failed"
+            || (task.state == "interrupted"
+                && matches!(task.kind.as_str(), "post" | "remux" | "finalize"))
+    };
+    run.tasks
+        .iter()
+        .find(|task| matches!(task.kind.as_str(), "post" | "remux") && broken(task))
+        .or_else(|| {
+            run.tasks
+                .iter()
+                .find(|task| task.kind == "merge" && task.state == "failed")
+        })
+        .or_else(|| {
+            run.tasks
+                .iter()
+                .find(|task| task.kind == "finalize" && broken(task))
+        })
+}
+
 fn build_incidents(
     history: &[RunView],
     sessions: &[RecordSession],
@@ -1035,11 +1096,7 @@ fn build_incidents(
         }
         // 后处理/收尾任务被上次退出打断时，工作确实没有完成，也要给出重试入口。
         // 录制任务的中断由 session 自身表达，不能当成后处理失败去重试。
-        if let Some(task) = run.tasks.iter().find(|task| {
-            task.state == "failed"
-                || (task.state == "interrupted"
-                    && matches!(task.kind.as_str(), "post" | "remux" | "finalize"))
-        }) {
+        if let Some(task) = incident_task(run) {
             if let Some(session_id) = task.session_id.as_deref() {
                 failed_task_sessions.insert(session_id.to_string());
             }
@@ -2002,5 +2059,76 @@ mod tests {
         );
         assert_eq!(run.state, "failed");
         assert_eq!(run.stage, "failed");
+    }
+
+    #[test]
+    fn history_cap_keeps_sessions_before_standalone_tasks() {
+        let mut runs = vec![
+            history_run("task:merge", 400),
+            history_run("session:s1", 300),
+            history_run("session:s2", 200),
+            history_run("task:export", 100),
+        ];
+        let kept = cap_history_runs(&mut runs, 2);
+        assert_eq!(kept, 2);
+        assert_eq!(
+            runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            vec!["session:s1", "session:s2"]
+        );
+    }
+
+    #[test]
+    fn history_cap_reserves_spare_slots_for_standalone_tasks() {
+        let mut runs = vec![
+            history_run("session:s1", 300),
+            history_run("task:merge", 200),
+            history_run("task:export", 100),
+        ];
+        let kept = cap_history_runs(&mut runs, 3);
+        assert_eq!(kept, 1);
+        assert_eq!(runs.len(), 3);
+    }
+
+    #[test]
+    fn failed_post_wins_over_failed_finalize_in_incident() {
+        let mut post = task("auto:sess:0", "post", "failed", Some(1));
+        post.finished_at = Some(200);
+        let mut draft = RunDraft::new("session:session-1".into());
+        draft.started_at = 100;
+        draft.ended_at = Some(200);
+        draft.session = Some(recorded_session("failed"));
+        draft.tasks = vec![post];
+        draft.finalize_failed = true;
+        let run = finish_run(draft, 300);
+        assert_eq!(incident_task(&run).map(|task| task.kind.as_str()), Some("post"));
+
+        let incidents = build_incidents(
+            &[run],
+            &[recorded_session("failed")],
+            &HashMap::new(),
+            &Default::default(),
+            &[],
+            Some("/opt/ffmpeg"),
+            Path::new("/tmp"),
+            300,
+        );
+        assert_eq!(incidents[0].action, "retry_post");
+    }
+
+    fn history_run(id: &str, ended_at: i64) -> RunView {
+        RunView {
+            id: id.into(),
+            room: None,
+            state: "done".into(),
+            stage: "done".into(),
+            started_at: ended_at - 10,
+            ended_at: Some(ended_at),
+            duration_ms: 1_000,
+            bytes: 1,
+            quality: None,
+            tasks: Vec::new(),
+            stages: Vec::new(),
+            finalize_retry_ready: false,
+        }
     }
 }

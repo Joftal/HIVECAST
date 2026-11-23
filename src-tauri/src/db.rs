@@ -1795,7 +1795,8 @@ impl Db {
         let limit = limit.clamp(1, 50_000);
         let from = "FROM task_event e
             LEFT JOIN record_session s ON e.run_id = 'session:' || s.id
-            LEFT JOIN room r ON r.id = s.room_id";
+            LEFT JOIN task_history th ON th.id = e.task_id
+            LEFT JOIN room r ON r.id = COALESCE(s.room_id, th.room_id)";
         // ESCAPE 里的反斜杠在 Rust 字符串中要写成 \\。
         let filter = "WHERE (?2 = 0 OR e.message LIKE ?1 ESCAPE '\\' OR e.stage LIKE ?1 ESCAPE '\\'
                 OR e.state LIKE ?1 ESCAPE '\\' OR e.task_id LIKE ?1 ESCAPE '\\'
@@ -1812,7 +1813,8 @@ impl Db {
             .map_err(db_err)?;
         let sql = format!(
             "SELECT e.id, e.task_id, e.run_id, e.kind, e.stage, e.state, e.percent, e.message, e.at,
-                    s.id, s.group_id, s.room_id, r.room_key, r.platform, r.host_name, r.title
+                    s.id, s.group_id, COALESCE(s.room_id, th.room_id),
+                    r.room_key, r.platform, r.host_name, r.title
                {from} {filter}
               ORDER BY e.at DESC, e.id DESC LIMIT ?5"
         );

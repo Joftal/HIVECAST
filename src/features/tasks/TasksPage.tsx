@@ -224,7 +224,7 @@ function progressOf(run: RunView): number | null {
 function canCancel(run: RunView): TaskView | undefined {
   return run.tasks.find(
     (task) =>
-      task.state === "running" &&
+      (task.state === "running" || task.state === "queued") &&
       !!task.sessionId &&
       (task.kind === "post" || task.kind === "remux" || task.kind === "merge"),
   );
@@ -491,7 +491,19 @@ function RunCard({
   );
 }
 
-function QueuedRow({ run, now, onOpen }: { run: RunView; now: number; onOpen: () => void }) {
+function QueuedRow({
+  run,
+  now,
+  busy,
+  onCancel,
+  onOpen,
+}: {
+  run: RunView;
+  now: number;
+  busy: boolean;
+  onCancel: (task: TaskView) => void;
+  onOpen: () => void;
+}) {
   const { t } = useTranslation();
   const tasks = queuedTasks(run);
   const task = tasks[0];
@@ -501,22 +513,35 @@ function QueuedRow({ run, now, onOpen }: { run: RunView; now: number; onOpen: ()
   const more = tasks.length > 1 ? ` +${tasks.length - 1}` : "";
   const waiting = t("tasks.waitingSlot", { time: formatElapsed(wait) });
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="focus-ring flex w-full items-center gap-3 border-b border-line px-4 py-2.5 text-left last:border-b-0 hover:bg-raised/50"
-    >
-      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] text-ink">
-          {run.room?.hostName || run.room?.title || t("tasks.detailNoRoom")}
+    <div className="flex w-full items-center border-b border-line last:border-b-0 hover:bg-raised/50">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="focus-ring flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left"
+      >
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] text-ink">
+            {run.room?.hostName || run.room?.title || t("tasks.detailNoRoom")}
+          </span>
+          <span className="mt-0.5 block truncate text-[10.5px] text-faint">
+            {kind}{clip ? ` · ${clip}` : ""}{more} · {waiting}
+          </span>
         </span>
-        <span className="mt-0.5 block truncate text-[10.5px] text-faint">
-          {kind}{clip ? ` · ${clip}` : ""}{more} · {waiting}
-        </span>
-      </span>
-      <span className="w-[92px] shrink-0 truncate text-right text-[10px] text-faint">{platformName(t, run.room?.platform)}</span>
-    </button>
+        <span className="w-[92px] shrink-0 truncate text-right text-[10px] text-faint">{platformName(t, run.room?.platform)}</span>
+      </button>
+      {task ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="mr-2 shrink-0"
+          disabled={busy}
+          onClick={() => onCancel(task)}
+        >
+          {t("tasks.cancel")}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -622,7 +647,7 @@ function DetailDrawer({
   eventsLoading: boolean;
   eventsLoadingMore: boolean;
   eventsError: boolean;
-  onLoadEarlier: () => Promise<void>;
+  onLoadEarlier: () => Promise<boolean>;
   busy: boolean;
   canOpenFiles: boolean;
   onClose: () => void;
@@ -640,7 +665,11 @@ function DetailDrawer({
   const timelinePages = Math.max(1, Math.ceil(events.length / TIMELINE_WINDOW));
   const [timelinePage, setTimelinePage] = useState(0);
   const timelineRunRef = useRef<string | null>(null);
-  const pendingOlder = useRef(false);
+  // 成功拉到更早一页后再前进一页。不能只看 events.length：失败后运行中的
+  // Run 仍会追加新事件，旧实现会误以为用户刚刚加载了更早页。
+  const [olderLoaded, setOlderLoaded] = useState(0);
+  const timelinePagesRef = useRef(timelinePages);
+  timelinePagesRef.current = timelinePages;
   useEffect(() => {
     if (timelineRunRef.current !== run.id) {
       timelineRunRef.current = run.id;
@@ -651,16 +680,14 @@ function DetailDrawer({
     setTimelinePage((page) => Math.min(page, timelinePages - 1));
   }, [timelinePages]);
   useEffect(() => {
-    if (!pendingOlder.current) return;
-    pendingOlder.current = false;
-    setTimelinePage((page) => Math.min(page + 1, timelinePages - 1));
-  }, [events.length, timelinePages]);
+    if (olderLoaded === 0) return;
+    setTimelinePage((page) => Math.min(page + 1, timelinePagesRef.current - 1));
+  }, [olderLoaded]);
   const timelineEnd = Math.max(0, events.length - timelinePage * TIMELINE_WINDOW);
   const timelineStart = Math.max(0, timelineEnd - TIMELINE_WINDOW);
   const visibleTimeline = events.slice(timelineStart, timelineEnd);
   const loadOlder = async () => {
-    pendingOlder.current = true;
-    await onLoadEarlier();
+    if (await onLoadEarlier()) setOlderLoaded((count) => count + 1);
   };
   // Run id 的前缀是内部键：session:/task:/starting:。详情里不要把技术前缀直接当「场次」。
   const runRef = run.id.startsWith("session:")
@@ -1319,19 +1346,21 @@ export default function TasksPage({
     };
   }, [selectedId, detailActive]);
 
-  const loadEarlierDetailEvents = async () => {
+  const loadEarlierDetailEvents = async (): Promise<boolean> => {
     const oldest = detailEvents[0];
     const runId = selectedId;
-    if (!runId || !oldest || detailEventsLoadingMore) return;
+    if (!runId || !oldest || detailEventsLoadingMore) return false;
     setDetailEventsLoadingMore(true);
     try {
       const page = await taskRunEvents(runId, { at: oldest.at, id: oldest.id }, EVENT_PAGE);
-      if (selectedIdRef.current !== runId) return;
+      if (selectedIdRef.current !== runId) return false;
       setDetailEvents((previous) => mergeEvents(page.events, previous));
       setDetailEventsHasMore(page.hasMore);
       setDetailEventsError(false);
+      return page.events.length > 0;
     } catch {
       if (selectedIdRef.current === runId) setDetailEventsError(true);
+      return false;
     } finally {
       if (selectedIdRef.current === runId) setDetailEventsLoadingMore(false);
     }
@@ -1704,6 +1733,8 @@ export default function TasksPage({
                         key={run.id}
                         run={run}
                         now={center.generatedAt || Math.floor(Date.now() / 1000)}
+                        busy={busyId != null}
+                        onCancel={(task) => void cancel(task)}
                         onOpen={() => setSelectedId(run.id)}
                       />
                     ))}
