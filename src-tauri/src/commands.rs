@@ -2261,11 +2261,21 @@ mod tests {
 
     #[test]
     fn csv_export_uses_readable_labels_and_blocks_formulas() {
-        assert_eq!(csv_stage("merging"), "合并");
-        assert_eq!(csv_stage("postprocessing"), "后处理");
-        assert_eq!(csv_state("running"), "运行中");
-        assert_eq!(csv_state("queued"), "排队中");
-        assert_eq!(csv_stage("unknown"), "unknown");
+        assert_eq!(csv_stage(None, "merging"), "合并");
+        assert_eq!(csv_stage(None, "postprocessing"), "后处理");
+        assert_eq!(csv_state(None, "running"), "运行中");
+        assert_eq!(csv_state(None, "queued"), "排队中");
+        assert_eq!(csv_stage(None, "unknown"), "unknown");
+        assert_eq!(csv_stage(Some("en-US"), "merging"), "Merging");
+        assert_eq!(
+            csv_stage(Some("en-US"), "postprocessing"),
+            "Post-processing"
+        );
+        assert_eq!(csv_stage(Some("en-US"), "thumbnail"), "Cover");
+        assert_eq!(csv_state(Some("en-US"), "running"), "Running");
+        assert_eq!(csv_state(Some("en-US"), "partial"), "Partially completed");
+        assert!(csv_header(None).starts_with("时间,平台"));
+        assert!(csv_header(Some("en-US")).starts_with("Time,Platform"));
 
         assert_eq!(csv_cell("=1+1"), "\"'=1+1\"");
         assert_eq!(csv_cell("  @cmd"), "\"'  @cmd\"");
@@ -3169,12 +3179,20 @@ pub fn task_event_search(
 
 /// 导出的是给人看的 CSV，阶段/状态不能再写内部枚举。
 /// 与跨 Run 检索共用 labels：两处各写一套映射迟早会漂移。
-fn csv_stage(stage: &str) -> &str {
-    crate::labels::stage_label(stage)
+fn csv_stage(lang: Option<&str>, stage: &str) -> String {
+    crate::labels::stage_label_for(lang, stage)
 }
 
-fn csv_state(state: &str) -> &str {
-    crate::labels::state_label(state)
+fn csv_state(lang: Option<&str>, state: &str) -> String {
+    crate::labels::state_label_for(lang, state)
+}
+
+fn csv_header(lang: Option<&str>) -> &'static str {
+    if crate::labels::is_english(lang) {
+        "Time,Platform,Room,Streamer,Title,Stage,State,Progress,Message,Task,Run"
+    } else {
+        "时间,平台,房间号,主播,直播间标题,阶段,状态,进度,消息,任务,Run"
+    }
 }
 
 /// RFC 4180 引号转义 + Excel 公式注入防护。
@@ -3203,6 +3221,7 @@ pub fn task_events_export(
     query: Option<String>,
     only_failed: Option<bool>,
     platform: Option<String>,
+    lang: Option<String>,
 ) -> Result<usize, AppError> {
     use chrono::TimeZone;
     use std::io::Write;
@@ -3235,11 +3254,8 @@ pub fn task_events_export(
     // 带 BOM，Excel 直接打开不会把中文表头显示成乱码。
     file.write_all("\u{feff}".as_bytes())
         .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
-    writeln!(
-        file,
-        "时间,平台,房间号,主播,直播间标题,阶段,状态,进度,消息,任务,Run"
-    )
-    .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
+    writeln!(file, "{}", csv_header(lang.as_deref()))
+        .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
     for hit in &result.hits {
         let time = chrono::Local
             .timestamp_opt(hit.at, 0)
@@ -3259,8 +3275,8 @@ pub fn task_events_export(
             ),
             csv_cell(hit.host_name.as_deref().unwrap_or_default()),
             csv_cell(hit.room_title.as_deref().unwrap_or_default()),
-            csv_cell(csv_stage(&hit.stage)),
-            csv_cell(csv_state(&hit.state)),
+            csv_cell(&csv_stage(lang.as_deref(), &hit.stage)),
+            csv_cell(&csv_state(lang.as_deref(), &hit.state)),
             hit.percent,
             csv_cell(hit.message.as_deref().unwrap_or_default()),
             csv_cell(&hit.task_id),

@@ -110,6 +110,34 @@ CREATE INDEX IF NOT EXISTS idx_task_event_run
 CREATE INDEX IF NOT EXISTS idx_task_event_task
     ON task_event (task_id, at);
 
+-- 跨 Run 检索的全文索引：trigram 支持 `LIKE '%foo%'` 的任意子串，
+-- 但至少 3 个字符才进索引；1–2 字符由调用方回退到阶段/状态枚举与 LIKE。
+-- rowid 直接复用 task_event.id，触发器保证增删改同步，避免检索到已删除事件。
+CREATE VIRTUAL TABLE IF NOT EXISTS task_event_fts USING fts5(
+    body,
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS task_event_fts_ai AFTER INSERT ON task_event BEGIN
+    INSERT INTO task_event_fts(rowid, body)
+    VALUES (new.id,
+        COALESCE(new.message, '') || ' ' || new.stage || ' ' || new.state || ' ' ||
+        new.kind || ' ' || new.task_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_event_fts_ad AFTER DELETE ON task_event BEGIN
+    DELETE FROM task_event_fts WHERE rowid = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_event_fts_au
+AFTER UPDATE OF message, stage, state, kind, task_id ON task_event BEGIN
+    DELETE FROM task_event_fts WHERE rowid = old.id;
+    INSERT INTO task_event_fts(rowid, body)
+    VALUES (new.id,
+        COALESCE(new.message, '') || ' ' || new.stage || ' ' || new.state || ' ' ||
+        new.kind || ' ' || new.task_id);
+END;
+
 -- 一条录像登记在册的全部文件：主文件、源封装母带、后处理派生文件。
 -- record_session 的 file_path/source_path 仍是播放与兼容的主索引，这张表负责完整清单。
 CREATE TABLE IF NOT EXISTS media_file (
@@ -249,6 +277,8 @@ pub struct Db {
     conn: Mutex<Connection>,
     /// 凭据列的加解密器；密钥文件与库文件同目录。
     secret: crate::secret::Secret,
+    /// FTS 回填是否成功；失败时检索退回 LIKE，不能让全文索引缺失变成 0 条结果。
+    fts_ready: std::sync::atomic::AtomicBool,
 }
 
 impl Db {
@@ -273,6 +303,7 @@ impl Db {
         let db = Self {
             conn: Mutex::new(conn),
             secret,
+            fts_ready: std::sync::atomic::AtomicBool::new(false),
         };
         // 老库没有 media_file 表：启动时按 file_path/source_path 回填一次。
         match db.backfill_media_files() {
@@ -291,6 +322,22 @@ impl Db {
             Ok(_) => {}
             Err(err) => tracing::warn!(error = %err, "补全旧录制场次分组失败"),
         }
+        // 跨 Run 检索的 FTS 索引：老库第一次启动时回填一次。失败不阻塞启动，
+        // 检索会自动退回 LIKE（见 task_event_search），最多慢一点，不会功能缺失。
+        let fts_ready = match db.ensure_task_event_fts() {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(count, "数据库迁移：回填任务事件全文索引");
+                }
+                true
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "回填任务事件全文索引失败，检索将回退 LIKE");
+                false
+            }
+        };
+        db.fts_ready
+            .store(fts_ready, std::sync::atomic::Ordering::Relaxed);
         Ok(db)
     }
 
@@ -1736,6 +1783,43 @@ impl Db {
         Ok(())
     }
 
+    /// 老库第一次引入 FTS 时回填；用 app_setting 标记，避免每次启动重建。
+    /// 触发器已经接管新事件，因此只需把历史行按 id 写进索引。
+    fn ensure_task_event_fts(&self) -> Result<usize, AppError> {
+        let mut conn = self.lock();
+        let ready: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = 'db.task_event_fts_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        if ready.as_deref() == Some("1") {
+            return Ok(0);
+        }
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute("DELETE FROM task_event_fts", [])
+            .map_err(db_err)?;
+        let count = tx
+            .execute(
+                "INSERT INTO task_event_fts(rowid, body)
+                 SELECT id, COALESCE(message, '') || ' ' || stage || ' ' || state || ' ' ||
+                        kind || ' ' || task_id
+                   FROM task_event",
+                [],
+            )
+            .map_err(db_err)?;
+        tx.execute(
+            "INSERT INTO app_setting (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params!["db.task_event_fts_v1", "1", now_ts()],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(count)
+    }
+
     /// 追加一条阶段事件。id 由 SQLite 自增，传入值会被忽略。
     pub fn task_event(&self, event: &hivecast_ipc::TaskEvent) -> Result<(), AppError> {
         self.lock()
@@ -1809,26 +1893,71 @@ impl Db {
             LEFT JOIN record_session s ON e.run_id = 'session:' || s.id
             LEFT JOIN task_history th ON th.id = e.task_id
             LEFT JOIN room r ON r.id = COALESCE(s.room_id, th.room_id)";
-        // 界面显示的是「录制 / 封面 / 运行中」，数据库存的是 record/thumbnail/running。
-        // 检索必须同时匹配内部值和用户看到的中文标签，否则输入界面上的阶段名会得到 0 条。
-        let stage_expr = crate::labels::stage_case_sql("e.stage");
-        let state_expr = crate::labels::state_case_sql("e.state");
-        // ESCAPE 里的反斜杠在 Rust 字符串中要写成 \\。
-        let filter = format!(
-            "WHERE (?2 = 0 OR e.message LIKE ?1 ESCAPE '\\' OR e.stage LIKE ?1 ESCAPE '\\'
-                OR {stage_expr} LIKE ?1 ESCAPE '\\'
-                OR e.state LIKE ?1 ESCAPE '\\'
-                OR {state_expr} LIKE ?1 ESCAPE '\\'
-                OR e.task_id LIKE ?1 ESCAPE '\\'
-                OR r.host_name LIKE ?1 ESCAPE '\\' OR r.title LIKE ?1 ESCAPE '\\')
-              AND (?3 = 0 OR e.state IN ('failed', 'interrupted'))
-              AND (?4 = '' OR r.platform = ?4)"
+        // 界面显示的是「录制 / 封面 / Running」，数据库存的是 record/thumbnail/running。
+        // 阶段/状态先按中英文标签映射回内部枚举，用 IN 走索引；消息等自由文本才进 FTS。
+        let stage_values = crate::labels::matching_stages(query);
+        let state_values = crate::labels::matching_states(query);
+        // trigram 索引至少 3 个字符；1–2 字符仍走 message LIKE，但阶段/状态
+        // 已经由 IN 命中，不会每次都对整张表做无索引扫描。
+        let use_fts = self.fts_ready.load(std::sync::atomic::Ordering::Relaxed)
+            && query.chars().count() >= 3
+            && query.chars().any(|ch| ch.is_alphanumeric());
+        let mut clauses = vec!["?2 = 0".to_string()];
+        if use_fts {
+            clauses.push(
+                "e.id IN (SELECT rowid FROM task_event_fts WHERE task_event_fts MATCH ?5)"
+                    .to_string(),
+            );
+        } else {
+            clauses.push(r"e.message LIKE ?1 ESCAPE '\'".to_string());
+        }
+        if let Some(clause) = enum_in_clause("e.stage", &stage_values) {
+            clauses.push(clause);
+        }
+        if let Some(clause) = enum_in_clause("e.state", &state_values) {
+            clauses.push(clause);
+        }
+        // 房间名改走 room 小表 + run_id/task_id 索引，避免 JOIN 后对事件表全表 LIKE。
+        clauses.push(
+            r"e.run_id IN (
+                SELECT 'session:' || s2.id FROM record_session s2
+                  JOIN room r2 ON r2.id = s2.room_id
+                 WHERE r2.host_name LIKE ?1 ESCAPE '\' OR r2.title LIKE ?1 ESCAPE '\'
+              )"
+            .to_string(),
         );
+        clauses.push(
+            r"e.task_id IN (
+                SELECT th2.id FROM task_history th2
+                  JOIN room r3 ON r3.id = th2.room_id
+                 WHERE r3.host_name LIKE ?1 ESCAPE '\' OR r3.title LIKE ?1 ESCAPE '\'
+              )"
+            .to_string(),
+        );
+        let filter = format!(
+            "WHERE ({})
+              AND (?3 = 0 OR e.state IN ('failed', 'interrupted'))
+              AND (?4 = '' OR r.platform = ?4 OR r.platform IS NULL)",
+            clauses.join(" OR ")
+        );
+        let mut args = vec![
+            SqlValue::Text(pattern),
+            SqlValue::Integer(has_query),
+            SqlValue::Integer(only_failed),
+            SqlValue::Text(platform.to_string()),
+        ];
+        if use_fts {
+            // 整体加引号做短语匹配；内部双引号按 FTS5 规则翻倍。
+            args.push(SqlValue::Text(format!(
+                "\"{}\"",
+                query.replace('"', "\"\"")
+            )));
+        }
         let conn = self.lock();
         let total: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) {from} {filter}"),
-                params![pattern, has_query, only_failed, platform],
+                rusqlite::params_from_iter(args.iter()),
                 |row| row.get(0),
             )
             .map_err(db_err)?;
@@ -1837,33 +1966,33 @@ impl Db {
                     s.id, s.group_id, COALESCE(s.room_id, th.room_id),
                     r.room_key, r.platform, r.host_name, r.title
                {from} {filter}
-              ORDER BY e.at DESC, e.id DESC LIMIT ?5"
+              ORDER BY e.at DESC, e.id DESC LIMIT ?{}",
+            args.len() + 1
         );
+        let mut hit_args = args;
+        hit_args.push(SqlValue::Integer(limit as i64));
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(
-                params![pattern, has_query, only_failed, platform, limit as i64],
-                |row| {
-                    Ok(hivecast_ipc::TaskEventHit {
-                        id: row.get(0)?,
-                        task_id: row.get(1)?,
-                        run_id: row.get(2)?,
-                        kind: row.get(3)?,
-                        stage: row.get(4)?,
-                        state: row.get(5)?,
-                        percent: row.get(6)?,
-                        message: row.get(7)?,
-                        at: row.get(8)?,
-                        session_id: row.get(9)?,
-                        group_id: row.get(10)?,
-                        room_id: row.get(11)?,
-                        room_key: row.get(12)?,
-                        platform: row.get(13)?,
-                        host_name: row.get(14)?,
-                        room_title: row.get(15)?,
-                    })
-                },
-            )
+            .query_map(rusqlite::params_from_iter(hit_args.iter()), |row| {
+                Ok(hivecast_ipc::TaskEventHit {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    stage: row.get(4)?,
+                    state: row.get(5)?,
+                    percent: row.get(6)?,
+                    message: row.get(7)?,
+                    at: row.get(8)?,
+                    session_id: row.get(9)?,
+                    group_id: row.get(10)?,
+                    room_id: row.get(11)?,
+                    room_key: row.get(12)?,
+                    platform: row.get(13)?,
+                    host_name: row.get(14)?,
+                    room_title: row.get(15)?,
+                })
+            })
             .map_err(db_err)?;
         let mut hits = Vec::new();
         for row in rows {
@@ -2871,6 +3000,19 @@ fn like_pattern(query: &str) -> String {
     }
     out.push('%');
     out
+}
+
+/// 生成 `column IN ('a','b')` 片段；阶段/状态来自静态表，值里只需处理单引号。
+fn enum_in_clause(column: &str, values: &[&str]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let list = values
+        .iter()
+        .map(|value| format!("'{}'", value.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!("{column} IN ({list})"))
 }
 
 fn db_err(err: rusqlite::Error) -> AppError {
@@ -4155,11 +4297,113 @@ mod tests {
         let bilibili = db
             .task_event_search("", false, Some("bilibili"), 100)
             .expect("检索失败");
-        assert_eq!(bilibili.total, 2, "任务级事件没有房间，不应混入平台筛选");
+        // 没有房间的合并/导出独立 Run 在平台筛选下仍然可见：它不属于任何平台，
+        // 隐藏它会让用户选完平台后以为那场合并失败消失了。
+        assert_eq!(bilibili.total, 3);
+        assert!(
+            bilibili.hits.iter().any(|hit| hit.task_id == "merge:x"),
+            "无房间的独立 Run 不应被平台筛选隐藏"
+        );
         let limited = db.task_event_search("", false, None, 1).expect("检索失败");
         assert_eq!(limited.total, 4);
         assert_eq!(limited.hits.len(), 1);
         assert_eq!(limited.hits[0].at, 300);
+    }
+
+    #[test]
+    fn task_event_search_matches_english_labels_and_short_chinese() {
+        let (db, _path) = temp_db("task-event-search-labels");
+        for (stage, state, message, at) in [
+            ("thumbnail", "done", "封面生成完成", 10),
+            ("postprocessing", "failed", "transcode failed", 20),
+            ("recording", "done", "录制开始", 30),
+        ] {
+            db.task_event(&hivecast_ipc::TaskEvent {
+                id: 0,
+                task_id: format!("task:{at}"),
+                run_id: Some(format!("task:{at}")),
+                kind: "post".into(),
+                stage: stage.into(),
+                state: state.into(),
+                percent: 100,
+                message: Some(message.into()),
+                at,
+            })
+            .expect("写事件失败");
+        }
+
+        let cover = db
+            .task_event_search("Cover", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(cover.total, 1);
+        assert_eq!(cover.hits[0].stage, "thumbnail");
+
+        let post = db
+            .task_event_search("Post-processing", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(post.total, 1);
+        assert_eq!(post.hits[0].stage, "postprocessing");
+
+        // 中文两个字低于 trigram 下限，必须靠阶段/状态枚举命中。
+        let short = db
+            .task_event_search("录制", false, None, 100)
+            .expect("检索失败");
+        assert_eq!(short.total, 1);
+        assert_eq!(short.hits[0].stage, "recording");
+    }
+
+    #[test]
+    fn task_event_fts_backfills_old_events_once() {
+        let (db, _path) = temp_db("task-event-fts-backfill");
+        db.task_event(&hivecast_ipc::TaskEvent {
+            id: 0,
+            task_id: "post:s-a1".into(),
+            run_id: Some("session:s-a1".into()),
+            kind: "post".into(),
+            stage: "thumbnail".into(),
+            state: "done".into(),
+            percent: 100,
+            message: Some("封面回填".into()),
+            at: 10,
+        })
+        .expect("写事件失败");
+        // 模拟升级前的老库：事件已经在，但索引为空且没有回填标记。
+        db.lock()
+            .execute(
+                "DELETE FROM app_setting WHERE key = 'db.task_event_fts_v1'",
+                [],
+            )
+            .expect("清标记失败");
+        db.lock()
+            .execute("DELETE FROM task_event_fts", [])
+            .expect("清索引失败");
+        // 索引不可用时退回 LIKE，不能因为 FTS 缺失就返回 0 条。
+        db.fts_ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            1
+        );
+        db.fts_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            0
+        );
+
+        assert_eq!(db.ensure_task_event_fts().expect("回填失败"), 1);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            1
+        );
+        // 标记写入后再次打开不再重复扫全表。
+        assert_eq!(db.ensure_task_event_fts().expect("回填失败"), 0);
     }
 
     #[test]

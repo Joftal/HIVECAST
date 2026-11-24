@@ -684,8 +684,9 @@ export async function taskEventsExport(
   query: string,
   onlyFailed: boolean,
   platform: string | null,
+  lang: string,
 ): Promise<number> {
-  return invoke<number>("task_events_export", { path, query, onlyFailed, platform });
+  return invoke<number>("task_events_export", { path, query, onlyFailed, platform, lang });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

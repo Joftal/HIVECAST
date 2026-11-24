@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -34,7 +34,6 @@ const EVENT_PAGE = 200;
 const HISTORY_VIEWPORT = 420;
 const HISTORY_ROW = 56;
 const HISTORY_OVERSCAN = 6;
-const TIMELINE_WINDOW = 200;
 const ACTIVE_RUN_STATES = new Set(["recording", "running", "finalizing", "queued"]);
 
 /** 合并两段按时间正序的事件，按 id 去重；后传入的覆盖旧状态。 */
@@ -665,35 +664,35 @@ function DetailDrawer({
   const cancelTask = canCancel(run);
   const retryTask = failedTask(run);
   const retryFinalizeTask = failedFinalizeTask(run);
-  // 时间线一次只挂一个 200 条的窗口；2100 条事件如果全部进 DOM，
-  // 可访问性树和滚动布局都会明显变慢。
-  const timelinePages = Math.max(1, Math.ceil(events.length / TIMELINE_WINDOW));
-  const [timelinePage, setTimelinePage] = useState(0);
-  const timelineRunRef = useRef<string | null>(null);
-  // 成功拉到更早一页后再前进一页。不能只看 events.length：失败后运行中的
-  // Run 仍会追加新事件，旧实现会误以为用户刚刚加载了更早页。
-  const [olderLoaded, setOlderLoaded] = useState(0);
-  const timelinePagesRef = useRef(timelinePages);
-  timelinePagesRef.current = timelinePages;
-  useEffect(() => {
-    if (timelineRunRef.current !== run.id) {
-      timelineRunRef.current = run.id;
-      setTimelinePage(0);
-    }
-  }, [run.id]);
-  useEffect(() => {
-    setTimelinePage((page) => Math.min(page, timelinePages - 1));
-  }, [timelinePages]);
-  useEffect(() => {
-    if (olderLoaded === 0) return;
-    setTimelinePage((page) => Math.min(page + 1, timelinePagesRef.current - 1));
-  }, [olderLoaded]);
-  const timelineEnd = Math.max(0, events.length - timelinePage * TIMELINE_WINDOW);
-  const timelineStart = Math.max(0, timelineEnd - TIMELINE_WINDOW);
-  const visibleTimeline = events.slice(timelineStart, timelineEnd);
+  // 不再做 200 条滑动窗口：用户点「加载更早」后把已取到的全部事件留在时间线里。
+  // 行本身有 content-visibility，浏览器只布局视口附近的行；这里只在插入更早页时
+  // 记录并恢复滚动位置，避免用户刚翻上去就被新内容顶回底部。
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  // 记录当前最上面一条事件在视口中的位置，而不是只记 scrollHeight：
+  // 运行中的 Run 可能在加载更早页的同时从底部追加新事件，单看高度会把视口带偏。
+  const timelineAnchor = useRef<{ id: number; top: number; offset: number } | null>(null);
+  const visibleTimeline = events;
   const loadOlder = async () => {
-    if (await onLoadEarlier()) setOlderLoaded((count) => count + 1);
+    const element = timelineScrollRef.current;
+    const first = events[0];
+    const row =
+      element && first
+        ? element.querySelector<HTMLElement>(`[data-event-id="${first.id}"]`)
+        : null;
+    timelineAnchor.current =
+      element && first && row
+        ? { id: first.id, top: element.scrollTop, offset: row.offsetTop }
+        : null;
+    if (!(await onLoadEarlier())) timelineAnchor.current = null;
   };
+  useLayoutEffect(() => {
+    const anchor = timelineAnchor.current;
+    const element = timelineScrollRef.current;
+    if (!anchor || !element) return;
+    timelineAnchor.current = null;
+    const row = element.querySelector<HTMLElement>(`[data-event-id="${anchor.id}"]`);
+    if (row) element.scrollTop = anchor.top + (row.offsetTop - anchor.offset);
+  }, [events.length]);
   // Run id 的前缀是内部键：session:/task:/starting:。详情里不要把技术前缀直接当「场次」。
   const runRef = run.id.startsWith("session:")
     ? { label: t("tasks.detailSession"), value: run.id.slice("session:".length) }
@@ -744,7 +743,7 @@ function DetailDrawer({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+        <div ref={timelineScrollRef} className="min-h-0 flex-1 overflow-auto px-5 py-4">
           <div className="flex items-center gap-2">
             <Chip tone={stateTone(run.state)} dot>
               {stateLabel(t, run.state)}
@@ -819,26 +818,13 @@ function DetailDrawer({
             <div className="mt-2">
               {events.length > 0 ? (
                 <div className="mb-2 flex items-center gap-1.5">
-                  {timelinePage < timelinePages - 1 ? (
-                    <Button size="sm" variant="ghost" onClick={() => setTimelinePage((page) => page + 1)}>
-                      {t("tasks.timelineOlder")}
-                    </Button>
-                  ) : eventsHasMore ? (
+                  {eventsHasMore ? (
                     <Button size="sm" variant="ghost" disabled={eventsLoadingMore} onClick={() => void loadOlder()}>
                       {eventsLoadingMore ? t("tasks.timelineLoadingEarlier") : t("tasks.timelineLoadEarlier")}
                     </Button>
                   ) : null}
-                  {timelinePage > 0 ? (
-                    <Button size="sm" variant="ghost" onClick={() => setTimelinePage((page) => Math.max(0, page - 1))}>
-                      {t("tasks.timelineNewer")}
-                    </Button>
-                  ) : null}
                   <span className="ml-auto text-[10px] tabular-nums text-faint">
-                    {t("tasks.timelineWindow", {
-                      from: timelineStart + 1,
-                      to: timelineEnd,
-                      total: events.length,
-                    })}
+                    {t("tasks.timelineLoaded", { n: events.length })}
                   </span>
                 </div>
               ) : null}
@@ -862,7 +848,12 @@ function DetailDrawer({
                           ? "bg-line-strong"
                           : "bg-accent";
                   return (
-                    <div key={event.id} className="flex gap-2.5">
+                    <div
+                      key={event.id}
+                      data-event-id={event.id}
+                      className="flex gap-2.5"
+                      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 44px" }}
+                    >
                       <div className="flex flex-col items-center">
                         <span className={cx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", tone)} />
                         {index < visibleTimeline.length - 1 ? <span className="my-1 w-px flex-1 bg-line" /> : null}
@@ -987,7 +978,7 @@ function EventSearchDialog({
   initialPlatform: string | null;
   onOpenFiles?: (roomId: string) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const notify = useNotify();
   const [query, setQuery] = useState("");
   const [onlyFailed, setOnlyFailed] = useState(false);
@@ -1043,7 +1034,7 @@ function EventSearchDialog({
       });
       if (typeof path !== "string" || !path) return;
       setExporting(true);
-      const count = await taskEventsExport(path, query, onlyFailed, platform);
+      const count = await taskEventsExport(path, query, onlyFailed, platform, i18n.language);
       notify.success(t("tasks.eventSearchExported", { n: count }));
     } catch (err) {
       notify.error(err);
@@ -1792,7 +1783,11 @@ export default function TasksPage({
                             tabIndex={0}
                             onClick={() => setSelectedId(run.id)}
                             onKeyDown={(event) => {
-                              if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+                              if (
+                                (event.key !== "Enter" && event.key !== " ") ||
+                                event.target !== event.currentTarget
+                              )
+                                return;
                               event.preventDefault();
                               setSelectedId(run.id);
                             }}
