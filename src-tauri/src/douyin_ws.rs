@@ -377,7 +377,7 @@ fn encode_frame(fields: &[(u32, Value)]) -> Vec<u8> {
     for (number, value) in fields {
         match value {
             Value::Varint(raw) => {
-                write_varint(&mut out, ((number << 3) | 0) as u64);
+                write_varint(&mut out, (number << 3) as u64);
                 write_varint(&mut out, *raw);
             }
             Value::Bytes(raw) => {

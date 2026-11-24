@@ -254,6 +254,9 @@ impl Default for Naming {
     }
 }
 
+/// 上一场自然结束：(结束时刻, 那场的开播时间, 是否平台确认离线)。
+type EndedRecord = (Instant, Option<i64>, bool);
+
 pub struct Recorder {
     db: Arc<Db>,
     /// 媒体库根目录：设置页可以改，开录时现取，避免改完要重启。
@@ -281,7 +284,7 @@ pub struct Recorder {
     /// 上一场自然结束：房间 →（结束时刻, 那场的开播时间, 是否平台确认离线）。
     /// 平台下播状态滞后时先别再开一条秒退的会话（S2）。
     /// 用单调时钟：改系统时间不该让静默窗口提前结束或永不结束（R4）。
-    ended: Mutex<HashMap<String, (Instant, Option<i64>, bool)>>,
+    ended: Mutex<HashMap<String, EndedRecord>>,
     /// 连续「成功检查且离线」的次数，给下播做二次确认（S1）。
     /// 只记次数不记时间：间隔再大也该能攒够两次（B5）。
     offline: Mutex<HashMap<String, u32>>,
@@ -1347,7 +1350,7 @@ impl Recorder {
         tracing::info!(count = ids.len(), "开始收尾全部录制会话");
         {
             let mut inner = self.inner.lock().expect("录制状态被污染");
-            for (_, active) in inner.iter_mut() {
+            for active in inner.values_mut() {
                 active.stop_reason = Some("app_exit".into());
                 send_graceful(&mut active.child);
             }
@@ -2142,8 +2145,8 @@ impl Recorder {
         // v2：编码/源流格式变了，绝不把两种编码混进同一个文件。
         let old = {
             let mut inner = self.inner.lock().expect("录制状态被污染");
-            let removed = inner.remove(room_id);
-            removed
+
+            inner.remove(room_id)
         };
         let Some(old) = old else {
             return false;
@@ -4523,7 +4526,7 @@ fn candidate_score(candidate: &StreamCandidate, prefs: StreamPrefs) -> ((u8, u32
     )
 }
 
-fn best_in_group<'a>(group: &'a StreamGroup, prefs: StreamPrefs) -> Option<&'a StreamCandidate> {
+fn best_in_group(group: &StreamGroup, prefs: StreamPrefs) -> Option<&StreamCandidate> {
     group
         .candidates
         .iter()

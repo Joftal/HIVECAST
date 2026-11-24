@@ -62,7 +62,7 @@ pub struct SignOptions<'a> {
 
 impl<'a> SignOptions<'a> {
     pub fn now() -> Self {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::now_ms();
         Self {
             ua: SIGN_UA,
             fp: SIGN_FP,
@@ -126,18 +126,18 @@ pub fn raw(params: &str, body: &str, opts: &SignOptions) -> String {
     dir[23] = (start & 0xff) as i32;
     dir[24] = (start / 0x1_0000_0000) as i32;
     dir[25] = (start / 0x100_0000_0000) as i32;
-    dir[26] = ((options[0] >> 24) & 0xff) as i32;
-    dir[27] = ((options[0] >> 16) & 0xff) as i32;
-    dir[28] = ((options[0] >> 8) & 0xff) as i32;
-    dir[29] = (options[0] & 0xff) as i32;
-    dir[30] = ((options[1] / 256) & 0xff) as i32;
+    dir[26] = (options[0] >> 24) & 0xff;
+    dir[27] = (options[0] >> 16) & 0xff;
+    dir[28] = (options[0] >> 8) & 0xff;
+    dir[29] = options[0] & 0xff;
+    dir[30] = (options[1] / 256) & 0xff;
     dir[31] = options[1] % 256;
-    dir[32] = ((options[1] >> 24) & 0xff) as i32;
-    dir[33] = ((options[1] >> 16) & 0xff) as i32;
-    dir[34] = ((options[2] >> 24) & 0xff) as i32;
-    dir[35] = ((options[2] >> 16) & 0xff) as i32;
-    dir[36] = ((options[2] >> 8) & 0xff) as i32;
-    dir[37] = (options[2] & 0xff) as i32;
+    dir[32] = (options[1] >> 24) & 0xff;
+    dir[33] = (options[1] >> 16) & 0xff;
+    dir[34] = (options[2] >> 24) & 0xff;
+    dir[35] = (options[2] >> 16) & 0xff;
+    dir[36] = (options[2] >> 8) & 0xff;
+    dir[37] = options[2] & 0xff;
     dir[38] = arr1[21] as i32;
     dir[39] = arr1[22] as i32;
     dir[40] = arr2[21] as i32;
@@ -235,7 +235,7 @@ fn abogus_encode(values: &[i32], alphabet: &[u8; 64]) -> String {
         }
         index += 3;
     }
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push('=');
     }
     out
@@ -259,7 +259,7 @@ fn base64_encode(bytes: &[u8], alphabet: &[u8; 64]) -> String {
         }
         index += 3;
     }
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push('=');
     }
     out

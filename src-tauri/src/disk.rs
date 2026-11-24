@@ -201,6 +201,8 @@ mod tests {
     use super::*;
 
     #[test]
+    // 两个阈值都是常量，断言的是编译期常量关系，不是运行时输入。
+    #[allow(clippy::assertions_on_constants)]
     fn thresholds_are_ordered() {
         assert!(MIN_START_FREE > MIN_KEEP_FREE);
     }

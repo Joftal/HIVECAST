@@ -1130,7 +1130,7 @@ fn batch_room_info(
         is_live: status.is_live,
         started_at: status
             .started_at
-            .or_else(|| if room.is_live { room.started_at } else { None }),
+            .or(if room.is_live { room.started_at } else { None }),
         online: status.online,
         stable_id: status
             .room_id
@@ -1371,7 +1371,7 @@ async fn apply_room_info(
         // 上一场刚自然结束、平台还显示在播时也先等一等（S2/S3）。
         if room.auto_record
             && !room.monitor_paused
-            && auto_record_allowed(&room, &info.room_name)
+            && auto_record_allowed(room, &info.room_name)
             && !recorder.is_recording(&room.id)
             && !recorder.auto_suppressed(&room.id, info.started_at)
             && !recorder.auto_blocked(&room.id, info.started_at)

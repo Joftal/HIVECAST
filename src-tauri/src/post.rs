@@ -750,11 +750,10 @@ fn parse_progress(line: &str, duration_ms: Option<u64>) -> Option<i64> {
     } else if let Some(raw) = line.strip_prefix("out_time_ms=") {
         // ffmpeg 的 out_time_ms 实际也是微秒，历史命名遗留。
         raw.trim().parse::<i64>().ok()?
-    } else if let Some(raw) = line.split("time=").nth(1) {
+    } else {
+        let raw = line.split("time=").nth(1)?;
         let stamp = raw.split_whitespace().next()?.trim();
         parse_timestamp_ms(stamp)? * 1000
-    } else {
-        return None;
     };
     if micros <= 0 {
         return None;
@@ -860,7 +859,7 @@ pub fn explain_failure(label: &str, stderr: &str, code: Option<i32>) -> String {
         .collect::<Vec<_>>()
         .join(" | ");
     if !detail.is_empty() {
-        message.push_str("；");
+        message.push('；');
         message.push_str(&detail.chars().take(300).collect::<String>());
     }
     message
@@ -1270,7 +1269,7 @@ pub fn trash(path: &Path) -> Result<(), String> {
         let body = format!(
             "[Trash Info]\nPath={}\nDeletionDate={}\n",
             url_encode_path(&absolute),
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
+            crate::clock::format_now_local("%Y-%m-%dT%H:%M:%S")
         );
         let info_path = info.join(format!("{name}.trashinfo"));
         std::fs::write(&info_path, body).map_err(|err| format!("写回收站信息失败：{err}"))?;

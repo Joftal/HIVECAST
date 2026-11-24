@@ -279,7 +279,7 @@ pub fn build(
         .map(|draft| finish_run(draft, now))
         .collect();
 
-    all_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    all_runs.sort_by_key(|run| std::cmp::Reverse(run.started_at));
 
     // 时间线不再随首屏一次性读取：1000 场历史会把 task_event 全部拉进内存，
     // 还会让一个超长任务挤掉其它 Run 的事件。详情抽屉打开时用
@@ -926,10 +926,8 @@ fn build_stages(
         "pending"
     } else if member_post_done {
         normal_commit
-    } else if post_state == "skipped" && all_ended {
-        normal_commit
-    } else if (abnormal_abort || interrupted_abort) && all_ended {
-        // 异常中断的场次不会再有正常的后处理/入库，直接给它最终态。
+    } else if all_ended && (post_state == "skipped" || abnormal_abort || interrupted_abort) {
+        // 跳过后处理或异常中断的场次不会再有正常入库，直接给它最终态。
         normal_commit
     } else if post_state == "active"
         && post_tasks.iter().any(|task| {
@@ -1112,6 +1110,8 @@ fn incident_task(run: &RunView) -> Option<&TaskView> {
         })
 }
 
+// 聚合入口需要同时拿到历史、会话、房间、监控状态与凭据。
+#[allow(clippy::too_many_arguments)]
 fn build_incidents(
     history: &[RunView],
     sessions: &[RecordSession],

@@ -636,7 +636,7 @@ pub async fn rooms_import(
         }
         if is_bilibili {
             if let Some(alias) = state.db.find_room_by_uid(platform, uid)? {
-                if known.as_ref().map_or(true, |room| room.id != alias.id) {
+                if known.as_ref().is_none_or(|room| room.id != alias.id) {
                     match known.take() {
                         None => {
                             state.db.rekey_room(&alias.id, room_id, &canonical_url)?;
@@ -1079,6 +1079,8 @@ pub async fn room_set_quality(
 }
 
 /// 单房间规则/备注：一次写回，前端保存按钮触发。
+// 前端一次提交完整规则表，保持扁平参数与 IPC 形状一致。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn room_set_rules(
     app: AppHandle,
@@ -1408,7 +1410,7 @@ fn session_file(state: &AppState, session_id: &str) -> Result<RecordSession, App
         .ok_or_else(|| AppError::Internal("录像不存在".into()))
 }
 
-fn file_label(path: &PathBuf) -> String {
+fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
@@ -1715,7 +1717,7 @@ pub async fn room_merge_sessions(
         .get_room(&room_id)?
         .map(|room| room.title)
         .filter(|title| !title.trim().is_empty())
-        .or_else(|| files.first().map(file_label))
+        .or_else(|| files.first().map(|path| file_label(path)))
         .unwrap_or_else(|| room_id.clone());
     let job = state.jobs.begin("merge", title, None);
     tracing::info!(target: "hivecast_lib::commands", room_id = %room_id, files = files.len(), "开始合并房间录像");
@@ -2691,6 +2693,8 @@ pub async fn huya_refresh_now(
 ///
 /// 顺手把缺缩略图的录像排进后台队列；生成完通过 EVENT_THUMB 回推，
 /// 前端按 sessionId 换封面，不用为了等封面把列表卡住。
+// 筛选参数与前端查询一一对应，拆结构体会改变 IPC 参数形状。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn media_list(
     app: AppHandle,
@@ -3223,7 +3227,6 @@ pub fn task_events_export(
     platform: Option<String>,
     lang: Option<String>,
 ) -> Result<usize, AppError> {
-    use chrono::TimeZone;
     use std::io::Write;
 
     let target = PathBuf::from(path.trim());
@@ -3257,10 +3260,7 @@ pub fn task_events_export(
     writeln!(file, "{}", csv_header(lang.as_deref()))
         .map_err(|err| AppError::User(format!("写入导出文件失败：{err}")))?;
     for hit in &result.hits {
-        let time = chrono::Local
-            .timestamp_opt(hit.at, 0)
-            .single()
-            .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S").to_string())
+        let time = crate::clock::format_local_opt(hit.at, "%Y-%m-%d %H:%M:%S")
             .unwrap_or_else(|| hit.at.to_string());
         writeln!(
             file,

@@ -227,7 +227,7 @@ pub fn value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
         .filter_map(|chunk| chunk.split_once('='))
         .filter(|(key, _)| key.trim() == name)
         .map(|(_, value)| value.trim())
-        .last()
+        .next_back()
 }
 
 /// 去掉指定 Cookie 项（例如换号时清掉旧号的 ac_time_value）。

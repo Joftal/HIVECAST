@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Local};
+use jiff::ZonedDateTime;
 
 /// 默认模板：平台-主播-标题-日期_时间。
 pub const DEFAULT_TEMPLATE: &str = "{platform}-{host}-{title}-{date}_{time}";
@@ -56,9 +56,7 @@ pub fn render(
     strip_emoji: bool,
     max_chars: usize,
 ) -> Result<String, String> {
-    let time = DateTime::from_timestamp(started_at, 0)
-        .unwrap_or_else(chrono::Utc::now)
-        .with_timezone(&Local);
+    let time = crate::clock::local_at(started_at);
     let mut out = String::with_capacity(template.len() + 32);
     let mut chars = template.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -68,7 +66,7 @@ pub fn render(
         }
         let mut name = String::new();
         let mut closed = false;
-        while let Some(next) = chars.next() {
+        for next in chars.by_ref() {
             if next == '}' {
                 closed = true;
                 break;
@@ -102,7 +100,7 @@ pub fn validate(template: &str) -> Result<(), String> {
         }
         let mut name = String::new();
         let mut closed = false;
-        while let Some(next) = chars.next() {
+        for next in chars.by_ref() {
             if next == '}' {
                 closed = true;
                 break;
@@ -119,7 +117,7 @@ pub fn validate(template: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn value_of(name: &str, parts: &NameParts, time: &DateTime<Local>) -> Result<String, String> {
+fn value_of(name: &str, parts: &NameParts, time: &ZonedDateTime) -> Result<String, String> {
     let value = match name {
         "platform" => parts.platform.to_string(),
         "platform_id" => parts.platform_id.to_string(),
@@ -128,15 +126,15 @@ fn value_of(name: &str, parts: &NameParts, time: &DateTime<Local>) -> Result<Str
         "area" => parts.area.to_string(),
         "room_key" => parts.room_key.to_string(),
         "qn" => parts.qn.to_string(),
-        "date" => time.format("%Y-%m-%d").to_string(),
-        "time" => time.format("%H-%M-%S").to_string(),
-        "datetime" => time.format("%Y-%m-%d %H-%M-%S").to_string(),
-        "year" => time.format("%Y").to_string(),
-        "month" => time.format("%m").to_string(),
-        "day" => time.format("%d").to_string(),
-        "hour" => time.format("%H").to_string(),
-        "min" => time.format("%M").to_string(),
-        "sec" => time.format("%S").to_string(),
+        "date" => time.strftime("%Y-%m-%d").to_string(),
+        "time" => time.strftime("%H-%M-%S").to_string(),
+        "datetime" => time.strftime("%Y-%m-%d %H-%M-%S").to_string(),
+        "year" => time.strftime("%Y").to_string(),
+        "month" => time.strftime("%m").to_string(),
+        "day" => time.strftime("%d").to_string(),
+        "hour" => time.strftime("%H").to_string(),
+        "min" => time.strftime("%M").to_string(),
+        "sec" => time.strftime("%S").to_string(),
         other => return Err(format!("未知变量 {{{other}}}")),
     };
     Ok(value)
@@ -277,11 +275,9 @@ mod tests {
         let ts = 1_791_366_450;
         let stem = render(DEFAULT_TEMPLATE, &parts(), ts, false, 120).expect("render");
         // 日期时间按本地时区渲染，测试里用同一套换算，避免 CI 换时区就挂。
-        let local = chrono::DateTime::from_timestamp(ts, 0)
-            .expect("时间戳")
-            .with_timezone(&chrono::Local);
-        let date = local.format("%Y-%m-%d").to_string();
-        let time = local.format("%H-%M-%S").to_string();
+        let local = crate::clock::local_at(ts);
+        let date = local.strftime("%Y-%m-%d").to_string();
+        let time = local.strftime("%H-%M-%S").to_string();
         assert_eq!(
             stem,
             format!("哔哩哔哩-老实憨厚的笑笑-今晚打排位 🎮-{date}_{time}")

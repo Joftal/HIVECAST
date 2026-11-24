@@ -148,13 +148,12 @@ fn matching_enum_values(
             .iter()
             .find_map(|(en_raw, label)| (*en_raw == *raw).then_some(*label))
             .unwrap_or(raw);
-        if raw.to_lowercase().contains(&needle)
+        if (raw.to_lowercase().contains(&needle)
             || zh_label.contains(&needle)
-            || en_label.to_lowercase().contains(&needle)
+            || en_label.to_lowercase().contains(&needle))
+            && !values.contains(raw)
         {
-            if !values.contains(raw) {
-                values.push(*raw);
-            }
+            values.push(*raw);
         }
     }
     values

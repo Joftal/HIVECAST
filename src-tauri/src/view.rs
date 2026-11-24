@@ -6,7 +6,7 @@
 //! - 每次（重）启动都用新的 session 目录，前端拿新 URL 重挂 hls，旧目录立刻删除。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -624,9 +624,8 @@ impl ViewManager {
                             let wait = backoff(attempts);
                             {
                                 let mut state = handle.lock();
-                                state.retry_at = Some(
-                                    chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64,
-                                );
+                                state.retry_at =
+                                    Some(crate::clock::now_ms() + wait.as_millis() as i64);
                             }
                             self.emit(&app);
                             // 丢掉地址缓存，重连时拿一条新线路。
@@ -666,8 +665,7 @@ impl ViewManager {
                     let wait = backoff(attempts);
                     {
                         let mut state = handle.lock();
-                        state.retry_at =
-                            Some(chrono::Utc::now().timestamp_millis() + wait.as_millis() as i64);
+                        state.retry_at = Some(crate::clock::now_ms() + wait.as_millis() as i64);
                     }
                     self.emit(&app);
                     broker.invalidate_address(&room_ref(&room));
@@ -681,6 +679,8 @@ impl ViewManager {
         tracing::debug!(slot, "观看监督循环退出");
     }
 
+    // 启动参数来自槽位与房间快照，显式传参比临时结构体更清楚。
+    #[allow(clippy::too_many_arguments)]
     async fn start_once(
         &self,
         app: &AppHandle,
@@ -836,7 +836,7 @@ impl ViewManager {
         }
     }
 
-    async fn wait_ready(&self, handle: &Arc<Slot>, dir: &PathBuf, generation: u64) -> Ready {
+    async fn wait_ready(&self, handle: &Arc<Slot>, dir: &Path, generation: u64) -> Ready {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             {
@@ -925,7 +925,7 @@ enum Ready {
     Timeout,
 }
 
-async fn playlist_ready(dir: &PathBuf) -> bool {
+async fn playlist_ready(dir: &Path) -> bool {
     let Ok(text) = tokio::fs::read_to_string(dir.join("index.m3u8")).await else {
         return false;
     };

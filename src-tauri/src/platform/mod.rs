@@ -241,7 +241,7 @@ impl PlatformError {
     pub fn is_risk_blocked(&self) -> bool {
         match self {
             PlatformError::Upstream { code, message } => {
-                matches!(*code, 10011 | 10012 | 10013) || {
+                matches!(*code, 10011..=10013) || {
                     let lower = message.to_ascii_lowercase();
                     lower.contains("blocked")
                         || message.contains("风控")
@@ -250,70 +250,6 @@ impl PlatformError {
             }
             _ => false,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{resolve_input, PlatformError};
-
-    #[test]
-    fn rate_limited_only_matches_explicit_platform_requests() {
-        assert!(PlatformError::Throttled { retry_after: 30 }.is_rate_limited());
-        assert!(PlatformError::Upstream {
-            code: -352,
-            message: "risk control".into()
-        }
-        .is_rate_limited());
-        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
-        assert!(!PlatformError::Parse("bad json".into()).is_rate_limited());
-        assert!(!PlatformError::RoomNotFound("42".into()).is_rate_limited());
-    }
-
-    #[test]
-    fn auth_expiry_is_separate_from_risk_blocking() {
-        for (code, message) in [
-            (8, "not login"),
-            (-101, "账号未登录"),
-            (-1, "未登录"),
-            (905, ""),
-        ] {
-            let err = PlatformError::Upstream {
-                code,
-                message: message.into(),
-            };
-            assert!(err.is_auth_expired(), "code {code} 应判登录态失效");
-            assert!(!err.is_risk_blocked(), "code {code} 不是风控");
-        }
-
-        let blocked = PlatformError::Upstream {
-            code: 10011,
-            message: "blocked".into(),
-        };
-        assert!(blocked.is_risk_blocked());
-        assert!(!blocked.is_auth_expired());
-
-        let server = PlatformError::Upstream {
-            code: 500,
-            message: "server error".into(),
-        };
-        assert!(!server.is_auth_expired());
-        assert!(!server.is_risk_blocked());
-        assert!(!PlatformError::Network("timeout".into()).is_auth_expired());
-    }
-
-    #[test]
-    fn generic_network_errors_still_back_off_per_room() {
-        assert!(PlatformError::Network("timeout".into()).is_throttle());
-        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
-    }
-
-    #[test]
-    fn explicit_platform_prefix_is_not_treated_as_url() {
-        let room = resolve_input("douyu:9999").expect("显式斗鱼前缀应可解析");
-        assert_eq!(room.platform, "douyu");
-        assert_eq!(room.room_key, "9999");
-        assert_eq!(room.canonical_url, "https://www.douyu.com/9999");
     }
 }
 
@@ -392,4 +328,68 @@ pub fn adapter_for(platform: &str) -> Result<Arc<dyn PlatformAdapter>, PlatformE
         .find(|adapter| adapter.id() == platform)
         .cloned()
         .ok_or_else(|| PlatformError::Unsupported(platform.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_input, PlatformError};
+
+    #[test]
+    fn rate_limited_only_matches_explicit_platform_requests() {
+        assert!(PlatformError::Throttled { retry_after: 30 }.is_rate_limited());
+        assert!(PlatformError::Upstream {
+            code: -352,
+            message: "risk control".into()
+        }
+        .is_rate_limited());
+        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
+        assert!(!PlatformError::Parse("bad json".into()).is_rate_limited());
+        assert!(!PlatformError::RoomNotFound("42".into()).is_rate_limited());
+    }
+
+    #[test]
+    fn auth_expiry_is_separate_from_risk_blocking() {
+        for (code, message) in [
+            (8, "not login"),
+            (-101, "账号未登录"),
+            (-1, "未登录"),
+            (905, ""),
+        ] {
+            let err = PlatformError::Upstream {
+                code,
+                message: message.into(),
+            };
+            assert!(err.is_auth_expired(), "code {code} 应判登录态失效");
+            assert!(!err.is_risk_blocked(), "code {code} 不是风控");
+        }
+
+        let blocked = PlatformError::Upstream {
+            code: 10011,
+            message: "blocked".into(),
+        };
+        assert!(blocked.is_risk_blocked());
+        assert!(!blocked.is_auth_expired());
+
+        let server = PlatformError::Upstream {
+            code: 500,
+            message: "server error".into(),
+        };
+        assert!(!server.is_auth_expired());
+        assert!(!server.is_risk_blocked());
+        assert!(!PlatformError::Network("timeout".into()).is_auth_expired());
+    }
+
+    #[test]
+    fn generic_network_errors_still_back_off_per_room() {
+        assert!(PlatformError::Network("timeout".into()).is_throttle());
+        assert!(!PlatformError::Network("timeout".into()).is_rate_limited());
+    }
+
+    #[test]
+    fn explicit_platform_prefix_is_not_treated_as_url() {
+        let room = resolve_input("douyu:9999").expect("显式斗鱼前缀应可解析");
+        assert_eq!(room.platform, "douyu");
+        assert_eq!(room.room_key, "9999");
+        assert_eq!(room.canonical_url, "https://www.douyu.com/9999");
+    }
 }

@@ -192,7 +192,7 @@ pub async fn merge(
         ensure_file(src)?;
     }
     let first = &sources[0];
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let stamp = crate::clock::format_now_local("%Y%m%d-%H%M%S");
     let out = first.with_file_name(format!("合并-{stamp}.mp4"));
     let list_path = out.with_extension("concat.txt");
     let mut list = String::new();

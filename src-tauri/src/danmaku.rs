@@ -409,7 +409,9 @@ impl RecordWriter {
         match writeln!(file, "{line}") {
             Ok(()) => {
                 inner.count += 1;
-                if inner.count % 50 == 0 || inner.flushed_at.elapsed() >= Duration::from_secs(1) {
+                if inner.count.is_multiple_of(50)
+                    || inner.flushed_at.elapsed() >= Duration::from_secs(1)
+                {
                     if let Err(err) = file.flush() {
                         inner.write_errors += 1;
                         tracing::warn!(
@@ -425,7 +427,7 @@ impl RecordWriter {
             Err(err) => {
                 let first = inner.write_errors == 0;
                 inner.write_errors += 1;
-                if first || inner.write_errors % 100 == 0 {
+                if first || inner.write_errors.is_multiple_of(100) {
                     tracing::warn!(
                         file = %inner.path.display(),
                         %err,
@@ -643,7 +645,7 @@ async fn sign_url(raw: &str) -> Result<String, String> {
             (key.into_owned(), cleaned)
         })
         .collect();
-    pairs.push(("wts".into(), chrono::Utc::now().timestamp().to_string()));
+    pairs.push(("wts".into(), crate::clock::now_secs().to_string()));
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
     let query = pairs
@@ -1110,9 +1112,9 @@ async fn try_connect(url: &str) -> Result<WsStream, String> {
     }
     let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
-        .map_err(|err| format!("{} → {err}", crate::platform::http::redact_url(&url)))?;
+        .map_err(|err| format!("{} → {err}", crate::platform::http::redact_url(url)))?;
     tracing::debug!(
-        url = %crate::platform::http::redact_url(&url),
+        url = %crate::platform::http::redact_url(url),
         "弹幕 WS 已连接"
     );
     Ok(ws)
@@ -1391,7 +1393,7 @@ fn parse_message(body: &[u8]) -> Option<DanmakuMessage> {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let color = info
-                .get(0)
+                .first()
                 .and_then(|item| item.get(3))
                 .and_then(Value::as_u64)
                 .unwrap_or(0xFFFFFF) as u32;
@@ -1825,7 +1827,7 @@ fn douyu_drain(buffer: &mut Vec<u8>) -> Vec<String> {
             break;
         }
         let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if len < 9 || len > 1024 * 1024 {
+        if !(9..=1024 * 1024).contains(&len) {
             // 帧头不可信说明流已经错位，交给上层断开重连。
             buffer.clear();
             break;
@@ -2709,7 +2711,7 @@ struct HuyaDeduper {
 impl HuyaDeduper {
     fn allow(&mut self, event: &HuyaEvent, now: Instant) -> bool {
         self.checks += 1;
-        if self.checks % 256 == 0 {
+        if self.checks.is_multiple_of(256) {
             self.seen
                 .retain(|_, at| now.saturating_duration_since(*at) < HUYA_DUP_ID_WINDOW);
         }

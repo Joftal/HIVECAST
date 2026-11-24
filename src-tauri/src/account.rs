@@ -742,7 +742,7 @@ async fn refresh_bilibili_cookie_inner(
         return Ok(RefreshOutcome::Fresh);
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::clock::now_ms();
     let path = correspond_path(now_ms)?;
     let correspond_url = format!("https://www.bilibili.com/correspond/1/{path}");
     // 参考公开实现：correspond 与刷新请求用随机 buvid3，避免设备指纹干扰。

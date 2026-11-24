@@ -1,0 +1,15 @@
+# cargo-audit 配置：只豁免无法由本项目修复的上游告警。
+# 保留逐条原因，新增豁免必须同时写明“为什么不能升级/迁移”。
+[advisories]
+ignore = [
+  # serde_with 3.24.0 的可选 chrono_0_4 依赖仍会写入 Cargo.lock，
+  # 但没有任何 feature 启用它，cargo tree -i chrono 无依赖边；本项目已从 chrono 迁移到 jiff。
+  "RUSTSEC-2026-0543",
+  # Tauri 2.12.7 依赖 gtk 0.18，gtk 0.18 依赖 glib 0.18.5；上游尚未发布兼容 gtk 0.18 的修复。
+  "RUSTSEC-2024-0429",
+  # 以下三项来自 Linux GTK/zbus 链路；zbus_names/zvariant 已被 zbus 合并，当前无 fixed upgrade。
+  "RUSTSEC-2024-0370",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+]

@@ -108,7 +108,7 @@ fn redact_path_segment(segment: &str) -> String {
             };
             // monkey= 里的 key= 不是参数名；要求前面不是字母或数字。
             let boundary = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphanumeric();
-            if boundary && hit.map_or(true, |(best, _)| pos < best) {
+            if boundary && hit.is_none_or(|(best, _)| pos < best) {
                 hit = Some((pos, key));
             }
         }
@@ -195,9 +195,9 @@ pub fn redact_url(url: &str) -> String {
 
 fn parse_date(headers: &reqwest::header::HeaderMap) -> Option<i64> {
     let value = headers.get(reqwest::header::DATE)?.to_str().ok()?;
-    chrono::DateTime::parse_from_rfc2822(value)
+    jiff::fmt::rfc2822::parse(value)
         .ok()
-        .map(|date| date.timestamp())
+        .map(|date| date.timestamp().as_second())
 }
 
 async fn send(

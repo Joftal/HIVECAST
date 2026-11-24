@@ -220,7 +220,7 @@ fn page_count(total: u64, page_size: u32) -> u32 {
     if total == 0 || page_size == 0 {
         return 1;
     }
-    ((total + page_size as u64 - 1) / page_size as u64) as u32
+    total.div_ceil(page_size as u64) as u32
 }
 
 fn now_millis() -> u128 {
@@ -614,7 +614,7 @@ impl<'a> Reader<'a> {
             }
             T_INT64 => {
                 let bytes = self.take(8)?;
-                i64::from_be_bytes(bytes.try_into().expect("8 字节")) as i64
+                i64::from_be_bytes(bytes.try_into().expect("8 字节"))
             }
             _ => return Err(protocol_error("期望整数")),
         })
@@ -723,7 +723,7 @@ mod tests {
         rsp.string(0, "");
         rsp.list(1, 1);
         rsp.struct_begin(0);
-        rsp.int64(0, 134_660_9715);
+        rsp.int64(0, 1_346_609_715);
         rsp.int64(1, 1_486_578_378);
         rsp.string(2, "虎牙英雄联盟赛事");
         rsp.string(3, "lpl");

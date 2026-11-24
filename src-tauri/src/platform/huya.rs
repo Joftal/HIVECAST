@@ -303,7 +303,7 @@ impl PlatformAdapter for HuyaAdapter {
             .into_values()
             .map(|(_, _, quality)| quality)
             .collect();
-        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+        qualities.sort_by_key(|quality| std::cmp::Reverse(quality.qn));
 
         Ok(StreamPlan { groups, qualities })
     }
@@ -612,7 +612,7 @@ fn build_stream_url(
     // fm 形如 "DWq8BcJ3h6DJt6TY_$0_$1_$2_$3"，只有前缀参与签名。
     let prefix = template.split('_').next().unwrap_or(template.as_str());
 
-    let timestamp = chrono::Utc::now().timestamp_millis();
+    let timestamp = crate::clock::now_ms();
     // 前端 uid 是随机的，这里用时间戳派生，保证每次请求不同即可。
     let uid = 12_340_000u64 + (timestamp % 10_000) as u64;
     let convert_uid = (((uid << 8) | (uid >> 24)) & 0xFFFF_FFFF) as u32;
@@ -840,10 +840,7 @@ fn extract_room_key(input: &str) -> Option<String> {
     if !(host == "huya.com" || host.ends_with(".huya.com")) {
         return None;
     }
-    let segment = url
-        .path_segments()?
-        .filter(|part| !part.is_empty())
-        .next_back()?;
+    let segment = url.path_segments()?.rfind(|part| !part.is_empty())?;
     is_room_token(segment).then(|| segment.to_string())
 }
 

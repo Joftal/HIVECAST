@@ -869,7 +869,7 @@ enum RefreshFailure {
 fn classify_return(value: &Value) -> Result<(), RefreshFailure> {
     match return_code(value) {
         0 => Ok(()),
-        40002 | 40003 | 40004 | 40005 => Err(RefreshFailure::Invalid),
+        40002..=40005 => Err(RefreshFailure::Invalid),
         _ => Err(RefreshFailure::Transient),
     }
 }

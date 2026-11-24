@@ -381,7 +381,7 @@ async fn teardown(server: &StreamServer, mut active: Active) {
 }
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    crate::clock::now_ms()
 }
 
 #[cfg(test)]

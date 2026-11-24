@@ -143,12 +143,7 @@ impl LiveTime {
     fn unix(&self) -> Option<i64> {
         match self {
             LiveTime::Number(value) => (*value > 0).then_some(*value),
-            LiveTime::Text(text) => {
-                let naive =
-                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()?;
-                let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
-                Some(naive.and_local_timezone(offset).single()?.timestamp())
-            }
+            LiveTime::Text(text) => crate::clock::parse_cn_naive(text),
         }
     }
 }
@@ -575,7 +570,7 @@ fn build_qualities(
             codec,
         });
     }
-    qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+    qualities.sort_by_key(|quality| std::cmp::Reverse(quality.qn));
     qualities
 }
 
@@ -813,8 +808,7 @@ fn extract_room_number(input: &str) -> Option<String> {
     }
     url.path_segments()?
         .filter(|segment| !segment.is_empty())
-        .filter(|segment| segment.chars().all(|ch| ch.is_ascii_digit()))
-        .next_back()
+        .rfind(|segment| segment.chars().all(|ch| ch.is_ascii_digit()))
         .map(|segment| segment.to_string())
 }
 

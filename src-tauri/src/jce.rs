@@ -161,14 +161,14 @@ pub fn get_bytes(fields: &[(u8, Value)], tag: u8) -> Option<&[u8]> {
     })
 }
 
-pub fn get_struct<'a>(fields: &'a [(u8, Value)], tag: u8) -> Option<&'a [(u8, Value)]> {
+pub fn get_struct(fields: &[(u8, Value)], tag: u8) -> Option<&[(u8, Value)]> {
     fields.iter().find_map(|(t, value)| match (t, value) {
         (t, Value::Struct(inner)) if *t == tag => Some(inner.as_slice()),
         _ => None,
     })
 }
 
-pub fn get_list<'a>(fields: &'a [(u8, Value)], tag: u8) -> Option<&'a [Value]> {
+pub fn get_list(fields: &[(u8, Value)], tag: u8) -> Option<&[Value]> {
     fields.iter().find_map(|(t, value)| match (t, value) {
         (t, Value::List(items)) if *t == tag => Some(items.as_slice()),
         _ => None,

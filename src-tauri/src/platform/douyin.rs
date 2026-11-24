@@ -601,10 +601,7 @@ fn extract_room_key(input: &str) -> Option<String> {
     if !(host == "douyin.com" || host.ends_with(".douyin.com")) {
         return None;
     }
-    let segment = url
-        .path_segments()?
-        .filter(|part| !part.is_empty())
-        .next_back()?;
+    let segment = url.path_segments()?.rfind(|part| !part.is_empty())?;
     allowed_rid(segment).then(|| segment.to_string())
 }
 
@@ -727,7 +724,7 @@ fn collect_qualities(stream: &StreamUrl) -> Vec<Quality> {
                         bitrate_kbps: (params.vbitrate.max(0) / 1000) as u32,
                         width,
                         height,
-                        fps: (params.fps > 0.0).then(|| params.fps as f32),
+                        fps: (params.fps > 0.0).then_some(params.fps as f32),
                         codec: parse_codec(&params.v_codec),
                         flv: main.flv.filter(|url| !url.is_empty()),
                         hls: main.hls.filter(|url| !url.is_empty()),
@@ -799,7 +796,7 @@ fn quality_infos(qualities: &[Quality]) -> Vec<QualityInfo> {
         }
     }
     let mut infos: Vec<QualityInfo> = map.into_values().map(|(_, info)| info).collect();
-    infos.sort_by(|a, b| b.qn.cmp(&a.qn));
+    infos.sort_by_key(|info| std::cmp::Reverse(info.qn));
     infos
 }
 

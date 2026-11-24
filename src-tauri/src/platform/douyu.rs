@@ -253,7 +253,7 @@ impl PlatformAdapter for DouyuAdapter {
         let rate = rate_for_qn(qn);
 
         let enc = fetch_encryption(&self.did, &referer).await?;
-        let ts = enc.date.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let ts = enc.date.unwrap_or_else(crate::clock::now_secs);
         let enc_data = enc.data.ok_or_else(|| PlatformError::Upstream {
             code: enc.error,
             message: non_empty(&enc.msg, "拿不到斗鱼加密参数"),
@@ -439,7 +439,7 @@ impl PlatformAdapter for DouyuAdapter {
             .into_values()
             .map(|(_, quality)| quality)
             .collect();
-        qualities.sort_by(|a, b| b.qn.cmp(&a.qn));
+        qualities.sort_by_key(|quality| std::cmp::Reverse(quality.qn));
 
         Ok(StreamPlan { groups, qualities })
     }
@@ -623,10 +623,7 @@ fn extract_room_key(input: &str) -> Option<String> {
     if !(url.host_str()? == "douyu.com" || url.host_str()?.ends_with(".douyu.com")) {
         return None;
     }
-    let segment = url
-        .path_segments()?
-        .filter(|part| !part.is_empty())
-        .next_back()?;
+    let segment = url.path_segments()?.rfind(|part| !part.is_empty())?;
     is_room_token(segment).then(|| segment.to_string())
 }
 

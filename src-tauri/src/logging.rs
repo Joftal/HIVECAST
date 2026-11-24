@@ -1,7 +1,7 @@
 //! 日志内核：本地日期分文件、单日分段、保留清理、运行中目录热切换。
 //!
 //! 不用 tracing-appender 的 Rotation::DAILY：它按 UTC 切日，东八区会在早上 8 点
-//! 换文件。这里用 chrono::Local 自己算日期，写入走独立线程，日志调用不会卡在磁盘 IO 上。
+//! 换文件。这里用 jiff 的系统本地日期自己算日期，写入走独立线程，日志调用不会卡在磁盘 IO 上。
 
 use std::collections::VecDeque;
 use std::fmt::Write as FmtWrite;
@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use hivecast_ipc::LogStatus;
+use jiff::civil::Date;
 use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::format::{DefaultVisitor, FormatFields, Writer};
 use tracing_subscriber::fmt::time::FormatTime;
@@ -28,7 +28,11 @@ struct LocalTime;
 
 impl FormatTime for LocalTime {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f %:z"))
+        write!(
+            w,
+            "{}",
+            jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S%.3f %:z")
+        )
     }
 }
 
@@ -56,7 +60,7 @@ enum LogMsg {
 
 struct WriterState {
     dir: Option<PathBuf>,
-    date: Option<NaiveDate>,
+    date: Option<Date>,
     segment: u32,
     file: Option<File>,
     written: u64,
@@ -143,7 +147,7 @@ impl WriterState {
         if self.dir.is_none() {
             return Err(io::Error::new(io::ErrorKind::NotFound, "日志目录尚未就绪"));
         }
-        let today = Local::now().date_naive();
+        let today = jiff::ZonedDateTime::now().date();
         // 文件已打开也要跨天检查：只看 file.is_some() 会让日志从零点一直写进昨天那个文件。
         if self.file.is_some() {
             if self.date == Some(today) {
@@ -196,7 +200,7 @@ impl WriterState {
             }
             segment = segment
                 .checked_add(1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "当天日志分段编号已耗尽"))?;
+                .ok_or_else(|| io::Error::other("当天日志分段编号已耗尽"))?;
         }
     }
 
@@ -204,7 +208,7 @@ impl WriterState {
         let next = self
             .segment
             .checked_add(1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "当天日志分段编号已耗尽"))?;
+            .ok_or_else(|| io::Error::other("当天日志分段编号已耗尽"))?;
         self.close();
         self.segment = next;
         self.open_from(next)
@@ -781,8 +785,13 @@ pub fn take_fallback() -> Option<(String, String)> {
         .and_then(|state| state.fallback.lock().ok().and_then(|mut one| one.take()))
 }
 
-fn segment_path(dir: &Path, date: NaiveDate, segment: u32) -> PathBuf {
-    let stem = format!("hivecast-{}", date.format("%Y-%m-%d"));
+fn days_before(date: Date, days: i64) -> Date {
+    date.checked_sub(jiff::Span::new().days(days))
+        .unwrap_or(date)
+}
+
+fn segment_path(dir: &Path, date: Date, segment: u32) -> PathBuf {
+    let stem = format!("hivecast-{}", date.strftime("%Y-%m-%d"));
     if segment == 0 {
         dir.join(format!("{stem}.log"))
     } else {
@@ -790,7 +799,7 @@ fn segment_path(dir: &Path, date: NaiveDate, segment: u32) -> PathBuf {
     }
 }
 
-fn parse_log_date(name: &str) -> Option<NaiveDate> {
+fn parse_log_date(name: &str) -> Option<Date> {
     let rest = name.strip_prefix("hivecast-")?.strip_suffix(".log")?;
     let (date, segment) = match rest.split_once('.') {
         Some((date, segment)) => (date, Some(segment)),
@@ -804,7 +813,7 @@ fn parse_log_date(name: &str) -> Option<NaiveDate> {
             return None;
         }
     }
-    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
+    Date::strptime("%Y-%m-%d", date).ok()
 }
 
 fn scan_dir(dir: &Path) -> (u64, u64) {
@@ -835,8 +844,8 @@ fn cleanup_dir(dir: &Path, retention_days: u32, current: Option<&Path>) -> io::R
     if retention_days == 0 {
         return Ok(());
     }
-    let today = Local::now().date_naive();
-    let keep_from = today - ChronoDuration::days((retention_days.saturating_sub(1)) as i64);
+    let today = jiff::ZonedDateTime::now().date();
+    let keep_from = days_before(today, (retention_days.saturating_sub(1)) as i64);
     let entries = std::fs::read_dir(dir)?;
     let mut first_error = None;
     for entry in entries {
@@ -917,9 +926,9 @@ mod tests {
     #[test]
     fn cleanup_keeps_today_and_retention_window() {
         let dir = temp_dir("cleanup");
-        let today = Local::now().date_naive();
-        let old = today - ChronoDuration::days(8);
-        let keep = today - ChronoDuration::days(3);
+        let today = jiff::ZonedDateTime::now().date();
+        let old = days_before(today, 8);
+        let keep = days_before(today, 3);
         std::fs::write(segment_path(&dir, old, 0), b"old").unwrap();
         std::fs::write(segment_path(&dir, old, 1), b"old").unwrap();
         std::fs::write(segment_path(&dir, keep, 0), b"keep").unwrap();
@@ -935,7 +944,7 @@ mod tests {
     #[test]
     fn cleanup_zero_keeps_everything() {
         let dir = temp_dir("keep");
-        let old = Local::now().date_naive() - ChronoDuration::days(30);
+        let old = days_before(jiff::ZonedDateTime::now().date(), 30);
         std::fs::write(segment_path(&dir, old, 0), b"old").unwrap();
         cleanup_dir(&dir, 0, None).unwrap();
         assert!(segment_path(&dir, old, 0).exists());
@@ -953,9 +962,9 @@ mod tests {
             assert_eq!(inner.pending.len(), 1);
         }
         state.set_dir(&dir).unwrap();
-        assert!(segment_path(&dir, Local::now().date_naive(), 0).exists());
+        assert!(segment_path(&dir, jiff::ZonedDateTime::now().date(), 0).exists());
         assert!(
-            std::fs::read_to_string(segment_path(&dir, Local::now().date_naive(), 0))
+            std::fs::read_to_string(segment_path(&dir, jiff::ZonedDateTime::now().date(), 0))
                 .unwrap()
                 .contains("before settings")
         );
@@ -967,7 +976,7 @@ mod tests {
         let dir = temp_dir("rollover");
         let state = LogState::new(dir.clone());
         state.set_dir(&dir).unwrap();
-        let yesterday = Local::now().date_naive() - ChronoDuration::days(1);
+        let yesterday = days_before(jiff::ZonedDateTime::now().date(), 1);
         let old_path = segment_path(&dir, yesterday, 0);
         let old_file = OpenOptions::new()
             .create(true)
@@ -982,7 +991,7 @@ mod tests {
             inner.current = Some(old_path.clone());
         }
         state.write_chunk(b"new day\n");
-        let today_path = segment_path(&dir, Local::now().date_naive(), 0);
+        let today_path = segment_path(&dir, jiff::ZonedDateTime::now().date(), 0);
         assert!(today_path.exists(), "跨天后要新开今天的文件");
         assert!(std::fs::read_to_string(&today_path)
             .unwrap()
@@ -990,7 +999,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn sparse_segment(dir: &Path, date: NaiveDate, segment: u32, len: u64) -> PathBuf {
+    fn sparse_segment(dir: &Path, date: Date, segment: u32, len: u64) -> PathBuf {
         let path = segment_path(dir, date, segment);
         let file = File::create(&path).unwrap();
         file.set_len(len).unwrap();
@@ -1001,7 +1010,7 @@ mod tests {
     fn full_segments_continue_into_a_new_segment_without_fallback() {
         let custom = temp_dir("full-custom");
         let fallback = temp_dir("full-default");
-        let today = Local::now().date_naive();
+        let today = jiff::ZonedDateTime::now().date();
         let existing = 4;
         for segment in 0..existing {
             sparse_segment(&custom, today, segment, SEGMENT_LIMIT);
@@ -1037,7 +1046,7 @@ mod tests {
     #[test]
     fn writer_rotates_when_the_next_line_would_exceed_the_limit() {
         let dir = temp_dir("rotate");
-        let today = Local::now().date_naive();
+        let today = jiff::ZonedDateTime::now().date();
         let first = sparse_segment(&dir, today, 0, SEGMENT_LIMIT - 10);
         let state = LogState::new(dir.clone());
         state.set_dir(&dir).unwrap();
@@ -1059,7 +1068,7 @@ mod tests {
     #[test]
     fn writer_appends_to_an_existing_file_after_restart() {
         let dir = temp_dir("append");
-        let today = Local::now().date_naive();
+        let today = jiff::ZonedDateTime::now().date();
         let path = segment_path(&dir, today, 0);
         std::fs::write(&path, b"first process\n").unwrap();
         let state = LogState::new(dir.clone());
@@ -1088,7 +1097,7 @@ mod tests {
         assert_eq!(state.dropped.load(Ordering::Relaxed), 1);
         state.set_dir(&dir).unwrap();
         assert_eq!(
-            std::fs::metadata(segment_path(&dir, Local::now().date_naive(), 0))
+            std::fs::metadata(segment_path(&dir, jiff::ZonedDateTime::now().date(), 0))
                 .unwrap()
                 .len(),
             5 * 100 * 1024
@@ -1104,7 +1113,7 @@ mod tests {
         state.write_chunk(b"startup line\n");
 
         // 让自定义目录里的当天日志文件被一个同名目录占住，open 必然失败。
-        let blocked = segment_path(&custom, Local::now().date_naive(), 0);
+        let blocked = segment_path(&custom, jiff::ZonedDateTime::now().date(), 0);
         std::fs::create_dir_all(&blocked).unwrap();
         assert!(state.set_dir(&custom).is_err());
         {
@@ -1115,7 +1124,7 @@ mod tests {
 
         // 与 apply_settings 的回落路径一致：换到默认目录后继续搬运。
         state.set_dir(&default).unwrap();
-        let path = segment_path(&default, Local::now().date_naive(), 0);
+        let path = segment_path(&default, jiff::ZonedDateTime::now().date(), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "startup line\n");
         assert_eq!(state.dropped.load(Ordering::Relaxed), 0);
         assert!(state.inner.lock().unwrap().pending.is_empty());
@@ -1133,7 +1142,7 @@ mod tests {
         std::fs::remove_dir_all(&custom).unwrap();
         state.write_chunk(b"fallback line\n");
 
-        let path = segment_path(&default, Local::now().date_naive(), 0);
+        let path = segment_path(&default, jiff::ZonedDateTime::now().date(), 0);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("fallback line"));
@@ -1160,7 +1169,7 @@ mod tests {
         }
         state.write_chunk(b"after delete\n");
 
-        let path = segment_path(&default, Local::now().date_naive(), 0);
+        let path = segment_path(&default, jiff::ZonedDateTime::now().date(), 0);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("after delete"));
@@ -1182,7 +1191,7 @@ mod tests {
         }
         state.write_chunk(b"after delete\n");
 
-        let path = segment_path(&dir, Local::now().date_naive(), 0);
+        let path = segment_path(&dir, jiff::ZonedDateTime::now().date(), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after delete\n");
         assert_eq!(state.dropped.load(Ordering::Relaxed), 0);
         assert!(state.fallback.lock().unwrap().is_none());
@@ -1196,7 +1205,7 @@ mod tests {
         let state = LogState::new(default.clone());
         state.set_dir(&dir).unwrap();
         state.write_chunk(b"before delete\n");
-        let path = segment_path(&dir, Local::now().date_naive(), 0);
+        let path = segment_path(&dir, jiff::ZonedDateTime::now().date(), 0);
         std::fs::remove_file(&path).unwrap();
         {
             let mut inner = state.inner.lock().unwrap();
@@ -1207,7 +1216,7 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after delete\n");
         assert!(state.fallback.lock().unwrap().is_none());
-        assert!(!segment_path(&default, Local::now().date_naive(), 0).exists());
+        assert!(!segment_path(&default, jiff::ZonedDateTime::now().date(), 0).exists());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&default);
     }
@@ -1217,7 +1226,7 @@ mod tests {
     fn log_files_are_owner_only_and_existing_files_are_tightened() {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("mode");
-        let path = segment_path(&dir, Local::now().date_naive(), 0);
+        let path = segment_path(&dir, jiff::ZonedDateTime::now().date(), 0);
         std::fs::write(&path, b"old\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let state = LogState::new(dir.clone());
@@ -1231,9 +1240,9 @@ mod tests {
     #[test]
     fn cleanup_uses_an_inclusive_retention_window() {
         let dir = temp_dir("cleanup-boundary");
-        let today = Local::now().date_naive();
-        let drop = today - ChronoDuration::days(7);
-        let keep = today - ChronoDuration::days(6);
+        let today = jiff::ZonedDateTime::now().date();
+        let drop = days_before(today, 7);
+        let keep = days_before(today, 6);
         std::fs::write(segment_path(&dir, drop, 0), b"drop").unwrap();
         std::fs::write(segment_path(&dir, keep, 3), b"keep").unwrap();
         cleanup_dir(&dir, 7, None).unwrap();
@@ -1245,7 +1254,7 @@ mod tests {
     #[test]
     fn cleanup_only_touches_regular_files_with_log_names() {
         let dir = temp_dir("cleanup-shape");
-        let old = Local::now().date_naive() - ChronoDuration::days(30);
+        let old = days_before(jiff::ZonedDateTime::now().date(), 30);
         let real = segment_path(&dir, old, 0);
         std::fs::write(&real, b"old").unwrap();
         std::fs::write(segment_path(&dir, old, 1), b"old").unwrap();

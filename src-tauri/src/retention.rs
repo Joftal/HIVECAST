@@ -159,7 +159,7 @@ fn artifacts(path: &Path) -> Vec<std::path::PathBuf> {
 /// 「删了新的、留下更旧的」这种反直觉结果。
 pub fn select(entries: &[Entry], now: i64, days: u32, max_bytes: u64) -> Vec<String> {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
-    sorted.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    sorted.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
     let cutoff = if days == 0 {
         i64::MIN
     } else {

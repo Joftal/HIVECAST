@@ -1282,6 +1282,8 @@ impl Db {
     }
 
     /// 单房间规则/备注：一次写回，避免每个字段拆成单独命令。
+    // 逐列写回房间规则；拆结构体只会多一层搬运。
+    #[allow(clippy::too_many_arguments)]
     pub fn set_room_rules(
         &self,
         id: &str,
@@ -1401,7 +1403,7 @@ impl Db {
 
         let mut page_args = args;
         page_args.push(SqlValue::Integer(filter.limit.clamp(1, 500) as i64));
-        page_args.push(SqlValue::Integer(filter.offset.max(0) as i64));
+        page_args.push(SqlValue::Integer(filter.offset as i64));
         let sql = format!(
             "SELECT s.id, s.room_id, r.platform, r.title, r.host_name, s.file_path,
                     s.file_size, s.duration_ms, s.started_at, s.status, s.danmaku_count,
@@ -1669,6 +1671,8 @@ impl Db {
     /// 手动转封装成功后把主文件切到派生文件，同时保留源封装母带。
     ///
     /// 只改后处理相关列，不动状态、时长和弹幕：转封装不改录制本身。
+    // 后处理字段逐列更新；保持与 SQL 列一一对应。
+    #[allow(clippy::too_many_arguments)]
     pub fn update_session_post_file(
         &self,
         id: &str,
@@ -2059,7 +2063,7 @@ impl Db {
             }
         }
         // 跨分块合并后仍只保留最新的一页；多取 1 条判断是否还有更早。
-        events.sort_by(|a, b| (b.at, b.id).cmp(&(a.at, a.id)));
+        events.sort_by_key(|event| std::cmp::Reverse((event.at, event.id)));
         let has_more = events.len() > limit;
         events.truncate(limit);
         events.reverse();
@@ -3065,7 +3069,7 @@ fn refresh_room_last_session(conn: &Connection, room_id: &str) -> rusqlite::Resu
 }
 
 pub fn now_ts() -> i64 {
-    chrono::Utc::now().timestamp()
+    crate::clock::now_secs()
 }
 
 const ROOM_SELECT: &str = "SELECT
