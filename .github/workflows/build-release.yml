@@ -112,6 +112,15 @@ jobs:
           pnpm check:docs
           pnpm check:i18n
 
+      - name: Test Rust core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src-tauri
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked --lib
+
       - name: Build macOS app and DMG
         if: runner.os == 'macOS'
         shell: bash
@@ -126,6 +135,23 @@ jobs:
           cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" \
             "release-assets/HIVECAST-v${VERSION}-macOS-arm64.dmg"
 
+      - name: Smoke test macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/HIVECAST.app/Contents/MacOS/HIVECAST"
+          "$app" >/tmp/hivecast-smoke.log 2>&1 &
+          pid=$!
+          sleep 10
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::应用启动后 10 秒内退出"
+            cat /tmp/hivecast-smoke.log
+            exit 1
+          fi
+          kill "$pid"
+          wait "$pid" 2>/dev/null || true
+
       - name: Build Windows NSIS installer
         if: runner.os == 'Windows'
         shell: bash
@@ -138,6 +164,20 @@ jobs:
           installer="$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*.exe' -print -quit)"
           test -n "$installer"
           cp "$installer" "release-assets/HIVECAST-v${VERSION}-Windows-x64-setup.exe"
+
+      - name: Smoke test Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/release/HIVECAST.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) {
+            Write-Error "应用启动后 10 秒内退出，exit=$($p.ExitCode)"
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "smoke ok pid=$($p.Id)"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

@@ -20,22 +20,25 @@ window.addEventListener("unhandledrejection", (event) => {
   logUiError(event.reason, "unhandledrejection");
 });
 
-const lab = import.meta.env.DEV && new URLSearchParams(window.location.search).has("arc-lab");
-const playerLab = import.meta.env.DEV && new URLSearchParams(window.location.search).has("player-lab");
-const ArcLab = React.lazy(() => import("./features/design/ArcLab"));
-const PlayerLab = React.lazy(() => import("./features/design/PlayerLab"));
+// 实验页只在开发构建里存在：用编译期常量包住动态 import，生产包不会
+// 再拆出 ArcLab/PlayerLab chunk（文档 196-23）。
+let Lab: React.LazyExoticComponent<React.ComponentType> | null = null;
+if (import.meta.env.DEV) {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("player-lab")) {
+    Lab = React.lazy(() => import("./features/design/PlayerLab"));
+  } else if (params.has("arc-lab")) {
+    Lab = React.lazy(() => import("./features/design/ArcLab"));
+  }
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ToastStackProvider>
       <ErrorBoundary>
-        {playerLab ? (
+        {Lab ? (
           <React.Suspense fallback={null}>
-            <PlayerLab />
-          </React.Suspense>
-        ) : lab ? (
-          <React.Suspense fallback={null}>
-            <ArcLab />
+            <Lab />
           </React.Suspense>
         ) : (
           <App />

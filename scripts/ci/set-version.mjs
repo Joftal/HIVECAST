@@ -43,16 +43,18 @@ const packageAt = cargo.indexOf("[package]");
 if (packageAt < 0) throw new Error("Cargo.toml 缺少 [package]");
 const before = cargo.slice(0, packageAt);
 const after = cargo.slice(packageAt);
-const nextAfter = after.replace(/^version = "[^"]*"$/m, `version = "${version}"`);
-if (nextAfter === after) throw new Error("Cargo.toml [package] 缺少 version");
-writeFileSync(cargoPath, before + nextAfter);
+// 只看 [package] 段，别改到依赖里的 version；同版本重跑也必须成功。
+const nextSection = after.indexOf("\n[", 1);
+const packageBody = nextSection < 0 ? after : after.slice(0, nextSection);
+const versionLine = /^version = "[^"]*"$/m;
+if (!versionLine.test(packageBody)) throw new Error("Cargo.toml [package] 缺少 version");
+const nextBody = packageBody.replace(versionLine, `version = "${version}"`);
+writeFileSync(cargoPath, before + nextBody + after.slice(packageBody.length));
 
 const lock = readFileSync(lockPath, "utf8");
-const nextLock = lock.replace(
-  /(\[\[package\]\]\nname = "hivecast"\nversion = ")[^"]+(")/,
-  `$1${version}$2`,
-);
-if (nextLock === lock) throw new Error("Cargo.lock 缺少根包 hivecast");
+const lockPattern = /(\[\[package\]\]\nname = "hivecast"\nversion = ")[^"]+(")/;
+if (!lockPattern.test(lock)) throw new Error("Cargo.lock 缺少根包 hivecast");
+const nextLock = lock.replace(lockPattern, `$1${version}$2`);
 writeFileSync(lockPath, nextLock);
 
 const checks = [

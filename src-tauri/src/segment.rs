@@ -18,7 +18,8 @@ pub const SEGMENT_SECONDS: u32 = 300;
 
 /// ffmpeg 的 segment 模板：把 %04d 交给 ffmpeg 展开。
 pub fn parts_pattern(final_path: &Path) -> String {
-    format!("{}.part%04d.ts", stem_of(final_path))
+    let stem = stem_of(final_path).replace('%', "%%");
+    format!("{stem}.part%04d.ts")
 }
 
 /// 某一片的名字（测试用：构造分片再验证排序与拼接）。
@@ -66,7 +67,12 @@ pub fn collect_parts_range(final_path: &Path, start: u32, end: Option<u32>) -> V
 pub fn part_index(part: &Path) -> Option<u32> {
     let name = part.file_name()?.to_str()?;
     let (_, digits) = name.rsplit_once(".part")?;
-    digits.strip_suffix(".ts")?.parse().ok()
+    let digits = digits.strip_suffix(".ts")?;
+    // 只接受纯数字：`room.partial.ts`、`room.part2.part0001.ts` 都不是本场分片。
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// 本场分片里最大的编号 + 1：续录时从这里接着编号，
@@ -94,14 +100,17 @@ fn collect_all_parts(final_path: &Path) -> Vec<PathBuf> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&prefix) && name.ends_with(".ts") {
-                Some(entry.path())
-            } else {
-                None
+            // 必须是「本场 stem.part + 纯数字 + .ts」。只匹配前缀会把
+            // `room.part2.part0001.ts`（另一场/另一段）也收进来，收尾时误删。
+            let digits = name.strip_prefix(&prefix)?.strip_suffix(".ts")?;
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
             }
+            Some(entry.path())
         })
         .collect();
-    parts.sort();
+    // 编号补零，字典序在超过 9999 后会错（part10000 < part9999）。
+    parts.sort_by_key(|part| part_index(part).unwrap_or(u32::MAX));
     parts
 }
 
@@ -150,8 +159,10 @@ pub async fn merge_range(
     let list = output.with_extension("concat.txt");
     let mut body = String::new();
     for part in &parts {
-        // concat 清单里用单引号包路径，路径内的单引号要转义
-        let text = part.display().to_string().replace('\u{27}', "'\\''");
+        // concat 清单按清单所在目录解析相对路径；媒体目录若曾是相对路径，
+        // 会把目录拼两次。这里统一写绝对路径，再转义单引号。
+        let absolute = std::path::absolute(part).unwrap_or_else(|_| part.clone());
+        let text = absolute.display().to_string().replace('\u{27}', "'\\''");
         body.push_str(&format!("file '{text}'\n"));
     }
     tokio::fs::write(&list, body)
@@ -375,6 +386,41 @@ mod tests {
     }
 
     #[test]
+    fn pattern_escapes_percent_in_the_recording_name() {
+        // 目录和文件名都可能有百分号：模板是完整路径，两处都要转义。
+        let path = Path::new("/tmp/100%媒体/[100%][a][b].mp4");
+        assert_eq!(
+            parts_pattern(path),
+            "/tmp/100%%媒体/[100%%][a][b].part%04d.ts",
+            "百分号必须转义，否则 ffmpeg 会把它当模板"
+        );
+    }
+
+    #[test]
+    fn collect_parts_rejects_nested_partial_names_and_sorts_by_number() {
+        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("[t][a][b].mp4");
+        std::fs::write(part_name(&final_path, 9999), b"a").unwrap();
+        std::fs::write(part_name(&final_path, 10_000), b"b").unwrap();
+        // 前缀相同但编号不是纯数字：上一场的分片，不能并进这一场。
+        std::fs::write(dir.join("[t][a][b].part2.part0001.ts"), b"x").unwrap();
+        std::fs::write(dir.join("[t][a][b].partial.ts"), b"y").unwrap();
+
+        let parts = collect_parts(&final_path);
+        let names: Vec<String> = parts
+            .iter()
+            .map(|part| part.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["[t][a][b].part9999.ts", "[t][a][b].part10000.ts"],
+            "必须按数字排序，且只收本场分片"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn collect_parts_sorts_and_ignores_other_files() {
         let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -517,9 +563,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "需要本机 ffmpeg"]
     async fn merge_makes_playable_mp4() {
-        let dir = std::env::temp_dir().join(format!("hivecast-seg-{}", uuid::Uuid::new_v4()));
+        // 目录与文件名都带 %：验证 ffmpeg 模板转义在完整路径上生效。
+        let dir = std::env::temp_dir().join(format!("hivecast-100%seg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let final_path = dir.join("[t][a][b].mp4");
+        let final_path = dir.join("[t][100%][b].mp4");
         let status = tokio::process::Command::new(ffmpeg::binary())
             .args([
                 "-hide_banner",

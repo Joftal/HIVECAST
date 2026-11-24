@@ -364,6 +364,11 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     if !path.exists() {
         std::fs::create_dir_all(&path).map_err(|err| AppError::from_io(err, &path))?;
     }
+    // 必须存绝对路径：ffmpeg 的 concat 清单按清单所在目录解析相对路径，
+    // 相对 media_root 会把目录拼两次，合并直接失败。
+    let path = path
+        .canonicalize()
+        .map_err(|err| AppError::from_io(err, &path))?;
     settings.media_root = path.display().to_string();
     settings.ffmpeg_path = settings.ffmpeg_path.trim().to_string();
     if !settings.ffmpeg_path.is_empty() {
@@ -374,75 +379,94 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
         settings.ffmpeg_path = ffmpeg.display().to_string();
     }
 
-    db.set_setting(KEY_RECORD_QN, &settings.default_record_qn.to_string())?;
-    db.set_setting(KEY_VIEW_QN, &settings.default_view_qn.to_string())?;
-    db.set_setting(KEY_RECORD_SOURCE_FORMAT, &settings.record_source_format)?;
-    db.set_setting(KEY_RECORD_CODEC, &settings.record_codec)?;
-    db.set_setting(KEY_SPLIT_ON_TITLE, &settings.split_on_title.to_string())?;
-    db.set_setting(
-        KEY_SPLIT_MAX_DURATION,
-        &settings.split_max_duration_sec.to_string(),
-    )?;
-    db.set_setting(
-        KEY_SPLIT_MAX_SIZE_MB,
-        &settings.split_max_size_mb.to_string(),
-    )?;
-    db.set_setting(KEY_MEDIA_ROOT, &settings.media_root)?;
-    db.set_setting(KEY_FFMPEG_PATH, &settings.ffmpeg_path)?;
-    db.set_setting(KEY_NOTIFY, &settings.notify_enabled.to_string())?;
-    db.set_setting(KEY_NOTIFY_ERROR, &settings.notify_error.to_string())?;
-    db.set_setting(KEY_NOTIFY_AUTH, &settings.notify_auth.to_string())?;
-    db.set_setting(KEY_LANGUAGE, &settings.language)?;
-    db.set_setting(KEY_THEME, &settings.theme)?;
-    db.set_setting(KEY_CLOSE_ACTION, &settings.close_action)?;
-    db.set_setting(KEY_PREVENT_SLEEP, &settings.prevent_sleep.to_string())?;
-    db.set_setting(KEY_RETENTION_DAYS, &settings.retention_days.to_string())?;
-    db.set_setting(KEY_MAX_TOTAL_GB, &settings.max_total_gb.to_string())?;
-    db.set_setting(KEY_POST_MODE, &settings.post_mode)?;
-    db.set_setting(KEY_POST_CONVERT_FORMAT, &settings.post_convert_format)?;
-    db.set_setting(
-        KEY_POST_DELETE_SOURCE,
-        &settings.post_delete_source.to_string(),
-    )?;
-    db.set_setting(KEY_POST_CUSTOM_COMMAND, &settings.post_custom_command)?;
-    db.set_setting(KEY_POST_CUSTOM_OUTPUT_EXT, &settings.post_custom_output_ext)?;
-    db.set_setting(
-        KEY_POST_CUSTOM_TIMEOUT,
-        &settings.post_custom_timeout_sec.to_string(),
-    )?;
-    db.set_setting(
-        KEY_MONITOR_INTERVAL,
-        &settings.monitor_interval_sec.to_string(),
-    )?;
-    db.set_setting(
-        KEY_MONITOR_BACKOFF,
-        &settings.monitor_backoff_enabled.to_string(),
-    )?;
-    db.set_setting(
-        KEY_MONITOR_BACKOFF_CAP,
-        &settings.monitor_backoff_cap_sec.to_string(),
-    )?;
-    db.set_setting(KEY_FILENAME_TEMPLATE, &settings.media_filename_template)?;
-    db.set_setting(KEY_STRIP_EMOJI, &settings.media_strip_emoji.to_string())?;
-    db.set_setting(KEY_GROUP_DIRS, &settings.media_group_dirs.to_string())?;
-    db.set_setting(KEY_LOG_DIR, &settings.log_dir)?;
-    db.set_setting(
-        KEY_LOG_RETENTION_DAYS,
-        &settings.log_retention_days.to_string(),
-    )?;
-    db.set_setting(KEY_RECORD_DANMAKU, &settings.record_danmaku.to_string())?;
-    db.set_setting(
-        KEY_RECORD_DANMAKU_GIFT,
-        &settings.record_danmaku_gift.to_string(),
-    )?;
-    db.set_setting(
-        KEY_RECORD_DANMAKU_SUPER_CHAT,
-        &settings.record_danmaku_super_chat.to_string(),
-    )?;
-    db.set_setting(
-        KEY_RECORD_DANMAKU_GUARD,
-        &settings.record_danmaku_guard.to_string(),
-    )?;
+    // 一次性事务提交：中途失败不会留下「画质已改、路径没改」的半套设置。
+    let values: Vec<(&str, String)> = vec![
+        (KEY_RECORD_QN, settings.default_record_qn.to_string()),
+        (KEY_VIEW_QN, settings.default_view_qn.to_string()),
+        (
+            KEY_RECORD_SOURCE_FORMAT,
+            settings.record_source_format.clone(),
+        ),
+        (KEY_RECORD_CODEC, settings.record_codec.clone()),
+        (KEY_SPLIT_ON_TITLE, settings.split_on_title.to_string()),
+        (
+            KEY_SPLIT_MAX_DURATION,
+            settings.split_max_duration_sec.to_string(),
+        ),
+        (
+            KEY_SPLIT_MAX_SIZE_MB,
+            settings.split_max_size_mb.to_string(),
+        ),
+        (KEY_MEDIA_ROOT, settings.media_root.clone()),
+        (KEY_FFMPEG_PATH, settings.ffmpeg_path.clone()),
+        (KEY_NOTIFY, settings.notify_enabled.to_string()),
+        (KEY_NOTIFY_ERROR, settings.notify_error.to_string()),
+        (KEY_NOTIFY_AUTH, settings.notify_auth.to_string()),
+        (KEY_LANGUAGE, settings.language.clone()),
+        (KEY_THEME, settings.theme.clone()),
+        (KEY_CLOSE_ACTION, settings.close_action.clone()),
+        (KEY_PREVENT_SLEEP, settings.prevent_sleep.to_string()),
+        (KEY_RETENTION_DAYS, settings.retention_days.to_string()),
+        (KEY_MAX_TOTAL_GB, settings.max_total_gb.to_string()),
+        (KEY_POST_MODE, settings.post_mode.clone()),
+        (
+            KEY_POST_CONVERT_FORMAT,
+            settings.post_convert_format.clone(),
+        ),
+        (
+            KEY_POST_DELETE_SOURCE,
+            settings.post_delete_source.to_string(),
+        ),
+        (
+            KEY_POST_CUSTOM_COMMAND,
+            settings.post_custom_command.clone(),
+        ),
+        (
+            KEY_POST_CUSTOM_OUTPUT_EXT,
+            settings.post_custom_output_ext.clone(),
+        ),
+        (
+            KEY_POST_CUSTOM_TIMEOUT,
+            settings.post_custom_timeout_sec.to_string(),
+        ),
+        (
+            KEY_MONITOR_INTERVAL,
+            settings.monitor_interval_sec.to_string(),
+        ),
+        (
+            KEY_MONITOR_BACKOFF,
+            settings.monitor_backoff_enabled.to_string(),
+        ),
+        (
+            KEY_MONITOR_BACKOFF_CAP,
+            settings.monitor_backoff_cap_sec.to_string(),
+        ),
+        (
+            KEY_FILENAME_TEMPLATE,
+            settings.media_filename_template.clone(),
+        ),
+        (KEY_STRIP_EMOJI, settings.media_strip_emoji.to_string()),
+        (KEY_GROUP_DIRS, settings.media_group_dirs.to_string()),
+        (KEY_LOG_DIR, settings.log_dir.clone()),
+        (
+            KEY_LOG_RETENTION_DAYS,
+            settings.log_retention_days.to_string(),
+        ),
+        (KEY_RECORD_DANMAKU, settings.record_danmaku.to_string()),
+        (
+            KEY_RECORD_DANMAKU_GIFT,
+            settings.record_danmaku_gift.to_string(),
+        ),
+        (
+            KEY_RECORD_DANMAKU_SUPER_CHAT,
+            settings.record_danmaku_super_chat.to_string(),
+        ),
+        (
+            KEY_RECORD_DANMAKU_GUARD,
+            settings.record_danmaku_guard.to_string(),
+        ),
+    ];
+    db.set_settings(&values)?;
     // 阈值调小后立刻生效，不用等下次录制收尾。
     crate::retention::enforce_from_settings(db);
     crate::retention::enforce_tasks(db);
@@ -672,6 +696,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn validate_log_dir_rejects_app_bundle_paths() {
         let dir = std::env::temp_dir().join(format!("hivecast-logs-{}", uuid::Uuid::new_v4()));

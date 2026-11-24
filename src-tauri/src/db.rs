@@ -254,7 +254,13 @@ fn media_where(filter: &MediaFilter, include_platform: bool) -> (String, Vec<Sql
     }
     if let Some(days) = filter.days.filter(|days| *days > 0) {
         where_sql.push_str(" AND s.started_at >= ?");
-        args.push(SqlValue::Integer(now_ts() - days * 86_400));
+        // 「今天」是本地零点，不是滚动 24 小时；其余天数仍按滚动窗口。
+        let since = if days == 1 {
+            crate::clock::today_start_secs()
+        } else {
+            now_ts() - days * 86_400
+        };
+        args.push(SqlValue::Integer(since));
     }
     if filter.only_danmaku {
         where_sql.push_str(" AND s.danmaku_count > 0");
@@ -1346,6 +1352,25 @@ impl Db {
         Ok(())
     }
 
+    /// 一次事务写入一批设置：保存设置要么整套生效，要么整套保持原样。
+    pub fn set_settings(&self, values: &[(&str, String)]) -> Result<(), AppError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO app_setting (key, value, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                )
+                .map_err(db_err)?;
+            let now = now_ts();
+            for (key, value) in values {
+                stmt.execute(params![key, value, now]).map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)
+    }
+
     /// 媒体库单行映射：列表和整组补齐共用，避免两处 SELECT 漂移。
     fn media_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
         let path: String = row.get(5)?;
@@ -1711,7 +1736,13 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, file_path, file_size, started_at FROM record_session
+                // 容量按 media_file 汇总：源封装母带、派生文件都要算，不能只看主文件。
+                "SELECT id, file_path,
+                        COALESCE((SELECT SUM(size) FROM media_file
+                                   WHERE session_id = record_session.id AND state <> 'deleted'),
+                                 file_size),
+                        started_at
+                   FROM record_session
                   WHERE file_path IS NOT NULL AND file_path <> '' AND status <> 'recording'
                   ORDER BY started_at DESC",
             )
@@ -4755,6 +4786,33 @@ mod tests {
         assert_eq!(
             db.split_manifest_for("s1").unwrap().as_deref(),
             Some("/tmp/s1.json")
+        );
+    }
+
+    #[test]
+    fn set_settings_rolls_back_every_key_when_one_write_fails() {
+        let (db, _path) = temp_db("settings-transaction");
+        db.set_setting("keep", "old").expect("写初始值失败");
+        db.lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_boom BEFORE INSERT ON app_setting
+                 WHEN NEW.key = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .expect("建触发器失败");
+
+        let err = db
+            .set_settings(&[
+                ("keep", "new".to_string()),
+                ("boom", "x".to_string()),
+                ("after", "y".to_string()),
+            ])
+            .expect_err("中途失败应返回错误");
+        assert!(err.to_string().contains("boom"), "应保留底层错误: {err}");
+        assert_eq!(db.get_setting("keep").unwrap().as_deref(), Some("old"));
+        assert_eq!(
+            db.get_setting("after").unwrap(),
+            None,
+            "失败后不能留下后续键"
         );
     }
 }

@@ -1041,9 +1041,13 @@ pub async fn room_set_auto_record(
             tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "开启自动录制后开录失败");
             state.recorder.set_error(&id, err.to_string());
         }
-    } else if !enabled && state.recorder.is_recording(&id) {
-        if let Err(err) = state.recorder.stop(&app, &id, "stopped").await {
-            tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "关闭自动录制时停止录制失败");
+    } else if !enabled {
+        // 解析线路可能已经跑了几秒：先打取消标记，让在途的自动开录在拉 ffmpeg 前退出。
+        state.recorder.cancel_start(&id);
+        if state.recorder.is_recording(&id) {
+            if let Err(err) = state.recorder.stop(&app, &id, "stopped").await {
+                tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "关闭自动录制时停止录制失败");
+            }
         }
     }
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
@@ -1632,11 +1636,20 @@ pub async fn post_retry(
         )?;
     }
     let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    if outcome.state != crate::post::STATE_DONE {
+        // 失败/取消必须冒泡成错误：前端此前只按 Ok 提示成功，会把失败说成完成（文档 196-11）。
+        let message = outcome.error.unwrap_or_else(|| "后处理未完成".to_string());
+        return Err(if outcome.state == crate::post::STATE_CANCELLED {
+            AppError::User(message)
+        } else {
+            AppError::Ffmpeg(message)
+        });
+    }
     Ok(PostResult {
         kind: "post".into(),
         path: outcome.path.display().to_string(),
         size: outcome.size,
-        message: outcome.error,
+        message: None,
     })
 }
 

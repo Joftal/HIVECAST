@@ -81,20 +81,37 @@ async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let output = tokio::time::timeout(TASK_TIMEOUT, command.output())
-        .await
-        .map_err(|_| AppError::Ffmpeg(format!("{label} 超时")))?
-        .map_err(AppError::Io)?;
-    if output.status.success() {
+    let mut child = command.spawn().map_err(AppError::Io)?;
+    let stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        if let Some(mut stream) = stderr {
+            let _ = stream.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let status = match tokio::time::timeout(TASK_TIMEOUT, child.wait()).await {
+        Ok(status) => status.map_err(AppError::Io)?,
+        Err(_) => {
+            // 超时必须真的杀掉子进程：只丢掉 future 会让 ffmpeg 继续写文件。
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            stderr_task.abort();
+            return Err(AppError::Ffmpeg(format!("{label} 超时")));
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let message = describe_failure(label, &stderr);
+    let text = String::from_utf8_lossy(&stderr);
+    let message = describe_failure(label, &text);
     tracing::warn!(
         target: "hivecast_lib::postprocess",
         label,
-        status = %output.status,
-        tail = %stderr.trim().chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>(),
+        status = %status,
+        tail = %text.trim().chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>(),
         "{message}"
     );
     Err(AppError::Ffmpeg(message))
@@ -131,10 +148,16 @@ async fn run_ffmpeg_progress(
         buf
     });
 
-    let mut last = 0i64;
-    if let Some(stream) = stdout {
+    // 进度读取和等待必须并发：先读到 stdout EOF 再 wait，会把超时起点拖到
+    // ffmpeg 自己退出之后，等于没有超时（文档 196-13）。
+    let app = progress.app.clone();
+    let task = progress.task.to_string();
+    let total_ms = progress.total_ms;
+    let progress_task = tokio::spawn(async move {
+        let Some(stream) = stdout else { return };
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut lines = BufReader::new(stream).lines();
+        let mut last = 0i64;
         while let Ok(Some(line)) = lines.next_line().await {
             let value = match line.strip_prefix("out_time_us=") {
                 Some(value) => value,
@@ -143,14 +166,14 @@ async fn run_ffmpeg_progress(
             let Ok(micros) = value.trim().parse::<i64>() else {
                 continue;
             };
-            let percent = percent_for(micros, progress.total_ms);
+            let percent = percent_for(micros, total_ms);
             if percent > last {
                 last = percent;
-                let _ = progress.app.emit(
+                let _ = app.emit(
                     EVENT_POST_PROGRESS,
                     PostProgress {
-                        task: progress.task.to_string(),
-                        session_id: progress.task.to_string(),
+                        task: task.clone(),
+                        session_id: task.clone(),
                         percent,
                         stage: "converting".into(),
                         state: "running".into(),
@@ -159,18 +182,46 @@ async fn run_ffmpeg_progress(
                 );
             }
         }
-    }
+    });
 
-    let status = tokio::time::timeout(TASK_TIMEOUT, child.wait())
-        .await
-        .map_err(|_| AppError::Ffmpeg(format!("{label} 超时")))?
-        .map_err(AppError::Io)?;
+    let status = match tokio::time::timeout(TASK_TIMEOUT, child.wait()).await {
+        Ok(status) => status.map_err(AppError::Io)?,
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            progress_task.abort();
+            stderr_task.abort();
+            return Err(AppError::Ffmpeg(format!("{label} 超时")));
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), progress_task).await;
     let stderr = stderr_task.await.unwrap_or_default();
     if status.success() {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&stderr);
     Err(AppError::Ffmpeg(describe_failure(label, &text)))
+}
+
+fn reserve_merge_output(first: &Path, stamp: &str) -> Result<PathBuf, AppError> {
+    for index in 0..1000u32 {
+        let name = if index == 0 {
+            format!("合并-{stamp}.mp4")
+        } else {
+            format!("合并-{stamp}-{index}.mp4")
+        };
+        let candidate = first.with_file_name(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(AppError::from_io(err, &candidate)),
+        }
+    }
+    Err(AppError::User("同一秒合并次数过多，请稍后重试".into()))
 }
 
 fn ensure_file(src: &Path) -> Result<(), AppError> {
@@ -193,8 +244,12 @@ pub async fn merge(
     }
     let first = &sources[0];
     let stamp = crate::clock::format_now_local("%Y%m%d-%H%M%S");
-    let out = first.with_file_name(format!("合并-{stamp}.mp4"));
+    // 同一秒可能点两次合并：原子占位唯一目标，避免互相覆盖清单与成品，
+    // 再让 ffmpeg 的 -y 覆盖我们自己刚占的空文件（文档 196-18）。
+    let out = reserve_merge_output(first, &stamp)?;
     let list_path = out.with_extension("concat.txt");
+    // 上次崩溃可能留下同名清单；目标名已唯一，这里删的是本目标对应的残留。
+    let _ = std::fs::remove_file(&list_path);
     let mut list = String::new();
     for src in sources {
         let escaped = src.to_string_lossy().replace('\'', "'\\''");
@@ -259,16 +314,18 @@ pub fn merge_danmaku(
     sources: &[DanmakuSource],
     out_video: &Path,
 ) -> std::io::Result<Option<PathBuf>> {
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
     let out = out_video.with_extension("jsonl");
     let mut writer = std::io::BufWriter::new(std::fs::File::create(&out)?);
     let mut offset = 0i64;
     let mut count = 0u64;
     for source in sources {
         if let Some(jsonl) = source.jsonl.as_ref().filter(|path| path.is_file()) {
-            if let Ok(raw) = std::fs::read_to_string(jsonl) {
-                for line in raw.lines() {
-                    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            // 长直播的 JSONL 可达几十 MB：逐行读，别整文件读进内存再切。
+            if let Ok(file) = std::fs::File::open(jsonl) {
+                for line in BufReader::new(file).lines() {
+                    let Ok(line) = line else { continue };
+                    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
                         continue;
                     };
                     let Some(t) = value.get("t").and_then(serde_json::Value::as_i64) else {
@@ -308,17 +365,17 @@ pub fn slice_danmaku(
     start_ms: i64,
     end_ms: Option<i64>,
 ) -> std::io::Result<u64> {
-    use std::io::Write as _;
+    use std::io::{BufRead, BufReader, Write as _};
 
-    let raw = std::fs::read_to_string(jsonl)?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::File::create(out)?;
     let mut writer = std::io::BufWriter::new(file);
     let mut count = 0u64;
-    for line in raw.lines() {
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+    for line in BufReader::new(std::fs::File::open(jsonl)?).lines() {
+        let Ok(line) = line else { continue };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         let Some(at) = value.get("t").and_then(serde_json::Value::as_i64) else {
@@ -357,12 +414,16 @@ fn danmaku_font() -> &'static str {
 }
 
 pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
+    use std::io::{BufRead, BufReader};
+
     ensure_file(jsonl)?;
-    let raw = std::fs::read_to_string(jsonl)?;
+    // 仍需按时间排序，但读取逐行进行，避免 raw String 与解析结果双份占内存。
+    let reader = BufReader::new(std::fs::File::open(jsonl)?);
     // 第四位表示「固定不滚动」：chat 之外（gift / super_chat）都按公告处理。
     let mut lines: Vec<(i64, String, u32, bool)> = Vec::new();
-    for line in raw.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         let text = value["c"].as_str().unwrap_or("").trim().to_string();
@@ -664,6 +725,20 @@ mod tests {
         );
         assert!(Path::new(&merged.path).is_file());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_outputs_never_share_a_name_in_the_same_second() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.flv");
+        let one = reserve_merge_output(&first, "20261125-010203").unwrap();
+        let two = reserve_merge_output(&first, "20261125-010203").unwrap();
+        assert_ne!(one, two);
+        assert_eq!(one.parent(), Some(dir.as_path()));
+        assert_eq!(two.parent(), Some(dir.as_path()));
+        assert!(one.is_file() && two.is_file(), "占位文件必须原子创建");
         std::fs::remove_dir_all(&dir).ok();
     }
 

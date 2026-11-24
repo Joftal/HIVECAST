@@ -223,6 +223,11 @@ export default function RoomRecordingsPage({
   const loadSeq = useRef(0);
   const playingRef = useRef(playing);
   playingRef.current = playing;
+  // 离开页面或请求被后一次点击取代时，迟到的 mediaPlay 结果必须自己停掉，
+  // 否则后端回放槽位会一直被占着（文档 196-12）。
+  const mountedRef = useRef(true);
+  const playSeqRef = useRef(0);
+  const desiredPlayRef = useRef<{ id: string; source: boolean } | null>(null);
 
   useEffect(() => {
     const item = playing?.item;
@@ -419,13 +424,16 @@ export default function RoomRecordingsPage({
   }, [hostId, loadFiles]);
 
   // 离开房间录制文件页时把回放停掉：缓存目录要清，不能留 ffmpeg 在后台。
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      desiredPlayRef.current = null;
+      playSeqRef.current += 1;
       const current = playingRef.current;
       if (current) void mediaStop(current.item.id).catch(() => undefined);
-    },
-    [],
-  );
+    };
+  }, []);
 
   const changeVolume = (next: number) => {
     const value = Math.min(1, Math.max(0, next));
@@ -470,9 +478,30 @@ export default function RoomRecordingsPage({
 
   const closePlay = async () => {
     const current = playing;
+    playSeqRef.current += 1;
+    desiredPlayRef.current = null;
     setPlaying(null);
     setConfirmSourceDelete(false);
     if (current) await stopPlayback(current.item.id);
+  };
+
+  // 迟到/失效的回放结果只允许停自己，不能覆盖后一次点击打开的播放器。
+  const acceptPlayback = (
+    item: MediaItem,
+    source: boolean,
+    seq: number,
+  ): boolean => {
+    const desired = desiredPlayRef.current;
+    const stale =
+      !mountedRef.current ||
+      seq !== playSeqRef.current ||
+      desired?.id !== item.id ||
+      desired?.source !== source;
+    if (!stale) return true;
+    if (!mountedRef.current || !desired || desired.id !== item.id) {
+      void mediaStop(item.id).catch(() => undefined);
+    }
+    return false;
   };
 
   const openPlay = async (item: MediaItem, source = false) => {
@@ -487,8 +516,11 @@ export default function RoomRecordingsPage({
     }
     setPlayBusy(item.id);
     setConfirmSourceDelete(false);
+    const seq = ++playSeqRef.current;
+    desiredPlayRef.current = { id: item.id, source };
     try {
       const playback = await mediaPlay(item.id, null, source);
+      if (!acceptPlayback(item, source, seq)) return;
       setPlaying({ item, playback, source });
     } catch (err) {
       notify.error(err, t("media.playFailed"));
@@ -503,9 +535,12 @@ export default function RoomRecordingsPage({
     const item = playing.item;
     setPlayBusy(item.id);
     setConfirmSourceDelete(false);
+    const seq = ++playSeqRef.current;
+    desiredPlayRef.current = { id: item.id, source };
     try {
       await stopPlayback(item.id);
       const playback = await mediaPlay(item.id, null, source);
+      if (!acceptPlayback(item, source, seq)) return;
       setPlaying({ item, playback, source });
     } catch (err) {
       notify.error(err, t("media.playFailed"));
@@ -534,7 +569,10 @@ export default function RoomRecordingsPage({
   const seekTo = async (item: MediaItem, positionMs: number) => {
     try {
       const source = playing?.source ?? false;
+      const seq = ++playSeqRef.current;
+      desiredPlayRef.current = { id: item.id, source };
       const playback = await mediaPlay(item.id, positionMs, source);
+      if (!acceptPlayback(item, source, seq)) return;
       setPlaying({ item, playback, source });
     } catch (err) {
       notify.error(err, t("media.playFailed"));
@@ -546,6 +584,8 @@ export default function RoomRecordingsPage({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (playingRef.current) {
+        playSeqRef.current += 1;
+        desiredPlayRef.current = null;
         void mediaStop(playingRef.current.item.id).catch(() => undefined);
         setPlaying(null);
         setConfirmSourceDelete(false);
@@ -686,7 +726,20 @@ export default function RoomRecordingsPage({
     if (busy) return;
     setBusy("merge:" + group.id);
     try {
-      const result = await sessionsMerge(group.clips.map((clip) => clip.id));
+      // 列表按片段分页，一场可能只加载了一部分；先补齐整组再合并，
+      // 否则只合并当前页的几段，成品会缺中间片段（文档 196-06）。
+      const clips =
+        group.clips.length < group.clipCount
+          ? await mediaGroupClips(group.id)
+          : group.clips;
+      const ordered = [...clips].sort(
+        (a, b) => a.clipIndex - b.clipIndex || a.startedAt - b.startedAt,
+      );
+      if (ordered.length < 2) {
+        notify.error(t("media.mergeFailed"));
+        return;
+      }
+      const result = await sessionsMerge(ordered.map((clip) => clip.id));
       notify.success(t("media.mergeDone", { size: formatSize(result.size) }));
       await refreshAll();
     } catch (err) {

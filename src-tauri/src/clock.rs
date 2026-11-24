@@ -43,6 +43,16 @@ pub fn format_now_local(fmt: &str) -> String {
     local_now().strftime(fmt).to_string()
 }
 
+/// 系统本地时区「今天 00:00」的 Unix 秒；夏令时缺零点时退回 24 小时窗口。
+pub fn today_start_secs() -> i64 {
+    let now = local_now();
+    now.date()
+        .at(0, 0, 0, 0)
+        .to_zoned_datetime(now.time_zone().clone())
+        .map(|start| start.timestamp().as_second())
+        .unwrap_or_else(|_| now_secs() - 86_400)
+}
+
 /// B 站的开播时间是不带时区的北京时间；按 UTC+8 解析后转 Unix 秒。
 pub fn parse_cn_naive(text: &str) -> Option<i64> {
     let datetime = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S", text).ok()?;

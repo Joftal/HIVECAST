@@ -471,9 +471,6 @@ async fn run_convert(src: &Path, cfg: &PostConfig, ctx: &Ctx) -> PostOutcome {
         };
     }
     let target = target_for(src, format);
-    if let Some(outcome) = reuse_existing(src, &target, cfg).await {
-        return outcome;
-    }
     if let Err(reason) = ensure_disk_headroom(src) {
         return PostOutcome::source_only(src, STATE_FAILED, Some(reason));
     }
@@ -509,9 +506,6 @@ async fn run_convert(src: &Path, cfg: &PostConfig, ctx: &Ctx) -> PostOutcome {
 async fn run_custom(src: &Path, cfg: &PostConfig, ctx: &Ctx) -> PostOutcome {
     let ext = sanitize_output_ext(&cfg.custom_output_ext);
     let target = target_for(src, &ext);
-    if let Some(outcome) = reuse_existing(src, &target, cfg).await {
-        return outcome;
-    }
     if let Err(reason) = ensure_disk_headroom(src) {
         return PostOutcome::source_only(src, STATE_FAILED, Some(reason));
     }
@@ -666,7 +660,9 @@ async fn finish_command(
         let _ = tokio::fs::remove_file(temp).await;
         return PostOutcome::source_only(src, STATE_FAILED, Some(format!("产物校验失败：{err}")));
     }
-    let sync = match tokio::fs::File::open(temp).await {
+    // Windows 上只读句柄不能 FlushFileBuffers；必须以写权限打开才能 sync_all，
+    // 否则校验通过的成品会被当成落盘失败删掉。
+    let sync = match tokio::fs::OpenOptions::new().write(true).open(temp).await {
         Ok(file) => file.sync_all().await,
         Err(err) => Err(err),
     };
@@ -914,6 +910,11 @@ fn file_size(path: &Path) -> i64 {
 /// 崩溃恢复会重跑后处理；每次都换 `.1` 会让数据库指向新文件、旧产物永远留下。
 /// 但同名文件也可能来自上一场录制（源已删、只剩派生），所以必须比较 mtime：
 /// 早于当前源文件的派生文件是别人的，跳过，不能覆盖也不能直接复用。
+/// 派生文件的确定目标：只选一个当前不存在的名字。
+///
+/// 不能仅凭「同名 + mtime 不早于源文件」认领旧文件：上一场录制、用户手动
+/// 放进来的文件都可能满足这个条件，覆盖/复用会把别人的内容登记成这次产物。
+/// 崩溃恢复重跑时宁可多一个 `.1` 派生文件，也不能错认；旧文件留给用户清理。
 fn target_for(src: &Path, ext: &str) -> PathBuf {
     let stem = src
         .file_stem()
@@ -925,50 +926,10 @@ fn target_for(src: &Path, ext: &str) -> PathBuf {
     // 自定义后处理的输出扩展名可能与源相同；此时绝不能把源本身当目标，
     // 否则 finish_command 会先删掉源再改名。显式跳过源文件。
     while candidate == src || candidate.exists() {
-        if candidate != src && is_current_derived(&candidate, src) {
-            return candidate;
-        }
         candidate = parent.join(format!("{stem}.{index}.{ext}"));
         index += 1;
     }
     candidate
-}
-
-/// 派生文件是否由当前源文件产生：mtime 不早于源文件。
-///
-/// 崩溃恢复重跑时，源文件刚合并完，派生文件是上一次尝试留下的，mtime 更晚；
-/// 上一场录制留下的同名派生文件则早于本场源文件，必须避开。
-fn is_current_derived(target: &Path, src: &Path) -> bool {
-    let target_time = std::fs::metadata(target).and_then(|meta| meta.modified());
-    let source_time = std::fs::metadata(src).and_then(|meta| meta.modified());
-    match (target_time, source_time) {
-        (Ok(target_time), Ok(source_time)) => target_time >= source_time,
-        _ => false,
-    }
-}
-
-/// 目标已经存在且能通过校验时直接复用，避免恢复重跑生成重复文件。
-async fn reuse_existing(src: &Path, target: &Path, cfg: &PostConfig) -> Option<PostOutcome> {
-    if target == src || !target.is_file() || file_size(target) <= 0 {
-        return None;
-    }
-    if !is_current_derived(target, src) {
-        return None;
-    }
-    if validate_media(target).await.is_err() {
-        return None;
-    }
-    let delete_source =
-        (cfg.mode == settings::POST_MODE_CONVERT && cfg.delete_source && target != src)
-            .then(|| src.to_path_buf());
-    Some(PostOutcome {
-        path: target.to_path_buf(),
-        size: file_size(target),
-        source_path: src.to_path_buf(),
-        state: STATE_DONE.to_string(),
-        error: None,
-        delete_source,
-    })
 }
 
 fn temp_path(src: &Path, ext: &str) -> PathBuf {

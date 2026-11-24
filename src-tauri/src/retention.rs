@@ -6,6 +6,7 @@
 //! 删除是「文件 + 同名弹幕 + 数据库行」一起删：媒体库按数据库行渲染，
 //! 只删文件会留下永远打不开的卡片，只删行会留下永远看不见的孤儿文件。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::db::{Db, PrunedTaskData};
@@ -106,22 +107,42 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
     for entry in entries.iter().filter(|entry| victims.contains(&entry.id)) {
         let path = Path::new(&entry.path);
         let mut freed = 0u64;
-        // 只删 mp4 与 .jsonl 会留下 .ass / .concat.txt / 残留分片（I4）：
-        // 这些文件不进数据库，媒体库里看不见，但会一直占盘。
-        for target in artifacts(path) {
+        // 除主文件旁的旁挂文件外，还要删 media_file 登记的源封装与派生文件，
+        // 否则容量统计和实际删除都会漏掉「保留源封装」模式下的母带。
+        let mut targets: HashSet<std::path::PathBuf> = artifacts(path).into_iter().collect();
+        match db.media_files(&entry.id) {
+            Ok(files) => {
+                for file in files {
+                    if file.state != "deleted" {
+                        targets.insert(std::path::PathBuf::from(file.path));
+                    }
+                }
+            }
+            Err(err) => tracing::warn!(%err, id = %entry.id, "读取录像文件清单失败"),
+        }
+        let mut failed = false;
+        for target in targets {
             match std::fs::metadata(&target) {
                 Ok(meta) => match std::fs::remove_file(&target) {
                     Ok(()) => freed += meta.len(),
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                     Err(err) => {
+                        failed = true;
                         tracing::warn!(id = %entry.id, path = %target.display(), error = %err, "保留策略删除文件失败");
                     }
                 },
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
-                    tracing::debug!(id = %entry.id, path = %target.display(), error = %err, "保留策略读取文件信息失败");
+                    failed = true;
+                    tracing::warn!(id = %entry.id, path = %target.display(), error = %err, "保留策略读取文件信息失败");
                 }
             }
+        }
+        // 有文件删不掉（卷离线、权限、占用）时保留会话行，下次还能重试；
+        // 先删行会让文件永远失联，媒体库也不再显示。
+        if failed {
+            tracing::warn!(id = %entry.id, "保留策略未能删除全部文件，保留会话记录");
+            continue;
         }
         if let Err(err) = db.delete_session(&entry.id) {
             tracing::warn!(%err, id = %entry.id, "删除历史记录失败");
@@ -278,6 +299,36 @@ mod tests {
             );
         }
         assert!(!std::path::Path::new(&part).exists(), "残留分片应被清掉");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enforce_keeps_the_session_when_an_artifact_cannot_be_removed() {
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        let dir = std::env::temp_dir().join(format!("hivecast-ret-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录失败");
+        // 把一个非空目录当作录像主文件：remove_file 会返回 EISDIR，模拟文件被占用/卷不可写。
+        let final_path = dir.join("busy.mp4");
+        std::fs::create_dir_all(&final_path).expect("建主文件目录失败");
+        std::fs::write(final_path.join("keep"), b"x").expect("写占位文件失败");
+        let started = crate::db::now_ts() - 3 * 86_400;
+        db.set_setting(crate::settings::KEY_RETENTION_DAYS, "1")
+            .expect("设置保留天数失败");
+        db.exec_batch_for_test(&format!(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-busy', 'bilibili', '9', 'https://live.bilibili.com/9', '主播', '房间', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms)
+                 VALUES ('s-busy', 'rm-busy', {started}, 'finished', '{}', 1048576, 60000);",
+                final_path.display()
+            ))
+            .expect("播种失败");
+
+        let cleaned = enforce_from_settings(&db);
+        assert_eq!(cleaned.deleted, 0, "删除失败时不能移除会话");
+        assert!(
+            db.get_session("s-busy").expect("查询会话失败").is_some(),
+            "会话应保留以便下次重试"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

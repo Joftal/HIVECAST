@@ -301,6 +301,8 @@ pub struct Recorder {
     upgrade_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// 正在开录的房间：停录请求要能看见「ffmpeg 已经在起、但还没进 active」的这段窗口（C5）。
     starting: Mutex<HashSet<String>>,
+    /// 开录在途时被取消自动录制的房间：解析线路要几秒，期间关掉自动录制也必须在拉 ffmpeg 前拦住。
+    start_cancelled: Mutex<HashSet<String>>,
     /// 开录在途时收到的停录请求：房间 → 原因。等 start 把会话挂进 active 再消费。
     pending_stop: Mutex<HashMap<String, String>>,
     /// 正在收尾的房间：转封装可能持续几十秒，期间不该被监控当成「没在录」重新拉起（C4）。
@@ -325,6 +327,7 @@ impl Recorder {
             detect_errors: Mutex::new(HashMap::new()),
             start_locks: Mutex::new(HashMap::new()),
             starting: Mutex::new(HashSet::new()),
+            start_cancelled: Mutex::new(HashSet::new()),
             pending_stop: Mutex::new(HashMap::new()),
             finalizing: Mutex::new(HashSet::new()),
             shutting_down: AtomicBool::new(false),
@@ -410,8 +413,35 @@ impl Recorder {
             .contains(room_id)
     }
 
+    /// 自动录制在开录在途时被关闭：给这条在途请求打取消标记，拉 ffmpeg 前拦下。
+    pub fn cancel_start(&self, room_id: &str) {
+        let mut cancelled = self.start_cancelled.lock().expect("开录取消标记被污染");
+        if self
+            .starting
+            .lock()
+            .expect("开录标记被污染")
+            .contains(room_id)
+        {
+            cancelled.insert(room_id.to_string());
+            tracing::info!(room_id, "自动录制已关闭，取消在途开录");
+        } else {
+            cancelled.remove(room_id);
+        }
+    }
+
+    fn is_start_cancelled(&self, room_id: &str) -> bool {
+        self.start_cancelled
+            .lock()
+            .expect("开录取消标记被污染")
+            .contains(room_id)
+    }
+
     /// 登记「这一路正在开录」：stop 靠它判断停录请求是在 start 之前还是之中到达（C5）。
     fn begin_start<'a>(&'a self, room_id: &str) -> StartGuard<'a> {
+        self.start_cancelled
+            .lock()
+            .expect("开录取消标记被污染")
+            .remove(room_id);
         self.starting
             .lock()
             .expect("开录标记被污染")
@@ -869,7 +899,12 @@ impl Recorder {
                 tracing::info!(room = %room.host_name, removed, paused, "监控开录复查未通过");
                 return Err(AppError::User("房间已移除或监控已暂停".into()));
             }
-            if fresh.is_none() {
+            if let Some(fresh) = fresh.as_ref() {
+                if !fresh.auto_record {
+                    tracing::info!(room = %room.host_name, "监控开录复查未通过：自动录制已关闭");
+                    return Err(AppError::User("自动录制已关闭".into()));
+                }
+            } else {
                 return Err(AppError::User("房间不存在".into()));
             }
         }
@@ -904,6 +939,21 @@ impl Recorder {
 
         // 从这里开始算「开录在途」：停录请求要能穿过解析线路、拉起 ffmpeg 这段窗口（C5）。
         let mut slot = self.begin_start(&room.id);
+
+        // begin_start 之前的一瞬用户可能刚好关掉自动录制：cancel_start 看到
+        // 还没进入 starting，不会留下标记。进入在途后立刻再读一次库，
+        // 把这个窗口也关上；此后的关闭会由 is_start_cancelled 拦住。
+        if recheck
+            && !self
+                .db
+                .get_room(&room.id)
+                .ok()
+                .flatten()
+                .is_some_and(|fresh| fresh.auto_record)
+        {
+            tracing::info!(room = %room.host_name, "开录在途时自动录制已关闭，取消本次开录");
+            return Err(AppError::User("自动录制已关闭".into()));
+        }
 
         // 磁盘写满会让 ffmpeg 直接退出，还会把系统拖死，所以先拦一道。
         // can_start 是开录门槛，is_low 是录制红线：两个都得过，
@@ -954,6 +1004,11 @@ impl Recorder {
                 tracing::warn!(room_id = %room.id, room = %room.host_name, error = %err, "开录解析线路失败");
                 AppError::from(err)
             })?;
+
+        if self.is_start_cancelled(&room.id) {
+            tracing::info!(room = %room.host_name, "开录在途时自动录制被关闭，取消本次开录");
+            return Err(AppError::User("自动录制已关闭".into()));
+        }
 
         let (candidate, group) = pick_candidate(&plan.groups, room.record_line.as_deref(), prefs)
             .ok_or_else(|| {
@@ -1010,6 +1065,12 @@ impl Recorder {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
         let url = candidate.url.clone().unwrap_or_default();
+
+        if self.is_start_cancelled(&room.id) {
+            let _ = tokio::fs::remove_file(&path).await;
+            tracing::info!(room = %room.host_name, "开录在途时自动录制被关闭，取消本次开录");
+            return Err(AppError::User("自动录制已关闭".into()));
+        }
 
         let mut command = build_command(&path, &url, &headers, 0, split.segment_secs);
         let mut child = match command.spawn() {
@@ -3105,6 +3166,12 @@ impl StartGuard<'_> {
 
 impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
+        // 与 begin_start / cancel_start 保持同一把锁顺序：先 cancel 标记，再 starting。
+        self.recorder
+            .start_cancelled
+            .lock()
+            .expect("开录取消标记被污染")
+            .remove(&self.room_id);
         self.recorder
             .starting
             .lock()
@@ -3252,37 +3319,73 @@ fn process_matches(pid: u32, path: &Path) -> bool {
     command.contains("ffmpeg") && command.contains(stem)
 }
 
+/// 命令行是否确实是「在录这条文件」的 ffmpeg。
+///
+/// 必须同时匹配 ffmpeg 与这条录像的完整路径、分片模板 stem 或文件名；只比
+/// 父目录会误杀同目录里正在录另一场的 ffmpeg。
+#[cfg(any(windows, test))]
+fn command_line_matches_recording(command: &str, path: &Path) -> bool {
+    let command = command.to_ascii_lowercase();
+    if !command.contains("ffmpeg") {
+        return false;
+    }
+    let full = path.to_string_lossy().to_ascii_lowercase();
+    if !full.is_empty() && command.contains(&full) {
+        return true;
+    }
+    // 录制命令的输出是「成品名.part%04d.ts」，不是成品路径本身；
+    // 用完整 stem + ".part" 仍能唯一锁定这一场。
+    if let Some(stem) = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+    {
+        if !stem.is_empty() && command.contains(&format!("{stem}.part")) {
+            return true;
+        }
+    }
+    // 兼容其他拉起方式：至少要求文件名（含扩展名）完整出现。
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| command.contains(&name))
+}
+
 #[cfg(windows)]
 fn process_matches(pid: u32, path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
-        return false;
-    };
     let Ok(output) = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
     else {
         return false;
     };
-    let command = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    // tasklist 只给映像名；命令行要另查，这里退一步只认 ffmpeg.exe 与同名录像目录。
-    let looks_like_ffmpeg = command.contains("ffmpeg");
-    let parent = path
-        .parent()
-        .map(|dir| dir.display().to_string())
-        .unwrap_or_default();
-    looks_like_ffmpeg
-        && (!stem.is_empty())
-        && std::process::Command::new("wmic")
-            .args([
-                "process",
-                "where",
-                &format!("ProcessId={pid}"),
-                "get",
-                "CommandLine",
-            ])
-            .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).contains(&parent))
-            .unwrap_or(false)
+    let listing = String::from_utf8_lossy(&output.stdout);
+    if !listing.to_ascii_lowercase().contains("ffmpeg") {
+        return false;
+    }
+    // wmic 在 Windows 11 已移除；优先 PowerShell CIM，失败才回退 wmic。
+    let script = format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine");
+    let command = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| {
+            std::process::Command::new("wmic")
+                .args([
+                    "process",
+                    "where",
+                    &format!("ProcessId={pid}"),
+                    "get",
+                    "CommandLine",
+                ])
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        });
+    command
+        .filter(|text| !text.trim().is_empty())
+        .is_some_and(|text| command_line_matches_recording(&text, path))
 }
 
 /// 先礼后兵：SIGTERM，等 300ms，还在就 SIGKILL。
@@ -5155,18 +5258,40 @@ mod tests {
             room_key: "6",
             qn: 10000,
         };
+        // 用临时目录而不是 /tmp：Windows 上 /tmp 会被解析成当前盘根目录。
+        let root = std::env::temp_dir().join("hivecast-path");
         let naming = Naming::default();
-        let path = session_path(Path::new("/tmp/lib"), &parts, 1_760_000_000, "flv", &naming);
-        let text = path.display().to_string();
-        assert!(text.starts_with("/tmp/lib/哔哩哔哩/主播/哔哩哔哩-主播-标题-"));
-        assert!(text.ends_with(".flv"));
+        let path = session_path(&root, &parts, 1_760_000_000, "flv", &naming);
+        let rel = path.strip_prefix(&root).expect("必须落在媒体根下");
+        let segments: Vec<String> = rel
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(segments[0], "哔哩哔哩");
+        assert_eq!(segments[1], "主播");
+        assert!(segments[2].starts_with("哔哩哔哩-主播-标题-"));
+        assert!(segments[2].ends_with(".flv"));
         // 关掉分目录后直接落在根目录。
         let flat = Naming {
             group_dirs: false,
             ..naming.clone()
         };
-        let path = session_path(Path::new("/tmp/lib"), &parts, 1_760_000_000, "flv", &flat);
-        assert_eq!(path.parent(), Some(Path::new("/tmp/lib")));
+        let path = session_path(&root, &parts, 1_760_000_000, "flv", &flat);
+        assert_eq!(path.parent(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn windows_command_line_must_name_the_exact_recording() {
+        let path = Path::new(r"C:\media\主播\a.flv");
+        let exact = r#"ffmpeg.exe -i https://x -f segment "C:\media\主播\a.part%04d.ts""#;
+        assert!(command_line_matches_recording(exact, path));
+        let other = r#"ffmpeg.exe -i https://x -f segment "C:\media\主播\b.part%04d.ts""#;
+        assert!(
+            !command_line_matches_recording(other, path),
+            "同目录另一场不能被认成这一场"
+        );
+        let not_ffmpeg = r#"notepad.exe "C:\media\主播\a.part0001.ts""#;
+        assert!(!command_line_matches_recording(not_ffmpeg, path));
     }
 
     fn test_recorder(tag: &str) -> Recorder {

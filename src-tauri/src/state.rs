@@ -369,10 +369,47 @@ fn ensure_writable(dir: &std::path::Path) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let probe = dir.join(".hivecast-write-test");
-    if std::fs::write(&probe, b"ok").is_err() {
+    // 唯一文件名 + create_new：不能截断用户目录里恰好同名的文件，
+    // 也不能跟随已存在的符号链接。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = dir.join(format!(
+        ".hivecast-write-test-{}-{stamp}",
+        std::process::id()
+    ));
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    else {
         return false;
-    }
+    };
+    drop(file);
     let _ = std::fs::remove_file(&probe);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_writable;
+
+    #[test]
+    fn write_probe_never_touches_an_existing_fixed_name() {
+        let dir = std::env::temp_dir().join(format!("hivecast-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join(".hivecast-write-test");
+        std::fs::write(&legacy, b"do not touch").unwrap();
+
+        assert!(ensure_writable(&dir));
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"do not touch");
+        let leaked: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy() != ".hivecast-write-test")
+            .collect();
+        assert!(leaked.is_empty(), "探测文件必须删除");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
