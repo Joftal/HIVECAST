@@ -785,23 +785,17 @@ mod tests {
         let room = std::env::var("DOUYIN_ROOM").expect("设置 DOUYIN_ROOM");
         let mut stream = open(&room).await.expect("应能连上");
         println!("已连接 {room}");
-        let mut seen = 0;
-        for index in 0..6 {
-            println!("等待第 {} 批…", index + 1);
-            let events =
-                tokio::time::timeout(std::time::Duration::from_secs(10), stream.next_events())
-                    .await
-                    .expect("10 秒内没有数据帧")
-                    .expect("读取失败");
-            for event in &events {
-                println!("[{}] {}: {}", event.kind, event.user, event.content);
-                seen += 1;
-            }
-            if seen >= 5 {
-                break;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+        let mut batches = 0;
+        while let Ok(result) = tokio::time::timeout_at(deadline, stream.next_events()).await {
+            let events = result.expect("读取失败");
+            batches += 1;
+            if !events.is_empty() {
+                println!("收到可展示事件：{} 条，读取 {} 批", events.len(), batches);
+                return;
             }
         }
-        assert!(seen > 0, "10 秒内没有收到任何弹幕");
+        panic!("40 秒内收到 {batches} 批数据，未收到可展示事件");
     }
 
     #[test]

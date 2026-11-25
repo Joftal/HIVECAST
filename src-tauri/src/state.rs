@@ -83,12 +83,17 @@ impl AppState {
         crate::settings::apply_ffmpeg_path(&settings.ffmpeg_path);
         // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
         // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
-        crate::recorder::reap_orphans(&db);
+        db.locate_legacy_media(
+            std::path::Path::new(&settings.media_root),
+            db.get_setting(crate::settings::KEY_MEDIA_ROOT)?
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
+        let deferred = crate::recorder::reap_orphans(&db)?;
         // 收尾要放在合并之前：合并会删掉分片，之后就取不到最后写入时间了（I1）。
-        match db.close_orphan_sessions() {
-            Ok(count) if count > 0 => tracing::info!(count, "收尾上次异常退出的录制记录"),
-            Ok(_) => {}
-            Err(err) => tracing::warn!(error = %err, "收尾上次异常退出的录制记录失败"),
+        let count = db.close_orphan_sessions(&deferred)?;
+        if count > 0 {
+            tracing::info!(count, "收尾上次异常退出的录制记录");
         }
         // 启动时清一次：长期不录制时录制收尾不会触发，磁盘只涨不降。
         crate::retention::enforce_from_settings(&db);
@@ -104,7 +109,8 @@ impl AppState {
         let recovery_jobs = jobs.clone();
         tauri::async_runtime::spawn(async move {
             let _recovery_job = recovery_jobs.begin_silent("finalize", "恢复上次录制", None);
-            let (recovered, recovered_bytes) = crate::recorder::recover_parts(&recovery_db).await;
+            let (recovered, recovered_bytes) =
+                crate::recorder::recover_parts(&recovery_db, &deferred).await;
             if recovered > 0 {
                 tracing::info!(recovered, recovered_bytes, "恢复上次崩溃遗留的录像");
                 // 媒体库可能已经打开并拉过列表：合并完成后让它重新取一次。
@@ -302,10 +308,36 @@ impl AppState {
 pub fn default_media_root() -> PathBuf {
     if let Ok(custom) = std::env::var("HIVECAST_MEDIA_DIR") {
         if !custom.trim().is_empty() {
-            return PathBuf::from(custom);
+            if let Ok(path) = std::path::absolute(custom) {
+                return path;
+            }
         }
     }
 
+    static DEFAULT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DEFAULT.get_or_init(discover_media_root).clone()
+}
+
+#[cfg(test)]
+static DEFAULT_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+fn empty_settings_reuse_default_media_directory() {
+    let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+    let expected = crate::settings::load(&db).media_root;
+    let probes = DEFAULT_PROBES.load(std::sync::atomic::Ordering::Relaxed);
+    for _ in 0..3 {
+        assert_eq!(crate::settings::load(&db).media_root, expected);
+    }
+    assert_eq!(
+        DEFAULT_PROBES.load(std::sync::atomic::Ordering::Relaxed),
+        probes
+    );
+}
+
+fn discover_media_root() -> PathBuf {
+    #[cfg(test)]
+    DEFAULT_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(dir) = install_dir() {
         let candidate = dir.join("Recording");
         if ensure_writable(&candidate) {

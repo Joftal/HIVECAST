@@ -88,7 +88,7 @@ impl LocalPlayer {
         } else {
             session.file_path.clone()
         }
-        .filter(|p| Path::new(p).is_file())
+        .filter(|p| Path::new(p).is_absolute() && Path::new(p).is_file())
         .ok_or_else(|| {
             tracing::warn!(session_id, source, "本地回放：录像文件已丢失");
             AppError::User(if source {
@@ -431,5 +431,87 @@ mod tests {
         assert!(contains(255_000, WINDOW_MS, 434_999));
         assert!(!contains(255_000, WINDOW_MS, 435_000));
         assert!(!contains(255_000, WINDOW_MS, 254_999));
+    }
+    #[tokio::test]
+    #[ignore = "需要本机 FFmpeg"]
+    async fn local_hls_lifecycle() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        let clip = root.join("video.mp4");
+        assert!(Command::new(ffmpeg::binary())
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=160x120",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264"
+            ])
+            .arg(&clip)
+            .status()
+            .await
+            .unwrap()
+            .success());
+        let database = root.join("legacy.sqlite");
+        let db = Db::open(&database).unwrap();
+        db.exec_batch_for_test("INSERT INTO room (id,platform,room_key,canonical_url,host_name,title,created_at,updated_at) VALUES ('r','bilibili','1','test','a','t',0,0);
+            INSERT INTO record_session (id,room_id,started_at,status,file_path,file_size,duration_ms) VALUES ('s','r',1,'finished','old/video.mp4',1000,2000);").unwrap();
+        drop(db);
+        let db = Db::open(&database).unwrap();
+        db.locate_legacy_media(&root, Some(Path::new("old")))
+            .unwrap();
+        let player = LocalPlayer::new(root.join("cache"), StreamServer::start().await.unwrap());
+        let opened = player.open(&db, "s", None, false).await.unwrap();
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let playlist = http
+            .get(&opened.url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let segment = playlist.lines().find(|s| s.ends_with(".ts")).unwrap();
+        let url = reqwest::Url::parse(&opened.url)
+            .unwrap()
+            .join(segment)
+            .unwrap();
+        assert!(!http
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            player.open(&db, "s", Some(500), false).await.unwrap().url,
+            opened.url
+        );
+        player.stop("s").await;
+        assert_eq!(
+            http.get(&opened.url)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            404
+        );
+        assert!(std::fs::read_dir(root.join("cache"))
+            .unwrap()
+            .next()
+            .is_none());
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

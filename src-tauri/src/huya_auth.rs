@@ -218,6 +218,10 @@ fn sdid_of(cookie: &str) -> String {
 
 /// 读取响应体，但绝不一次性把远端内容全读进内存。
 /// Content-Length 只能提前拒绝明显超限的响应；chunk 循环负责兜底没有长度或长度撒谎的响应。
+fn safe_http_error(err: reqwest::Error) -> reqwest::Error {
+    err.without_url()
+}
+
 async fn read_body_limited(mut resp: Response, what: &str) -> Result<Vec<u8>, AppError> {
     if let Some(len) = resp.content_length() {
         if len > MAX_BODY as u64 {
@@ -226,7 +230,7 @@ async fn read_body_limited(mut resp: Response, what: &str) -> Result<Vec<u8>, Ap
     }
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        tracing::warn!(error = %err, what, "读取虎牙响应失败");
+        tracing::warn!(error = %safe_http_error(err), what, "读取虎牙响应失败");
         upstream("虎牙接口暂时不可用，请稍后重试")
     })? {
         if body.len() + chunk.len() > MAX_BODY {
@@ -350,7 +354,7 @@ async fn post_huya(
         .send()
         .await
         .map_err(|err| {
-            tracing::warn!(error = %err, "请求虎牙接口失败");
+            tracing::warn!(error = %safe_http_error(err), "请求虎牙接口失败");
             upstream("虎牙接口暂时不可用，请稍后重试")
         })?;
     let mut jar = BTreeMap::new();
@@ -370,7 +374,7 @@ async fn get_huya(
         .send()
         .await
         .map_err(|err| {
-            tracing::warn!(error = %err, "请求虎牙接口失败");
+            tracing::warn!(error = %safe_http_error(err), "请求虎牙接口失败");
             upstream("虎牙接口暂时不可用，请稍后重试")
         })?;
     let status = resp.status();
@@ -417,7 +421,7 @@ async fn fetch_qr_png(qr_id: &str, jar: &BTreeMap<String, String>) -> Result<Vec
         .send()
         .await
         .map_err(|err| {
-            tracing::warn!(error = %err, "下载虎牙二维码失败");
+            tracing::warn!(error = %safe_http_error(err), "下载虎牙二维码失败");
             upstream("虎牙二维码下载失败，请稍后重试")
         })?;
     let status = resp.status();
@@ -1477,6 +1481,23 @@ fn credential_info(db: &Db, platform: &str) -> Option<hivecast_ipc::CredentialIn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn qr_error_log_value_omits_url_and_ticket() {
+        let url = "http://127.0.0.1:1/qr?ticket=synthetic-signature";
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.url().map(|u| u.as_str()), Some(url));
+        let field = safe_http_error(error);
+        assert!(field.url().is_none());
+        assert!(!format!("{field}").contains("synthetic-signature"));
+    }
 
     #[test]
     fn device_jar_has_required_binding_cookies() {

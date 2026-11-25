@@ -924,6 +924,11 @@ impl Recorder {
             tracing::debug!(room_id = %room.id, "拒绝开录：上一场仍在收尾");
             return Err(AppError::User("上一场正在收尾".into()));
         }
+        if self.db.room_has_unclosed_recording(&room.id)? {
+            return Err(AppError::User(
+                "上一场录制尚未确认退出，请恢复录像目录后重新启动".into(),
+            ));
+        }
         if self.cooling_down(&room.id) {
             tracing::warn!(room_id = %room.id, "拒绝开录：该房间连续录制失败，仍在冷却");
             return Err(AppError::User("该房间连续录制失败，已暂停自动重试".into()));
@@ -938,7 +943,7 @@ impl Recorder {
         }
 
         // 从这里开始算「开录在途」：停录请求要能穿过解析线路、拉起 ffmpeg 这段窗口（C5）。
-        let mut slot = self.begin_start(&room.id);
+        let slot = self.begin_start(&room.id);
 
         // begin_start 之前的一瞬用户可能刚好关掉自动录制：cancel_start 看到
         // 还没进入 starting，不会留下标记。进入在途后立刻再读一次库，
@@ -1236,8 +1241,7 @@ impl Recorder {
             .lock()
             .expect("录制状态被污染")
             .insert(room.id.clone(), entry);
-        slot.mark_inserted();
-        drop(slot);
+        let (cancelled, requested_stop) = slot.finish();
         app.state::<crate::state::AppState>().jobs.emit_session(
             &recording.session_id,
             "record",
@@ -1247,14 +1251,7 @@ impl Recorder {
             Some(&recording.quality),
         );
 
-        // 最后一次取消检查到挂进 active 之间，用户仍可能关掉自动录制并停录：
-        // 那时 stop 看到房间里既不在 starting 也不在 active，不会留下 pending_stop。
-        // 会话已经挂上后再取一次取消标记 / 自动录制开关，把这条窗口收干净（C5）。
-        let cancelled = self
-            .start_cancelled
-            .lock()
-            .expect("开录取消标记被污染")
-            .remove(&room.id);
+        // 挂入 active 后已经取走本次的取消与停录标记，再复查最新的自动录制开关。
         let auto_off = recheck
             && !self
                 .db
@@ -1266,10 +1263,7 @@ impl Recorder {
         let pending = if cancelled || auto_off {
             Some("stopped".to_string())
         } else {
-            self.pending_stop
-                .lock()
-                .expect("停录标记被污染")
-                .remove(&room.id)
+            requested_stop
         };
         if let Some(reason) = pending {
             tracing::info!(
@@ -3179,13 +3173,26 @@ struct StartGuard<'a> {
 }
 
 impl StartGuard<'_> {
-    fn mark_inserted(&mut self) {
+    fn finish(mut self) -> (bool, Option<String>) {
+        let mut cancelled = self.recorder.start_cancelled.lock().expect("取消标记");
+        let mut starting = self.recorder.starting.lock().expect("开录标记");
+        starting.remove(&self.room_id);
+        let pending = self
+            .recorder
+            .pending_stop
+            .lock()
+            .expect("停录标记")
+            .remove(&self.room_id);
         self.inserted = true;
+        (cancelled.remove(&self.room_id), pending)
     }
 }
 
 impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
+        if self.inserted {
+            return;
+        }
         // 与 begin_start / cancel_start 保持同一把锁顺序：先 cancel 标记，再 starting。
         self.recorder
             .start_cancelled
@@ -3198,13 +3205,11 @@ impl Drop for StartGuard<'_> {
             .expect("开录标记被污染")
             .remove(&self.room_id);
         // 开录失败：这条停录请求没有对应的会话可停，别留给下一次开录。
-        if !self.inserted {
-            self.recorder
-                .pending_stop
-                .lock()
-                .expect("停录标记被污染")
-                .remove(&self.room_id);
-        }
+        self.recorder
+            .pending_stop
+            .lock()
+            .expect("停录标记被污染")
+            .remove(&self.room_id);
     }
 }
 
@@ -3298,153 +3303,39 @@ fn remove_pid_file(path: &Path) {
 /// 把这些分片合成 mp4，结果是「合成到一半又被追加」，产物直接坏掉。
 /// 必须先杀。pid 可能被系统复用，所以还要核对命令行里确实有这条录像的
 /// 文件名，避免误杀用户自己的 ffmpeg。
-pub fn reap_orphans(db: &Db) {
-    let Ok(rows) = db.recording_sessions() else {
-        return;
-    };
-    for (_id, file) in rows {
-        let path = PathBuf::from(&file);
-        let pid_path = pid_file(&path);
-        let Ok(raw) = std::fs::read_to_string(&pid_path) else {
+pub fn reap_orphans(db: &Db) -> Result<HashSet<String>, AppError> {
+    let mut deferred = HashSet::new();
+    for (id, file) in db.recording_sessions()? {
+        let path = Path::new(&file);
+        if !path.is_absolute() {
+            deferred.extend(db.session_group_ids(&id)?);
             continue;
-        };
-        let Ok(pid) = raw.trim().parse::<u32>() else {
-            let _ = std::fs::remove_file(&pid_path);
-            continue;
-        };
-        match process_matches(pid, &path) {
-            Some(true) => {
-                tracing::warn!(pid, file = %path.display(), "清理上次崩溃遗留的 ffmpeg");
-                terminate(pid);
-            }
-            // 进程已经不在了，或 pid 被别的进程复用：pid 文件没有保留价值。
-            Some(false) => {}
-            // 查不到命令行（PowerShell/WMIC 都被裁剪）时不能把 pid 文件删掉，
-            // 否则下次启动再也无法定位这个可能还在写分片的进程。
-            None => {
-                tracing::warn!(pid, file = %path.display(), "无法读取进程命令行，保留 pid 文件待下次重试");
-                continue;
-            }
         }
-        let _ = std::fs::remove_file(&pid_path);
-    }
-}
-
-/// 这个 pid 现在还活着、而且确实是录这条文件的 ffmpeg。
-#[cfg(unix)]
-fn process_matches(pid: u32, path: &Path) -> Option<bool> {
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-        return Some(false);
-    }
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let command = String::from_utf8_lossy(&output.stdout);
-    Some(command_line_matches_recording(&command, path))
-}
-
-/// 命令行是否确实是「在录这条文件」的 ffmpeg。
-///
-/// 必须同时匹配 ffmpeg 与这条录像的完整路径、分片模板 stem 或文件名；只比
-/// 父目录会误杀同目录里正在录另一场的 ffmpeg。
-fn command_line_matches_recording(command: &str, path: &Path) -> bool {
-    // 统一分隔符再比较：Windows 命令行里可能是反斜杠，测试与日志里常是正斜杠。
-    let command = command.replace('\\', "/").to_ascii_lowercase();
-    if !command.contains("ffmpeg") {
-        return false;
-    }
-    let full = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    if !full.is_empty() && command.contains(&full) {
-        return true;
-    }
-    // 录制命令的输出是「成品名.part%04d.ts」，不是成品路径本身。
-    // 必须带上完整父目录：只比 stem 会把另一个目录里的同名录像认成这一场。
-    let (parent, name) = full.rsplit_once('/').unwrap_or(("", full.as_str()));
-    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
-    if !stem.is_empty() {
-        let expected = format!("{parent}/{stem}.part")
-            .trim_start_matches('/')
-            .to_string();
-        if !expected.is_empty() && command.contains(&expected) {
-            return true;
-        }
-    }
-    // 兼容其他拉起方式：至少要求文件名（含扩展名）完整出现。
-    !name.is_empty() && command.contains(name)
-}
-
-#[cfg(windows)]
-fn process_matches(pid: u32, path: &Path) -> Option<bool> {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return None;
-    };
-    if !output.status.success() {
-        return None;
-    }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    if !listing.to_ascii_lowercase().contains("ffmpeg") {
-        // 进程不存在时 tasklist 也成功但列表为空；这里返回“不是我们的”。
-        return Some(false);
-    }
-    // wmic 在 Windows 11 已移除；优先 PowerShell CIM，失败才回退 wmic。
-    let script = format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine");
-    let command = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| {
-            std::process::Command::new("wmic")
-                .args([
-                    "process",
-                    "where",
-                    &format!("ProcessId={pid}"),
-                    "get",
-                    "CommandLine",
-                ])
-                .output()
+        let marker = pid_file(path);
+        let safe = match std::fs::read_to_string(&marker) {
+            Ok(raw) => raw
+                .trim()
+                .parse::<u32>()
                 .ok()
-                .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        });
-    match command {
-        Some(text) if !text.trim().is_empty() => Some(command_line_matches_recording(&text, path)),
-        _ => None,
-    }
-}
-
-/// 先礼后兵：SIGTERM，等 300ms，还在就 SIGKILL。
-#[cfg(unix)]
-fn terminate(pid: u32) {
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
-    for _ in 0..3 {
-        std::thread::sleep(Duration::from_millis(100));
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-            return;
+                .filter(|pid| *pid > 0)
+                .is_some_and(|pid| crate::orphan::stop_if_owned(pid, path)),
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound
+                    && path.parent().is_some_and(Path::is_dir)
+                {
+                    continue;
+                }
+                false
+            }
+        };
+        if safe {
+            let _ = std::fs::remove_file(marker);
+        } else {
+            tracing::warn!(session_id = %id, "录制进程尚未确认退出，延后整场恢复");
+            deferred.extend(db.session_group_ids(&id)?);
         }
     }
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn terminate(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .output();
+    Ok(deferred)
 }
 
 /// 监控开录前的复查条件（R3）：房间还在、且没被暂停监控。
@@ -4372,16 +4263,19 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
 /// 在 close_orphan_sessions 之后调用（I2）：崩溃会话已被标成 aborted，
 /// 这里先从「失败/中止」的最近记录里捞回还带分片的，再合并。
 /// 由 state.rs 放在后台任务里跑，不挡窗口出现。
-pub async fn recover_parts(db: &Db) -> (usize, u64) {
+pub async fn recover_parts(db: &Db, deferred: &HashSet<String>) -> (usize, u64) {
     let mut recovered = 0usize;
     let mut bytes = 0u64;
-    let mut handled: HashSet<String> = HashSet::new();
+    let mut handled = deferred.clone();
     let post_cfg = crate::post::PostConfig::from_settings(&crate::settings::load(db));
     // 分割收尾的清单优先：里面记着每段的分片范围，先按它补齐，
     // 否则普通恢复会把剩余分片重新合并进首片段，覆盖已完成的片段文件。
     match db.manifest_sessions() {
         Ok(rows) => {
             for (id, file) in rows {
+                if deferred.contains(&id) || !Path::new(&file).is_absolute() {
+                    continue;
+                }
                 match recover_split_manifest(db, Path::new(&file)).await {
                     Some((count, size)) => {
                         handled.insert(id);
@@ -4405,7 +4299,7 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
         }
     };
     for (id, file_path) in rows {
-        if handled.contains(&id) {
+        if handled.contains(&id) || !Path::new(&file_path).is_absolute() {
             continue;
         }
         let path = PathBuf::from(&file_path);
@@ -4443,7 +4337,7 @@ pub async fn recover_parts(db: &Db) -> (usize, u64) {
     match db.unfinished_sessions() {
         Ok(rows) => {
             for (id, file_path) in rows {
-                if handled.contains(&id) {
+                if handled.contains(&id) || !Path::new(&file_path).is_absolute() {
                     continue;
                 }
                 let path = PathBuf::from(&file_path);
@@ -5315,25 +5209,6 @@ mod tests {
         assert_eq!(path.parent(), Some(root.as_path()));
     }
 
-    #[test]
-    fn windows_command_line_must_name_the_exact_recording() {
-        let path = Path::new(r"C:\media\主播\a.flv");
-        let exact = r#"ffmpeg.exe -i https://x -f segment "C:\media\主播\a.part%04d.ts""#;
-        assert!(command_line_matches_recording(exact, path));
-        let other = r#"ffmpeg.exe -i https://x -f segment "C:\media\主播\b.part%04d.ts""#;
-        assert!(
-            !command_line_matches_recording(other, path),
-            "同目录另一场不能被认成这一场"
-        );
-        let other_dir = r#"ffmpeg.exe -i https://x -f segment "D:\second\a.part%04d.ts""#;
-        assert!(
-            !command_line_matches_recording(other_dir, path),
-            "另一个目录的同名录像不能被认成这一场"
-        );
-        let not_ffmpeg = r#"notepad.exe "C:\media\主播\a.part0001.ts""#;
-        assert!(!command_line_matches_recording(not_ffmpeg, path));
-    }
-
     fn test_recorder(tag: &str) -> Recorder {
         let db = Arc::new(Db::open(Path::new(":memory:")).expect("内存库"));
         let _ = tag;
@@ -5596,31 +5471,17 @@ mod tests {
     }
 
     #[test]
-    fn start_guard_clears_inflight_and_keeps_pending_stop() {
+    fn finished_start_consumes_both_stop_markers() {
         let recorder = test_recorder("start-guard");
-        {
-            let mut guard = recorder.begin_start("r1");
-            assert!(recorder.starting.lock().expect("锁").contains("r1"));
-            // 开录在途时来了停录请求：记进 pending_stop。
-            recorder
-                .pending_stop
-                .lock()
-                .expect("锁")
-                .insert("r1".to_string(), "stopped".to_string());
-            guard.mark_inserted();
-            assert!(!recorder.is_finalizing("r1"));
-        }
-        // 会话已挂上：在途标记要摘掉，但停录请求要留给 start 消费（C5）。
-        assert!(!recorder.starting.lock().expect("锁").contains("r1"));
-        assert_eq!(
-            recorder
-                .pending_stop
-                .lock()
-                .expect("锁")
-                .get("r1")
-                .map(String::as_str),
-            Some("stopped")
-        );
+        let guard = recorder.begin_start("r1");
+        recorder.cancel_start("r1");
+        recorder
+            .pending_stop
+            .lock()
+            .unwrap()
+            .insert("r1".into(), "stopped".into());
+        assert_eq!(guard.finish(), (true, Some("stopped".into())));
+        assert_eq!(recorder.begin_start("r1").finish(), (false, None));
     }
 
     #[test]
@@ -6147,7 +6008,7 @@ mod tests {
                 .expect("写分片");
         }
 
-        let (count, bytes) = recover_parts(&db).await;
+        let (count, bytes) = recover_parts(&db, &HashSet::new()).await;
         assert_eq!(count, 1);
         assert_eq!(bytes, 210);
         let row = db.get_session("s1").expect("查库").expect("会话");

@@ -932,8 +932,8 @@ fn target_for(src: &Path, ext: &str) -> PathBuf {
 }
 
 /// 选下一个不存在的同名候选；不覆盖任何已有文件。
-fn next_available_target(target: &Path) -> PathBuf {
-    if !target.exists() {
+fn output_candidate(target: &Path, index: u32) -> PathBuf {
+    if index == 0 {
         return target.to_path_buf();
     }
     let stem = target
@@ -942,18 +942,11 @@ fn next_available_target(target: &Path) -> PathBuf {
         .unwrap_or_else(|| "output".into());
     let ext = target.extension().map(|value| value.to_string_lossy());
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let mut index = 1;
-    loop {
-        let name = match &ext {
-            Some(ext) => format!("{stem}.{index}.{ext}"),
-            None => format!("{stem}.{index}"),
-        };
-        let candidate = parent.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-        index += 1;
-    }
+    let name = match &ext {
+        Some(ext) => format!("{stem}.{index}.{ext}"),
+        None => format!("{stem}.{index}"),
+    };
+    parent.join(name)
 }
 
 /// 把临时产物提交到最终名字，绝不覆盖已有文件。
@@ -961,9 +954,8 @@ fn next_available_target(target: &Path) -> PathBuf {
 /// 同目录 hard_link 在 APFS/NTFS/ext4 上原子且零拷贝；不支持的卷
 /// （exFAT 等）回退到 create_new + 复制，慢但安全。
 async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
-    let mut candidate = target.to_path_buf();
-    loop {
-        candidate = next_available_target(&candidate);
+    for index in 0..=u32::MAX {
+        let candidate = output_candidate(target, index);
         match tokio::fs::hard_link(temp, &candidate).await {
             Ok(()) => {
                 let _ = tokio::fs::remove_file(temp).await;
@@ -985,6 +977,7 @@ async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
             }
         }
     }
+    Err("没有可用的输出文件名".into())
 }
 
 /// 不覆盖的复制：create_new 占位，失败时清掉自己写了一半的文件。
@@ -1487,6 +1480,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn commit_advances_past_dangling_symlink() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        let target = root.join("result.mp4");
+        let temp = root.join("encoded");
+        std::fs::write(&temp, b"encoded").unwrap();
+        #[cfg(windows)]
+        if let Err(e) = std::os::windows::fs::symlink_file(root.join("missing"), &target) {
+            if e.raw_os_error() == Some(1314) {
+                std::fs::remove_dir_all(&root).unwrap();
+                return;
+            }
+            panic!("{e}");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("missing"), &target).unwrap();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            commit_output(&temp, &target),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(out, root.join("result.1.mp4"));
+        assert!(target.is_symlink());
+        assert_eq!(std::fs::read(out).unwrap(), b"encoded");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn commit_output_does_not_overwrite_a_file_created_during_encoding() {
         let dir = std::env::temp_dir().join(format!("hivecast-post-{}", uuid::Uuid::new_v4()));

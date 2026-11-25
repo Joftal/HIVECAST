@@ -19,7 +19,7 @@ const KEY_RECORD_CODEC: &str = "record.codec";
 const KEY_SPLIT_ON_TITLE: &str = "record.split_on_title";
 const KEY_SPLIT_MAX_DURATION: &str = "record.split_max_duration_sec";
 const KEY_SPLIT_MAX_SIZE_MB: &str = "record.split_max_size_mb";
-const KEY_MEDIA_ROOT: &str = "media.root";
+pub(crate) const KEY_MEDIA_ROOT: &str = "media.root";
 /// 手动指定的 ffmpeg；空串表示自动检测（PATH + 平台常见安装位置）。
 pub const KEY_FFMPEG_PATH: &str = "ffmpeg.path";
 const KEY_NOTIFY: &str = "ui.notify";

@@ -124,6 +124,12 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
                 continue;
             }
         }
+        if targets
+            .iter()
+            .any(|p| !p.is_absolute() || parent_missing(p))
+        {
+            continue;
+        }
         let mut failed = false;
         for target in targets {
             match std::fs::metadata(&target) {

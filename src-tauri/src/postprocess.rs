@@ -211,6 +211,21 @@ fn reserve_merge_output(first: &Path, stamp: &str) -> Result<PathBuf, AppError> 
             format!("合并-{stamp}-{index}.mp4")
         };
         let candidate = first.with_file_name(name);
+        // These names also belong to the finished video. Skip stems already in use.
+        let mut conflict = false;
+        for ext in ["jsonl", "ass", "concat.txt"] {
+            match candidate.with_extension(ext).symlink_metadata() {
+                Ok(_) => {
+                    conflict = true;
+                    break;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(AppError::from_io(err, &candidate)),
+            }
+        }
+        if conflict {
+            continue;
+        }
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -265,6 +280,10 @@ pub async fn merge(
     // 再让 ffmpeg 的 -y 覆盖我们自己刚占的空文件（文档 196-18）。
     let out = reserve_merge_output(first, &stamp)?;
     let list_path = out.with_extension("concat.txt");
+    let mut list_file = std::fs::File::create_new(&list_path).map_err(|err| {
+        let _ = std::fs::remove_file(&out);
+        AppError::from_io(err, &list_path)
+    })?;
     let mut artifacts = MergeArtifacts {
         out: out.clone(),
         list: list_path.clone(),
@@ -278,7 +297,8 @@ pub async fn merge(
         let escaped = absolute.to_string_lossy().replace('\'', "'\\''");
         list.push_str(&format!("file '{escaped}'\n"));
     }
-    std::fs::write(&list_path, list)?;
+    std::io::Write::write_all(&mut list_file, list.as_bytes())?;
+    drop(list_file);
 
     let args: Vec<OsString> = vec![
         "-hide_banner".into(),
@@ -343,7 +363,7 @@ pub fn merge_danmaku(
 ) -> std::io::Result<Option<PathBuf>> {
     use std::io::{BufRead, BufReader, Write};
     let out = out_video.with_extension("jsonl");
-    let mut writer = std::io::BufWriter::new(std::fs::File::create(&out)?);
+    let mut writer = std::io::BufWriter::new(std::fs::File::create_new(&out)?);
     let mut offset = 0i64;
     let mut count = 0u64;
     for source in sources {
@@ -367,6 +387,7 @@ pub fn merge_danmaku(
         offset += source.duration_ms.max(0);
     }
     writer.flush()?;
+    drop(writer);
     if count == 0 {
         let _ = std::fs::remove_file(&out);
         return Ok(None);
@@ -441,6 +462,10 @@ fn danmaku_font() -> &'static str {
 }
 
 pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
+    write_danmaku_ass(jsonl, false)
+}
+
+pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, AppError> {
     use std::io::{BufRead, BufReader};
 
     ensure_file(jsonl)?;
@@ -532,7 +557,14 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     }
 
     let out = sibling(jsonl, "", "ass");
-    std::fs::write(&out, ass)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(!exclusive)
+        .create_new(exclusive)
+        .open(&out)?;
+    std::io::Write::write_all(&mut file, ass.as_bytes())?;
+    drop(file);
     tracing::info!(
         target: "hivecast_lib::postprocess",
         task = "ass",
@@ -607,6 +639,27 @@ fn escape_text(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn merge_reservation_preserves_existing_sidecars() {
+        let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        for ext in ["concat.txt", "jsonl", "ass"] {
+            let previous = dir.join("合并-test.mp4").with_extension(ext);
+            std::fs::write(&previous, b"sentinel").unwrap();
+            let out = reserve_merge_output(&dir.join("clip.mp4"), "test").unwrap();
+            assert_eq!(out, dir.join("合并-test-1.mp4"));
+            let list = out.with_extension("concat.txt");
+            std::fs::File::create_new(&list).unwrap();
+            drop(MergeArtifacts {
+                out,
+                list,
+                keep: false,
+            });
+            assert_eq!(std::fs::read(&previous).unwrap(), b"sentinel");
+            std::fs::remove_file(previous).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn failed_merge_cleanup_removes_output_and_list() {
         let dir =
@@ -778,6 +831,16 @@ mod tests {
         make_clip(&first, 3).await;
         make_clip(&second, 3).await;
 
+        // Reserve the unnumbered names across the next minute so both FFmpeg
+        // runs collide with a pre-existing manifest even across a second boundary.
+        let now = crate::clock::now_secs();
+        let mut sentinels = Vec::new();
+        for second in now..now + 60 {
+            let stamp = crate::clock::format_local_opt(second, "%Y%m%d-%H%M%S").unwrap();
+            let list = dir.join(format!("合并-{stamp}.concat.txt"));
+            std::fs::write(&list, b"previous manifest").unwrap();
+            sentinels.push(list);
+        }
         let merged = merge(&[first.clone(), second.clone()], None).await.unwrap();
         let source_total = size_of(&first) + size_of(&second);
         assert_eq!(merged.kind, "merge");
@@ -788,6 +851,26 @@ mod tests {
             source_total
         );
         assert!(Path::new(&merged.path).is_file());
+
+        assert!(Path::new(&merged.path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-1"));
+        let bad = dir.join("broken.flv");
+        std::fs::write(&bad, b"invalid media").unwrap();
+        assert!(merge(&[bad.clone(), bad], None).await.is_err());
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "mp4"))
+                .count(),
+            1
+        );
+        for list in sentinels {
+            assert_eq!(std::fs::read(list).unwrap(), b"previous manifest");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

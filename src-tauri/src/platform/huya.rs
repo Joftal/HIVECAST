@@ -1092,7 +1092,10 @@ mod tests {
     #[ignore = "需要访问虎牙接口"]
     async fn live_room_probe() {
         let adapter = HuyaAdapter::new();
-        let room = adapter.resolve("huya:660000").expect("解析房间号失败");
+        let rid = std::env::var("HIVE_HUYA_ROOM").unwrap_or_else(|_| "660000".into());
+        let room = adapter
+            .resolve(&format!("huya:{rid}"))
+            .expect("解析房间号失败");
         let info = adapter.room_info(&room).await.expect("取房间信息失败");
         println!(
             "room: {} / {} live={}",
