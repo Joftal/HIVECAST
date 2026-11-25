@@ -3,7 +3,7 @@
 //! v1 只有一个作用域（全局）。docs/19 §4.4 规划的四级覆盖要等
 //! 「同一房间不同会话不同画质」真正出现时再落地，现在拆表只会增加复杂度。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use hivecast_ipc::Settings;
 
@@ -103,8 +103,16 @@ pub const MIN_MONITOR_INTERVAL: u32 = 5;
 pub const MIN_BACKOFF_CAP: u32 = 60;
 pub const MAX_BACKOFF_CAP: u32 = 3_600;
 
-/// 首次启动的默认值。
+/// 首次启动的默认值（生产路径用 load；测试构造完整设置时用）。
+#[allow(dead_code)]
 pub fn defaults() -> Settings {
+    let mut settings = base_defaults();
+    settings.media_root = default_media_root().display().to_string();
+    settings
+}
+
+/// 除媒体目录以外的默认值；load 用它避免每 2 秒轮询时重复探测/创建默认目录（文档 200-21）。
+fn base_defaults() -> Settings {
     Settings {
         default_record_qn: RECORD_QN_HIGHEST,
         default_view_qn: 0,
@@ -113,7 +121,7 @@ pub fn defaults() -> Settings {
         split_on_title: false,
         split_max_duration_sec: 0,
         split_max_size_mb: 0,
-        media_root: default_media_root().display().to_string(),
+        media_root: String::new(),
         ffmpeg_path: String::new(),
         notify_enabled: true,
         notify_error: true,
@@ -156,8 +164,10 @@ fn parse_bool(value: &str) -> Option<bool> {
 
 /// 从库里读出设置；缺失或损坏的项回落到默认值。
 pub fn load(db: &Db) -> Settings {
-    let mut settings = defaults();
-    let read = |key: &str| db.get_setting(key).ok().flatten();
+    let mut settings = base_defaults();
+    // 全部设置一次读出，避免逐键查询时被并发保存切成两半（文档 200-19）。
+    let stored = db.all_settings().unwrap_or_default();
+    let read = |key: &str| stored.get(key).cloned();
 
     if let Some(value) = read(KEY_RECORD_QN).and_then(|v| v.parse::<u32>().ok()) {
         settings.default_record_qn = normalize_record_qn(value);
@@ -185,7 +195,7 @@ pub fn load(db: &Db) -> Settings {
         settings.split_max_size_mb = sanitize_split_size(value);
     }
     if let Some(value) = read(KEY_MEDIA_ROOT).filter(|v| !v.trim().is_empty()) {
-        settings.media_root = value;
+        settings.media_root = absolute_media_root(&value);
     }
     if let Some(value) = read(KEY_FFMPEG_PATH).filter(|v| !v.trim().is_empty()) {
         settings.ffmpeg_path = value;
@@ -287,7 +297,32 @@ pub fn load(db: &Db) -> Settings {
     if let Some(value) = read(KEY_RECORD_DANMAKU_GUARD).and_then(|v| parse_bool(&v)) {
         settings.record_danmaku_guard = value;
     }
+    if settings.media_root.trim().is_empty() {
+        // 只有库中从未保存过媒体目录时才探测默认值；已保存的目录不再触碰文件系统。
+        settings.media_root = default_media_root().display().to_string();
+    }
     settings
+}
+
+/// 旧版本可能把媒体目录存成相对路径；读回时按默认媒体目录的父目录解析，
+/// 保证运行期拿到的是绝对路径。目录暂时不可达时也保留绝对形式，不退回相对值。
+fn absolute_media_root(raw: &str) -> String {
+    let path = PathBuf::from(raw.trim());
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        let base = default_media_root()
+            .parent()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        base.join(path)
+    };
+    absolute
+        .canonicalize()
+        .unwrap_or(absolute)
+        .display()
+        .to_string()
 }
 
 /// 只把媒体目录写回设置：启动时目录不可用、回落默认目录后用（H2）。
@@ -848,6 +883,20 @@ mod tests {
         assert!(!loaded.record_danmaku_guard);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_resolves_a_legacy_relative_media_root() {
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        db.set_setting(KEY_MEDIA_ROOT, "legacy-recording-dir")
+            .expect("写入设置失败");
+        let settings = load(&db);
+        let expected = default_media_root()
+            .parent()
+            .expect("默认媒体目录应有父目录")
+            .join("legacy-recording-dir");
+        assert_eq!(Path::new(&settings.media_root), expected);
+        assert!(Path::new(&settings.media_root).is_absolute());
     }
 
     #[test]

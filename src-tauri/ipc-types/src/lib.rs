@@ -875,6 +875,17 @@ pub struct TaskEventSearch {
     pub hits: Vec<TaskEventHit>,
 }
 
+/// 任务事件 CSV 导出结果：total 是匹配总数，written 是实际写入行数。
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct TaskEventExport {
+    #[ts(type = "number")]
+    pub written: i64,
+    #[ts(type = "number")]
+    pub total: i64,
+}
+
 /// 任务中心首页：运行中 + 最近历史。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

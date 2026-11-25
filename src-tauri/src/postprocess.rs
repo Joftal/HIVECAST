@@ -224,6 +224,23 @@ fn reserve_merge_output(first: &Path, stamp: &str) -> Result<PathBuf, AppError> 
     Err(AppError::User("同一秒合并次数过多，请稍后重试".into()))
 }
 
+/// 合并失败时清掉本次占位的成品和清单，别把 0 字节 MP4 留在录制目录。
+struct MergeArtifacts {
+    out: PathBuf,
+    list: PathBuf,
+    keep: bool,
+}
+
+impl Drop for MergeArtifacts {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.out);
+        let _ = std::fs::remove_file(&self.list);
+    }
+}
+
 fn ensure_file(src: &Path) -> Result<(), AppError> {
     if !src.is_file() {
         return Err(AppError::Path(format!("源文件不存在：{}", src.display())));
@@ -248,11 +265,17 @@ pub async fn merge(
     // 再让 ffmpeg 的 -y 覆盖我们自己刚占的空文件（文档 196-18）。
     let out = reserve_merge_output(first, &stamp)?;
     let list_path = out.with_extension("concat.txt");
-    // 上次崩溃可能留下同名清单；目标名已唯一，这里删的是本目标对应的残留。
-    let _ = std::fs::remove_file(&list_path);
+    let mut artifacts = MergeArtifacts {
+        out: out.clone(),
+        list: list_path.clone(),
+        keep: false,
+    };
     let mut list = String::new();
     for src in sources {
-        let escaped = src.to_string_lossy().replace('\'', "'\\''");
+        // concat 清单按清单所在目录解析相对路径；源可能是旧版本留下的相对
+        // 路径，直接写进去会把目录拼两次。统一转成绝对路径再写。
+        let absolute = std::path::absolute(src).unwrap_or_else(|_| src.clone());
+        let escaped = absolute.to_string_lossy().replace('\'', "'\\''");
         list.push_str(&format!("file '{escaped}'\n"));
     }
     std::fs::write(&list_path, list)?;
@@ -282,9 +305,13 @@ pub async fn merge(
         }
         _ => run_ffmpeg(args, "合并").await,
     };
-    let _ = std::fs::remove_file(&list_path);
     result?;
     let size = size_of(&out);
+    if size == 0 {
+        return Err(AppError::Ffmpeg("合并输出为空".into()));
+    }
+    let _ = std::fs::remove_file(&list_path);
+    artifacts.keep = true;
     tracing::info!(
         target: "hivecast_lib::postprocess",
         task = "merge",
@@ -579,6 +606,43 @@ fn escape_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_merge_cleanup_removes_output_and_list() {
+        let dir =
+            std::env::temp_dir().join(format!("hivecast-merge-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("merge.mp4");
+        let list = dir.join("merge.concat.txt");
+        std::fs::write(&out, b"").unwrap();
+        std::fs::write(
+            &list,
+            b"file 'a.ts'
+",
+        )
+        .unwrap();
+        {
+            let _guard = MergeArtifacts {
+                out: out.clone(),
+                list: list.clone(),
+                keep: false,
+            };
+        }
+        assert!(!out.exists(), "失败合并不能留下 0 字节成品");
+        assert!(!list.exists(), "失败合并不能留下清单");
+
+        std::fs::write(&out, b"ok").unwrap();
+        {
+            let mut guard = MergeArtifacts {
+                out: out.clone(),
+                list: list.clone(),
+                keep: false,
+            };
+            guard.keep = true;
+        }
+        assert!(out.exists(), "成功的成品必须保留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ass_time_pads_centiseconds() {

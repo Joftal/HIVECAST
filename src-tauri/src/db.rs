@@ -4,6 +4,7 @@
 //! 加一层 spawn_blocking 或 async 包装只会让代码更难读；这里用 Mutex 串行化，
 //! 并通过 WAL 让读不阻塞写。真正的长任务（ffmpeg）不在锁内。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -1339,6 +1340,26 @@ impl Db {
         )
         .optional()
         .map_err(db_err)
+    }
+
+    /// 一次 SELECT 读出全部设置：设置页读十几项，逐键查询会在并发保存时
+    /// 跨多个事务混读（文档 200-19）。单条语句天然是一个快照。
+    pub fn all_settings(&self) -> Result<HashMap<String, String>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM app_setting")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
+        let mut values = HashMap::new();
+        for row in rows {
+            let (key, value) = row.map_err(db_err)?;
+            values.insert(key, value);
+        }
+        Ok(values)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
@@ -4787,6 +4808,21 @@ mod tests {
             db.split_manifest_for("s1").unwrap().as_deref(),
             Some("/tmp/s1.json")
         );
+    }
+
+    #[test]
+    fn all_settings_returns_every_key_in_one_snapshot() {
+        let (db, _path) = temp_db("settings-all");
+        db.set_settings(&[
+            ("a", "1".to_string()),
+            ("b", "2".to_string()),
+            ("c", "3".to_string()),
+        ])
+        .expect("写设置失败");
+        let all = db.all_settings().expect("读设置失败");
+        assert_eq!(all.get("a").map(String::as_str), Some("1"));
+        assert_eq!(all.get("b").map(String::as_str), Some("2"));
+        assert_eq!(all.get("c").map(String::as_str), Some("3"));
     }
 
     #[test]

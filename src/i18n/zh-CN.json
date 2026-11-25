@@ -285,7 +285,8 @@
     "systemFfmpegOk": "ffmpeg 正常",
     "systemFfmpegMissing": "ffmpeg 缺失",
     "systemDisk": "磁盘剩余",
-    "emptyAction": "打开监控"
+    "emptyAction": "打开监控",
+    "eventSearchExportTruncated": "已导出 {{written}} 条，共匹配 {{total}} 条；单次最多写入最近 50,000 条"
   },
   "settings": {
     "title": "设置",

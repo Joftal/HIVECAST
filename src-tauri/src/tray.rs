@@ -64,7 +64,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_menu(app)?;
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("HIVECAST")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -86,9 +86,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         });
     // 模板图让 macOS 按菜单栏明暗自动反色，深色菜单栏下才不会看不见。
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.icon_as_template(true);
-    }
+    let builder = builder.icon_as_template(true);
     builder.build(app)?;
     tracing::info!("系统托盘已创建");
     Ok(())

@@ -67,9 +67,16 @@ pub fn collect_parts_range(final_path: &Path, start: u32, end: Option<u32>) -> V
 pub fn part_index(part: &Path) -> Option<u32> {
     let name = part.file_name()?.to_str()?;
     let (_, digits) = name.rsplit_once(".part")?;
-    let digits = digits.strip_suffix(".ts")?;
-    // 只接受纯数字：`room.partial.ts`、`room.part2.part0001.ts` 都不是本场分片。
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    parse_part_digits(digits.strip_suffix(".ts")?)
+}
+
+/// ffmpeg 的 `%04d` 只会写出 0000…9999，以及 10000 起的五位数字；
+/// `part1.ts`、`part00001.ts` 都不是本场产物，超过 u32 的编号也不能收。
+fn parse_part_digits(digits: &str) -> Option<u32> {
+    if digits.len() < 4 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if digits.len() > 4 && digits.starts_with('0') {
         return None;
     }
     digits.parse().ok()
@@ -103,9 +110,7 @@ fn collect_all_parts(final_path: &Path) -> Vec<PathBuf> {
             // 必须是「本场 stem.part + 纯数字 + .ts」。只匹配前缀会把
             // `room.part2.part0001.ts`（另一场/另一段）也收进来，收尾时误删。
             let digits = name.strip_prefix(&prefix)?.strip_suffix(".ts")?;
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
+            parse_part_digits(digits)?;
             Some(entry.path())
         })
         .collect();
@@ -406,6 +411,10 @@ mod tests {
         // 前缀相同但编号不是纯数字：上一场的分片，不能并进这一场。
         std::fs::write(dir.join("[t][a][b].part2.part0001.ts"), b"x").unwrap();
         std::fs::write(dir.join("[t][a][b].partial.ts"), b"y").unwrap();
+        // 非 %04d 产物、前导零多于四位、u32 溢出：都不能当成本场分片。
+        std::fs::write(dir.join("[t][a][b].part1.ts"), b"p").unwrap();
+        std::fs::write(dir.join("[t][a][b].part00001.ts"), b"q").unwrap();
+        std::fs::write(dir.join("[t][a][b].part99999999999.ts"), b"r").unwrap();
 
         let parts = collect_parts(&final_path);
         let names: Vec<String> = parts

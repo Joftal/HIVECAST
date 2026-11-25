@@ -1037,7 +1037,13 @@ pub async fn room_set_auto_record(
         && !state.recorder.is_recording(&id)
         && crate::monitor::auto_record_allowed(&room, &room.title)
     {
-        if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
+        // 走 start_checked：用户从关闭到再次打开可能只隔一瞬，拿锁后必须
+        // 重新读库确认自动录制仍然是开的，否则这次开录会盖掉刚做的关闭。
+        if let Err(err) = state
+            .recorder
+            .start_checked(&app, &state.broker, &room)
+            .await
+        {
             tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "开启自动录制后开录失败");
             state.recorder.set_error(&id, err.to_string());
         }
@@ -1720,6 +1726,9 @@ pub async fn room_merge_sessions(
         .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
     let plan = merge_plan(sessions);
+    if !plan.missing.is_empty() {
+        return Err(missing_files_error(&plan.missing));
+    }
     let files = plan.files;
     // 弹幕偏移跟视频容器时长走；ffprobe 失败时才退回数据库时长。
     let durations = probe_merge_durations(&files).await;
@@ -1738,7 +1747,16 @@ pub async fn room_merge_sessions(
     match &result {
         Ok(merged) => {
             let danmaku = merge_danmaku_files(&sources, &merged.path);
-            register_merged_session(&state.db, &room_id, merged, danmaku.as_deref(), total_ms);
+            if let Err(err) =
+                register_merged_session(&state.db, &room_id, merged, danmaku.as_deref(), total_ms)
+            {
+                let message = format!(
+                    "合并完成但登记失败：{err}。成品已保存在 {}，请重试合并或手动导入",
+                    merged.path
+                );
+                job.finish("failed", Some(&message));
+                return Err(AppError::User(message));
+            }
             job.finish("done", None);
         }
         Err(err) => job.finish("failed", Some(&err.to_string())),
@@ -1772,6 +1790,9 @@ pub async fn sessions_merge(
     // 缺文件的片段必须与它的时长一起剔除。旧实现先按全部片段累加时长推进
     // 弹幕偏移，再过滤视频，少一段就会让后面的弹幕整体错位。
     let plan = merge_plan(sessions);
+    if !plan.missing.is_empty() {
+        return Err(missing_files_error(&plan.missing));
+    }
     let merged_room_id = plan.room_id.clone().unwrap_or_default();
     let files = plan.files;
     if files.len() < 2 {
@@ -1798,13 +1819,20 @@ pub async fn sessions_merge(
     match &result {
         Ok(merged) => {
             let danmaku = merge_danmaku_files(&sources, &merged.path);
-            register_merged_session(
+            if let Err(err) = register_merged_session(
                 &state.db,
                 &merged_room_id,
                 merged,
                 danmaku.as_deref(),
                 total_ms,
-            );
+            ) {
+                let message = format!(
+                    "合并完成但登记失败：{err}。成品已保存在 {}，请重试合并或手动导入",
+                    merged.path
+                );
+                job.finish("failed", Some(&message));
+                return Err(AppError::User(message));
+            }
             job.finish("done", None);
         }
         Err(err) => job.finish("failed", Some(&err.to_string())),
@@ -1819,7 +1847,7 @@ fn register_merged_session(
     merged: &PostResult,
     danmaku: Option<&std::path::Path>,
     duration_ms: i64,
-) {
+) -> Result<(), AppError> {
     let now = now_ts();
     let duration_ms = duration_ms.max(0);
     let session = RecordSession {
@@ -1848,7 +1876,9 @@ fn register_merged_session(
     };
     if let Err(err) = db.create_session(&session) {
         tracing::warn!(target: "hivecast_lib::commands", %err, "合并录像登记失败");
+        return Err(err);
     }
+    Ok(())
 }
 
 fn count_lines(path: &std::path::Path) -> i64 {
@@ -1894,19 +1924,15 @@ struct MergePlan {
     danmaku: Vec<postprocess::DanmakuSource>,
     total_ms: i64,
     room_id: Option<String>,
+    /// 数据库有记录、但磁盘上找不到的片段；调用方必须报错，不能静默少合一段。
+    missing: Vec<String>,
 }
 
-/// 合并顺序只看开录时间，与勾选顺序无关；文件已被删掉的片段整段跳过。
+/// 合并顺序按开录时间，同一秒内再按分段序号；与勾选顺序无关。
 /// 视频、弹幕、时长必须来自同一批片段，否则少一段视频就会让后续弹幕错位。
+/// 缺文件的片段不再静默跳过：记进 `missing`，由调用方中止整次合并。
 fn merge_plan(mut sessions: Vec<RecordSession>) -> MergePlan {
-    sessions.sort_by_key(|session| session.started_at);
-    sessions.retain(|session| {
-        session
-            .file_path
-            .as_deref()
-            .map(|path| Path::new(path).is_file())
-            .unwrap_or(false)
-    });
+    sessions.sort_by_key(|session| (session.started_at, session.clip_index));
     let room_id = sessions.first().map(|session| session.room_id.clone());
     let total_ms: i64 = sessions
         .iter()
@@ -1923,16 +1949,38 @@ fn merge_plan(mut sessions: Vec<RecordSession>) -> MergePlan {
             duration_ms: session.duration_ms.max(0),
         })
         .collect();
-    let files = sessions
-        .into_iter()
-        .filter_map(|session| session.file_path.map(PathBuf::from))
-        .collect();
+    let mut missing = Vec::new();
+    let mut files = Vec::new();
+    for session in sessions {
+        match session.file_path {
+            Some(path) if Path::new(&path).is_file() => files.push(PathBuf::from(path)),
+            Some(path) => missing.push(path),
+            None => missing.push(format!("{}（无文件路径）", session.id)),
+        }
+    }
     MergePlan {
         files,
         danmaku,
         total_ms,
         room_id,
+        missing,
     }
+}
+
+/// 缺段时给用户一句能定位的提示，并阻止“少合一段也算成功”。
+fn missing_files_error(missing: &[String]) -> AppError {
+    let shown: Vec<&str> = missing.iter().take(5).map(String::as_str).collect();
+    let more = missing.len().saturating_sub(shown.len());
+    let suffix = if more > 0 {
+        format!(" 等 {} 段", missing.len())
+    } else {
+        String::new()
+    };
+    AppError::User(format!(
+        "有 {} 段录像文件不存在，已停止合并：{}{suffix}",
+        missing.len(),
+        shown.join("、")
+    ))
 }
 
 /// 逐个 ffprobe 合并源；数组顺序与 `merge_plan.files` 一致。
@@ -2085,8 +2133,8 @@ mod tests {
     }
 
     #[test]
-    fn merge_order_follows_start_time_and_skips_missing() {
-        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", std::process::id()));
+    fn merge_order_follows_start_time_and_reports_missing() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.mp4");
         let b = dir.join("b.mp4");
@@ -2096,14 +2144,34 @@ mod tests {
         // 乱序传入，缺失文件在中间。
         let plan = merge_plan(vec![
             session("2", 200, b.clone()),
-            session("3", 300, missing),
+            session("3", 300, missing.clone()),
             session("1", 100, a.clone()),
         ]);
         assert_eq!(plan.files, vec![a, b]);
-        // 被删掉的那段既不贡献时长，也不推进弹幕偏移。
-        assert_eq!(plan.total_ms, 120_000);
-        assert_eq!(plan.danmaku.len(), 2);
+        assert_eq!(plan.missing, vec![missing.display().to_string()]);
+        // 缺段不能静默成功；调用方会用它中止合并。
+        assert!(matches!(
+            missing_files_error(&plan.missing),
+            AppError::User(message) if message.contains("3 段") || message.contains("1 段")
+        ));
+        assert_eq!(plan.total_ms, 180_000);
+        assert_eq!(plan.danmaku.len(), 3);
         assert_eq!(plan.room_id.as_deref(), Some("room"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_order_uses_clip_index_within_the_same_second() {
+        let dir = std::env::temp_dir().join(format!("hivecast-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp4");
+        let b = dir.join("b.mp4");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let mut second = session("2", 100, b.clone());
+        second.clip_index = 1;
+        let plan = merge_plan(vec![second, session("1", 100, a.clone())]);
+        assert_eq!(plan.files, vec![a, b]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2135,6 +2203,41 @@ mod tests {
         for sidecar in &sidecars {
             assert!(!sidecar.exists(), "{} 应被清理", sidecar.display());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn danmaku_replay_streams_only_the_requested_window() {
+        let dir =
+            std::env::temp_dir().join(format!("hivecast-danmaku-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("track.jsonl");
+        let lines = [
+            r#"{"t":0,"k":"chat","c":"a"}"#,
+            "not json",
+            r#"{"t":1500,"k":"gift","c":"b","u":"u"}"#,
+            r#"{"t":3000,"k":"chat","c":"c"}"#,
+        ];
+        std::fs::write(
+            &path,
+            lines.join(
+                "
+",
+            ) + "
+",
+        )
+        .unwrap();
+        let window = read_danmaku_range(&path, Some(1000), Some(2500)).unwrap();
+        assert_eq!(window.len(), 1, "只返回窗口内的弹幕");
+        assert_eq!(window[0].content, "b");
+        assert_eq!(window[0].offset_ms, 1500);
+        assert_eq!(window[0].kind, "gift");
+        let all = read_danmaku_range(&path, None, None).unwrap();
+        assert_eq!(all.len(), 3, "坏行跳过，其余全部返回");
+        assert_eq!(
+            all.iter().map(|m| m.offset_ms).collect::<Vec<_>>(),
+            vec![0, 1500, 3000]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2246,7 +2349,7 @@ mod tests {
             message: Some("合并 2 段".into()),
         };
 
-        register_merged_session(&db, "room-merge", &merged, Some(&jsonl), 125_000);
+        register_merged_session(&db, "room-merge", &merged, Some(&jsonl), 125_000).unwrap();
 
         let (items, total) = db
             .media_list(&MediaFilter {
@@ -2788,21 +2891,20 @@ pub async fn session_export_danmaku(
     postprocess::danmaku_to_ass(std::path::Path::new(&path))
 }
 
-/// 读取一段录像的弹幕 JSONL，供媒体库按视频进度回放。
-#[tauri::command]
-pub async fn media_danmaku(
-    state: State<'_, AppState>,
-    session_id: String,
+/// 从 JSONL 里流式读出 [from_ms, to_ms] 的弹幕，避免整文件读进内存。
+///
+/// 录像 JSONL 是追加写、天然按时间有序；只对取出的窗口排序，窗口大小由调用方控制。
+fn read_danmaku_range(
+    path: &std::path::Path,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
 ) -> Result<Vec<DanmakuMessage>, AppError> {
-    let session = session_file(&state, &session_id)?;
-    let path = session
-        .danmaku_path
-        .filter(|path| std::path::Path::new(path).is_file())
-        .ok_or_else(|| AppError::User("这段录像没有弹幕文件".into()))?;
-    let text = std::fs::read_to_string(&path)
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
         .map_err(|err| AppError::Internal(format!("读取弹幕文件失败：{err}")))?;
     let mut messages = Vec::new();
-    for line in text.lines() {
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -2810,12 +2912,16 @@ pub async fn media_danmaku(
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        let offset = value.get("t").and_then(|v| v.as_i64()).unwrap_or(0);
+        if from_ms.is_some_and(|from| offset < from) || to_ms.is_some_and(|to| offset > to) {
+            continue;
+        }
         let content = value.get("c").and_then(|v| v.as_str()).unwrap_or_default();
         if content.is_empty() {
             continue;
         }
         messages.push(DanmakuMessage {
-            offset_ms: value.get("t").and_then(|v| v.as_i64()).unwrap_or(0),
+            offset_ms: offset,
             kind: value
                 .get("k")
                 .and_then(|v| v.as_str())
@@ -2830,13 +2936,32 @@ pub async fn media_danmaku(
         });
     }
     messages.sort_by_key(|message| message.offset_ms);
-    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, count = messages.len(), "读取录像弹幕轨");
+    Ok(messages)
+}
+
+/// 读取一段录像的弹幕 JSONL，供媒体库按视频进度回放。
+///
+/// 只返回播放位置附近的窗口（前端按时间推进换窗），避免长录像把整轨复制到 webview。
+#[tauri::command]
+pub async fn media_danmaku(
+    state: State<'_, AppState>,
+    session_id: String,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> Result<Vec<DanmakuMessage>, AppError> {
+    let session = session_file(&state, &session_id)?;
+    let path = session
+        .danmaku_path
+        .filter(|path| std::path::Path::new(path).is_file())
+        .ok_or_else(|| AppError::User("这段录像没有弹幕文件".into()))?;
+    let messages = read_danmaku_range(std::path::Path::new(&path), from_ms, to_ms)?;
+    tracing::debug!(target: "hivecast_lib::commands", session_id = %session_id, count = messages.len(), from_ms, to_ms, "读取录像弹幕窗口");
     Ok(messages)
 }
 
 /// 删掉录像主文件之外由录制流程生成的伴随文件：分片、分割清单、pid、
 /// 弹幕字幕和合并临时文件。主文件删除失败时不要调用，避免留下半套数据。
-async fn remove_session_sidecars(path: &std::path::Path) {
+async fn remove_session_sidecars(path: &std::path::Path) -> Vec<PathBuf> {
     let mut targets = vec![
         path.with_extension("ass"),
         path.with_extension("jsonl"),
@@ -2857,18 +2982,23 @@ async fn remove_session_sidecars(path: &std::path::Path) {
             }
         }
     }
+    let mut failed = Vec::new();
     for target in targets {
         match tokio::fs::remove_file(&target).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => tracing::warn!(
-                target: "hivecast_lib::commands",
-                file = %target.display(),
-                error = %err,
-                "删除录像伴随文件失败"
-            ),
+            Err(err) => {
+                tracing::warn!(
+                    target: "hivecast_lib::commands",
+                    file = %target.display(),
+                    error = %err,
+                    "删除录像伴随文件失败"
+                );
+                failed.push(target);
+            }
         }
     }
+    failed
 }
 
 /// 删除一条录像：先停掉可能正在回放的它，再按需删文件，最后删库。
@@ -2903,20 +3033,27 @@ pub async fn media_delete(
                 })?;
             }
         }
+        let mut failed: Vec<String> = Vec::new();
         if let Some(path) = session.danmaku_path.as_deref() {
             let path = std::path::Path::new(path);
             if path.is_file() {
                 if let Err(err) = tokio::fs::remove_file(path).await {
                     tracing::warn!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), error = %err, "删除弹幕文件失败");
+                    failed.push(path.display().to_string());
                 }
             }
         }
         if let Some(path) = session.file_path.as_deref() {
-            remove_session_sidecars(std::path::Path::new(path)).await;
+            failed.extend(
+                remove_session_sidecars(std::path::Path::new(path))
+                    .await
+                    .into_iter()
+                    .map(|path| path.display().to_string()),
+            );
         }
         // 源封装与历史派生文件也要一起删，否则转封装几次就会留下孤儿。
-        // 主文件删除失败已经直接返回，这里的派生文件失败只记警告：不能因为
-        // 一个旧的中间产物挡住用户删除整条录像。
+        // 任何文件删失败都保留数据库行：主文件可能已经删掉，但用户还能从
+        // 残留列表重试，不会出现“界面说删完了，母带还在盘上”。
         for file in state.db.media_files(&session_id)? {
             if file.state != "present" || Some(file.path.as_str()) == session.file_path.as_deref() {
                 continue;
@@ -2925,10 +3062,24 @@ pub async fn media_delete(
             if path.is_file() {
                 if let Err(err) = tokio::fs::remove_file(path).await {
                     tracing::warn!(target: "hivecast_lib::commands", session_id = %session_id, file = %path.display(), error = %err, "删除派生文件失败");
+                    failed.push(path.display().to_string());
                     continue;
                 }
             }
-            remove_session_sidecars(path).await;
+            failed.extend(
+                remove_session_sidecars(path)
+                    .await
+                    .into_iter()
+                    .map(|path| path.display().to_string()),
+            );
+        }
+        if !failed.is_empty() {
+            failed.sort();
+            failed.dedup();
+            return Err(AppError::User(format!(
+                "录像记录已保留，以下文件删除失败，请重试：{}",
+                failed.join("、")
+            )));
         }
     }
 
@@ -2963,6 +3114,7 @@ pub async fn media_delete_group(
     for session in &sessions {
         state.local.stop(&session.id).await;
         let mut file_failed = false;
+        let mut failed_files: Vec<String> = Vec::new();
         if delete_file {
             if let Some(path) = session.file_path.as_deref() {
                 let path = std::path::Path::new(path);
@@ -2972,6 +3124,7 @@ pub async fn media_delete_group(
                         if first_error.is_none() {
                             first_error = Some(AppError::from_io(err, path));
                         }
+                        failed_files.push(path.display().to_string());
                         file_failed = true;
                     }
                 }
@@ -2981,18 +3134,30 @@ pub async fn media_delete_group(
                 if path.is_file() {
                     if let Err(err) = tokio::fs::remove_file(path).await {
                         tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, file = %path.display(), error = %err, "删除弹幕文件失败");
+                        failed_files.push(path.display().to_string());
+                        file_failed = true;
                     }
                 }
             }
         }
         if file_failed {
+            if first_error.is_none() && !failed_files.is_empty() {
+                first_error = Some(AppError::User(format!(
+                    "录像记录已保留，以下文件删除失败，请重试：{}",
+                    failed_files.join("、")
+                )));
+            }
             continue;
         }
         // 与单条删除保持一致：用户选择「保留文件」时不要顺手删掉弹幕、
         // 分割清单和分片，否则留下的 mp4 会缺少可追溯的伴随数据。
         if delete_file {
             if let Some(path) = session.file_path.as_deref() {
-                remove_session_sidecars(std::path::Path::new(path)).await;
+                let leftovers = remove_session_sidecars(std::path::Path::new(path)).await;
+                if !leftovers.is_empty() {
+                    file_failed = true;
+                    failed_files.extend(leftovers.iter().map(|path| path.display().to_string()));
+                }
             }
             for file in state.db.media_files(&session.id)? {
                 if file.state != "present"
@@ -3004,11 +3169,26 @@ pub async fn media_delete_group(
                 if path.is_file() {
                     if let Err(err) = tokio::fs::remove_file(path).await {
                         tracing::warn!(target: "hivecast_lib::commands", session_id = %session.id, file = %path.display(), error = %err, "删除派生文件失败");
+                        failed_files.push(path.display().to_string());
+                        file_failed = true;
                         continue;
                     }
                 }
-                remove_session_sidecars(path).await;
+                let leftovers = remove_session_sidecars(path).await;
+                if !leftovers.is_empty() {
+                    file_failed = true;
+                    failed_files.extend(leftovers.iter().map(|path| path.display().to_string()));
+                }
             }
+        }
+        if file_failed {
+            if first_error.is_none() && !failed_files.is_empty() {
+                first_error = Some(AppError::User(format!(
+                    "录像记录已保留，以下文件删除失败，请重试：{}",
+                    failed_files.join("、")
+                )));
+            }
+            continue;
         }
         state.thumbs.remove(&session.id);
         if let Err(err) = state.db.delete_session(&session.id) {
@@ -3239,7 +3419,7 @@ pub fn task_events_export(
     only_failed: Option<bool>,
     platform: Option<String>,
     lang: Option<String>,
-) -> Result<usize, AppError> {
+) -> Result<hivecast_ipc::TaskEventExport, AppError> {
     use std::io::Write;
 
     let target = PathBuf::from(path.trim());
@@ -3305,8 +3485,11 @@ pub fn task_events_export(
             "任务事件导出达到上限，只写入最近的事件"
         );
     }
-    tracing::info!(path = %target.display(), count = result.hits.len(), "任务事件已导出");
-    Ok(result.hits.len())
+    tracing::info!(path = %target.display(), count = result.hits.len(), total = result.total, "任务事件已导出");
+    Ok(hivecast_ipc::TaskEventExport {
+        written: result.hits.len() as i64,
+        total: result.total,
+    })
 }
 
 /// 任务中心的运行中列表 = 录制（含开录中）+ 后处理/合并/弹幕导出；历史来自 task_history。

@@ -193,6 +193,15 @@ pub fn redact_url(url: &str) -> String {
     parsed.to_string()
 }
 
+/// 请求错误里不要带原始 URL。
+///
+/// 扫码轮询把 qrcode_key 放在 query 上，URL 会随 reqwest 的错误 Display 一起
+/// 进入日志；`redact_url` 只处理我们自己拼的那一段，必须再把错误自带的 URL
+/// 摘掉，否则 qrcode_key、token 这类一次性凭据仍会落盘。
+fn request_error(url: &str, err: reqwest::Error) -> String {
+    format!("{} → {}", redact_url(url), err.without_url())
+}
+
 fn parse_date(headers: &reqwest::header::HeaderMap) -> Option<i64> {
     let value = headers.get(reqwest::header::DATE)?.to_str().ok()?;
     jiff::fmt::rfc2822::parse(value)
@@ -228,7 +237,7 @@ async fn send_inner(
     // 这样既不会把同一个 Cookie 头发两遍，也避免每个适配器都去查一次凭据。
     let mut request = request
         .build()
-        .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Network(request_error(url, err)))?;
     if inject_cookie && request.headers().get(reqwest::header::COOKIE).is_none() {
         if let Some(cookie) = crate::credential::cookie_for_url(url) {
             match reqwest::header::HeaderValue::from_str(&cookie) {
@@ -247,7 +256,7 @@ async fn send_inner(
     let response = client()
         .execute(request)
         .await
-        .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Network(request_error(url, err)))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -331,7 +340,7 @@ async fn get_json_fetched<T: DeserializeOwned>(
     let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok(Fetched { data, date })
 }
 
@@ -362,7 +371,7 @@ pub async fn get_json_with_headers<T: DeserializeOwned>(
     let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok(FetchedWithHeaders { data, set_cookies })
 }
 
@@ -382,7 +391,7 @@ pub async fn get_text(
     let body = response
         .text()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok((body, date))
 }
 
@@ -407,7 +416,7 @@ pub async fn post_form_json<T: DeserializeOwned>(
     let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok(Fetched { data, date })
 }
 
@@ -433,7 +442,7 @@ pub async fn post_json<T: DeserializeOwned>(
     let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok(Fetched { data, date })
 }
 
@@ -454,7 +463,7 @@ pub async fn post_octets(
     let bytes = response
         .bytes()
         .await
-        .map_err(|err| PlatformError::Network(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Network(request_error(url, err)))?;
     Ok(bytes.to_vec())
 }
 
@@ -487,13 +496,13 @@ pub async fn post_form_json_with_headers<T: DeserializeOwned>(
     let data = response
         .json::<T>()
         .await
-        .map_err(|err| PlatformError::Parse(format!("{} → {err}", redact_url(url))))?;
+        .map_err(|err| PlatformError::Parse(request_error(url, err)))?;
     Ok(FetchedWithHeaders { data, set_cookies })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redact_url;
+    use super::{redact_url, request_error};
 
     #[test]
     fn urls_in_logs_keep_keys_but_drop_secrets() {
@@ -569,6 +578,20 @@ mod tests {
         );
         assert!(redacted.contains("token=***"));
         assert!(redacted.contains("index.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn request_errors_drop_the_url_so_qrcode_key_never_reaches_logs() {
+        let url = "http://127.0.0.1:1/qrcode/poll?qrcode_key=SECRET&token=SECRET2";
+        let err = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect_err("连接 127.0.0.1:1 应当失败");
+        let text = request_error(url, err);
+        assert!(!text.contains("SECRET"), "凭据泄露了：{text}");
+        assert!(text.contains("qrcode_key=***"));
+        assert!(text.contains("token=***"));
     }
 
     #[test]

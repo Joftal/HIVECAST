@@ -43,6 +43,7 @@ import type { TaskCenter } from "./bindings/TaskCenter";
 import type { TaskEvent } from "./bindings/TaskEvent";
 import type { TaskEventHit } from "./bindings/TaskEventHit";
 import type { TaskEventPage } from "./bindings/TaskEventPage";
+import type { TaskEventExport } from "./bindings/TaskEventExport";
 import type { TaskEventSearch } from "./bindings/TaskEventSearch";
 import type { TaskSummary } from "./bindings/TaskSummary";
 import type { SystemHealth } from "./bindings/SystemHealth";
@@ -97,6 +98,7 @@ export type {
   TaskEvent,
   TaskEventHit,
   TaskEventPage,
+  TaskEventExport,
   TaskEventSearch,
   TaskRecord,
   TaskSummary,
@@ -478,8 +480,12 @@ export async function sessionExportDanmaku(sessionId: string): Promise<PostResul
 }
 
 /** 读取一段录像的弹幕 JSONL，按 offsetMs 升序，供回放调度。 */
-export async function mediaDanmaku(sessionId: string): Promise<DanmakuMessage[]> {
-  return invoke<DanmakuMessage[]>("media_danmaku", { sessionId });
+export async function mediaDanmaku(
+  sessionId: string,
+  fromMs?: number,
+  toMs?: number,
+): Promise<DanmakuMessage[]> {
+  return invoke<DanmakuMessage[]>("media_danmaku", { sessionId, fromMs, toMs });
 }
 
 export async function mediaPlay(
@@ -678,15 +684,15 @@ export async function taskEventSearch(
   });
 }
 
-/** 把当前检索条件下的阶段事件导出为 CSV，返回写入条数。 */
+/** 把当前检索条件下的阶段事件导出为 CSV，返回实际写入数与匹配总数。 */
 export async function taskEventsExport(
   path: string,
   query: string,
   onlyFailed: boolean,
   platform: string | null,
   lang: string,
-): Promise<number> {
-  return invoke<number>("task_events_export", { path, query, onlyFailed, platform, lang });
+): Promise<TaskEventExport> {
+  return invoke<TaskEventExport>("task_events_export", { path, query, onlyFailed, platform, lang });
 }
 
 /** 任务已清空后立即退出（关闭提示里的「立即退出」）。 */

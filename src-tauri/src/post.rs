@@ -674,27 +674,26 @@ async fn finish_command(
         let _ = tokio::fs::remove_file(temp).await;
         return PostOutcome::source_only(src, STATE_CANCELLED, Some("后处理已取消".into()));
     }
-    // 目标可能来自上一次失败尝试：先移除再改名，Windows 的 rename 不覆盖。
-    if target.exists() {
-        if let Err(err) = tokio::fs::remove_file(target).await {
+    // 目标名是在编码前选的；编码期间用户或另一场录制可能占用了同名文件。
+    // 绝不能先删再改名：那会把别人的文件覆盖掉。这里用 hard_link 做原子
+    // 的「仅在不存在时创建」，占用则顺延 .1/.2，源临时文件随后删除。
+    let target = match commit_output(temp, target).await {
+        Ok(path) => path,
+        Err(err) => {
             let _ = tokio::fs::remove_file(temp).await;
             return PostOutcome::source_only(
                 src,
                 STATE_FAILED,
-                Some(format!("替换旧产物失败：{err}")),
+                Some(format!("产物落盘失败：{err}")),
             );
         }
-    }
-    if let Err(err) = tokio::fs::rename(temp, target).await {
-        let _ = tokio::fs::remove_file(temp).await;
-        return PostOutcome::source_only(src, STATE_FAILED, Some(format!("产物改名失败：{err}")));
-    }
+    };
     let delete_source =
         (cfg.mode == settings::POST_MODE_CONVERT && cfg.delete_source && target != src)
             .then(|| src.to_path_buf());
     PostOutcome {
-        path: target.to_path_buf(),
-        size: file_size(target),
+        path: target.clone(),
+        size: file_size(&target),
         source_path: src.to_path_buf(),
         state: STATE_DONE.to_string(),
         error: None,
@@ -932,6 +931,84 @@ fn target_for(src: &Path, ext: &str) -> PathBuf {
     candidate
 }
 
+/// 选下一个不存在的同名候选；不覆盖任何已有文件。
+fn next_available_target(target: &Path) -> PathBuf {
+    if !target.exists() {
+        return target.to_path_buf();
+    }
+    let stem = target
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".into());
+    let ext = target.extension().map(|value| value.to_string_lossy());
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let mut index = 1;
+    loop {
+        let name = match &ext {
+            Some(ext) => format!("{stem}.{index}.{ext}"),
+            None => format!("{stem}.{index}"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+/// 把临时产物提交到最终名字，绝不覆盖已有文件。
+///
+/// 同目录 hard_link 在 APFS/NTFS/ext4 上原子且零拷贝；不支持的卷
+/// （exFAT 等）回退到 create_new + 复制，慢但安全。
+async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
+    let mut candidate = target.to_path_buf();
+    loop {
+        candidate = next_available_target(&candidate);
+        match tokio::fs::hard_link(temp, &candidate).await {
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(temp).await;
+                return Ok(candidate);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                let source = temp.to_path_buf();
+                let destination = candidate.clone();
+                let copied =
+                    tokio::task::spawn_blocking(move || copy_no_clobber(&source, &destination))
+                        .await
+                        .map_err(|err| format!("提交产物任务失败：{err}"))?;
+                match copied {
+                    Ok(()) => return Ok(candidate),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => return Err(err.to_string()),
+                }
+            }
+        }
+    }
+}
+
+/// 不覆盖的复制：create_new 占位，失败时清掉自己写了一半的文件。
+fn copy_no_clobber(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut input = std::fs::File::open(source)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let result = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    drop(output);
+    match result {
+        Ok(()) => {
+            // 临时文件清不掉不应把已经提交成功的产物判成失败；交给下次清理。
+            let _ = std::fs::remove_file(source);
+            Ok(())
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(destination);
+            Err(err)
+        }
+    }
+}
+
 fn temp_path(src: &Path, ext: &str) -> PathBuf {
     let name = src
         .file_name()
@@ -1163,14 +1240,14 @@ pub fn trash_info() -> TrashInfo {
 }
 
 /// 回收站根目录；Linux 用于写 .trashinfo，设置页用于「打开」。
+///
+/// Windows 的回收站没有可直接打开的目录，`trash_open` 走 explorer 的
+/// `shell:RecycleBinFolder`，因此这里只在 Unix 上存在。
+#[cfg(unix)]
 pub fn trash_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME").map(|home| Path::new(&home).join(".Trash"))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        None
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1178,10 +1255,6 @@ pub fn trash_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")))
             .map(|data| data.join("Trash"))
-    }
-    #[cfg(not(any(unix, target_os = "windows")))]
-    {
-        None
     }
 }
 
@@ -1410,6 +1483,25 @@ mod tests {
         let target = target_for(&src, "mp4");
         assert_eq!(target, dir.join("live.1.mp4"));
         assert!(!target.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_output_does_not_overwrite_a_file_created_during_encoding() {
+        let dir = std::env::temp_dir().join(format!("hivecast-post-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let temp = dir.join(".live.post-1234.mp4");
+        let target = dir.join("live.mp4");
+        std::fs::write(&temp, b"our output").unwrap();
+        std::fs::write(&target, b"someone else").unwrap();
+
+        let committed = commit_output(&temp, &target).await.expect("提交应成功");
+
+        assert_eq!(committed, dir.join("live.1.mp4"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone else");
+        assert_eq!(std::fs::read(&committed).unwrap(), b"our output");
+        assert!(!temp.exists(), "临时文件应被清理");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

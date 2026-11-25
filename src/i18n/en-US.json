@@ -285,7 +285,8 @@
     "systemFfmpegOk": "ffmpeg ready",
     "systemFfmpegMissing": "ffmpeg missing",
     "systemDisk": "Disk free",
-    "emptyAction": "Open monitor"
+    "emptyAction": "Open monitor",
+    "eventSearchExportTruncated": "Exported {{written}} of {{total}} matching events; the latest 50,000 are written per export"
   },
   "settings": {
     "title": "Settings",

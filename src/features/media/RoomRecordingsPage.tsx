@@ -40,6 +40,9 @@ import {
 
 const PAGE_SIZE = 60;
 const VOLUME_KEY = "hivecast.mediaVolume";
+// 回放弹幕按播放位置附近取窗口：长录像的整轨可达几十 MB，不能一次塞进 webview。
+const DANMAKU_WINDOW_MS = 120_000;
+const DANMAKU_MARGIN_MS = 30_000;
 
 const FILE_ROLE: Record<string, string> = {
   main: "media.mainFile",
@@ -213,6 +216,13 @@ export default function RoomRecordingsPage({
   const [volume, setVolume] = useState(loadVolume);
   // 录像弹幕轨：从 JSONL 读进内存，由播放位置驱动，不订阅直播流。
   const [danmakuTrack, setDanmakuTrack] = useState<DanmakuMessage[] | null>(null);
+  const [danmakuWindow, setDanmakuWindow] = useState<{
+    sessionId: string;
+    from: number;
+    to: number;
+  } | null>(null);
+  const danmakuSeqRef = useRef(0);
+  const danmakuLoadingRef = useRef(false);
   const [danmakuLoading, setDanmakuLoading] = useState(false);
   const [danmakuOn, setDanmakuOn] = useState(true);
   const [playPosition, setPlayPosition] = useState(0);
@@ -248,34 +258,66 @@ export default function RoomRecordingsPage({
     };
   }, [playing?.item.id, playing?.item.path, playing?.item.postState, playing?.item.sourceDeleted]);
 
+  const loadDanmakuWindow = useCallback((item: MediaItem, positionMs: number) => {
+    if (danmakuLoadingRef.current) return;
+    const seq = ++danmakuSeqRef.current;
+    // 播放器上报的是毫秒浮点数；IPC 的 fromMs/toMs 是 i64，
+    // 直接传小数会被 Tauri 拒绝，窗口就永远停在加载中。
+    const position = Math.round(positionMs);
+    const from = Math.max(0, position - DANMAKU_WINDOW_MS);
+    const to = position + DANMAKU_WINDOW_MS;
+    danmakuLoadingRef.current = true;
+    setDanmakuLoading(true);
+    void mediaDanmaku(item.id, from, to)
+      .then((messages) => {
+        if (seq !== danmakuSeqRef.current) return;
+        setDanmakuTrack(messages);
+        setDanmakuWindow({ sessionId: item.id, from, to });
+      })
+      .catch(() => {
+        if (seq === danmakuSeqRef.current) {
+          setDanmakuTrack([]);
+          // 失败也要推进窗口，否则同一段位置会让每个播放事件都重试一次。
+          setDanmakuWindow({ sessionId: item.id, from, to });
+        }
+      })
+      .finally(() => {
+        danmakuLoadingRef.current = false;
+        if (seq === danmakuSeqRef.current) setDanmakuLoading(false);
+      });
+  }, []);
+
   useEffect(() => {
     const item = playing?.item;
-    setPlayPosition(playing?.playback.offsetMs ?? 0);
+    const offset = playing?.playback.offsetMs ?? 0;
+    danmakuSeqRef.current += 1;
+    danmakuLoadingRef.current = false;
+    setPlayPosition(offset);
     setDanmakuTrack(null);
+    setDanmakuWindow(null);
     if (!item?.danmakuPath) {
       setDanmakuLoading(false);
       return;
     }
-    let alive = true;
-    setDanmakuLoading(true);
-    void mediaDanmaku(item.id)
-      .then((messages) => {
-        if (alive) setDanmakuTrack(messages);
-      })
-      .catch(() => {
-        if (alive) setDanmakuTrack([]);
-      })
-      .finally(() => {
-        if (alive) setDanmakuLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [playing?.item.id, playing?.item.danmakuPath]);
+    loadDanmakuWindow(item, offset);
+  }, [playing?.item.id, playing?.item.danmakuPath, loadDanmakuWindow]);
 
   useEffect(() => {
     if (playing) setPlayPosition(playing.playback.offsetMs);
   }, [playing?.playback.offsetMs]);
+
+  // 接近当前窗口的边缘才换窗口；注意 from=0 时不能再用 from+margin
+  // 判断，否则开场前 30 秒每一帧都会重载同一段。
+  useEffect(() => {
+    const item = playing?.item;
+    if (!item?.danmakuPath || !danmakuWindow || danmakuLoading) return;
+    if (danmakuWindow.sessionId !== item.id) return;
+    const needsEarlier =
+      danmakuWindow.from > 0 && playPosition < danmakuWindow.from + DANMAKU_MARGIN_MS;
+    const needsLater = playPosition > danmakuWindow.to - DANMAKU_MARGIN_MS;
+    if (!needsEarlier && !needsLater) return;
+    loadDanmakuWindow(item, playPosition);
+  }, [playPosition, playing?.item.id, playing?.item.danmakuPath, danmakuWindow, danmakuLoading, loadDanmakuWindow]);
 
   // 搜索防抖：每敲一个字都查一次库没必要。
   useEffect(() => {
@@ -363,39 +405,54 @@ export default function RoomRecordingsPage({
   // 启动后的崩溃恢复合并在后台跑完时会改文件路径/大小，重新拉一遍列表（I2）。
   useEffect(() => {
     if (!isTauri()) return;
+    let disposed = false;
     let dispose: (() => void) | undefined;
     void onMediaChanged(() => {
+      if (disposed) return;
       void loadFiles(0);
     })
       .then((off) => {
-        dispose = off;
+        // 订阅应答可能晚于卸载：此时清理函数还没拿到 off，必须在这里补解绑。
+        if (disposed) off();
+        else dispose = off;
       })
       .catch(() => undefined);
-    return () => dispose?.();
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, [hostId, loadFiles]);
 
   // 生成好的九宫格封面按 id 替换，不整页重载。
   useEffect(() => {
     if (!isTauri()) return;
+    let disposed = false;
     let dispose: (() => void) | undefined;
     void onMediaThumb((thumb) => {
+      if (disposed) return;
       thumbsRef.current[thumb.sessionId] = thumb.url;
       setItems((prev) =>
         prev.map((item) => (item.id === thumb.sessionId ? { ...item, thumbnailUrl: thumb.url } : item)),
       );
     })
       .then((off) => {
-        dispose = off;
+        if (disposed) off();
+        else dispose = off;
       })
       .catch(() => undefined);
-    return () => dispose?.();
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
+    let disposed = false;
     let dispose: (() => void) | undefined;
     const timers = new Set<number>();
     void onPostProgress((one) => {
+      if (disposed) return;
       setPostJobs((prev) => ({ ...prev, [one.sessionId]: one }));
       if (one.state === "done" || one.state === "cancelled") {
         setPostJobs((prev) => {
@@ -414,10 +471,12 @@ export default function RoomRecordingsPage({
       }
     })
       .then((off) => {
-        dispose = off;
+        if (disposed) off();
+        else dispose = off;
       })
       .catch(() => undefined);
     return () => {
+      disposed = true;
       dispose?.();
       for (const timer of timers) window.clearTimeout(timer);
     };
@@ -1102,9 +1161,12 @@ export default function RoomRecordingsPage({
                         startAtSec={playing.playback.offsetMs / 1000}
                         onSeek={(positionMs) => void seekTo(playing.item, positionMs)}
                         onPositionChange={setPlayPosition}
-                        danmakuEnabled={danmakuOn && (danmakuTrack?.length ?? 0) > 0}
+                        danmakuEnabled={
+                          danmakuOn &&
+                          ((playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0)
+                        }
                         onToggleDanmaku={
-                          (danmakuTrack?.length ?? 0) > 0
+                          (playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0
                             ? () => setDanmakuOn((value) => !value)
                             : undefined
                         }
@@ -1169,9 +1231,11 @@ export default function RoomRecordingsPage({
                         <span className="ml-auto shrink-0 font-sans text-[10px] tabular-nums text-faint">
                           {danmakuLoading
                             ? t("media.danmakuLoading")
-                            : danmakuTrack && danmakuTrack.length > 0
-                              ? t("media.danmakuTrackCount", { n: danmakuTrack.length })
-                              : t("media.danmakuEmpty")}
+                            : (playing.item.danmakuCount ?? 0) > 0
+                              ? t("media.danmakuTrackCount", { n: playing.item.danmakuCount })
+                              : danmakuTrack && danmakuTrack.length > 0
+                                ? t("media.danmakuTrackCount", { n: danmakuTrack.length })
+                                : t("media.danmakuEmpty")}
                         </span>
                       </div>
                     ) : null}

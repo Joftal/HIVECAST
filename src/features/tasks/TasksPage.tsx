@@ -1034,8 +1034,14 @@ function EventSearchDialog({
       });
       if (typeof path !== "string" || !path) return;
       setExporting(true);
-      const count = await taskEventsExport(path, query, onlyFailed, platform, i18n.language);
-      notify.success(t("tasks.eventSearchExported", { n: count }));
+      const result = await taskEventsExport(path, query, onlyFailed, platform, i18n.language);
+      if (result.total > result.written) {
+        notify.warning(
+          t("tasks.eventSearchExportTruncated", { written: result.written, total: result.total }),
+        );
+      } else {
+        notify.success(t("tasks.eventSearchExported", { n: result.written }));
+      }
     } catch (err) {
       notify.error(err);
     } finally {

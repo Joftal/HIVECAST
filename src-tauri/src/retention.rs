@@ -118,20 +118,36 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
                     }
                 }
             }
-            Err(err) => tracing::warn!(%err, id = %entry.id, "读取录像文件清单失败"),
+            // 读不到清单就保留会话，不能把母带当孤儿删掉。
+            Err(err) => {
+                tracing::warn!(%err, id = %entry.id, "读取录像文件清单失败，保留会话记录");
+                continue;
+            }
         }
         let mut failed = false;
         for target in targets {
             match std::fs::metadata(&target) {
                 Ok(meta) => match std::fs::remove_file(&target) {
                     Ok(()) => freed += meta.len(),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // 并发删除可接受；父目录都不可见则是卷离线/挂载点消失，
+                        // 此时把 NotFound 当成功会删掉会话，卷回来后文件永远失联。
+                        if parent_missing(&target) {
+                            failed = true;
+                            tracing::warn!(id = %entry.id, path = %target.display(), "保留策略：父目录不可见，保留会话记录");
+                        }
+                    }
                     Err(err) => {
                         failed = true;
                         tracing::warn!(id = %entry.id, path = %target.display(), error = %err, "保留策略删除文件失败");
                     }
                 },
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    if parent_missing(&target) {
+                        failed = true;
+                        tracing::warn!(id = %entry.id, path = %target.display(), "保留策略：父目录不可见，保留会话记录");
+                    }
+                }
                 Err(err) => {
                     failed = true;
                     tracing::warn!(id = %entry.id, path = %target.display(), error = %err, "保留策略读取文件信息失败");
@@ -159,6 +175,11 @@ pub fn enforce_from_settings(db: &Db) -> Cleaned {
         );
     }
     cleaned
+}
+
+/// 文件本身不存在不一定是异常；父目录也不存在通常意味着卷没挂上。
+fn parent_missing(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| !parent.exists())
 }
 
 /// 一条录像在磁盘上的全部产物：成品、弹幕、字幕、合并清单、残留分片（I4）。
@@ -330,6 +351,35 @@ mod tests {
             "会话应保留以便下次重试"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enforce_keeps_the_session_when_the_parent_directory_is_gone() {
+        let db = Db::open(Path::new(":memory:")).expect("内存库");
+        let dir = std::env::temp_dir().join(format!("hivecast-ret-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录失败");
+        let final_path = dir.join("外置盘录像.mp4");
+        std::fs::write(&final_path, b"x").expect("写成品");
+        let started = crate::db::now_ts() - 3 * 86_400;
+        db.set_setting(crate::settings::KEY_RETENTION_DAYS, "1")
+            .expect("设置保留天数失败");
+        db.exec_batch_for_test(&format!(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-gone', 'bilibili', '10', 'https://live.bilibili.com/10', '主播', '房间', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms)
+                 VALUES ('s-gone', 'rm-gone', {started}, 'finished', '{}', 1, 60000);",
+                final_path.display()
+            ))
+            .expect("播种失败");
+
+        // 模拟外置盘拔出/挂载点消失：整棵目录都不存在，所有目标都是 NotFound。
+        std::fs::remove_dir_all(&dir).expect("删除目录失败");
+        let cleaned = enforce_from_settings(&db);
+        assert_eq!(cleaned.deleted, 0, "父目录不可见时不能移除会话");
+        assert!(
+            db.get_session("s-gone").expect("查询会话失败").is_some(),
+            "会话应保留，等卷恢复后重试"
+        );
     }
 
     #[test]

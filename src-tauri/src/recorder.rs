@@ -1247,16 +1247,36 @@ impl Recorder {
             Some(&recording.quality),
         );
 
-        // 开录在途时用户点了停录：会话既然已经挂上，就立刻按这个原因收尾（C5）。
-        let pending = self
-            .pending_stop
+        // 最后一次取消检查到挂进 active 之间，用户仍可能关掉自动录制并停录：
+        // 那时 stop 看到房间里既不在 starting 也不在 active，不会留下 pending_stop。
+        // 会话已经挂上后再取一次取消标记 / 自动录制开关，把这条窗口收干净（C5）。
+        let cancelled = self
+            .start_cancelled
             .lock()
-            .expect("停录标记被污染")
+            .expect("开录取消标记被污染")
             .remove(&room.id);
+        let auto_off = recheck
+            && !self
+                .db
+                .get_room(&room.id)
+                .ok()
+                .flatten()
+                .is_some_and(|fresh| fresh.auto_record);
+        // 开录在途时用户点了停录：会话既然已经挂上，就立刻按这个原因收尾（C5）。
+        let pending = if cancelled || auto_off {
+            Some("stopped".to_string())
+        } else {
+            self.pending_stop
+                .lock()
+                .expect("停录标记被污染")
+                .remove(&room.id)
+        };
         if let Some(reason) = pending {
             tracing::info!(
                 room = %room.host_name,
                 reason = %reason,
+                auto_off,
+                cancelled,
                 "开录在途时收到停止请求，立即收尾"
             );
             {
@@ -3292,9 +3312,19 @@ pub fn reap_orphans(db: &Db) {
             let _ = std::fs::remove_file(&pid_path);
             continue;
         };
-        if process_matches(pid, &path) {
-            tracing::warn!(pid, file = %path.display(), "清理上次崩溃遗留的 ffmpeg");
-            terminate(pid);
+        match process_matches(pid, &path) {
+            Some(true) => {
+                tracing::warn!(pid, file = %path.display(), "清理上次崩溃遗留的 ffmpeg");
+                terminate(pid);
+            }
+            // 进程已经不在了，或 pid 被别的进程复用：pid 文件没有保留价值。
+            Some(false) => {}
+            // 查不到命令行（PowerShell/WMIC 都被裁剪）时不能把 pid 文件删掉，
+            // 否则下次启动再也无法定位这个可能还在写分片的进程。
+            None => {
+                tracing::warn!(pid, file = %path.display(), "无法读取进程命令行，保留 pid 文件待下次重试");
+                continue;
+            }
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -3302,65 +3332,69 @@ pub fn reap_orphans(db: &Db) {
 
 /// 这个 pid 现在还活着、而且确实是录这条文件的 ffmpeg。
 #[cfg(unix)]
-fn process_matches(pid: u32, path: &Path) -> bool {
+fn process_matches(pid: u32, path: &Path) -> Option<bool> {
     if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-        return false;
+        return Some(false);
     }
-    let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let Ok(output) = std::process::Command::new("ps")
+    let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
-    else {
-        return false;
-    };
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let command = String::from_utf8_lossy(&output.stdout);
-    command.contains("ffmpeg") && command.contains(stem)
+    Some(command_line_matches_recording(&command, path))
 }
 
 /// 命令行是否确实是「在录这条文件」的 ffmpeg。
 ///
 /// 必须同时匹配 ffmpeg 与这条录像的完整路径、分片模板 stem 或文件名；只比
 /// 父目录会误杀同目录里正在录另一场的 ffmpeg。
-#[cfg(any(windows, test))]
 fn command_line_matches_recording(command: &str, path: &Path) -> bool {
-    let command = command.to_ascii_lowercase();
+    // 统一分隔符再比较：Windows 命令行里可能是反斜杠，测试与日志里常是正斜杠。
+    let command = command.replace('\\', "/").to_ascii_lowercase();
     if !command.contains("ffmpeg") {
         return false;
     }
-    let full = path.to_string_lossy().to_ascii_lowercase();
+    let full = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     if !full.is_empty() && command.contains(&full) {
         return true;
     }
-    // 录制命令的输出是「成品名.part%04d.ts」，不是成品路径本身；
-    // 用完整 stem + ".part" 仍能唯一锁定这一场。
-    if let Some(stem) = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
-    {
-        if !stem.is_empty() && command.contains(&format!("{stem}.part")) {
+    // 录制命令的输出是「成品名.part%04d.ts」，不是成品路径本身。
+    // 必须带上完整父目录：只比 stem 会把另一个目录里的同名录像认成这一场。
+    let (parent, name) = full.rsplit_once('/').unwrap_or(("", full.as_str()));
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    if !stem.is_empty() {
+        let expected = format!("{parent}/{stem}.part")
+            .trim_start_matches('/')
+            .to_string();
+        if !expected.is_empty() && command.contains(&expected) {
             return true;
         }
     }
     // 兼容其他拉起方式：至少要求文件名（含扩展名）完整出现。
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .filter(|name| !name.is_empty())
-        .is_some_and(|name| command.contains(&name))
+    !name.is_empty() && command.contains(name)
 }
 
 #[cfg(windows)]
-fn process_matches(pid: u32, path: &Path) -> bool {
+fn process_matches(pid: u32, path: &Path) -> Option<bool> {
     let Ok(output) = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
     else {
-        return false;
+        return None;
     };
+    if !output.status.success() {
+        return None;
+    }
     let listing = String::from_utf8_lossy(&output.stdout);
     if !listing.to_ascii_lowercase().contains("ffmpeg") {
-        return false;
+        // 进程不存在时 tasklist 也成功但列表为空；这里返回“不是我们的”。
+        return Some(false);
     }
     // wmic 在 Windows 11 已移除；优先 PowerShell CIM，失败才回退 wmic。
     let script = format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine");
@@ -3383,9 +3417,10 @@ fn process_matches(pid: u32, path: &Path) -> bool {
                 .ok()
                 .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
         });
-    command
-        .filter(|text| !text.trim().is_empty())
-        .is_some_and(|text| command_line_matches_recording(&text, path))
+    match command {
+        Some(text) if !text.trim().is_empty() => Some(command_line_matches_recording(&text, path)),
+        _ => None,
+    }
 }
 
 /// 先礼后兵：SIGTERM，等 300ms，还在就 SIGKILL。
@@ -5289,6 +5324,11 @@ mod tests {
         assert!(
             !command_line_matches_recording(other, path),
             "同目录另一场不能被认成这一场"
+        );
+        let other_dir = r#"ffmpeg.exe -i https://x -f segment "D:\second\a.part%04d.ts""#;
+        assert!(
+            !command_line_matches_recording(other_dir, path),
+            "另一个目录的同名录像不能被认成这一场"
         );
         let not_ffmpeg = r#"notepad.exe "C:\media\主播\a.part0001.ts""#;
         assert!(!command_line_matches_recording(not_ffmpeg, path));
