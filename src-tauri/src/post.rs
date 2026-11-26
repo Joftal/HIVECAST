@@ -18,6 +18,7 @@ use hivecast_ipc::{PostProgress, Settings, TrashInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(test)]
 use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
@@ -563,7 +564,7 @@ async fn finish_command(
 ) -> PostOutcome {
     let _ = tokio::fs::remove_file(temp).await;
     let duration = media_duration_ms(src).await;
-    let mut command = Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -771,7 +772,7 @@ pub(crate) async fn media_duration_ms(path: &Path) -> Option<u64> {
     let probe = ffmpeg::probe_binary()?;
     let output = tokio::time::timeout(
         Duration::from_secs(20),
-        Command::new(probe)
+        crate::process::background_async(probe)
             .arg("-v")
             .arg("error")
             .arg("-show_entries")
@@ -952,7 +953,7 @@ fn output_candidate(target: &Path, index: u32) -> PathBuf {
 /// 把临时产物提交到最终名字，绝不覆盖已有文件。
 ///
 /// 同目录 hard_link 在 APFS/NTFS/ext4 上原子且零拷贝；不支持的卷
-/// （exFAT 等）回退到 create_new + 复制，慢但安全。
+/// （exFAT 等）回退到目标目录内暂存复制并排他发布。
 async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
     for index in 0..=u32::MAX {
         let candidate = output_candidate(target, index);
@@ -980,26 +981,23 @@ async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
     Err("没有可用的输出文件名".into())
 }
 
-/// 不覆盖的复制：create_new 占位，失败时清掉自己写了一半的文件。
+/// A crash while copying must never expose the final name. Stage on the destination
+/// volume, sync, then publish exclusively. If the volume cannot do that, leave the
+/// source and destination alone so recovery can retry.
 pub(crate) fn copy_no_clobber(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let mut input = std::fs::File::open(source)?;
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    let result = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
-    drop(output);
-    match result {
-        Ok(()) => {
-            // 临时文件清不掉不应把已经提交成功的产物判成失败；交给下次清理。
-            let _ = std::fs::remove_file(source);
-            Ok(())
-        }
-        Err(err) => {
-            let _ = std::fs::remove_file(destination);
-            Err(err)
-        }
-    }
+    publish_copy(std::fs::File::open(source)?, destination)?;
+    let _ = std::fs::remove_file(source);
+    Ok(())
+}
+
+fn publish_copy(mut input: impl std::io::Read, destination: &Path) -> std::io::Result<()> {
+    let mut staged = tempfile::Builder::new()
+        .prefix(".hivecast-copy-")
+        .tempfile_in(destination.parent().unwrap_or(Path::new(".")))?;
+    std::io::copy(&mut input, staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
+    staged.persist_noclobber(destination).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn temp_path(src: &Path, ext: &str) -> PathBuf {
@@ -1121,7 +1119,7 @@ pub async fn validate_media(path: &Path) -> Result<(), String> {
         return validate_with_ffprobe(path, probe.as_deref().unwrap()).await;
     }
     // 没有 ffprobe 时用 ffmpeg 只读前 1 秒，至少能确认容器头和第一条流可用。
-    let mut command = Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -1157,7 +1155,7 @@ pub async fn validate_media(path: &Path) -> Result<(), String> {
 }
 
 async fn validate_with_ffprobe(path: &Path, probe: &str) -> Result<(), String> {
-    let mut command = Command::new(probe);
+    let mut command = crate::process::background_async(probe);
     command
         .arg("-v")
         .arg("error")
@@ -1267,7 +1265,7 @@ pub fn trash(path: &Path) -> Result<(), String> {
             "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{}','OnlyErrorDialogs','SendToRecycleBin')",
             path.display().to_string().replace('\'', "''")
         );
-        let output = std::process::Command::new("powershell")
+        let output = crate::process::background("powershell")
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -1369,6 +1367,40 @@ fn move_to_target(path: &Path, target: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_copy_keeps_final_name_free_for_retry() {
+        struct Interrupted<'a> {
+            path: &'a Path,
+            first_chunk: &'a [u8],
+        }
+        impl std::io::Read for Interrupted<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.path.exists());
+                if self.first_chunk.is_empty() {
+                    return Err(std::io::Error::other("copy interrupted"));
+                }
+                self.first_chunk.read(buffer)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("chat.ass");
+        for first_chunk in [&b""[..], b"partial subtitle"] {
+            assert!(publish_copy(
+                Interrupted {
+                    path: &destination,
+                    first_chunk
+                },
+                &destination
+            )
+            .is_err());
+            assert!(dir.path().read_dir().unwrap().next().is_none());
+        }
+        publish_copy(&b"complete subtitle"[..], &destination).unwrap();
+        let err = publish_copy(&b"other content"[..], &destination).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(destination).unwrap(), b"complete subtitle");
+    }
 
     #[test]
     fn extension_mapping_covers_flv_hevc_and_audio() {

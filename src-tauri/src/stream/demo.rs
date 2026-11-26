@@ -26,7 +26,7 @@ pub async fn ensure_demo(cache_root: &Path) -> Result<PathBuf, AppError> {
         return Err(AppError::FfmpegMissing);
     }
 
-    let child = tokio::process::Command::new(crate::ffmpeg::binary())
+    let child = crate::process::background_async(crate::ffmpeg::binary())
         .args([
             "-hide_banner",
             "-loglevel",

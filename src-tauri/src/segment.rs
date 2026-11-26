@@ -80,30 +80,38 @@ pub fn next_part_index(final_path: &Path) -> u32 {
 }
 
 fn collect_all_parts(final_path: &Path) -> Vec<PathBuf> {
-    let Some(parent) = final_path.parent() else {
-        return Vec::new();
-    };
-    let Some(stem) = final_path.file_stem().and_then(|s| s.to_str()) else {
-        return Vec::new();
-    };
-    let prefix = format!("{stem}.part");
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Vec::new();
-    };
-    let mut parts: Vec<PathBuf> = entries
+    let mut parts: Vec<_> = part_entries(final_path)
+        .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            // 必须是「本场 stem.part + 纯数字 + .ts」。只匹配前缀会把
-            // `room.part2.part0001.ts`（另一场/另一段）也收进来，收尾时误删。
-            let digits = name.strip_prefix(&prefix)?.strip_suffix(".ts")?;
-            parse_part_digits(digits)?;
-            Some(entry.path())
-        })
+        .filter_map(Result::ok)
         .collect();
     // 编号补零，字典序在超过 9999 后会错（part10000 < part9999）。
     parts.sort_by_key(|part| part_index(part).unwrap_or(u32::MAX));
     parts
+}
+
+/// Only skip an empty recording attempt when its directory was read successfully.
+pub(crate) fn confirmed_no_parts(path: &Path) -> bool {
+    part_entries(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+fn part_entries(path: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<PathBuf>>> {
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
+    let prefix = format!("{stem}.part");
+    Ok(std::fs::read_dir(parent)?.filter_map(move |entry| {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => return Some(Err(err)),
+        };
+        let name = entry.file_name();
+        let digits = name.to_str()?.strip_prefix(&prefix)?.strip_suffix(".ts")?;
+        parse_part_digits(digits)?;
+        Some(Ok(entry.path()))
+    }))
 }
 
 /// 合并分片为 mp4：-c copy 不转码，几分钟的录像一两秒完成。
@@ -172,7 +180,7 @@ pub async fn merge_range(
         .path()
         .join("output")
         .with_extension(output.extension().unwrap_or_default());
-    let mut command = tokio::process::Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -282,7 +290,7 @@ pub async fn fallback_concat_range(
                 staging = e.file;
             }
             Err(e) => {
-                // exFAT / FAT32 等卷不支持 hard_link 时回退到 create_new + 复制，同样保证绝不覆盖。
+                // 在目标卷暂存复制，再排他发布。
                 staging = e.file;
                 match crate::post::copy_no_clobber(staging.path(), &candidate) {
                     Ok(()) => break,

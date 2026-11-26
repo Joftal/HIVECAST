@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hivecast_ipc::Playback;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(test)]
+use tokio::process::Command;
 
 use crate::db::Db;
 use crate::error::AppError;
@@ -300,7 +302,7 @@ pub fn window_for(position_ms: i64, duration_ms: i64) -> (i64, i64) {
 }
 
 fn spawn_window(path: &Path, dir: &Path, start_ms: i64, window_ms: i64) -> Result<Child, AppError> {
-    let mut command = Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .arg("-hide_banner")
         .arg("-nostdin")

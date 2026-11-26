@@ -198,7 +198,7 @@ impl Thumbs {
             .await
             .map_err(|err| AppError::from_io(err, &self.dir))?;
         let out = self.dir.join(format!("{session_id}.jpg"));
-        let mut command = tokio::process::Command::new(ffmpeg::binary());
+        let mut command = crate::process::background_async(ffmpeg::binary());
         command
             .arg("-hide_banner")
             .arg("-nostdin")

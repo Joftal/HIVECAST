@@ -3405,7 +3405,7 @@ fn build_command(
     start_number: u32,
     segment_secs: u32,
 ) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -4132,27 +4132,21 @@ async fn recover_split_manifest(db: &Db, file: &Path, session_id: &str) -> Optio
             // Only a single-clip receipt unambiguously owns the complete writer track.
             if manifest.clips.len() == 1 {
                 if let Some(track) = existing.danmaku_path.as_deref().map(Path::new) {
-                    let ass_path = track.with_extension("ass");
                     match crate::postprocess::recovered_chat_count(track) {
                         Ok(n) => {
                             count = n;
-                            if n > 0 && !ass_path.is_file() {
-                                match crate::postprocess::write_danmaku_ass(track, true) {
-                                    Ok(_) => {}
-                                    Err(AppError::Io(ref err))
-                                        if err.kind() == std::io::ErrorKind::AlreadyExists
-                                            && ass_path.is_file() => {}
-                                    Err(err) => {
-                                        tracing::warn!(%err, "恢复弹幕字幕失败，保留清单重试");
-                                        post_error = Some(format!(
-                                            "{}恢复弹幕字幕失败：{err}",
-                                            post_error
-                                                .as_ref()
-                                                .map(|s| format!("{s}；"))
-                                                .unwrap_or_default()
-                                        ));
-                                        db_ok = false;
-                                    }
+                            if n > 0 {
+                                if let Err(err) = crate::postprocess::recover_danmaku_ass(track, n)
+                                {
+                                    tracing::warn!(%err, "恢复弹幕字幕失败，保留清单重试");
+                                    post_error = Some(format!(
+                                        "{}恢复弹幕字幕失败：{err}",
+                                        post_error
+                                            .as_ref()
+                                            .map(|s| format!("{s}；"))
+                                            .unwrap_or_default()
+                                    ));
+                                    db_ok = false;
                                 }
                             }
                         }
@@ -4364,7 +4358,8 @@ async fn recover_terminal_session(
                 && registered
                 && session.reason.as_deref() == Some("app_exit")
                 && track.is_file()
-                && (session.danmaku_count == 0 || !track.with_extension("ass").is_file()) =>
+                && (session.danmaku_count == 0
+                    || crate::postprocess::ass_needs_recovery(track, session.danmaku_count)?) =>
         {
             db.session_group_ids(id)?.len() == 1
                 && crate::postprocess::recovered_chat_count(track)? > 0

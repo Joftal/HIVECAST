@@ -213,6 +213,59 @@ async fn real_media_registration_retry_keeps_inputs_and_reuses_the_playable_outp
 }
 
 #[tokio::test]
+async fn legacy_incomplete_subtitles_are_repaired_after_manifest_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("old.flv");
+    let track = source.with_extension("jsonl");
+    let ass = source.with_extension("ass");
+    let dbfile = dir.path().join("test.db");
+    let db = Db::open(&dbfile).unwrap();
+    seed_recovery_session(&db, &source);
+    std::fs::write(&source, b"already registered").unwrap();
+    std::fs::write(
+        &track,
+        b"{\"t\":0,\"c\":\"one\"}\n{\"t\":10,\"c\":\"two\"}\n",
+    )
+    .unwrap();
+    rusqlite::Connection::open(&dbfile).unwrap().execute(
+        "UPDATE record_session SET file_size=18,status='aborted',reason='app_exit',post_state='done',danmaku_count=2,danmaku_path=?1",
+        [track.to_str().unwrap()]).unwrap();
+    for partial in [&b""[..], b"[Script Info]\nScriptTy"] {
+        std::fs::write(&ass, partial).unwrap();
+        assert_eq!(recover_parts(&db, &Default::default()).await, (1, 18));
+        let subtitles = std::fs::read_to_string(&ass).unwrap();
+        assert_eq!(
+            subtitles
+                .lines()
+                .filter(|l| l.starts_with("Dialogue: "))
+                .count(),
+            2
+        );
+        assert!(!manifest_path(&source).exists());
+        assert_eq!(recover_parts(&db, &Default::default()).await, (0, 0));
+        assert!(dir.path().read_dir().unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".hivecast-ass-backup-")
+                && std::fs::read(e.path().join("original.ass")).unwrap() == partial
+        }));
+    }
+    // An older, intentionally shortened but valid subtitle has no ownership receipt.
+    let export = std::fs::read_to_string(&ass)
+        .unwrap()
+        .replace("; HIVECAST subtitle export\n", "");
+    let second = export.rfind("Dialogue: ").unwrap();
+    let edited = &export[..second];
+    std::fs::write(&ass, edited).unwrap();
+    assert_eq!(recover_parts(&db, &Default::default()).await, (0, 0));
+    assert_eq!(std::fs::read(&ass).unwrap(), edited.as_bytes());
+    let custom = b"[Script Info]\nTitle: custom subtitles\n[Events]\nDialogue: user edits\n";
+    std::fs::write(&ass, custom).unwrap();
+    assert_eq!(recover_parts(&db, &Default::default()).await, (0, 0));
+    assert_eq!(std::fs::read(ass).unwrap(), custom);
+}
+
+#[tokio::test]
 async fn old_completed_crash_record_repairs_only_the_owned_track_once() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("old.flv");

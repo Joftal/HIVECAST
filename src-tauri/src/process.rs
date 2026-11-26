@@ -7,6 +7,23 @@ use std::time::{Duration, Instant};
 
 use tokio::process::Child;
 
+/// Keep console applications invisible when launched from the Windows GUI.
+pub(crate) fn background(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(program);
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        command
+    }
+    #[cfg(not(windows))]
+    std::process::Command::new(program)
+}
+
+pub(crate) fn background_async(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    background(program).into()
+}
+
 /// 优先 SIGINT：ffmpeg 会写完文件尾 / 分片索引再退出；拿不到 pid 才退化为 kill。
 pub fn send_graceful(child: &mut Child) {
     #[cfg(unix)]

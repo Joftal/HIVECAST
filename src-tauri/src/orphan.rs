@@ -38,13 +38,6 @@ fn same_executable(name: &str) -> bool {
     matches_executable(name, &expected_executables())
 }
 
-#[cfg(windows)]
-fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW)
-}
-
 fn recording_args(args: &[String], path: &Path) -> bool {
     let Some(output) = args.last() else {
         return false;
@@ -104,8 +97,8 @@ pub fn stop_if_owned(pid: u32, path: &Path) -> bool {
     let script = format!(
         r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction Stop | Select-Object Name,CommandLine | ConvertTo-Json -Compress"#
     );
-    let mut cmd = std::process::Command::new("powershell");
-    no_window(&mut cmd).args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let mut cmd = crate::process::background("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
     let info = cmd
         .output()
         .ok()
@@ -236,8 +229,8 @@ pub fn stop_unmarked(path: &Path) -> bool {
 
 #[cfg(windows)]
 fn recorder_pids() -> Option<Vec<u32>> {
-    let mut cmd = std::process::Command::new("powershell");
-    no_window(&mut cmd).args([
+    let mut cmd = crate::process::background("powershell");
+    cmd.args([
         "-NoProfile", "-NonInteractive", "-Command",
         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object Name,ProcessId)"
     ]);

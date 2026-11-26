@@ -1733,7 +1733,10 @@ fn room_merge_candidate(session: &RecordSession) -> bool {
                     Ok(meta) => meta.is_file() && meta.len() == 0,
                     Err(err) => err.kind() == std::io::ErrorKind::NotFound,
                 }
-                && crate::segment::collect_parts(p).is_empty();
+                && p.with_extension("split.json")
+                    .try_exists()
+                    .is_ok_and(|exists| !exists)
+                && crate::segment::confirmed_no_parts(p);
             !empty_on_disk
         }
         _ => true,
@@ -1758,11 +1761,11 @@ pub async fn room_merge_sessions(
         }
         offset += count;
     }
+    all_sessions.retain(|s| s.status != "recording" && s.reason.as_deref() != Some("merge"));
+    ensure_merge_finalized(&state.db, &all_sessions)?;
     let sessions: Vec<_> = all_sessions
         .into_iter()
         .filter(room_merge_candidate)
-        // 合并产物本身也是 finished 会话，再整房合并时跳过，避免越合越多。
-        .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
     run_merge(
         &state.db,
@@ -1797,6 +1800,7 @@ pub async fn sessions_merge(
         }
         sessions.push(session);
     }
+    ensure_merge_finalized(&state.db, &sessions)?;
     run_merge(
         &state.db,
         &state.jobs,
@@ -1805,6 +1809,22 @@ pub async fn sessions_merge(
         Some(&app),
     )
     .await
+}
+
+/// A recovered file can already be playable while its group is still awaiting
+/// registration. Require the whole group to finish before selecting its inputs.
+fn ensure_merge_finalized(db: &crate::db::Db, sessions: &[RecordSession]) -> Result<(), AppError> {
+    let pending = db.pending_finalize_groups()?;
+    if let Some(row) = sessions
+        .iter()
+        .find(|s| pending.contains(s.group_id.as_ref().unwrap_or(&s.id)))
+    {
+        return Err(AppError::User(format!(
+            "录像仍待恢复，请先完成收尾再合并：{}",
+            row.file_path.as_deref().unwrap_or(&row.id)
+        )));
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1912,15 +1932,16 @@ async fn execute_merge(
     if !plan.missing.is_empty() {
         return Err(missing_files_error(&plan.missing));
     }
-    let durations = probe_merge_durations(&plan.files).await;
-    let total_ms = actual_total_ms(&durations).unwrap_or(plan.total_ms);
+    let durations = probe_merge_durations(&plan.files).await?;
+    let expected_ms = actual_total_ms(&durations);
+    let total_ms = expected_ms.unwrap_or(plan.total_ms);
     let sources = retime_danmaku_sources(plan.danmaku, &durations);
     let progress = app.map(|app| postprocess::Progress {
         app,
         task: "merge",
         total_ms,
     });
-    let merged = postprocess::merge(&plan.files, progress.as_ref()).await?;
+    let merged = postprocess::merge(&plan.files, expected_ms, progress.as_ref()).await?;
     let danmaku = merge_danmaku_files(&sources, &merged.path);
     let session = merged_session(
         plan.room_id.as_deref().unwrap_or_default(),
@@ -2077,7 +2098,12 @@ fn merge_plan(mut sessions: Vec<RecordSession>) -> MergePlan {
     let mut files = Vec::new();
     for session in sessions {
         match session.file_path {
-            Some(path) if Path::new(&path).is_absolute() && Path::new(&path).is_file() => {
+            Some(path)
+                if Path::new(&path).is_absolute()
+                    && Path::new(&path)
+                        .metadata()
+                        .is_ok_and(|m| m.is_file() && m.len() > 0) =>
+            {
                 files.push(PathBuf::from(path))
             }
             Some(path) => missing.push(path),
@@ -2103,23 +2129,32 @@ fn missing_files_error(missing: &[String]) -> AppError {
         String::new()
     };
     AppError::User(format!(
-        "有 {} 段录像文件不存在，已停止合并：{}{suffix}",
+        "有 {} 段录像文件不存在、为空或无法读取，已停止合并：{}{suffix}",
         missing.len(),
         shown.join("、")
     ))
 }
 
 /// 逐个 ffprobe 合并源；数组顺序与 `merge_plan.files` 一致。
-async fn probe_merge_durations(files: &[PathBuf]) -> Vec<Option<i64>> {
+async fn probe_merge_durations(files: &[PathBuf]) -> Result<Vec<Option<i64>>, AppError> {
     let mut durations = Vec::with_capacity(files.len());
     for file in files {
         let duration = crate::post::media_duration_ms(file)
             .await
             .map(|ms| ms as i64)
             .filter(|ms| *ms > 0);
+        if duration.is_none() {
+            // A stream with no declared duration can still be valid (including without ffprobe).
+            crate::post::validate_media(file).await.map_err(|err| {
+                AppError::User(format!(
+                    "录像无法读取，已停止合并：{}（{err}）",
+                    file.display()
+                ))
+            })?;
+        }
         durations.push(duration);
     }
-    durations
+    Ok(durations)
 }
 
 /// 只有所有源都探测成功才使用容器时长，避免一段失败后偏移半新半旧。
@@ -2353,6 +2388,108 @@ mod tests {
         assert_eq!(db.retention_rows().unwrap().len(), 62);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn pending_manifest_blocks_merge_of_any_clip_in_its_group() {
+        let db = fixture_db();
+        let first = session("first", 1, PathBuf::from("first.mp4"));
+        let mut second = session("second", 2, PathBuf::from("second.mp4"));
+        second.group_id = Some(first.id.clone());
+        db.create_session(&first).unwrap();
+        db.create_clip(&second, &first.id, 1, None).unwrap();
+        db.set_split_manifest(&first.id, Some("pending.split.json"))
+            .unwrap();
+        assert!(ensure_merge_finalized(&db, std::slice::from_ref(&second)).is_err());
+        db.set_split_manifest(&first.id, None).unwrap();
+        ensure_merge_finalized(&db, &[second]).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "需要本机 FFmpeg 和 ffprobe"]
+    async fn room_merge_rejects_incomplete_inputs_and_preserves_both_clips() {
+        let db = fixture_db();
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = crate::jobs::Jobs::new();
+        let mut clips = Vec::new();
+        let mut frames = Vec::new();
+        async fn decoded_frames(path: &Path) -> Vec<String> {
+            let output = crate::process::background_async(crate::ffmpeg::binary())
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args(["-f", "framemd5", "-"])
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(|l| l.rsplit(',').next().unwrap().trim().to_owned())
+                .collect()
+        }
+        for (index, color) in ["red", "blue"].into_iter().enumerate() {
+            let file = dir.path().join(format!("{color}.mp4"));
+            assert!(crate::process::background_async(crate::ffmpeg::binary())
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c={color}:size=160x120:rate=10"),
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264"
+                ])
+                .arg(&file)
+                .status()
+                .await
+                .unwrap()
+                .success());
+            frames.extend(decoded_frames(&file).await);
+            clips.push(session(color, (index * 2) as i64, file));
+        }
+        assert_eq!(frames.len(), 20);
+        assert_ne!(frames[0], frames[10]);
+        let placeholder = dir.path().join("empty.mp4");
+        let mut empty = session("empty", 1, placeholder.clone());
+        empty.file_size = 0;
+        empty.status = "aborted".into();
+        clips.insert(1, empty);
+        let candidates = || {
+            clips
+                .iter()
+                .filter(|c| room_merge_candidate(c))
+                .cloned()
+                .collect()
+        };
+        std::fs::write(&placeholder, []).unwrap();
+        let part = crate::segment::part_name(&placeholder, 0);
+        std::fs::write(&part, b"pending").unwrap();
+        assert!(run_merge(&db, &jobs, dir.path(), candidates(), None)
+            .await
+            .is_err());
+        std::fs::write(&placeholder, b"invalid container").unwrap();
+        assert!(run_merge(&db, &jobs, dir.path(), candidates(), None)
+            .await
+            .is_err());
+        assert!(db.list_sessions(Some("room"), 50, 0).unwrap().is_empty());
+        assert!(!dir.path().read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("合并-")));
+        std::fs::remove_file(part).unwrap();
+        std::fs::write(&placeholder, []).unwrap();
+        let merged = run_merge(&db, &jobs, dir.path(), candidates(), None)
+            .await
+            .unwrap();
+        let out = Path::new(&merged.path);
+        assert_eq!(decoded_frames(out).await, frames);
+        assert_eq!(crate::post::media_duration_ms(out).await, Some(2000));
+    }
+
     fn fixture_db() -> crate::db::Db {
         let db = crate::db::Db::open(Path::new(":memory:")).unwrap();
         db.exec_batch_for_test("INSERT INTO room (id,platform,room_key,canonical_url,host_name,title,created_at,updated_at) VALUES ('room','bilibili','1','test','','',1,1)").unwrap();

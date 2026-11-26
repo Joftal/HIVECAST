@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{OnceLock, RwLock};
 
 use hivecast_ipc::FfmpegStatus;
@@ -129,18 +129,6 @@ pub fn binary() -> String {
     }
 }
 
-#[cfg(windows)]
-fn no_window(cmd: &mut Command) -> &mut Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW)
-}
-
-#[cfg(not(windows))]
-fn no_window(cmd: &mut Command) -> &mut Command {
-    cmd
-}
-
 /// 校验用户在设置里填的路径：允许选目录（自动补 ffmpeg 文件名），
 /// 但必须是绝对路径、真实存在的文件，而且真的能跑 `-version`。
 pub fn validate_selection(raw: &str) -> Result<PathBuf, String> {
@@ -155,8 +143,7 @@ pub fn validate_selection(raw: &str) -> Result<PathBuf, String> {
     if !candidate.is_file() {
         return Err(format!("{} 不是文件", candidate.display()));
     }
-    let mut cmd = Command::new(&candidate);
-    let output = no_window(&mut cmd)
+    let output = crate::process::background(&candidate)
         .arg("-version")
         .stdin(Stdio::null())
         .output()
@@ -210,8 +197,7 @@ fn extra_dirs() -> Vec<PathBuf> {
 }
 
 fn version_of(path: &Path) -> Option<String> {
-    let mut cmd = Command::new(path);
-    let output = no_window(&mut cmd)
+    let output = crate::process::background(path)
         .arg("-version")
         .stdin(Stdio::null())
         .output()
@@ -236,8 +222,7 @@ fn is_runnable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
-    let mut cmd = Command::new(path);
-    no_window(&mut cmd)
+    crate::process::background(path)
         .arg("-version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

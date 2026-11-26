@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use hivecast_ipc::{PostProgress, PostResult};
 use tauri::{AppHandle, Emitter};
+#[cfg(test)]
 use tokio::process::Command;
 
 use crate::error::AppError;
@@ -75,7 +76,7 @@ fn size_of(path: &Path) -> i64 {
 }
 
 async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
-    let mut command = Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -102,7 +103,7 @@ async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
         }
     };
     let stderr = stderr_task.await.unwrap_or_default();
-    if status.success() {
+    if status.success() && stderr.is_empty() {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&stderr);
@@ -129,7 +130,7 @@ async fn run_ffmpeg_progress(
     label: &str,
     progress: &Progress<'_>,
 ) -> Result<(), AppError> {
-    let mut command = Command::new(ffmpeg::binary());
+    let mut command = crate::process::background_async(ffmpeg::binary());
     command
         .args(&args)
         .args(["-progress", "pipe:1", "-stats_period", "0.2", "-nostats"])
@@ -196,7 +197,7 @@ async fn run_ffmpeg_progress(
     };
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), progress_task).await;
     let stderr = stderr_task.await.unwrap_or_default();
-    if status.success() {
+    if status.success() && stderr.is_empty() {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&stderr);
@@ -266,6 +267,7 @@ fn ensure_file(src: &Path) -> Result<(), AppError> {
 // 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
 pub async fn merge(
     sources: &[PathBuf],
+    expected_ms: Option<i64>,
     progress: Option<&Progress<'_>>,
 ) -> Result<PostResult, AppError> {
     if sources.len() < 2 {
@@ -306,6 +308,7 @@ pub async fn merge(
         "-loglevel".into(),
         "error".into(),
         "-y".into(),
+        "-xerror".into(),
         "-f".into(),
         "concat".into(),
         "-safe".into(),
@@ -329,6 +332,17 @@ pub async fn merge(
     let size = size_of(&out);
     if size == 0 {
         return Err(AppError::Ffmpeg("合并输出为空".into()));
+    }
+    if let Some(expected_ms) = expected_ms {
+        let actual_ms = crate::post::media_duration_ms(&out)
+            .await
+            .ok_or_else(|| AppError::Ffmpeg("无法验证合并产物时长".into()))?;
+        // Stream copy can round timestamps at container/packet boundaries.
+        if actual_ms.saturating_add(250) < expected_ms as u64 {
+            return Err(AppError::Ffmpeg(format!(
+                "合并产物时长不足：预期 {expected_ms} 毫秒，实际 {actual_ms} 毫秒"
+            )));
+        }
     }
     let _ = std::fs::remove_file(&list_path);
     artifacts.keep = true;
@@ -485,7 +499,7 @@ pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     write_danmaku_ass(jsonl, false)
 }
 
-pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, AppError> {
+fn render_danmaku_ass(jsonl: &Path) -> Result<String, AppError> {
     use std::io::{BufRead, BufReader};
 
     ensure_file(jsonl)?;
@@ -539,7 +553,6 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
     );
 
-    let line_count = lines.len();
     let lane_count = ((PLAY_RES_Y - LANE_TOP) / LANE_HEIGHT).max(1);
     let mut lane_free = vec![0i64; lane_count as usize];
     // 公告只占顶部三条泳道，避免盖住画面主体。
@@ -575,9 +588,23 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
         ));
     }
 
+    Ok(ass)
+}
+
+// New exports carry an ASS comment so routine startup can distinguish them from
+// files written by the old direct-copy fallback without scanning their contents.
+const ASS_INFO: &[u8] = b"[Script Info]\n";
+const LEGACY_HEADER: &[u8] = b"[Script Info]\nScriptType: v4.00+\n";
+const ATOMIC_EXPORT_COMMENT: &[u8] = b"; HIVECAST subtitle export\n";
+
+pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, AppError> {
+    use std::io::Write;
+    let ass = render_danmaku_ass(jsonl)?;
     let out = sibling(jsonl, "", "ass");
     let mut file = tempfile::NamedTempFile::new_in(jsonl.parent().unwrap_or(Path::new(".")))?;
-    std::io::Write::write_all(&mut file, ass.as_bytes())?;
+    file.write_all(ASS_INFO)?;
+    file.write_all(ATOMIC_EXPORT_COMMENT)?;
+    file.write_all(&ass.as_bytes()[ASS_INFO.len()..])?;
     file.as_file().sync_all()?;
     if exclusive {
         match file.persist_noclobber(&out) {
@@ -586,7 +613,7 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
                 return Err(e.error.into());
             }
             Err(e) => {
-                // exFAT / FAT32 不支持 hard_link 时回退到 create_new + 复制，仍保证排他不覆盖。
+                // 跨卷时在目标卷重新暂存并排他发布。
                 crate::post::copy_no_clobber(e.file.path(), &out)?;
             }
         }
@@ -598,7 +625,6 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
         task = "ass",
         src = %jsonl.display(),
         out = %out.display(),
-        lines = line_count,
         bytes = size_of(&out),
         "弹幕字幕导出完成"
     );
@@ -608,6 +634,112 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
         size: size_of(&out),
         message: None,
     })
+}
+
+/// Missing or interrupted legacy export. A user-authored ASS must remain intact.
+/// Compare suspected truncations against the actual JSONL, including partial UTF-8.
+pub(crate) fn ass_needs_recovery(track: &Path, count: i64) -> Result<bool, AppError> {
+    incomplete_ass_at(track, &track.with_extension("ass"), count)
+}
+
+fn incomplete_ass_at(track: &Path, path: &Path, count: i64) -> Result<bool, AppError> {
+    use std::io::{BufRead, BufReader, Read, Seek};
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(err) => return Err(err.into()),
+    };
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    (&mut reader)
+        .take(LEGACY_HEADER.len() as u64)
+        .read_to_end(&mut bytes)?;
+    if !LEGACY_HEADER.starts_with(&bytes) {
+        return Ok(false);
+    }
+    if bytes.is_empty() {
+        return Ok(true);
+    }
+    // Old complete exports need only a line count, without loading either track into memory.
+    let mut dialogues = 0;
+    loop {
+        bytes.clear();
+        if reader.read_until(b'\n', &mut bytes)? == 0 {
+            break;
+        }
+        if bytes.starts_with(b"Dialogue: ") && bytes.ends_with(b"\n") {
+            dialogues += 1;
+            if dialogues >= count && count > 0 {
+                return Ok(false);
+            }
+        }
+    }
+    let expected = render_danmaku_ass(track)?;
+    if reader.get_ref().metadata()?.len() >= expected.len() as u64 {
+        return Ok(false);
+    }
+    reader.rewind()?;
+    reader.read_to_end(&mut bytes)?;
+    if !expected.as_bytes().starts_with(&bytes) {
+        return Ok(false);
+    }
+    // An edited subtitle can legitimately end after any complete event. Older
+    // exports have no ownership marker: preserve that ambiguous case in place.
+    let last = bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(&bytes)
+        .rsplit(|b| *b == b'\n')
+        .next()
+        .unwrap_or_default();
+    let complete_event = last.starts_with(b"Dialogue: ")
+        && last.splitn(10, |b| *b == b',').nth(9).is_some_and(|text| {
+            text.iter()
+                .position(|b| *b == b'}')
+                .is_some_and(|end| end + 1 < text.len())
+                && std::str::from_utf8(text).is_ok()
+        });
+    Ok(!complete_event)
+}
+
+pub(crate) fn recover_danmaku_ass(track: &Path, count: i64) -> Result<(), AppError> {
+    let path = track.with_extension("ass");
+    if path.try_exists()? {
+        if !incomplete_ass_at(track, &path, count)? {
+            return Ok(());
+        }
+        // Pre-fix exports carried no ownership receipt. Preserve the original
+        // bytes even if an edited subtitle happens to be a prefix of our export.
+        let backup = tempfile::Builder::new()
+            .prefix(".hivecast-ass-backup-")
+            .tempdir_in(path.parent().unwrap_or(Path::new(".")))?;
+        let saved = backup.path().join("original.ass");
+        if !std::fs::symlink_metadata(&path)?.is_file() {
+            return Err(AppError::Path(format!(
+                "字幕路径不是普通文件：{}",
+                path.display()
+            )));
+        }
+        std::fs::rename(&path, &saved)?;
+        let backup_dir = backup.keep();
+        // A concurrent writer may have installed a different file before rename.
+        // Restore it exclusively, and keep the backup if the name is taken again.
+        if !incomplete_ass_at(track, &saved, count)? {
+            crate::post::copy_no_clobber(&saved, &path)?;
+            let _ = std::fs::remove_dir(backup_dir);
+            return Ok(());
+        }
+        tracing::warn!(path = %saved.display(), "旧版不完整字幕已留存");
+    }
+    match write_danmaku_ass(track, true) {
+        Ok(_) => Ok(()),
+        Err(AppError::Io(err))
+            if err.kind() == std::io::ErrorKind::AlreadyExists
+                && !ass_needs_recovery(track, count)? =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn pick_lane(free: &[i64], at: i64) -> usize {
@@ -869,7 +1001,9 @@ mod tests {
             std::fs::write(&list, b"previous manifest").unwrap();
             sentinels.push(list);
         }
-        let merged = merge(&[first.clone(), second.clone()], None).await.unwrap();
+        let merged = merge(&[first.clone(), second.clone()], None, None)
+            .await
+            .unwrap();
         let source_total = size_of(&first) + size_of(&second);
         assert_eq!(merged.kind, "merge");
         assert!(
@@ -887,7 +1021,11 @@ mod tests {
             .ends_with("-1"));
         let bad = dir.join("broken.flv");
         std::fs::write(&bad, b"invalid media").unwrap();
-        assert!(merge(&[bad.clone(), bad], None).await.is_err());
+        assert!(merge(&[first.clone(), bad, second.clone()], None, None)
+            .await
+            .is_err());
+        // A playable output still fails validation if it falls short of the input timeline.
+        assert!(merge(&[first, second], Some(10_000), None).await.is_err());
         assert_eq!(
             std::fs::read_dir(&dir)
                 .unwrap()

@@ -1688,6 +1688,18 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
+    pub fn pending_finalize_groups(&self) -> Result<std::collections::HashSet<String>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT COALESCE(group_id, id) FROM record_session
+             WHERE split_manifest IS NOT NULL AND split_manifest <> ''",
+            )
+            .map_err(db_err)?;
+        let rows = stmt.query_map([], |row| row.get(0)).map_err(db_err)?;
+        rows.collect::<Result<_, _>>().map_err(db_err)
+    }
+
     /// 给已经写入的会话补上片段归属（首片段收尾后才知道自己是 group 的起点）。
     pub fn set_session_group(
         &self,

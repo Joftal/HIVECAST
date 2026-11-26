@@ -714,7 +714,7 @@ impl ViewManager {
             AppError::from_io(err, &dir)
         })?;
 
-        let mut command = tokio::process::Command::new(ffmpeg::binary());
+        let mut command = crate::process::background_async(ffmpeg::binary());
         // 让 init.mp4 / 分片 / m3u8 都以会话目录为工作目录：
         // ffmpeg 的 -hls_fmp4_init_filename 是相对 cwd 的，之前会写到应用目录，
         // 播放器按 m3u8 请求播放会话目录里的 init.mp4 就会 404。
