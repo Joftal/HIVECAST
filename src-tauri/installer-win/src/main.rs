@@ -218,13 +218,16 @@ where
 
     #[cfg(windows)]
     let _lock = win_os::operation_lock()?;
-    fs::create_dir_all(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     #[cfg(windows)]
     {
         let registered = win_os::read_installed_dir();
-        let owned = registered.as_ref().is_some_and(|dir| {
-            same_location(dir, install_dir) && install::has_existing_install(dir)
-        });
+        let dir_exists = install_dir
+            .try_exists()
+            .map_err(|e| InstallError::Directory(e.to_string()))?;
+        let owned = dir_exists
+            && registered.as_ref().is_some_and(|dir| {
+                same_location(dir, install_dir) && install::has_existing_install(dir)
+            });
         if !owned {
             if registered
                 .as_ref()
@@ -234,17 +237,23 @@ where
                     "请使用已登记的安装目录升级，或先卸载原版本".into(),
                 ));
             }
-            if fs::read_dir(install_dir)
-                .map_err(|e| InstallError::Directory(e.to_string()))?
-                .next()
-                .is_some()
-            {
-                return Err(InstallError::Directory(
-                    "目录非空，请选择新的 HIVECAST 专用子目录".into(),
-                ));
+            if dir_exists {
+                if !install_dir.is_dir() {
+                    return Err(InstallError::Directory("所选路径不是有效文件夹".into()));
+                }
+                if fs::read_dir(install_dir)
+                    .map_err(|e| InstallError::Directory(e.to_string()))?
+                    .next()
+                    .is_some()
+                {
+                    return Err(InstallError::Directory(
+                        "目录非空，请选择新的 HIVECAST 专用子目录".into(),
+                    ));
+                }
             }
         }
     }
+    fs::create_dir_all(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     let staging =
         tempfile::tempdir_in(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     let self_exe = env::current_exe().map_err(|e| format!("无法获取安装程序路径：{e}"))?;

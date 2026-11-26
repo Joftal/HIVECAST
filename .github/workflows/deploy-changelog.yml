@@ -75,5 +75,7 @@ jobs:
         env:
           GH_REPO: ${{ github.repository }}
         run: |
-          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/changelog.json"
-          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/latest.json"
+          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/changelog.json" \
+            || echo "::warning::jsDelivr purge failed for changelog.json (Pages and gh-pages were already updated)"
+          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/latest.json" \
+            || echo "::warning::jsDelivr purge failed for latest.json (Pages and gh-pages were already updated)"
