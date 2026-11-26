@@ -202,6 +202,8 @@ pub fn operation_lock() -> Result<OwnedHandle, String> {
 }
 
 // Resolve shortcut locations identically during installation and removal, including redirected desktops.
+// Uses native Unicode COM IShellLinkW + IPersistFile instead of WScript.Shell, which rejects non-ACP
+// Unicode paths (e.g., CJK install paths on English Windows) with E_INVALIDARG.
 fn shortcut_command(
     exe: &Path,
     desktop: bool,
@@ -211,7 +213,70 @@ fn shortcut_command(
     let common = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$shell = New-Object -ComObject WScript.Shell
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+
+public static class HivecastShellLink {
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    private class ShellLink {}
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    private interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cchMaxPath, IntPtr pfd, uint fFlags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cchMaxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cchMaxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cchMaxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+        void GetHotkey(out ushort pwHotkey);
+        void SetHotkey(ushort wHotkey);
+        void GetShowCmd(out int piShowCmd);
+        void SetShowCmd(int iShowCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cchIconPath, out int piIcon);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+        void Resolve(IntPtr hwnd, uint fFlags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+    }
+
+    public static void Create(string lnkPath, string targetPath, string workingDir, string description) {
+        var link = (IShellLinkW)new ShellLink();
+        try {
+            link.SetPath(targetPath);
+            link.SetWorkingDirectory(workingDir);
+            link.SetIconLocation(targetPath, 0);
+            link.SetDescription(description);
+            ((IPersistFile)link).Save(lnkPath, true);
+        } finally {
+            Marshal.ReleaseComObject(link);
+        }
+    }
+
+    public static string GetTarget(string lnkPath) {
+        var link = (IShellLinkW)new ShellLink();
+        try {
+            ((IPersistFile)link).Load(lnkPath, 0);
+            var sb = new StringBuilder(4096);
+            link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
+            if (sb.Length == 0) {
+                link.GetPath(sb, sb.Capacity, IntPtr.Zero, 4);
+            }
+            return sb.ToString();
+        } finally {
+            Marshal.ReleaseComObject(link);
+        }
+    }
+}
+'@
 $folders = @(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
 if ($env:HIVECAST_DESKTOP -eq '1') {
     $desk = [Environment]::GetFolderPath('DesktopDirectory')
@@ -223,6 +288,7 @@ $paths = @($folders | ForEach-Object { Join-Path $_ 'HIVECAST.lnk' })
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-STA",
             "-Command",
             &format!("{common}\n{script}"),
         ])
@@ -243,15 +309,15 @@ $paths = @($folders | ForEach-Object { Join-Path $_ 'HIVECAST.lnk' })
 }
 
 pub fn stage_shortcut(exe: &Path, desktop: bool, staging: &Path) -> Result<Vec<PathBuf>, String> {
-    // WScript requires a .lnk extension. The stage directory is private to this operation.
+    // IShellLinkW + IPersistFile saves a full-Unicode .lnk without WScript.Shell's ANSI codepage limits.
     let staged = staging.join("HIVECAST.lnk");
     let script = r#"
-$link = $shell.CreateShortcut($env:HIVECAST_STAGED_LINK)
-$link.TargetPath = $env:HIVECAST_EXE
-$link.WorkingDirectory = [IO.Path]::GetDirectoryName($env:HIVECAST_EXE)
-$link.IconLocation = "$env:HIVECAST_EXE,0"
-$link.Description = 'HIVECAST Live Recording Studio'
-$link.Save()
+[HivecastShellLink]::Create(
+    $env:HIVECAST_STAGED_LINK,
+    $env:HIVECAST_EXE,
+    [IO.Path]::GetDirectoryName($env:HIVECAST_EXE),
+    'HIVECAST Live Recording Studio'
+)
 ConvertTo-Json -Compress -InputObject $paths
 "#;
     let json = shortcut_command(exe, desktop, &staged, script)?;
@@ -264,10 +330,13 @@ pub fn remove_shortcuts(exe: &Path) -> Result<(), String> {
         true,
         Path::new(""),
         r#"
+$expected = [IO.Path]::GetFullPath($env:HIVECAST_EXE)
 foreach ($path in $paths) {
-    if ((Test-Path -LiteralPath $path -PathType Leaf) -and
-        ($shell.CreateShortcut($path).TargetPath -eq $env:HIVECAST_EXE)) {
-        Remove-Item -LiteralPath $path
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $target = [HivecastShellLink]::GetTarget($path)
+        if ($target -and [string]::Equals([IO.Path]::GetFullPath($target), $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $path
+        }
     }
 }
 "#,
