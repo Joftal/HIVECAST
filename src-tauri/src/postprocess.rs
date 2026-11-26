@@ -270,16 +270,20 @@ pub struct MergeDurationExpectation {
     pub min_clip_ms: Option<u64>,
 }
 
-/// 拷流拼接会在各段首尾音视频帧边界产生约 10–30 ms 舍入误差。
-/// 容差随段数温和增长（封顶 2.5 秒），同时不超过最短单段时长的一半（下限 250 ms），
-/// 既避免几十段真实直播因累计舍入被误拒，又能拦截任意非极短片段的静默漏片。
-fn merge_duration_tolerance_ms(clip_count: usize, min_clip_ms: Option<u64>) -> u64 {
-    let scaled = 250u64
-        .saturating_add(clip_count.saturating_sub(2) as u64 * 40)
-        .min(2_500);
-    match min_clip_ms {
-        Some(shortest) => scaled.min((shortest / 2).max(250)),
-        None => scaled,
+/// 真实直播流拼接常见卡顿时间戳跳变与音视频轨尾差，容差只用来拦截“真正漏片/提前截断”，
+/// 不应因为几秒正常漂移卡死用户：
+/// - 宽松漂移预算：每段 300ms 或总时长的 2%，封顶 60 秒、下限 250ms；
+/// - 最短段约束：不超过最短单段的 60%，但保留 `max(总时长 1% 封顶 60 秒, 250ms)` 下限，
+///   避免多段长直播里混入 1 条极短片段就把整场几小时合并卡死。
+fn merge_duration_tolerance_ms(clip_count: usize, expected: MergeDurationExpectation) -> u64 {
+    let generous = (clip_count as u64)
+        .saturating_mul(300)
+        .max(expected.total_ms / 50)
+        .clamp(250, 60_000);
+    let ratio_floor = (expected.total_ms / 100).clamp(250, 60_000);
+    match expected.min_clip_ms {
+        Some(shortest) => generous.min((shortest * 6 / 10).max(ratio_floor)),
+        None => generous,
     }
 }
 
@@ -288,7 +292,7 @@ fn merge_duration_is_short(
     clip_count: usize,
     expected: MergeDurationExpectation,
 ) -> bool {
-    let tolerance = merge_duration_tolerance_ms(clip_count, expected.min_clip_ms);
+    let tolerance = merge_duration_tolerance_ms(clip_count, expected);
     actual_ms.saturating_add(tolerance) < expected.total_ms
 }
 
@@ -303,6 +307,14 @@ pub async fn merge(
     }
     for src in sources {
         ensure_file(src)?;
+        if expected.is_none() {
+            crate::post::validate_media(src).await.map_err(|err| {
+                AppError::User(format!(
+                    "录像无法读取，已停止合并：{}（{err}）",
+                    src.display()
+                ))
+            })?;
+        }
     }
     let first = &sources[0];
     let stamp = crate::clock::format_now_local("%Y%m%d-%H%M%S");
@@ -330,13 +342,14 @@ pub async fn merge(
     std::io::Write::write_all(&mut list_file, list.as_bytes())?;
     drop(list_file);
 
+    // 不加 -xerror：真实直播 FLV/TS 偶发 1–2 个非单调 DTS 脏包，FFmpeg 默认可自动跳过继续拼完；
+    // 坏容器由前置 validate_media / probe_merge_durations 拦截，中途截断由成品时长校验兜底。
     let args: Vec<OsString> = vec![
         "-hide_banner".into(),
         "-nostdin".into(),
         "-loglevel".into(),
         "error".into(),
         "-y".into(),
-        "-xerror".into(),
         "-f".into(),
         "concat".into(),
         "-safe".into(),
@@ -361,16 +374,35 @@ pub async fn merge(
     if size == 0 {
         return Err(AppError::Ffmpeg("合并输出为空".into()));
     }
+    let mut message = format!("共 {} 段", sources.len());
     if let Some(expected) = expected {
         let actual_ms = crate::post::media_duration_ms(&out)
             .await
             .ok_or_else(|| AppError::Ffmpeg("无法验证合并产物时长".into()))?;
         if merge_duration_is_short(actual_ms, sources.len(), expected) {
-            let tolerance = merge_duration_tolerance_ms(sources.len(), expected.min_clip_ms);
+            let tolerance = merge_duration_tolerance_ms(sources.len(), expected);
             return Err(AppError::Ffmpeg(format!(
                 "合并产物时长不足：预期 {} 毫秒，实际 {} 毫秒（允许误差 {} 毫秒）",
                 expected.total_ms, actual_ms, tolerance
             )));
+        }
+        let shortfall_ms = expected.total_ms.saturating_sub(actual_ms);
+        if shortfall_ms >= 3_000 {
+            let shortfall_sec = shortfall_ms / 1_000;
+            tracing::warn!(
+                target: "hivecast_lib::postprocess",
+                task = "merge",
+                sources = sources.len(),
+                expected_ms = expected.total_ms,
+                actual_ms,
+                shortfall_ms,
+                "合并完成但成品略短于预期时长（多见于直播卡顿跳时间戳或音视频轨尾差）"
+            );
+            message = format!(
+                "共 {} 段（比预期略短 {} 秒，建议核对后再清理原片）",
+                sources.len(),
+                shortfall_sec
+            );
         }
     }
     let _ = std::fs::remove_file(&list_path);
@@ -388,7 +420,7 @@ pub async fn merge(
         kind: "merge".into(),
         path: out.to_string_lossy().to_string(),
         size,
-        message: Some(format!("共 {} 段", sources.len())),
+        message: Some(message),
     })
 }
 
@@ -1095,38 +1127,54 @@ mod tests {
 
     #[test]
     fn merge_duration_tolerance_scales_without_hiding_dropped_clips() {
-        // 2 段 1 秒录像保持 250 ms 容差：正常舍入放行，漏掉 1 段拦住。
+        // 2 段 1 秒录像：允许 600 ms 漂移，漏掉 1 段（少 1000 ms）仍会拦住。
         let two_clips = MergeDurationExpectation {
             total_ms: 2_000,
             min_clip_ms: Some(1_000),
         };
-        assert_eq!(merge_duration_tolerance_ms(2, Some(1_000)), 250);
+        assert_eq!(merge_duration_tolerance_ms(2, two_clips), 600);
         assert!(!merge_duration_is_short(1_800, 2, two_clips));
         assert!(merge_duration_is_short(1_000, 2, two_clips));
 
-        // 30 段 10 分钟真实直播合并：各段累计舍入 450 ms 放行，漏掉 1 段拦住。
+        // 2 段各 10 分钟直播：允许 24 秒卡顿/音视频尾差，漏掉 1 段（少 10 分钟）拦住。
+        let two_long = MergeDurationExpectation {
+            total_ms: 1_200_000,
+            min_clip_ms: Some(600_000),
+        };
+        assert_eq!(merge_duration_tolerance_ms(2, two_long), 24_000);
+        assert!(!merge_duration_is_short(1_195_000, 2, two_long));
+        assert!(merge_duration_is_short(600_000, 2, two_long));
+
+        // 30 段 10 分钟真实直播（5 小时）：容差封顶 60 秒；卡顿/音视频差 30 秒放行，漏掉 1 段（600 秒）拦住。
         let thirty_clips = MergeDurationExpectation {
             total_ms: 18_000_000,
             min_clip_ms: Some(600_000),
         };
-        assert_eq!(merge_duration_tolerance_ms(30, Some(600_000)), 1_370);
-        assert!(!merge_duration_is_short(17_999_550, 30, thirty_clips));
+        assert_eq!(merge_duration_tolerance_ms(30, thirty_clips), 60_000);
+        assert!(!merge_duration_is_short(17_970_000, 30, thirty_clips));
         assert!(merge_duration_is_short(17_400_000, 30, thirty_clips));
 
-        // 61 段长录像容差封顶 2500 ms。
-        assert_eq!(merge_duration_tolerance_ms(61, Some(600_000)), 2_500);
+        // 30 段 10 分钟 + 1 条 1 秒极短尾片：1% 下限保护整场不被 1 秒短片卡死，漏掉任意 10 分钟片段仍拦住。
+        let mixed_long_and_tiny = MergeDurationExpectation {
+            total_ms: 18_001_000,
+            min_clip_ms: Some(1_000),
+        };
+        assert_eq!(merge_duration_tolerance_ms(31, mixed_long_and_tiny), 60_000);
+        assert!(!merge_duration_is_short(
+            17_993_000,
+            31,
+            mixed_long_and_tiny
+        ));
+        assert!(merge_duration_is_short(17_401_000, 31, mixed_long_and_tiny));
 
-        // 61 段 1 秒短录像：容差受最短段一半（500 ms）约束，漏掉 1 秒片段仍会拦住。
+        // 61 段 1 秒短录像：容差受最短段 60% 与总时长 1% 共同约束（610 ms），漏掉 1 秒片段仍会拦住。
         let short_many = MergeDurationExpectation {
             total_ms: 61_000,
             min_clip_ms: Some(1_000),
         };
-        assert_eq!(merge_duration_tolerance_ms(61, Some(1_000)), 500);
-        assert!(!merge_duration_is_short(60_600, 61, short_many));
+        assert_eq!(merge_duration_tolerance_ms(61, short_many), 610);
+        assert!(!merge_duration_is_short(60_500, 61, short_many));
         assert!(merge_duration_is_short(60_000, 61, short_many));
-
-        // 极短片段不会把容差压到低于原本的 250 ms。
-        assert_eq!(merge_duration_tolerance_ms(30, Some(200)), 250);
     }
 
     #[test]

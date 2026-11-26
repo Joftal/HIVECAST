@@ -17,6 +17,11 @@ on:
         required: true
         default: false
         type: boolean
+      sign_macos:
+        description: '使用 Apple Developer ID 签名并公证 macOS 安装包（无证书开源发布保持取消勾选）'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -137,19 +142,20 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.validate.outputs.version }}
-          HIVECAST_PUBLIC_MACOS: ${{ inputs.publish && 'true' || 'false' }}
-          APPLE_SIGNING_IDENTITY: ${{ inputs.publish && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_CERTIFICATE: ${{ inputs.publish && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ inputs.publish && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_ID: ${{ inputs.publish && secrets.APPLE_ID || '' }}
-          APPLE_TEAM_ID: ${{ inputs.publish && secrets.APPLE_TEAM_ID || '' }}
-          APPLE_PASSWORD: ${{ inputs.publish && secrets.APPLE_PASSWORD || '' }}
+          HIVECAST_PUBLIC_MACOS: ${{ inputs.sign_macos && 'true' || 'false' }}
+          APPLE_SIGNING_IDENTITY: ${{ inputs.sign_macos && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_CERTIFICATE: ${{ inputs.sign_macos && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ inputs.sign_macos && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ inputs.sign_macos && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ inputs.sign_macos && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_PASSWORD: ${{ inputs.sign_macos && secrets.APPLE_PASSWORD || '' }}
         run: |
           set -euo pipefail
           bash scripts/build-dmg.sh --no-build
           mkdir -p release-assets
-          cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" \
-            "release-assets/HIVECAST-v${VERSION}-macOS-arm64.dmg"
+          dmg="release-assets/HIVECAST-v${VERSION}-macOS-arm64.dmg"
+          cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" "$dmg"
+          shasum -a 256 "$dmg"
 
       - name: Smoke test macOS app
         if: runner.os == 'macOS'
@@ -173,18 +179,28 @@ jobs:
           kill "$pid"
           wait "$pid" 2>/dev/null || true
 
-      - name: Build Windows NSIS installer
+      - name: Build Windows NSIS installer and portable zip
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
           pnpm tauri build --bundles nsis
-          mkdir -p release-assets
-          installer="$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*.exe' -print -quit)"
-          test -n "$installer"
-          cp "$installer" "release-assets/HIVECAST-v${VERSION}-Windows-x64-setup.exe"
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $installer = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe | Select-Object -First 1
+          if (-not $installer) { throw "未找到 NSIS 安装器" }
+          $setupOut = "release-assets/HIVECAST-v$env:VERSION-Windows-x64-setup.exe"
+          Copy-Item $installer.FullName $setupOut
+          $exe = "src-tauri/target/release/HIVECAST.exe"
+          if (-not (Test-Path $exe)) { throw "未找到 $exe" }
+          $stage = "release-assets/portable-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe "$stage/HIVECAST.exe"
+          $zipOut = "release-assets/HIVECAST-v$env:VERSION-Windows-x64-portable.zip"
+          Compress-Archive -Path "$stage/HIVECAST.exe" -DestinationPath $zipOut -Force
+          Remove-Item -Recurse -Force $stage
+          Get-FileHash $setupOut, $zipOut -Algorithm SHA256 | Format-Table -AutoSize
 
       - name: Smoke test Windows app
         if: runner.os == 'Windows'
@@ -229,6 +245,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.validate.outputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
         run: |
           set -euo pipefail
           case "$VERSION" in
@@ -243,7 +260,31 @@ jobs:
             echo "::error::tag v$VERSION 已存在，拒绝覆盖发布"
             exit 1
           fi
+          (cd release-assets && sha256sum HIVECAST-* > SHA256SUMS.txt)
           ls -lh release-assets
+          cat release-assets/SHA256SUMS.txt
+
+          cat > release-notes.md <<'NOTES'
+          ## 安装说明（开源无商业签名版）
+
+          本版本为个人开源构建，未购买商业代码签名证书，首次打开时系统安全提示属正常现象；下载后可对照 `SHA256SUMS.txt` 核验文件完整性。
+
+          ### macOS（Apple Silicon arm64）
+          1. 打开 `HIVECAST-v__VERSION__-macOS-arm64.dmg`，将 `HIVECAST.app` 拖入 **应用程序（Applications）**。
+          2. 首次打开如提示“无法验证开发者”：
+             - **图形方式**：点击取消后，打开「系统设置 → 隐私与安全性」，滑到底部点击 **“仍要打开”** 即可（之后不再提示）；
+             - **终端一行**：执行 `xattr -cr /Applications/HIVECAST.app` 后直接双击打开。
+
+          ### Windows（x64）
+          - **安装版**：运行 `HIVECAST-v__VERSION__-Windows-x64-setup.exe`，如遇 SmartScreen 提示，点击 **“更多信息 → 仍要运行”** 完成安装。
+          - **绿色免安装版**：解压 `HIVECAST-v__VERSION__-Windows-x64-portable.zip` 后直接运行 `HIVECAST.exe`。
+
+          ### 运行依赖
+          - 录制与后处理依赖本机 **FFmpeg**（macOS 可通过 `brew install ffmpeg` 安装，Windows 可在应用「设置 → 录制与媒体」中指定 `ffmpeg.exe` 路径）。
+          - macOS 录制目录建议使用 APFS/HFS+ 卷；多段分割录制中途异常退出时会自动恢复已录视频片段。
+          NOTES
+          sed -i "s/__VERSION__/${VERSION}/g" release-notes.md
+
           args=()
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
@@ -254,5 +295,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "HIVECAST v$VERSION" \
+            --notes-file release-notes.md \
             --generate-notes \
             "${args[@]}"
