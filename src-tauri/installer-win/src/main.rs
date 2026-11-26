@@ -41,9 +41,9 @@ fn main() {
                 .unwrap_or_else(preferred_install_dir)
                 .display()
                 .to_string();
-            install::validate_install_dir(&raw_dir).and_then(|target| {
-                perform_install(&target, desktop_shortcut, |_, _| {}).map(|_| ())
-            })
+            perform_install(&raw_dir, desktop_shortcut, |_, _| {})
+                .map(|_| ())
+                .map_err(InstallError::into_message)
         }
         CliAction::SilentUninstall { dir } => {
             resolve_uninstall_dir(dir).and_then(|target| perform_uninstall(&target))
@@ -176,22 +176,49 @@ fn rollback(changes: Vec<Replacement>, cause: String) -> String {
     errors.join("；")
 }
 
+#[derive(serde::Serialize)]
+#[serde(tag = "type", content = "message")]
+pub(crate) enum InstallError {
+    #[serde(rename = "installDirError")]
+    Directory(String),
+    #[serde(rename = "error")]
+    Other(String),
+}
+
+impl InstallError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Directory(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+impl From<String> for InstallError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 pub(crate) fn perform_install<F>(
-    install_dir: &Path,
+    raw_dir: &str,
     desktop_shortcut: bool,
     mut on_progress: F,
-) -> Result<PathBuf, String>
+) -> Result<(PathBuf, PathBuf), InstallError>
 where
     F: FnMut(u8, u8),
 {
+    let target = install::validate_install_dir(raw_dir).map_err(InstallError::Directory)?;
+    let install_dir = target.as_path();
     #[cfg(windows)]
     if win_os::is_app_running() {
-        return Err("检测到 HIVECAST 正在运行，请先关闭应用后再安装或升级。".into());
+        return Err(InstallError::Other(
+            "检测到 HIVECAST 正在运行，请先关闭应用后再安装或升级。".into(),
+        ));
     }
 
     #[cfg(windows)]
     let _lock = win_os::operation_lock()?;
-    fs::create_dir_all(install_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     #[cfg(windows)]
     {
         let registered = win_os::read_installed_dir();
@@ -203,18 +230,23 @@ where
                 .as_ref()
                 .is_some_and(|dir| install::has_existing_install(dir))
             {
-                return Err("请使用已登记的安装目录升级，或先卸载原版本".into());
+                return Err(InstallError::Directory(
+                    "请使用已登记的安装目录升级，或先卸载原版本".into(),
+                ));
             }
             if fs::read_dir(install_dir)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| InstallError::Directory(e.to_string()))?
                 .next()
                 .is_some()
             {
-                return Err("目录非空，请选择新的 HIVECAST 专用子目录".into());
+                return Err(InstallError::Directory(
+                    "目录非空，请选择新的 HIVECAST 专用子目录".into(),
+                ));
             }
         }
     }
-    let staging = tempfile::tempdir_in(install_dir).map_err(|e| e.to_string())?;
+    let staging =
+        tempfile::tempdir_in(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     let self_exe = env::current_exe().map_err(|e| format!("无法获取安装程序路径：{e}"))?;
     let located = payload::locate_payload(&self_exe)
         .map_err(|e| format!("读取安装包结构失败：{e}"))?
@@ -262,11 +294,11 @@ where
         Ok(())
     })();
     if let Err(err) = result {
-        return Err(rollback(changes, err));
+        return Err(rollback(changes, err).into());
     }
 
     on_progress(100, 2);
-    Ok(dest_exe)
+    Ok((target, dest_exe))
 }
 
 pub(crate) fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
@@ -332,5 +364,24 @@ fn launch_gui(uninstall: bool) -> Result<(), String> {
     {
         let _ = uninstall;
         Err("GUI 安装界面仅支持 Windows 运行；非 Windows 环境请使用 --pack / --self-test / --silent。".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_directory_reports_a_field_error_before_installation_starts() {
+        for raw in ["relative", r"C:\", r"C:\Windows", ""] {
+            let error = perform_install(raw, false, |_, _| panic!("unexpected install progress"))
+                .unwrap_err();
+            let event = serde_json::json!(error);
+            assert_eq!(event["type"], "installDirError");
+            assert_eq!(
+                event["message"],
+                install::validate_install_dir(raw).unwrap_err()
+            );
+        }
     }
 }

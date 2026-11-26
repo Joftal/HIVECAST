@@ -168,7 +168,7 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                 }
             }
             Event::UserEvent(AppEvent::EmitJs(payload)) => {
-                if matches!(payload["type"].as_str(), Some("installDone" | "uninstallDone" | "error")) {
+                if matches!(payload["type"].as_str(), Some("installDone" | "uninstallDone" | "installDirError" | "error")) {
                     busy = false;
                 }
                 if let Ok(json) = serde_json::to_string(&payload) {
@@ -221,17 +221,8 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         busy = true;
                         let worker_proxy = proxy.clone();
                         thread::spawn(move || {
-                            let target = match install::validate_install_dir(&dir) {
-                                Ok(p) => p,
-                                Err(msg) => {
-                                    let _ = worker_proxy.send_event(AppEvent::EmitJs(
-                                        serde_json::json!({ "type": "error", "message": msg }),
-                                    ));
-                                    return;
-                                }
-                            };
                             let progress_proxy = worker_proxy.clone();
-                            match perform_install(&target, desktop_shortcut, |pct, stage| {
+                            match perform_install(&dir, desktop_shortcut, |pct, stage| {
                                 let _ = progress_proxy.send_event(AppEvent::EmitJs(
                                     serde_json::json!({
                                         "type": "progress",
@@ -240,7 +231,7 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                                     }),
                                 ));
                             }) {
-                                Ok(exe_path) => {
+                                Ok((target, exe_path)) => {
                                     let _ = worker_proxy.send_event(AppEvent::EmitJs(
                                         serde_json::json!({
                                             "type": "installDone",
@@ -249,9 +240,9 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                                         }),
                                     ));
                                 }
-                                Err(msg) => {
+                                Err(error) => {
                                     let _ = worker_proxy.send_event(AppEvent::EmitJs(
-                                        serde_json::json!({ "type": "error", "message": msg }),
+                                        serde_json::json!(error),
                                     ));
                                 }
                             }

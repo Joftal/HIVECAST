@@ -79,20 +79,17 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
     }
 }
 
-/// Strip surrounding whitespace, trailing NULs, and invisible Unicode BOM/bidi marks
-/// (commonly injected when reading legacy registry values or copying paths from Explorer).
+/// Strip surrounding whitespace and Explorer's BOM/bidi marks. Only the REG_SZ
+/// reader may interpret a NUL as a terminator; keep it here for validation.
 pub fn sanitize_dir_input(raw: &str) -> String {
-    let before_nul = raw.split('\0').next().unwrap_or("");
-    before_nul
-        .trim()
-        .trim_matches(|c: char| {
-            matches!(
+    raw.trim_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
                 c,
                 '\u{feff}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
             )
-        })
-        .trim()
-        .to_string()
+    })
+    .to_string()
 }
 
 pub fn default_install_dir() -> PathBuf {
@@ -252,9 +249,8 @@ mod tests {
     fn install_dir_validation_blocks_roots_and_system_dirs() {
         assert!(validate_install_dir(r"C:\Users\alice\AppData\Local\HIVECAST").is_ok());
         assert!(validate_install_dir(r"D:\工具\HIVECAST").is_ok());
-        // Legacy registry NUL tail & Explorer BOM/bidi marks are sanitized cleanly.
         assert_eq!(
-            validate_install_dir("\u{feff}\u{202a}C:\\Users\\alice\\HIVECAST\0garbage").unwrap(),
+            validate_install_dir(" \u{feff} \u{202a}C:\\Users\\alice\\HIVECAST\u{202c} ").unwrap(),
             PathBuf::from(r"C:\Users\alice\HIVECAST")
         );
         for bad in [
@@ -270,6 +266,13 @@ mod tests {
                 validate_install_dir(bad).is_err(),
                 "expected invalid install dir: {bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn entered_path_rejects_nul_instead_of_installing_to_a_prefix() {
+        for raw in ["\0C:\\Apps", "C:\\Apps\0", "C:\\Apps\0\\HIVECAST"] {
+            assert!(validate_install_dir(raw).unwrap_err().contains("U+0000"));
         }
     }
 }
