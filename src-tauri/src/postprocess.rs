@@ -461,6 +461,26 @@ fn danmaku_font() -> &'static str {
     }
 }
 
+/// Count readable chat records even when a previous export already exists.
+pub fn recovered_chat_count(jsonl: &Path) -> std::io::Result<i64> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(jsonl)?);
+    let mut line = Vec::new();
+    let mut count = 0;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(count);
+        }
+        if serde_json::from_slice::<serde_json::Value>(&line)
+            .ok()
+            .is_some_and(|v| v["c"].as_str().is_some_and(|c| !c.trim().is_empty()))
+        {
+            count += 1;
+        }
+    }
+}
+
 pub fn danmaku_to_ass(jsonl: &Path) -> Result<PostResult, AppError> {
     write_danmaku_ass(jsonl, false)
 }
@@ -473,9 +493,8 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
     let reader = BufReader::new(std::fs::File::open(jsonl)?);
     // 第四位表示「固定不滚动」：chat 之外（gift / super_chat）都按公告处理。
     let mut lines: Vec<(i64, String, u32, bool)> = Vec::new();
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+    for line in reader.split(b'\n') {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line?) else {
             continue;
         };
         let text = value["c"].as_str().unwrap_or("").trim().to_string();
@@ -557,14 +576,15 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
     }
 
     let out = sibling(jsonl, "", "ass");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(!exclusive)
-        .create_new(exclusive)
-        .open(&out)?;
+    let mut file = tempfile::NamedTempFile::new_in(jsonl.parent().unwrap_or(Path::new(".")))?;
     std::io::Write::write_all(&mut file, ass.as_bytes())?;
-    drop(file);
+    file.as_file().sync_all()?;
+    if exclusive {
+        file.persist_noclobber(&out)
+    } else {
+        file.persist(&out)
+    }
+    .map_err(|e| e.error)?;
     tracing::info!(
         target: "hivecast_lib::postprocess",
         task = "ass",

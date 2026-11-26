@@ -26,13 +26,62 @@ fi
 
 [[ -d "$APP" ]] || { echo "找不到 $APP，先跑一次构建" >&2; exit 1; }
 
+PUBLIC="${HIVECAST_PUBLIC_MACOS:-false}"
+case "$PUBLIC" in
+  true|false) ;;
+  *) echo "HIVECAST_PUBLIC_MACOS 必须是 true 或 false" >&2; exit 1 ;;
+esac
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
+KEYCHAIN=""
+cleanup() {
+  if [[ -n "$KEYCHAIN" ]]; then security delete-keychain "$KEYCHAIN" >/dev/null || true; fi
+  rm -rf "$STAGE"
+}
+trap cleanup EXIT
+APP_COPY="$STAGE/payload/HIVECAST.app"
+mkdir -p "$STAGE/payload"
+ditto "$APP" "$APP_COPY"
+
+if [[ "$PUBLIC" == true ]]; then
+  : "${APPLE_SIGNING_IDENTITY:?需要 Developer ID Application 身份}"
+  : "${APPLE_ID:?需要公证账号}" "${APPLE_TEAM_ID:?需要开发者团队 ID}" "${APPLE_PASSWORD:?需要公证专用密码}"
+  case "$APPLE_SIGNING_IDENTITY" in "Developer ID Application:"*) ;; *) echo "需要 Developer ID Application 身份" >&2; exit 1;; esac
+  signing_args=(--force --timestamp --sign "$APPLE_SIGNING_IDENTITY")
+  if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
+    : "${APPLE_CERTIFICATE_PASSWORD:?需要证书密码}"
+    KEYCHAIN="$STAGE/signing.keychain-db"
+    pass="$(openssl rand -hex 24)"
+    security create-keychain -p "$pass" "$KEYCHAIN"
+    security unlock-keychain -p "$pass" "$KEYCHAIN"
+    security set-keychain-settings -lut 3600 "$KEYCHAIN"
+    printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$STAGE/identity.p12"
+    security import "$STAGE/identity.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null
+    security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$KEYCHAIN" >/dev/null
+    signing_args+=(--keychain "$KEYCHAIN")
+  fi
+  codesign --options runtime "${signing_args[@]}" "$APP_COPY"
+  notary=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD")
+  ditto -c -k --keepParent "$APP_COPY" "$STAGE/app.zip"
+  xcrun notarytool submit "$STAGE/app.zip" "${notary[@]}" --wait
+  xcrun stapler staple "$APP_COPY"
+  xcrun stapler validate "$APP_COPY"
+  spctl --assess --type execute "$APP_COPY"
+elif ! codesign --verify --deep --strict "$APP_COPY" 2>/dev/null; then
+  codesign --force --sign - "$APP_COPY"
+fi
+codesign --verify --deep --strict "$APP_COPY"
+ln -s /Applications "$STAGE/payload/Applications"
 
 mkdir -p "$OUT_DIR"
 rm -f "$DMG"
-hdiutil create -volname HIVECAST -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -volname HIVECAST -srcfolder "$STAGE/payload" -ov -format UDZO "$DMG" >/dev/null
+if [[ "$PUBLIC" == true ]]; then
+  codesign "${signing_args[@]}" "$DMG"
+  xcrun notarytool submit "$DMG" "${notary[@]}" --wait
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  spctl --assess --type open --context context:primary-signature "$DMG"
+fi
+hdiutil verify "$DMG" >/dev/null
 echo "dmg: $DMG"
 du -h "$DMG" | awk '{print "size:", $1}'

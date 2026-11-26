@@ -930,8 +930,11 @@ export default function RoomRecordingsPage({
               const cover = group.clips.find((clip) => clip.thumbnailUrl)?.thumbnailUrl ?? item.thumbnailUrl;
               const isPlaying = group.clips.some((clip) => clip.id === playing?.item.id);
               const isBusy = group.clips.some((clip) => clip.id === playBusy);
-              const job = postJobs[playable.id] ?? postJobs[item.id];
-              const jobRunning = job?.state === "queued" || job?.state === "running";
+              const jobClip = group.clips.find((clip) => {
+                const state = postJobs[clip.id]?.state;
+                return state === "queued" || state === "running";
+              });
+              const job = jobClip && postJobs[jobClip.id];
               const retryable = item.postState === "failed" || item.postState === "cancelled";
               const missingClips = Math.max(0, group.clipCount - group.clips.length);
               return (
@@ -976,10 +979,10 @@ export default function RoomRecordingsPage({
                       {t("platformName." + item.platform, { defaultValue: item.platform })}
                     </span>
 
-                    {jobRunning ? (
+                    {job && jobClip ? (
                       <button
                         type="button"
-                        onClick={() => void cancelOne(playable)}
+                        onClick={() => void cancelOne(jobClip)}
                         className="focus-ring absolute left-2 top-[26px] z-10 rounded-[4px] bg-black/60 px-1.5 py-[3px] text-[10px] leading-none text-white/90 backdrop-blur-[2px] hover:bg-black/80"
                       >
                         {job.stage === "queued"
@@ -989,7 +992,7 @@ export default function RoomRecordingsPage({
                     ) : retryable ? (
                       <button
                         type="button"
-                        onClick={() => void retryOne(playable)}
+                        onClick={() => void retryOne(item)}
                         title={item.postError ?? undefined}
                         className="focus-ring absolute left-2 top-[26px] z-10 rounded-[4px] bg-black/60 px-1.5 py-[3px] text-[10px] leading-none text-red-200 backdrop-blur-[2px] hover:bg-black/80"
                       >
@@ -1096,6 +1099,11 @@ export default function RoomRecordingsPage({
                       <span className="font-mono tabular-nums">{formatDate(item.startedAt)}</span>
                       <span className="shrink-0 font-mono tabular-nums">{formatSize(group.size)}</span>
                     </div>
+                    {missingClips > 0 && (
+                      <div className="text-[10.5px] text-faint">
+                        {t("media.partialTotals", { loaded: group.clips.length, total: group.clipCount })}
+                      </div>
+                    )}
                     {group.clipCount > 1 && !isPlaying ? (
                       <div className="text-[10.5px] text-faint">
                         {t("media.clipCount", { n: group.clipCount })}

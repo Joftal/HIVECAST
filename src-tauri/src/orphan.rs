@@ -205,6 +205,58 @@ pub fn stop_if_owned(pid: u32, path: &Path) -> bool {
     gone()
 }
 
+/// A missing sidecar alone cannot distinguish a clean stop from a surviving writer.
+pub fn stop_unmarked(path: &Path) -> bool {
+    recorder_pids().is_some_and(|pids| pids.into_iter().all(|pid| stop_if_owned(pid, path)))
+}
+
+#[cfg(windows)]
+fn recorder_pids() -> Option<Vec<u32>> {
+    let output = std::process::Command::new("powershell").args([
+        "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object Name,ProcessId)"
+    ]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Process {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "ProcessId")]
+        pid: u32,
+    }
+    let rows: Vec<Process> = serde_json::from_slice(&output.stdout).ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.into_iter()
+            .filter(|p| same_executable(&p.name))
+            .map(|p| p.pid)
+            .collect(),
+    )
+}
+
+#[cfg(unix)]
+fn recorder_pids() -> Option<Vec<u32>> {
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-axo", "pid=,comm="])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let mut pids = Vec::new();
+    for line in std::str::from_utf8(&output.stdout).ok()?.lines() {
+        let (pid, name) = line.trim().split_once(char::is_whitespace)?;
+        if same_executable(name.trim()) {
+            pids.push(pid.parse().ok()?);
+        }
+    }
+    Some(pids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

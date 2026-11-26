@@ -111,6 +111,7 @@
     "close": "Close",
     "playingNow": "Now playing",
     "clipCount": "{{n}} clips",
+    "partialTotals": "Duration, size and chat totals cover {{loaded}}/{{total}} loaded clips",
     "loadClips": "Load {{n}} more clips",
     "clipIndex": "Clip {{n}}",
     "danmakuTrack": "Danmaku track",

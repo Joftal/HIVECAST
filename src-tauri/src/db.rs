@@ -1630,19 +1630,23 @@ impl Db {
 
     /// 已收尾但可能留下分片的会话：失败/中止的收尾可能没来得及合并（G4）。
     ///
-    /// 只取最近 200 条：再老的残片早被保留策略清掉，全量扫库没有意义。
-    pub fn unfinished_sessions(&self) -> Result<Vec<(String, String)>, AppError> {
+    /// 按稳定的主键游标分批遍历，较新的失败行不会遮住旧分片。
+    pub fn unfinished_sessions(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Vec<(String, String)>, AppError> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT id, file_path FROM record_session
                   WHERE status IN ('failed', 'aborted')
                     AND file_path IS NOT NULL AND file_path <> ''
-                  ORDER BY started_at DESC LIMIT 200",
+                    AND (?1 IS NULL OR id > ?1)
+                  ORDER BY id LIMIT 200",
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([after], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(db_err)?;
@@ -1660,13 +1664,22 @@ impl Db {
         Ok(())
     }
 
-    /// 有分割清单的会话：不论状态都要先按清单恢复，不能走普通整段合并。
+    pub fn mark_manifest_unreadable(&self, id: &str, manifest: &str) -> Result<(), AppError> {
+        self.lock().execute(
+            "UPDATE record_session SET post_error = '收尾清单无法读取或内容无效，请恢复清单后重试'
+             WHERE id = ?1 AND split_manifest = ?2",
+            params![id, manifest],
+        ).map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 有收尾清单的非录制中会话须先按清单恢复。
     pub fn manifest_sessions(&self) -> Result<Vec<(String, String)>, AppError> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT id, split_manifest FROM record_session
-                  WHERE split_manifest IS NOT NULL AND split_manifest <> ''",
+                  WHERE split_manifest IS NOT NULL AND split_manifest <> '' AND status <> 'recording'",
             )
             .map_err(db_err)?;
         let rows = stmt
@@ -1675,7 +1688,6 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
-    /// 修正会话的产物路径与大小：合并失败降级成 .ts、或崩溃恢复后路径变化时用。
     /// 给已经写入的会话补上片段归属（首片段收尾后才知道自己是 group 的起点）。
     pub fn set_session_group(
         &self,
@@ -1693,32 +1705,6 @@ impl Db {
             )
             .map_err(db_err)?;
         Ok(())
-    }
-
-    pub fn update_session_file(
-        &self,
-        id: &str,
-        path: &str,
-        file_size: i64,
-    ) -> Result<(), AppError> {
-        let mut guard = self.lock();
-        let conn = guard.transaction().map_err(db_err)?;
-        conn.execute(
-            "UPDATE record_session SET file_path = ?2, file_size = ?3 WHERE id = ?1",
-            params![id, path, file_size],
-        )
-        .map_err(db_err)?;
-        let source: Option<Option<String>> = conn
-            .query_row(
-                "SELECT source_path FROM record_session WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        sync_media_files_on(&conn, id, Some(path), source.flatten().as_deref(), false)
-            .map_err(db_err)?;
-        conn.commit().map_err(db_err)
     }
 
     /// 断流续录拿到不同实际档位时更新会话元数据。
@@ -1801,7 +1787,7 @@ impl Db {
                    FROM record_session
                   WHERE file_path IS NOT NULL AND file_path <> '' AND status <> 'recording'
                     AND COALESCE(group_id,id) NOT IN (SELECT COALESCE(group_id,id)
-                        FROM record_session WHERE status = 'recording')
+                        FROM record_session WHERE status = 'recording' OR split_manifest IS NOT NULL)
                   ORDER BY started_at DESC",
             )
             .map_err(db_err)?;
@@ -2469,15 +2455,22 @@ impl Db {
 
     /// 某场次待恢复的分割清单：片段 id 或同组任意片段上的清单都算。
     pub fn split_manifest_for(&self, session_id: &str) -> Result<Option<String>, AppError> {
+        Ok(self.split_manifest_owner(session_id)?.map(|(_, path)| path))
+    }
+
+    pub fn split_manifest_owner(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, String)>, AppError> {
         let conn = self.lock();
         conn.query_row(
-            "SELECT split_manifest FROM record_session
+            "SELECT id, split_manifest FROM record_session
               WHERE split_manifest IS NOT NULL AND split_manifest <> ''
                 AND (id = ?1 OR COALESCE(group_id, id) = COALESCE(
                     (SELECT COALESCE(group_id, id) FROM record_session WHERE id = ?1), ?1))
-              ORDER BY started_at ASC LIMIT 1",
+              ORDER BY (id = ?1) DESC, started_at ASC, id LIMIT 1",
             params![session_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(db_err)
@@ -3646,7 +3639,7 @@ mod tests {
             )
             .expect("改成失败态失败");
 
-        let rows = db.unfinished_sessions().expect("查询遗留分片失败");
+        let rows = db.unfinished_sessions(None).expect("查询遗留分片失败");
         assert_eq!(rows.len(), 1, "只有 failed/aborted 算遗留：{rows:?}");
         assert_eq!(rows[0].0, "s-a1");
     }

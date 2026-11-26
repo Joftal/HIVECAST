@@ -111,6 +111,7 @@
     "close": "关闭",
     "playingNow": "正在回放",
     "clipCount": "{{n}} 个片段",
+    "partialTotals": "时长、大小和弹幕仅统计已加载的 {{loaded}}/{{total}} 段",
     "loadClips": "加载剩余 {{n}} 个片段",
     "clipIndex": "第 {{n}} 段",
     "danmakuTrack": "弹幕轨",

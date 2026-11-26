@@ -121,7 +121,7 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked --lib
 
-      - name: Build macOS app and DMG
+      - name: Build macOS app
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -130,6 +130,21 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
           pnpm tauri build --bundles app
+
+      - name: Package and verify macOS distribution
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          HIVECAST_PUBLIC_MACOS: ${{ inputs.publish && 'true' || 'false' }}
+          APPLE_SIGNING_IDENTITY: ${{ inputs.publish && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_CERTIFICATE: ${{ inputs.publish && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ inputs.publish && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ inputs.publish && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ inputs.publish && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_PASSWORD: ${{ inputs.publish && secrets.APPLE_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
           bash scripts/build-dmg.sh --no-build
           mkdir -p release-assets
           cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" \
@@ -140,8 +155,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="src-tauri/target/release/bundle/macos/HIVECAST.app/Contents/MacOS/HIVECAST"
-          "$app" >/tmp/hivecast-smoke.log 2>&1 &
+          mount="$(mktemp -d)"
+          trap 'hdiutil detach "$mount" >/dev/null; rmdir "$mount"' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" release-assets/*.dmg
+          bundle="$mount/HIVECAST.app"
+          codesign --verify --deep --strict "$bundle"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
+          "$bundle/Contents/MacOS/$executable" >/tmp/hivecast-smoke.log 2>&1 &
           pid=$!
           sleep 10
           if ! kill -0 "$pid" 2>/dev/null; then

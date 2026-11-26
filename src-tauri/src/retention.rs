@@ -194,7 +194,6 @@ fn artifacts(path: &Path) -> Vec<std::path::PathBuf> {
         path.to_path_buf(),
         path.with_extension("jsonl"),
         path.with_extension("ass"),
-        path.with_extension("concat.txt"),
     ];
     out.extend(crate::segment::collect_parts(path));
     out
@@ -318,8 +317,9 @@ mod tests {
 
         let cleaned = enforce_from_settings(&db);
         assert_eq!(cleaned.deleted, 1);
-        assert_eq!(cleaned.freed, 1_048_576 + 56 + 14 + 84 + 32_768);
-        for suffix in ["mp4", "jsonl", "ass", "concat.txt"] {
+        assert_eq!(cleaned.freed, 1_048_576 + 56 + 14 + 32_768);
+        assert!(final_path.with_extension("concat.txt").is_file());
+        for suffix in ["mp4", "jsonl", "ass"] {
             assert!(
                 !final_path.with_extension(suffix).exists(),
                 "{suffix} 应被清掉"

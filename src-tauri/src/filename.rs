@@ -226,8 +226,12 @@ pub fn reserve_unique_path(path: &Path) -> std::io::Result<PathBuf> {
             (_, None) => format!("{stem} ({index})"),
         };
         let candidate = parent.join(name);
-        // 旁挂弹幕/缩略图同名也算占用，否则会覆盖上一场的副本。
-        if candidate.with_extension("jsonl").exists() {
+        // 未登记完成的录像可能只有分片或收尾清单，不能复用其基名。
+        if candidate.exists()
+            || candidate.with_extension("jsonl").try_exists()?
+            || candidate.with_extension("split.json").try_exists()?
+            || !crate::segment::collect_parts(&candidate).is_empty()
+        {
             continue;
         }
         match std::fs::OpenOptions::new()
@@ -319,8 +323,10 @@ mod tests {
         assert!(first.exists() && second.exists());
         // 旁挂文件存在时也要让开。
         std::fs::write(dir.join("a (3).jsonl"), "x").expect("write");
+        std::fs::write(dir.join("a (4).split.json"), "pending").unwrap();
+        std::fs::write(dir.join("a (5).part0003.ts"), b"pending").unwrap();
         let third = reserve_unique_path(&base).expect("第三个");
-        assert_eq!(third, dir.join("a (4).mp4"));
+        assert_eq!(third, dir.join("a (6).mp4"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

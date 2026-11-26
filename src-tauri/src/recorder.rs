@@ -1097,7 +1097,12 @@ impl Recorder {
             }
         };
         let stderr_tail = drain_stderr(&mut child);
-        write_pid_file(&path, child.id());
+        if let Err(err) = write_pid_file(&path, child.id()) {
+            if child.kill().await.is_ok() && path.metadata().is_ok_and(|m| m.len() == 0) {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            return Err(AppError::from_io(err, pid_file(&path)));
+        }
 
         // 弹幕落盘与视频同名，只换扩展名；后处理阶段按这个约定找旁挂文件。
         // 总开关关闭时整场不挂 writer：既不建 JSONL，也不会在收尾时导出 ASS。
@@ -1923,7 +1928,11 @@ impl Recorder {
             }
         };
         let stderr_tail = drain_stderr(&mut child);
-        write_pid_file(&path, child.id());
+        if let Err(err) = write_pid_file(&path, child.id()) {
+            tracing::warn!(%err, room_id, "续录无法登记 PID，停止本次子进程");
+            let _ = child.kill().await;
+            return false;
+        }
 
         let mut change = None;
         {
@@ -2465,6 +2474,36 @@ impl Recorder {
         // 即使只有一段也写清单：收尾失败（磁盘满、合并/拼接失败）时
         // 它能保留「分片还在、成品未落定」的现场，启动后按清单重试。
         // 成功后清单会被删除，正常录制不会留下额外文件。
+        let fail_before_merge = |message: String| {
+            tracing::warn!(session = %active.recording.session_id, %message, "保留原始分片等待重试");
+            if let Err(err) = self.db.finish_session_with_post(
+                &active.recording.session_id,
+                "failed",
+                "finalize_failed",
+                crate::db::now_ts(),
+                &source_path.display().to_string(),
+                0,
+                Some(&source_path.display().to_string()),
+                &post_cfg.mode,
+                crate::post::STATE_FAILED,
+                false,
+                Some(&message),
+                danmaku_path.as_deref(),
+                danmaku_count,
+                Some(&message),
+            ) {
+                tracing::warn!(%err, "登记收尾失败状态失败");
+            }
+            message
+        };
+        let _finalize_lease = match reserve_finalize(&manifest_path(&source_path).to_string_lossy())
+        {
+            Ok(lease) => lease,
+            Err(err) => {
+                post_job.finish("failed", Some(&fail_before_merge(err.to_string())));
+                return;
+            }
+        };
         let mut manifest = if !plans.is_empty() {
             if plans.len() > 1 {
                 tracing::info!(
@@ -2478,7 +2517,13 @@ impl Recorder {
                 let output = if index == 0 {
                     source_path.clone()
                 } else {
-                    clip_output_path(&source_path, index)
+                    match clip_output_path(&source_path, index) {
+                        Ok(path) => path,
+                        Err(err) => {
+                            post_job.finish("failed", Some(&fail_before_merge(err.to_string())));
+                            return;
+                        }
+                    }
                 };
                 let id = if index == 0 {
                     active.recording.session_id.clone()
@@ -2517,12 +2562,14 @@ impl Recorder {
             };
             let file = manifest_path(&source_path);
             if let Err(err) = write_manifest(&file, &manifest) {
-                tracing::warn!(%err, file = %file.display(), "写分割清单失败，崩溃后可能无法按片段恢复");
+                post_job.finish("failed", Some(&fail_before_merge(err)));
+                return;
             } else if let Err(err) = self.db.set_split_manifest(
                 &active.recording.session_id,
                 Some(&file.display().to_string()),
             ) {
-                tracing::warn!(%err, "登记分割清单失败");
+                post_job.finish("failed", Some(&fail_before_merge(err.to_string())));
+                return;
             }
             Some(manifest)
         } else {
@@ -2968,20 +3015,21 @@ impl Recorder {
         if let Some(mut manifest) = manifest.take() {
             let file = manifest_path(&source_path);
             if history_ok {
+                for clip in &manifest.clips {
+                    remove_range_parts(&source_path, clip.start, clip.end).await;
+                }
                 manifest.completed = true;
                 if let Err(err) = write_manifest(&file, &manifest) {
                     tracing::warn!(%err, file = %file.display(), "完成分割清单失败");
                 }
-                match std::fs::remove_file(&file) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => tracing::warn!(%err, file = %file.display(), "删除分割清单失败"),
-                }
-                if let Err(err) = self
+                match self
                     .db
                     .set_split_manifest(&active.recording.session_id, None)
                 {
-                    tracing::warn!(%err, "清理分割清单登记失败");
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&file);
+                    }
+                    Err(err) => tracing::warn!(%err, "清理分割清单登记失败"),
                 }
             } else {
                 // 清单里保留已成功的 path/rendered，恢复时只补失败的片段和 DB 行。
@@ -3020,19 +3068,17 @@ impl Recorder {
             }
         }
 
-        if final_status == "finished" {
+        if final_status == "finished" && history_ok {
             post_job.progress(98, "thumbnail", Some("生成封面缩略图"));
             self.queue_thumb(app, &active.recording.session_id);
         }
-        let finish_message = error.as_deref().or(Some("录制收尾完成"));
-        post_job.finish(
-            if final_status == "failed" {
-                "failed"
-            } else {
-                "done"
-            },
-            finish_message,
-        );
+        if !history_ok {
+            post_job.finish("failed", Some("录像尚未完整登记，已保留收尾清单供重试"));
+        } else if final_status == "failed" {
+            post_job.finish("failed", error.as_deref());
+        } else {
+            post_job.finish("done", error.as_deref().or(Some("录制收尾完成")));
+        }
 
         // 每次收尾跑一次保留策略：录制是媒体库唯一的增长来源。
         crate::retention::enforce_from_settings(&self.db);
@@ -3286,11 +3332,14 @@ fn pid_file(path: &Path) -> PathBuf {
     path.with_extension("ffmpeg.pid")
 }
 
-fn write_pid_file(path: &Path, pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    if let Err(err) = std::fs::write(pid_file(path), pid.to_string()) {
-        tracing::debug!(%err, file = %path.display(), "写入 ffmpeg pid 文件失败");
-    }
+fn write_pid_file(path: &Path, pid: Option<u32>) -> std::io::Result<()> {
+    use std::io::Write;
+    let pid = pid.ok_or_else(|| std::io::Error::other("录制进程没有 PID"))?;
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    write!(file, "{pid}")?;
+    file.as_file().sync_all()?;
+    file.persist(pid_file(path)).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn remove_pid_file(path: &Path) {
@@ -3323,9 +3372,10 @@ pub fn reap_orphans(db: &Db) -> Result<HashSet<String>, AppError> {
                 if err.kind() == std::io::ErrorKind::NotFound
                     && path.parent().is_some_and(Path::is_dir)
                 {
-                    continue;
+                    crate::orphan::stop_unmarked(path)
+                } else {
+                    false
                 }
-                false
             }
         };
         if safe {
@@ -3684,7 +3734,7 @@ fn plan_clips(
 }
 
 /// 后续片段沿用原文件名加 .clipNN 后缀，仍然走原子占位避免撞名。
-fn clip_output_path(source: &Path, index: usize) -> PathBuf {
+fn clip_output_path(source: &Path, index: usize) -> std::io::Result<PathBuf> {
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
@@ -3696,7 +3746,7 @@ fn clip_output_path(source: &Path, index: usize) -> PathBuf {
         .and_then(|ext| ext.to_str())
         .unwrap_or("ts");
     let candidate = parent.join(format!("{stem}.clip{index:02}.{ext}"));
-    crate::filename::reserve_unique_path(&candidate).unwrap_or(candidate)
+    crate::filename::reserve_unique_path(&candidate)
 }
 
 /// 把每个片段容器的实际时长累加成视频时间轴区间；任一段探测失败就整体退回标称时间。
@@ -3720,16 +3770,14 @@ fn manifest_path(source: &Path) -> PathBuf {
 
 fn write_manifest(path: &Path, manifest: &SplitManifest) -> Result<(), String> {
     let body = serde_json::to_string_pretty(manifest).map_err(|err| err.to_string())?;
-    let tmp = path.with_extension("split.tmp");
-    std::fs::write(&tmp, body).map_err(|err| format!("写 {}: {err}", tmp.display()))?;
-    // Unix 上 rename 覆盖是原子的；Windows 不允许覆盖，先删再改名。
-    if let Err(first) = std::fs::rename(&tmp, path) {
-        if !path.exists() {
-            return Err(format!("改名 {}: {first}", path.display()));
-        }
-        std::fs::remove_file(path).map_err(|err| format!("删 {}: {err}", path.display()))?;
-        std::fs::rename(&tmp, path).map_err(|err| format!("改名 {}: {err}", path.display()))?;
-    }
+    use std::io::Write;
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|e| e.to_string())?;
+    tmp.write_all(body.as_bytes())
+        .and_then(|_| tmp.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    tmp.persist(path)
+        .map_err(|e| format!("提交 {}: {}", path.display(), e.error))?;
     Ok(())
 }
 
@@ -3737,82 +3785,6 @@ fn read_manifest(path: &Path) -> Result<SplitManifest, String> {
     let body =
         std::fs::read_to_string(path).map_err(|err| format!("读 {}: {err}", path.display()))?;
     serde_json::from_str(&body).map_err(|err| format!("解析 {}: {err}", path.display()))
-}
-
-/// 普通崩溃恢复：把刚合并出来的源封装补跑后处理，并把结果写回数据库。
-async fn post_recovered_file(
-    db: &Db,
-    id: &str,
-    target: PathBuf,
-    size: i64,
-    cfg: &crate::post::PostConfig,
-) -> (PathBuf, i64) {
-    if size <= 0 {
-        return (target, size);
-    }
-    // 恢复任务也要能被“退出时取消”覆盖：登记会话作用域，run 会继承取消标志。
-    let _post_scope = crate::post::begin_session(id);
-    let existing = db.get_session(id).ok().flatten();
-    if let Some(existing) = existing.as_ref() {
-        // 上次已经完成后处理、只是没来得及删分片：直接沿用最终文件。
-        if existing.post_state == crate::post::STATE_DONE {
-            if let Some(path) = existing.file_path.as_deref().map(PathBuf::from) {
-                if path.is_file() {
-                    let actual = std::fs::metadata(&path)
-                        .map(|meta| meta.len() as i64)
-                        .unwrap_or(size);
-                    if actual > 0 && existing.file_size != actual {
-                        let _ = db.finish_session_with_post(
-                            id,
-                            &existing.status,
-                            existing.reason.as_deref().unwrap_or(""),
-                            existing.ended_at.unwrap_or_else(crate::db::now_ts),
-                            &path.display().to_string(),
-                            actual,
-                            existing.source_path.as_deref(),
-                            &existing.post_mode,
-                            &existing.post_state,
-                            existing.source_deleted,
-                            existing.post_error.as_deref(),
-                            existing.danmaku_path.as_deref(),
-                            existing.danmaku_count,
-                            existing.error.as_deref(),
-                        );
-                    }
-                    return (path, actual.max(size));
-                }
-            }
-        }
-    }
-    let task_id = format!("auto:{id}:recover");
-    let outcome = crate::post::run(&task_id, id, &target, cfg, None).await;
-    if let Some(existing) = existing.as_ref() {
-        let result = db.finish_session_with_post(
-            id,
-            &existing.status,
-            existing.reason.as_deref().unwrap_or(""),
-            existing.ended_at.unwrap_or_else(crate::db::now_ts),
-            &outcome.path.display().to_string(),
-            outcome.size,
-            Some(&target.display().to_string()),
-            &cfg.mode,
-            &outcome.state,
-            false,
-            outcome.error.as_deref(),
-            existing.danmaku_path.as_deref(),
-            existing.danmaku_count,
-            existing.error.as_deref(),
-        );
-        match result {
-            Ok(()) => {
-                delete_source_after_commit(db, id, outcome.delete_source.as_deref()).await;
-            }
-            Err(err) => tracing::warn!(%err, id, "恢复后处理结果写库失败"),
-        }
-    } else {
-        let _ = db.update_session_file(id, &outcome.path.display().to_string(), outcome.size);
-    }
-    (outcome.path, outcome.size)
 }
 
 /// 只有数据库提交成功后才允许删除源封装母带；删除失败保留源，不能丢录像。
@@ -3843,7 +3815,7 @@ async fn finish_range(base: &Path, output: &Path, start: u32, end: Option<u32>) 
     // 成品已完整时直接复用。恢复路径通常已经提前判断，这里再兜一层，
     // 避免 merge 因「目标已存在」失败后又走兜底把完整 mp4 删掉换成 .ts。
     if let Ok(meta) = tokio::fs::metadata(output).await {
-        if meta.len() > 0 {
+        if meta.is_file() && meta.len() > 0 {
             return (output.to_path_buf(), meta.len() as i64);
         }
     }
@@ -3856,7 +3828,7 @@ async fn finish_range(base: &Path, output: &Path, start: u32, end: Option<u32>) 
     match segment::fallback_concat_range(base, output, start, end).await {
         Ok((target, size)) => {
             // 占位文件是给 mp4 准备的；兜底成 .ts 后别留 0 字节空壳。
-            if target != output {
+            if target != output && output.metadata().is_ok_and(|m| m.is_file() && m.len() == 0) {
                 let _ = std::fs::remove_file(output);
             }
             (target, size as i64)
@@ -3880,29 +3852,9 @@ async fn finish_range(base: &Path, output: &Path, start: u32, end: Option<u32>) 
     }
 }
 
-/// 收尾产物落定，返回（最终路径, 字节数）。
-async fn finish_file(path: &Path) -> (PathBuf, i64) {
-    match segment::merge(path).await {
-        Ok(size) => return (path.to_path_buf(), size as i64),
-        Err(err) => tracing::warn!(%err, "分片合成源封装失败，改用字节拼接"),
-    }
-    match segment::fallback_concat(path).await {
-        Ok((target, size)) => {
-            // 兜底产物是 .ts：原来的 .mp4 只是 0 字节占位，别留成空壳。
-            if target != path {
-                let _ = std::fs::remove_file(path);
-            }
-            (target, size as i64)
-        }
-        Err(err) => {
-            // 同上：分片还在，保留现场，不要把空占位记成完整录像。
-            tracing::warn!(
-                %err,
-                parts_bytes = segment::parts_total(path),
-                "分片拼接失败，保留分片等待恢复"
-            );
-            (path.to_path_buf(), 0)
-        }
+async fn remove_range_parts(source: &Path, start: u32, end: Option<u32>) {
+    for part in segment::collect_parts_range(source, start, end) {
+        let _ = tokio::fs::remove_file(part).await;
     }
 }
 
@@ -3913,7 +3865,7 @@ static FINALIZE_RETRYING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 pub(crate) struct FinalizeRetryLease {
     manifest: String,
     /// 跨进程文件锁：进程退出时由内核释放，锁文件本身可以留着。
-    _lock: std::fs::File,
+    _lock: Option<std::fs::File>,
 }
 
 impl Drop for FinalizeRetryLease {
@@ -3931,6 +3883,12 @@ impl Drop for FinalizeRetryLease {
 /// 公开给命令层，让「重试收尾」在创建任务之前就拿到锁：拿不到锁时直接
 /// 返回错误，不会留下一条假的失败任务。
 pub(crate) fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLease, AppError> {
+    let mut lease = reserve_finalize(manifest)?;
+    lease._lock = Some(lock_manifest_file(manifest)?);
+    Ok(lease)
+}
+
+fn reserve_finalize(manifest: &str) -> Result<FinalizeRetryLease, AppError> {
     let set = FINALIZE_RETRYING.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = set
         .lock()
@@ -3938,18 +3896,9 @@ pub(crate) fn acquire_finalize_retry(manifest: &str) -> Result<FinalizeRetryLeas
     if !guard.insert(manifest.to_string()) {
         return Err(AppError::User("这一场正在重试收尾，请稍候".into()));
     }
-    // 内存锁只覆盖当前进程；两个应用实例（或调试包与正式包）指向同一媒体目录时，
-    // 还要靠清单旁边的文件锁互斥。锁失败时把刚才的内存标记撤回，免得泄漏。
-    let lock = match lock_manifest_file(manifest) {
-        Ok(lock) => lock,
-        Err(err) => {
-            guard.remove(manifest);
-            return Err(err);
-        }
-    };
     Ok(FinalizeRetryLease {
         manifest: manifest.to_string(),
-        _lock: lock,
+        _lock: None,
     })
 }
 
@@ -3989,7 +3938,7 @@ pub(crate) async fn retry_finalize_with_lease(
         manifest = %manifest_path.display(),
         "手动重试录制收尾"
     );
-    match recover_split_manifest(db, &manifest_path).await {
+    match recover_split_manifest(db, &manifest_path, session_id).await {
         Some((recovered, bytes)) if !manifest_path.exists() => {
             tracing::info!(
                 session = %session_id,
@@ -4019,8 +3968,8 @@ pub(crate) async fn retry_finalize_with_lease(
 
 /// 按清单恢复一次分割收尾：已渲染的片段直接沿用，缺失的按分片范围重跑。
 ///
-/// 返回 None 表示清单不可用（读不到 / 解析失败），调用方应清掉登记并走普通恢复。
-async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
+/// 返回 None 表示清单不可读，应保留整组和登记等待重试。
+async fn recover_split_manifest(db: &Db, file: &Path, session_id: &str) -> Option<(usize, u64)> {
     let mut manifest = match read_manifest(file) {
         Ok(manifest) => manifest,
         Err(err) => {
@@ -4028,13 +3977,13 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
             return None;
         }
     };
-    if manifest.completed || manifest.clips.is_empty() {
-        match std::fs::remove_file(file) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => tracing::warn!(%err, file = %file.display(), "删除已完成的分割清单失败"),
+    if manifest.session_id != session_id || manifest.clips.is_empty() {
+        return None;
+    }
+    if manifest.completed {
+        if db.set_split_manifest(&manifest.session_id, None).is_ok() {
+            let _ = std::fs::remove_file(file);
         }
-        let _ = db.set_split_manifest(&manifest.session_id, None);
         return Some((0, 0));
     }
 
@@ -4050,13 +3999,14 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
         // 先找源封装母带。清单里 path 记录的就是源封装（v1 清单则是旧的 mp4 成品）。
         let mut source_path: Option<PathBuf> = None;
         let mut source_size = 0i64;
-        for candidate in [
-            PathBuf::from(&clip.path),
-            planned.clone(),
-            planned.with_extension("ts"),
-        ] {
+        for candidate in [PathBuf::from(&clip.path), planned.clone()] {
+            if clip.final_path.as_deref() == candidate.to_str()
+                && candidate != Path::new(&clip.path)
+            {
+                continue;
+            }
             if let Ok(meta) = tokio::fs::metadata(&candidate).await {
-                if meta.len() > 0 {
+                if meta.is_file() && meta.len() > 0 {
                     tracing::warn!(
                         session = %manifest.session_id,
                         clip = index,
@@ -4074,7 +4024,7 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
             .final_path
             .as_ref()
             .map(PathBuf::from)
-            .filter(|path| path.is_file());
+            .filter(|path| path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0));
         // 清单里已有 final_path 时，保留上次后处理结果；失败也要保留 failed，
         // 不能在恢复时被误标成 done。
         let mut post_state = clip
@@ -4082,7 +4032,12 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
             .clone()
             .unwrap_or_else(|| crate::post::STATE_DONE.to_string());
         let mut post_error = clip.post_error.clone();
-        let mut delete_source: Option<PathBuf> = None;
+        let mut delete_source = source_path.clone().filter(|src| {
+            manifest.post.delete_source
+                && manifest.post.mode == crate::settings::POST_MODE_CONVERT
+                && post_state == crate::post::STATE_DONE
+                && final_path.as_ref().is_some_and(|target| target != src)
+        });
 
         if source_size <= 0 && final_path.is_none() {
             let (target, got) = finish_range(&source, &planned, clip.start, clip.end).await;
@@ -4117,6 +4072,8 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
         };
         let size = tokio::fs::metadata(&final_path)
             .await
+            .ok()
+            .filter(|m| m.is_file())
             .map(|meta| meta.len() as i64)
             .unwrap_or(0);
         if size <= 0 {
@@ -4131,12 +4088,6 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
             continue;
         }
 
-        // 成品已完整，范围分片就是垃圾；不删会占双份空间，
-        // 也会让下一次普通恢复误以为还没合并。
-        for part in segment::collect_parts_range(&source, clip.start, clip.end) {
-            let _ = tokio::fs::remove_file(part).await;
-        }
-
         manifest.clips[index].path = source_path
             .as_ref()
             .map(|path| path.display().to_string())
@@ -4147,6 +4098,8 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
         manifest.rendered = index + 1;
         if let Err(err) = write_manifest(file, &manifest) {
             tracing::warn!(%err, file = %file.display(), "更新分割恢复清单失败");
+            db_ok = false;
+            continue;
         }
 
         let existing = match db.get_session(&clip.id) {
@@ -4161,14 +4114,44 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
         let db_result = if let Some(existing) = existing.as_ref() {
             // 每个片段都要补分组：旧库/早期版本可能只有首片段写了 group_id，
             // 后续片段缺 group_id 时媒体库会把它们拆成单独一场。
-            if let Err(err) = db.set_session_group(
-                &clip.id,
-                &manifest.session_id,
-                index as i64,
-                clip.reason.as_deref(),
-            ) {
-                tracing::warn!(%err, id = %clip.id, clip = index, "恢复片段分组失败");
-                db_ok = false;
+            if manifest.clips.len() > 1 {
+                if let Err(err) = db.set_session_group(
+                    &clip.id,
+                    &manifest.session_id,
+                    index as i64,
+                    clip.reason.as_deref(),
+                ) {
+                    tracing::warn!(%err, id = %clip.id, clip = index, "恢复片段分组失败");
+                    db_ok = false;
+                    continue;
+                }
+            }
+            let mut count = existing.danmaku_count;
+            // In a split recording the original track can still span all clips.
+            // Only a single-clip receipt unambiguously owns the complete writer track.
+            if manifest.clips.len() == 1 {
+                if let Some(track) = existing.danmaku_path.as_deref().map(Path::new) {
+                    let result = crate::postprocess::recovered_chat_count(track)
+                        .map_err(AppError::from)
+                        .and_then(|n| {
+                            count = n;
+                            if n > 0 && !track.with_extension("ass").is_file() {
+                                crate::postprocess::write_danmaku_ass(track, true)?;
+                            }
+                            Ok(())
+                        });
+                    if let Err(err) = result {
+                        tracing::warn!(%err, "恢复弹幕字幕失败，保留清单重试");
+                        post_error = Some(format!(
+                            "{}恢复弹幕字幕失败：{err}",
+                            post_error
+                                .as_ref()
+                                .map(|s| format!("{s}；"))
+                                .unwrap_or_default()
+                        ));
+                        db_ok = false;
+                    }
+                }
             }
             db.finish_session_with_post(
                 &clip.id,
@@ -4183,7 +4166,7 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 existing.source_deleted,
                 post_error.as_deref(),
                 existing.danmaku_path.as_deref(),
-                existing.danmaku_count,
+                count,
                 manifest.error.as_deref(),
             )
         } else {
@@ -4233,19 +4216,18 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
                 continue;
             }
         }
+        remove_range_parts(&source, clip.start, clip.end).await;
         recovered += 1;
         bytes += size as u64;
     }
 
     if recovered == manifest.clips.len() && db_ok {
         manifest.completed = true;
-        let _ = write_manifest(file, &manifest);
-        match std::fs::remove_file(file) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => tracing::warn!(%err, file = %file.display(), "删除分割清单失败"),
+        if db.set_split_manifest(&manifest.session_id, None).is_ok() {
+            let _ = std::fs::remove_file(file);
+        } else {
+            let _ = write_manifest(file, &manifest);
         }
-        let _ = db.set_split_manifest(&manifest.session_id, None);
     }
     tracing::info!(
         session = %manifest.session_id,
@@ -4261,139 +4243,163 @@ async fn recover_split_manifest(db: &Db, file: &Path) -> Option<(usize, u64)> {
 /// 启动时恢复上次崩溃留下的分片。
 ///
 /// 在 close_orphan_sessions 之后调用（I2）：崩溃会话已被标成 aborted，
-/// 这里先从「失败/中止」的最近记录里捞回还带分片的，再合并。
+/// 先处理有清单的场次，再逐页检查其余失败或中止记录。
 /// 由 state.rs 放在后台任务里跑，不挡窗口出现。
 pub async fn recover_parts(db: &Db, deferred: &HashSet<String>) -> (usize, u64) {
     let mut recovered = 0usize;
     let mut bytes = 0u64;
     let mut handled = deferred.clone();
-    let post_cfg = crate::post::PostConfig::from_settings(&crate::settings::load(db));
-    // 分割收尾的清单优先：里面记着每段的分片范围，先按它补齐，
-    // 否则普通恢复会把剩余分片重新合并进首片段，覆盖已完成的片段文件。
-    match db.manifest_sessions() {
-        Ok(rows) => {
-            for (id, file) in rows {
-                if deferred.contains(&id) || !Path::new(&file).is_absolute() {
-                    continue;
-                }
-                match recover_split_manifest(db, Path::new(&file)).await {
-                    Some((count, size)) => {
-                        handled.insert(id);
-                        recovered += count;
-                        bytes += size;
-                    }
-                    None => {
-                        let _ = db.set_split_manifest(&id, None);
-                    }
-                }
-            }
-        }
-        Err(err) => tracing::warn!(%err, "读取分割清单失败"),
-    }
-
-    let rows = match db.recording_sessions() {
+    let post = crate::post::PostConfig::from_settings(&crate::settings::load(db));
+    let rows = match db.manifest_sessions() {
         Ok(rows) => rows,
         Err(err) => {
-            tracing::warn!(%err, "读取待恢复会话失败");
-            return (recovered, bytes);
+            tracing::warn!(%err, "读取分割清单失败");
+            return (0, 0);
         }
     };
-    for (id, file_path) in rows {
-        if handled.contains(&id) || !Path::new(&file_path).is_absolute() {
-            continue;
-        }
-        let path = PathBuf::from(&file_path);
-        // 成品非空就说明合并已经完成，不管分片有没有删干净。先复用成品，
-        // 避免在「改名成功、分片还没删完」时崩溃后又重合并覆盖它。
-        if let Ok(meta) = tokio::fs::metadata(&path).await {
-            if meta.len() > 0 {
-                for part in segment::collect_parts(&path) {
-                    let _ = tokio::fs::remove_file(part).await;
-                }
-                let (target, size) =
-                    post_recovered_file(db, &id, path.clone(), meta.len() as i64, &post_cfg).await;
-                tracing::info!(id = %id, file = %target.display(), size, "沿用已完成的录像成品");
-                recovered += 1;
-                bytes += size as u64;
-                continue;
+    for (id, file) in rows {
+        match db.session_group_ids(&id) {
+            Ok(group) => handled.extend(group),
+            Err(err) => {
+                tracing::warn!(%err, "查询待恢复分组失败");
+                return (recovered, bytes);
             }
         }
-        let has_parts = !segment::collect_parts(&path).is_empty();
-        if !has_parts {
+        if deferred.contains(&id) || !Path::new(&file).is_absolute() {
             continue;
         }
-        let (target, size) = finish_file(&path).await;
-        if size <= 0 {
+        let Ok(_lease) = acquire_finalize_retry(&file) else {
             continue;
+        };
+        if let Some((count, size)) = recover_split_manifest(db, Path::new(&file), &id).await {
+            recovered += count;
+            bytes += size;
+        } else if let Err(err) = db.mark_manifest_unreadable(&id, &file) {
+            tracing::warn!(%err, %id, "无法记录清单读取错误");
         }
-        let (target, size) = post_recovered_file(db, &id, target, size, &post_cfg).await;
-        tracing::info!(id = %id, file = %target.display(), size, "恢复崩溃遗留的录像");
-        recovered += 1;
-        bytes += size as u64;
     }
 
-    // 失败 / 中止的收尾也可能没走完合并：进程崩在「分片写完、还没合并」之间。
-    // 只扫 status='recording' 会把这些分片永远留在磁盘上（G4）。
-    match db.unfinished_sessions() {
-        Ok(rows) => {
-            for (id, file_path) in rows {
-                if handled.contains(&id) || !Path::new(&file_path).is_absolute() {
-                    continue;
+    // Only terminal sessions are eligible. The monitor can already be starting new recordings.
+    let mut cursor = None;
+    loop {
+        let rows = match db.unfinished_sessions(cursor.as_deref()) {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "读取待恢复会话失败");
+                break;
+            }
+        };
+        let Some((last, _)) = rows.last() else {
+            break;
+        };
+        cursor = Some(last.clone());
+        for (id, file) in rows {
+            if handled.contains(&id) || !Path::new(&file).is_absolute() {
+                continue;
+            }
+            match recover_terminal_session(db, &id, Path::new(&file), &post).await {
+                Ok(Some((count, size))) => {
+                    recovered += count;
+                    bytes += size;
                 }
-                let path = PathBuf::from(&file_path);
-                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                    if meta.len() > 0 {
-                        let parts = segment::collect_parts(&path);
-                        // 正常退出的历史会话也会命中这里：成品已完整、分片也已
-                        // 清理干净时没有可恢复的东西，不要每次启动都报「已恢复」
-                        // 并触发一次媒体库刷新。后处理未完成的除外。
-                        let post_pending = db
-                            .get_session(&id)
-                            .ok()
-                            .flatten()
-                            .map(|session| session.post_state != crate::post::STATE_DONE)
-                            .unwrap_or(false);
-                        if parts.is_empty() && !post_pending {
-                            continue;
-                        }
-                        for part in parts {
-                            let _ = tokio::fs::remove_file(part).await;
-                        }
-                        let (target, size) = post_recovered_file(
-                            db,
-                            &id,
-                            path.clone(),
-                            meta.len() as i64,
-                            &post_cfg,
-                        )
-                        .await;
-                        tracing::info!(id = %id, file = %target.display(), size, "沿用失败会话已完成的成品");
-                        recovered += 1;
-                        bytes += size as u64;
-                        continue;
-                    }
-                }
-                if segment::collect_parts(&path).is_empty() {
-                    continue;
-                }
-                let (target, size) = finish_file(&path).await;
-                if size <= 0 {
-                    continue;
-                }
-                let (target, size) = post_recovered_file(db, &id, target, size, &post_cfg).await;
-                tracing::info!(
-                    id = %id,
-                    file = %target.display(),
-                    size,
-                    "恢复失败会话遗留的分片"
-                );
-                recovered += 1;
-                bytes += size as u64;
+                Ok(None) => {}
+                Err(err) => tracing::warn!(%err, %id, "恢复录像失败，保留记录重试"),
             }
         }
-        Err(err) => tracing::warn!(%err, "读取失败会话失败"),
     }
     (recovered, bytes)
+}
+
+/// Use the same durable output receipt as split finalization, including after a database error.
+async fn recover_terminal_session(
+    db: &Db,
+    id: &str,
+    path: &Path,
+    post: &crate::post::PostConfig,
+) -> Result<Option<(usize, u64)>, AppError> {
+    let Some(session) = db.get_session(id)? else {
+        return Ok(None);
+    };
+    let parts = segment::collect_parts(path);
+    let complete = path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0);
+    let registered = session.file_size > 0
+        && matches!(
+            session.post_state.as_str(),
+            crate::post::STATE_DONE | crate::post::STATE_FAILED | crate::post::STATE_CANCELLED
+        );
+    let old_chat = match session.danmaku_path.as_deref().map(Path::new) {
+        Some(track)
+            if parts.is_empty()
+                && complete
+                && registered
+                && session.reason.as_deref() == Some("app_exit")
+                && track.is_file()
+                && (session.danmaku_count == 0 || !track.with_extension("ass").is_file()) =>
+        {
+            db.session_group_ids(id)?.len() == 1
+                && crate::postprocess::recovered_chat_count(track)? > 0
+        }
+        _ => false,
+    };
+    if parts.is_empty() && (!complete || (registered && !old_chat)) {
+        return Ok(None);
+    }
+    let file = manifest_path(path);
+    let file_name = file.to_string_lossy();
+    let _lease = acquire_finalize_retry(&file_name)?;
+    if file.try_exists()? {
+        let existing = read_manifest(&file).map_err(AppError::Internal)?;
+        if existing.session_id != id {
+            return Err(AppError::User("同名清单属于其他场次".into()));
+        }
+    } else {
+        let already_done = complete && registered;
+        let original = path.display().to_string();
+        let clip = ManifestClip {
+            id: id.into(),
+            output: path.display().to_string(),
+            path: if already_done {
+                session.source_path.clone().unwrap_or(original)
+            } else {
+                original
+            },
+            final_path: already_done.then(|| path.display().to_string()),
+            post_state: already_done.then(|| session.post_state.clone()),
+            post_error: session.post_error.clone(),
+            start: 0,
+            end: None,
+            reason: None,
+            started_at: session.started_at,
+            ended_at: session.ended_at.unwrap_or(session.started_at),
+        };
+        let manifest = SplitManifest {
+            version: 2,
+            session_id: id.into(),
+            room_id: session.room_id,
+            source: path.display().to_string(),
+            status: session.status,
+            reason: session.reason.unwrap_or_default(),
+            error: session.error,
+            quality: session.quality,
+            quality_history: session.quality_history,
+            line: session.line,
+            post: if already_done {
+                crate::post::PostConfig {
+                    mode: session.post_mode,
+                    delete_source: false,
+                    ..post.clone()
+                }
+            } else {
+                post.clone()
+            },
+            clips: vec![clip],
+            rendered: 0,
+            completed: false,
+        };
+        write_manifest(&file, &manifest).map_err(AppError::Internal)?;
+    }
+    db.set_split_manifest(id, Some(&file_name))?;
+    Ok(recover_split_manifest(db, &file, id).await)
 }
 
 fn emit_notice(
@@ -4658,6 +4664,10 @@ pub fn session_path(
     });
     dir.join(format!("{stem}.{ext}"))
 }
+
+#[cfg(test)]
+#[path = "recorder/recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5729,7 +5739,9 @@ mod tests {
         db.set_split_manifest("s1", Some(&file.display().to_string()))
             .expect("登记清单");
 
-        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        let (count, bytes) = recover_split_manifest(&db, &file, "s1")
+            .await
+            .expect("恢复");
         assert_eq!(count, 2);
         assert_eq!(bytes, 460);
         assert!(!file.exists());
@@ -5750,7 +5762,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn seed_recovery_session(db: &Db, source: &Path) {
+    pub(super) fn seed_recovery_session(db: &Db, source: &Path) {
         db.insert_room(
             &RoomRecord {
                 id: "r1".into(),
@@ -5895,7 +5907,9 @@ mod tests {
         db.set_split_manifest("s1", Some(&file.display().to_string()))
             .expect("登记清单");
 
-        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        let (count, bytes) = recover_split_manifest(&db, &file, "s1")
+            .await
+            .expect("恢复");
         assert_eq!(count, 2);
         assert_eq!(bytes, 460);
         let first = db.get_session("s1").expect("查库").expect("首片段");
@@ -5974,7 +5988,9 @@ mod tests {
         db.set_split_manifest("s1", Some(&file.display().to_string()))
             .expect("登记清单");
 
-        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        let (count, bytes) = recover_split_manifest(&db, &file, "s1")
+            .await
+            .expect("恢复");
         assert_eq!(count, 2);
         assert_eq!(bytes, 460);
         assert_eq!(
@@ -6008,12 +6024,14 @@ mod tests {
                 .expect("写分片");
         }
 
+        assert_eq!(recover_parts(&db, &HashSet::new()).await, (0, 0));
+        db.close_orphan_sessions(&HashSet::new()).unwrap();
         let (count, bytes) = recover_parts(&db, &HashSet::new()).await;
         assert_eq!(count, 1);
         assert_eq!(bytes, 210);
         let row = db.get_session("s1").expect("查库").expect("会话");
         assert_eq!(row.file_size, 210);
-        assert_eq!(row.status, "recording");
+        assert_eq!(row.status, "aborted");
         assert!(!dir.join("live.part0000.ts").exists());
         assert!(!dir.join("live.part0001.ts").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -6092,7 +6110,9 @@ mod tests {
         db.set_split_manifest("s1", Some(&file.display().to_string()))
             .expect("登记清单");
 
-        let (count, bytes) = recover_split_manifest(&db, &file).await.expect("恢复");
+        let (count, bytes) = recover_split_manifest(&db, &file, "s1")
+            .await
+            .expect("恢复");
         assert_eq!(count, 2, "缺失的首段不能挡住后面两段");
         assert_eq!(bytes, 540);
         assert!(file.exists(), "还有片段没恢复时清单必须保留");
@@ -6175,7 +6195,11 @@ mod tests {
         assert_eq!(path, second);
         assert!(size > 1000, "第二段太小：{size}");
         assert!(first.is_file() && second.is_file());
-        assert!(segment::collect_parts(&source).is_empty(), "分片应被清理");
+        assert_eq!(
+            segment::collect_parts(&source).len(),
+            parts.len(),
+            "登记前保留输入分片"
+        );
         assert!(!dir.join(".live.clip00.merging.mp4").exists());
         assert!(!dir.join("live.clip00.concat.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);

@@ -1535,17 +1535,15 @@ pub async fn finalize_retry(
     if session.status == "recording" {
         return Err(AppError::User("这段还在录制，先停下再重试收尾".into()));
     }
-    let manifest = state.db.split_manifest_for(&session_id)?;
-    let manifest_ready = manifest
-        .as_deref()
-        .is_some_and(|path| !path.trim().is_empty() && Path::new(path).is_file());
-    if !manifest_ready {
+    let (owner, manifest) = state
+        .db
+        .split_manifest_owner(&session_id)?
+        .ok_or_else(|| AppError::User("这段录像没有待恢复的收尾清单，可能已经收尾完成".into()))?;
+    if !Path::new(&manifest).is_file() {
         return Err(AppError::User(
-            "这段录像没有待恢复的收尾清单，可能已经收尾完成".into(),
+            "暂时无法读取收尾清单，请检查存储目录后重试".into(),
         ));
     }
-    // 先占清单锁再登记任务：另一个窗口正在重试时直接返回，不留下假的失败任务。
-    let manifest = manifest.expect("manifest_ready 已确认清单存在");
     let lease = crate::recorder::acquire_finalize_retry(&manifest)?;
     let room_id = Some(session.room_id.clone());
     let title = room_id
@@ -1562,7 +1560,7 @@ pub async fn finalize_retry(
         room_id,
     );
     job.progress(5, "finalizing", Some("重新合并分片并执行后处理"));
-    match crate::recorder::retry_finalize_with_lease(&state.db, &session_id, lease).await {
+    match crate::recorder::retry_finalize_with_lease(&state.db, &owner, lease).await {
         Ok(()) => {
             job.finish("done", Some("收尾完成"));
             let _ = app.emit(EVENT_ROOMS_CHANGED, ());
@@ -1708,6 +1706,17 @@ pub async fn media_delete_source(
     Ok(())
 }
 
+fn room_merge_candidate(session: &RecordSession) -> bool {
+    session.status != "recording"
+        && !(matches!(session.status.as_str(), "failed" | "aborted")
+            && session
+                .file_path
+                .as_deref()
+                .is_none_or(|p| p.trim().is_empty())
+            && session.file_size == 0
+            && session.source_path.is_none())
+}
+
 /// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
 #[tauri::command]
 pub async fn room_merge_sessions(
@@ -1728,7 +1737,7 @@ pub async fn room_merge_sessions(
     }
     let sessions: Vec<_> = all_sessions
         .into_iter()
-        .filter(|session| session.status != "recording")
+        .filter(room_merge_candidate)
         // 合并产物本身也是 finished 会话，再整房合并时跳过，避免越合越多。
         .filter(|session| session.reason.as_deref() != Some("merge"))
         .collect();
@@ -1828,13 +1837,12 @@ async fn run_merge(
     ));
     let dir = data_dir.join("pending-merges");
     std::fs::create_dir_all(&dir)?;
-    // A bounded set of lock files also serializes retries from another app instance.
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join(format!("{}.lock", &key[..2])))?;
+        .open(dir.join(format!("{key}.lock")))?;
     lock.try_lock()
         .map_err(|_| AppError::User("合并任务正忙，请稍后重试".into()))?;
     let receipt = dir.join(format!("{key}.json"));
@@ -2141,6 +2149,55 @@ mod tests {
             group_id: None,
             clip_index: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn merge_lock_distinguishes_selections_with_equal_prefixes() {
+        let db = fixture_db();
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = crate::jobs::Jobs::new();
+        let records = |id: &str| {
+            vec![
+                session("alpha", 1, dir.path().join("missing-a.mp4")),
+                session(id, 2, dir.path().join("missing-b.mp4")),
+            ]
+        };
+        // Both sorted ID lists hash to the Base64URL prefix "B7".
+        let _ = run_merge(&db, &jobs, dir.path(), records("56"), None).await;
+        let mut locks = std::fs::read_dir(dir.path().join("pending-merges")).unwrap();
+        let lock_path = locks.next().unwrap().unwrap().path();
+        let held = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        held.try_lock().unwrap();
+        let same = run_merge(&db, &jobs, dir.path(), records("56"), None)
+            .await
+            .unwrap_err();
+        assert!(same.to_string().contains("正忙"));
+        let other = run_merge(&db, &jobs, dir.path(), records("94"), None)
+            .await
+            .unwrap_err();
+        assert!(other.to_string().contains("录像文件不存在"), "{other}");
+    }
+
+    #[test]
+    fn room_merge_skips_only_empty_attempts() {
+        let mut row = session("empty", 10, PathBuf::new());
+        row.file_size = 0;
+        row.file_path = None;
+        for status in ["failed", "aborted"] {
+            row.status = status.into();
+            assert!(!room_merge_candidate(&row));
+            assert_eq!(merge_plan(vec![row.clone()]).missing.len(), 1);
+        }
+        row.source_path = Some("master.flv".into());
+        assert!(room_merge_candidate(&row));
+        row.source_path = None;
+        row.status = "finished".into();
+        assert!(room_merge_candidate(&row));
+        assert_eq!(merge_plan(vec![row]).missing.len(), 1);
     }
 
     #[tokio::test]
@@ -2507,7 +2564,6 @@ mod tests {
             dir.join("clip.ffmpeg.pid"),
             dir.join("clip.part0000.ts"),
             dir.join("clip.part0001.ts"),
-            dir.join(".clip.merging.mp4"),
         ];
         for sidecar in &sidecars {
             std::fs::write(sidecar, b"x").unwrap();
@@ -3265,24 +3321,7 @@ async fn remove_session_sidecars(path: &std::path::Path) -> Vec<PathBuf> {
         path.with_extension("ffmpeg.pid"),
     ];
     targets.extend(crate::segment::collect_parts(path));
-    if let (Some(parent), Some(stem)) = (
-        path.parent(),
-        path.file_stem().and_then(|stem| stem.to_str()),
-    ) {
-        let prefix = format!(".{stem}.merging.");
-        let entries = match std::fs::read_dir(parent) {
-            Ok(entries) => entries,
-            Err(_) => return vec![parent.to_owned()],
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return vec![parent.to_owned()];
-            };
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                targets.push(entry.path());
-            }
-        }
-    }
+
     let mut failed = Vec::new();
     for target in targets {
         match tokio::fs::remove_file(&target).await {
