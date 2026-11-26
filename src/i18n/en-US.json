@@ -376,8 +376,6 @@
     "aboutCardReleasesDesc": "Download builds & verify SHA-256",
     "aboutCardIssuesTitle": "Bug Report & Ideas",
     "aboutCardIssuesDesc": "Open an Issue with copied env info",
-    "aboutCardSiteTitle": "Changelog Website",
-    "aboutCardSiteDesc": "Global CDN · Auto-synced history",
     "aboutFfmpegReady": "FFmpeg {{version}}",
     "aboutFfmpegMissing": "FFmpeg not set",
     "aboutOpenDataDir": "Data Folder",

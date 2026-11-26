@@ -376,8 +376,6 @@
     "aboutCardReleasesDesc": "下载全部正式版与哈希校验清单",
     "aboutCardIssuesTitle": "Bug 反馈与建议",
     "aboutCardIssuesDesc": "提交 Issues，附环境信息更高效",
-    "aboutCardSiteTitle": "更新日志站点",
-    "aboutCardSiteDesc": "全球可访问 · 自动同步 Release",
     "aboutFfmpegReady": "FFmpeg {{version}}",
     "aboutFfmpegMissing": "FFmpeg 未配置",
     "aboutOpenDataDir": "数据目录",
