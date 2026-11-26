@@ -799,7 +799,10 @@ export default function RoomRecordingsPage({
         return;
       }
       const result = await sessionsMerge(ordered.map((clip) => clip.id));
-      notify.success(t("media.mergeDone", { size: formatSize(result.size) }));
+      const size = formatSize(result.size);
+      notify.success(result.shortfallMs != null
+        ? t("media.mergeDoneShort", { size, seconds: result.shortfallMs / 1000 })
+        : t("media.mergeDone", { size }));
       await refreshAll();
     } catch (err) {
       notify.error(err, t("media.mergeFailed"));

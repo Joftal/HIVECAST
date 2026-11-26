@@ -9,6 +9,14 @@ export type PostResult = {
  */
 kind: string, path: string, size: number,
 /**
- * 额外说明（例如合并了几段），前端直接展示
+ * 合并成品实测时长。
+ */
+durationMs: number | null,
+/**
+ * 达到提醒阈值的合并时长差。
+ */
+shortfallMs: number | null,
+/**
+ * 额外说明（例如合并了几段）
  */
 message: string | null, };

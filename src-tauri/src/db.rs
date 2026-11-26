@@ -1061,6 +1061,29 @@ impl Db {
         conn.commit().map_err(db_err)
     }
 
+    pub fn update_merged_duration(&self, session: &RecordSession) -> Result<(), AppError> {
+        let mut guard = self.lock();
+        let tx = guard.transaction().map_err(db_err)?;
+        let changed = tx
+            .execute(
+                "UPDATE record_session SET started_at=?1, duration_ms=?2
+             WHERE id=?3 AND room_id=?4 AND reason='merge' AND file_path=?5",
+                params![
+                    session.started_at,
+                    session.duration_ms,
+                    session.id,
+                    session.room_id,
+                    session.file_path
+                ],
+            )
+            .map_err(db_err)?;
+        if changed != 1 {
+            return Err(AppError::User("合并登记单与录像记录不匹配".into()));
+        }
+        refresh_room_last_session(&tx, &session.room_id).map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
+
     /// 创建一个分割片段：group_id 指向首片段，clip_index 从 0 递增。
     pub fn create_clip(
         &self,

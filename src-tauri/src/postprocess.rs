@@ -75,49 +75,6 @@ fn size_of(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-async fn run_ffmpeg(args: Vec<OsString>, label: &str) -> Result<(), AppError> {
-    let mut command = crate::process::background_async(ffmpeg::binary());
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(AppError::Io)?;
-    let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        if let Some(mut stream) = stderr {
-            let _ = stream.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    let status = match tokio::time::timeout(TASK_TIMEOUT, child.wait()).await {
-        Ok(status) => status.map_err(AppError::Io)?,
-        Err(_) => {
-            // 超时必须真的杀掉子进程：只丢掉 future 会让 ffmpeg 继续写文件。
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            stderr_task.abort();
-            return Err(AppError::Ffmpeg(format!("{label} 超时")));
-        }
-    };
-    let stderr = stderr_task.await.unwrap_or_default();
-    if status.success() && stderr.is_empty() {
-        return Ok(());
-    }
-    let text = String::from_utf8_lossy(&stderr);
-    let message = describe_failure(label, &text);
-    tracing::warn!(
-        target: "hivecast_lib::postprocess",
-        label,
-        status = %status,
-        tail = %text.trim().chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>(),
-        "{message}"
-    );
-    Err(AppError::Ffmpeg(message))
-}
-
 /// 进度上下文：有总时长才发进度（否则 ffmpeg 的 out_time 没有参照）。
 pub struct Progress<'a> {
     pub app: &'a AppHandle,
@@ -125,83 +82,179 @@ pub struct Progress<'a> {
     pub total_ms: i64,
 }
 
-async fn run_ffmpeg_progress(
+async fn report_progress(stdout: tokio::process::ChildStdout, progress: &Progress<'_>) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(stdout).lines();
+    let mut last = 0;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Some(micros) = line
+            .strip_prefix("out_time_us=")
+            .and_then(|v| v.parse().ok())
+        else {
+            continue;
+        };
+        let percent = percent_for(micros, progress.total_ms);
+        if percent > last {
+            last = percent;
+            let _ = progress.app.emit(
+                EVENT_POST_PROGRESS,
+                PostProgress {
+                    task: progress.task.into(),
+                    session_id: progress.task.into(),
+                    percent,
+                    stage: "converting".into(),
+                    state: "running".into(),
+                    message: None,
+                },
+            );
+        }
+    }
+}
+
+fn flv_packet_mismatch(line: &str) -> bool {
+    let Some((address, fields)) = line
+        .trim()
+        .strip_prefix("[flv @ ")
+        .and_then(|s| s.split_once("] Packet mismatch "))
+    else {
+        return false;
+    };
+    let address = address.strip_prefix("0x").unwrap_or(address);
+    let mut values = fields.split_whitespace();
+    !address.is_empty()
+        && address.bytes().all(|b| b.is_ascii_hexdigit())
+        && (0..3).all(|_| values.next().is_some_and(|v| v.parse::<i64>().is_ok()))
+        && values.next().is_none()
+}
+
+async fn run_merge_ffmpeg(
     args: Vec<OsString>,
-    label: &str,
-    progress: &Progress<'_>,
-) -> Result<(), AppError> {
+    progress: Option<&Progress<'_>>,
+) -> Result<bool, AppError> {
     let mut command = crate::process::background_async(ffmpeg::binary());
     command
-        .args(&args)
-        .args(["-progress", "pipe:1", "-stats_period", "0.2", "-nostats"])
+        .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(AppError::Io)?;
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let progress = progress.filter(|p| p.total_ms > 0);
+    if progress.is_some() {
+        command
+            .args(["-progress", "pipe:1", "-stats_period", "0.2", "-nostats"])
+            .stdout(Stdio::piped());
+    }
+    let mut child = command.spawn()?;
     let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        if let Some(mut stream) = stderr {
-            let _ = stream.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-
-    // 进度读取和等待必须并发：先读到 stdout EOF 再 wait，会把超时起点拖到
-    // ffmpeg 自己退出之后，等于没有超时（文档 196-13）。
-    let app = progress.app.clone();
-    let task = progress.task.to_string();
-    let total_ms = progress.total_ms;
-    let progress_task = tokio::spawn(async move {
-        let Some(stream) = stdout else { return };
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut lines = BufReader::new(stream).lines();
-        let mut last = 0i64;
-        while let Ok(Some(line)) = lines.next_line().await {
-            let value = match line.strip_prefix("out_time_us=") {
-                Some(value) => value,
-                None => continue,
-            };
-            let Ok(micros) = value.trim().parse::<i64>() else {
-                continue;
-            };
-            let percent = percent_for(micros, total_ms);
-            if percent > last {
-                last = percent;
-                let _ = app.emit(
-                    EVENT_POST_PROGRESS,
-                    PostProgress {
-                        task: task.clone(),
-                        session_id: task.clone(),
-                        percent,
-                        stage: "converting".into(),
-                        state: "running".into(),
-                        message: None,
-                    },
-                );
-            }
-        }
-    });
-
-    let status = match tokio::time::timeout(TASK_TIMEOUT, child.wait()).await {
-        Ok(status) => status.map_err(AppError::Io)?,
-        Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            progress_task.abort();
-            stderr_task.abort();
-            return Err(AppError::Ffmpeg(format!("{label} 超时")));
+    let read_progress = async {
+        if let (Some(stdout), Some(progress)) = (stdout, progress) {
+            report_progress(stdout, progress).await;
         }
     };
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), progress_task).await;
-    let stderr = stderr_task.await.unwrap_or_default();
-    if status.success() && stderr.is_empty() {
-        return Ok(());
+    use tokio::io::AsyncReadExt;
+    let mut stream = child.stderr.take().expect("stderr configured as piped");
+    let mut stderr = Vec::new();
+    let (status, read, ()) = match tokio::time::timeout(TASK_TIMEOUT, async {
+        tokio::join!(child.wait(), stream.read_to_end(&mut stderr), read_progress)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // Release the output handle before MergeArtifacts removes the file on Windows.
+            child.kill().await?;
+            return Err(AppError::Ffmpeg("合并超时".into()));
+        }
+    };
+    read?;
+    let diagnostics = String::from_utf8_lossy(&stderr);
+    if !status?.success() || !diagnostics.lines().all(flv_packet_mismatch) {
+        return Err(AppError::Ffmpeg(describe_failure("合并", &diagnostics)));
     }
-    let text = String::from_utf8_lossy(&stderr);
-    Err(AppError::Ffmpeg(describe_failure(label, &text)))
+    Ok(!diagnostics.is_empty())
+}
+
+// Only on a recoverable FLV diagnostic, independently read past incorrect previous-tag
+// sizes and compare packet totals for each copied A/V track. Ambiguous layouts fail closed.
+type PacketCounts = std::collections::BTreeMap<String, (String, u64)>;
+
+async fn packet_counts(probe: &str, path: &Path, source: bool) -> Result<PacketCounts, AppError> {
+    #[derive(serde::Deserialize)]
+    struct Streams {
+        streams: Vec<Stream>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Stream {
+        codec_type: String,
+        codec_name: Option<String>,
+        nb_read_packets: Option<String>,
+    }
+    let invalid = || AppError::Ffmpeg(format!("无法验证音视频包数：{}", path.display()));
+    let mut command = crate::process::background_async(probe);
+    command.args(["-v", "error"]);
+    if source {
+        command.args(["-flv_ignore_prevtag", "1"]);
+    }
+    let output = command
+        .args([
+            "-count_packets",
+            "-show_entries",
+            "stream=codec_type,codec_name,nb_read_packets",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(invalid());
+    }
+    let parsed: Streams = serde_json::from_slice(&output.stdout).map_err(|_| invalid())?;
+    let mut counts = PacketCounts::new();
+    for stream in parsed.streams {
+        if !matches!(stream.codec_type.as_str(), "audio" | "video") {
+            continue;
+        }
+        let count = stream
+            .nb_read_packets
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(&invalid)?;
+        let codec = stream.codec_name.ok_or_else(&invalid)?;
+        if counts.insert(stream.codec_type, (codec, count)).is_some() {
+            return Err(invalid());
+        }
+    }
+    if counts.is_empty() {
+        return Err(invalid());
+    }
+    Ok(counts)
+}
+
+async fn verify_merge_packets(sources: &[PathBuf], out: &Path) -> Result<(), AppError> {
+    let probe = ffmpeg::probe_binary()
+        .ok_or_else(|| AppError::Ffmpeg("需要 ffprobe 核对合并成品".into()))?;
+    let mut remaining = packet_counts(&probe, out, false).await?;
+    let mismatch = || AppError::Ffmpeg("合并成品与输入的音视频包不一致".into());
+    for source in sources {
+        let counts = packet_counts(&probe, source, true).await?;
+        if counts.len() != remaining.len() {
+            return Err(mismatch());
+        }
+        for (kind, (codec, count)) in counts {
+            let (expected_codec, left) = remaining.get_mut(&kind).ok_or_else(&mismatch)?;
+            if *expected_codec != codec {
+                return Err(mismatch());
+            }
+            *left = left.checked_sub(count).ok_or_else(&mismatch)?;
+        }
+    }
+    if remaining.values().any(|(_, left)| *left != 0) {
+        return Err(mismatch());
+    }
+    Ok(())
 }
 
 fn reserve_merge_output(first: &Path, stamp: &str) -> Result<PathBuf, AppError> {
@@ -342,8 +395,8 @@ pub async fn merge(
     std::io::Write::write_all(&mut list_file, list.as_bytes())?;
     drop(list_file);
 
-    // 不加 -xerror：真实直播 FLV/TS 偶发 1–2 个非单调 DTS 脏包，FFmpeg 默认可自动跳过继续拼完；
-    // 坏容器由前置 validate_media / probe_merge_durations 拦截，中途截断由成品时长校验兜底。
+    // Keep recoverable FLV previous-tag diagnostics for the independent packet check.
+    // Other error-level diagnostics can mean an unreadable input even when ffmpeg exits 0.
     let args: Vec<OsString> = vec![
         "-hide_banner".into(),
         "-nostdin".into(),
@@ -363,22 +416,21 @@ pub async fn merge(
         out.as_os_str().to_os_string(),
     ];
     let started = std::time::Instant::now();
-    let result = match progress {
-        Some(progress) if progress.total_ms > 0 => {
-            run_ffmpeg_progress(args, "合并", progress).await
-        }
-        _ => run_ffmpeg(args, "合并").await,
-    };
-    result?;
+    if run_merge_ffmpeg(args, progress).await? {
+        tokio::time::timeout(TASK_TIMEOUT, verify_merge_packets(sources, &out))
+            .await
+            .map_err(|_| AppError::Ffmpeg("核对合并成品超时".into()))??;
+    }
     let size = size_of(&out);
     if size == 0 {
         return Err(AppError::Ffmpeg("合并输出为空".into()));
     }
     let mut message = format!("共 {} 段", sources.len());
+    let duration_ms = crate::post::media_duration_ms(&out).await;
+    let mut shortfall_ms = None;
     if let Some(expected) = expected {
-        let actual_ms = crate::post::media_duration_ms(&out)
-            .await
-            .ok_or_else(|| AppError::Ffmpeg("无法验证合并产物时长".into()))?;
+        let actual_ms =
+            duration_ms.ok_or_else(|| AppError::Ffmpeg("无法验证合并产物时长".into()))?;
         if merge_duration_is_short(actual_ms, sources.len(), expected) {
             let tolerance = merge_duration_tolerance_ms(sources.len(), expected);
             return Err(AppError::Ffmpeg(format!(
@@ -386,16 +438,17 @@ pub async fn merge(
                 expected.total_ms, actual_ms, tolerance
             )));
         }
-        let shortfall_ms = expected.total_ms.saturating_sub(actual_ms);
-        if shortfall_ms >= 3_000 {
-            let shortfall_sec = shortfall_ms / 1_000;
+        let gap = expected.total_ms.saturating_sub(actual_ms);
+        if gap >= 3_000 {
+            shortfall_ms = Some(gap);
+            let shortfall_sec = gap as f64 / 1000.0;
             tracing::warn!(
                 target: "hivecast_lib::postprocess",
                 task = "merge",
                 sources = sources.len(),
                 expected_ms = expected.total_ms,
                 actual_ms,
-                shortfall_ms,
+                shortfall_ms = gap,
                 "合并完成但成品略短于预期时长（多见于直播卡顿跳时间戳或音视频轨尾差）"
             );
             message = format!(
@@ -420,6 +473,8 @@ pub async fn merge(
         kind: "merge".into(),
         path: out.to_string_lossy().to_string(),
         size,
+        duration_ms,
+        shortfall_ms,
         message: Some(message),
     })
 }
@@ -693,6 +748,8 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
         kind: "ass".into(),
         path: out.to_string_lossy().to_string(),
         size: size_of(&out),
+        duration_ms: None,
+        shortfall_ms: None,
         message: None,
     })
 }
@@ -1123,6 +1180,72 @@ mod tests {
         assert_eq!(two.parent(), Some(dir.as_path()));
         assert!(one.is_file() && two.is_file(), "占位文件必须原子创建");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "需要本机 FFmpeg 和 ffprobe"]
+    async fn merge_packet_check_rejects_missing_clip_or_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.flv");
+        let status = crate::process::background_async(ffmpeg::binary())
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=80x60:r=5",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let sources = vec![source.clone(), source.clone()];
+        let merged = merge(&sources, None, None).await.unwrap();
+        let out = Path::new(&merged.path);
+        verify_merge_packets(&sources, out).await.unwrap();
+        assert!(verify_merge_packets(&sources, &source).await.is_err());
+        let silent = dir.path().join("silent.mp4");
+        let status = crate::process::background_async(ffmpeg::binary())
+            .args(["-v", "error", "-i"])
+            .arg(out)
+            .args(["-an", "-c", "copy"])
+            .arg(&silent)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert!(verify_merge_packets(&sources, &silent).await.is_err());
+    }
+
+    #[test]
+    fn only_flv_previous_tag_size_diagnostics_are_recoverable() {
+        for address in ["0xabc", "00001B92D7A0"] {
+            assert!(flv_packet_mismatch(&format!(
+                "[flv @ {address}] Packet mismatch 17 16 1794"
+            )));
+        }
+        for text in [
+            "",
+            "[concat @ 123] Impossible to open",
+            "[flv @ abc] Packet mismatch",
+            "[flv @ abc] Packet mismatch 17 16 1794: read error",
+        ] {
+            assert!(!flv_packet_mismatch(text));
+        }
     }
 
     #[test]

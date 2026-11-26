@@ -82,6 +82,7 @@
     "fileDeleted": "Deleted",
     "fileMissing": "Missing",
     "merge": "Merge selected",
+    "mergeDoneShort": "Merged ({{size}}). The result is {{seconds}} seconds shorter than expected. Check it before deleting the originals.",
     "mergeDone": "Merged: {{size}}",
     "mergeHint": "Select at least two recordings to merge",
     "progress": "Playback position",

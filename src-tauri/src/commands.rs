@@ -1515,6 +1515,8 @@ pub async fn session_remux(
         kind: "remux".into(),
         path: outcome.path.display().to_string(),
         size: outcome.size,
+        duration_ms: None,
+        shortfall_ms: None,
         message: Some("已转封装为 MP4，源封装已保留".into()),
     })
 }
@@ -1656,6 +1658,8 @@ pub async fn post_retry(
         kind: "post".into(),
         path: outcome.path.display().to_string(),
         size: outcome.size,
+        duration_ms: None,
+        shortfall_ms: None,
         message: None,
     })
 }
@@ -1834,10 +1838,10 @@ struct PendingMerge {
     modified: std::time::SystemTime,
 }
 
-fn finish_merge_registration(
+async fn finish_merge_registration(
     db: &crate::db::Db,
     receipt: &Path,
-    pending: PendingMerge,
+    mut pending: PendingMerge,
 ) -> Result<PostResult, AppError> {
     let path = Path::new(&pending.result.path);
     let meta = std::fs::metadata(path).map_err(|e| AppError::from_io(e, path))?;
@@ -1847,7 +1851,33 @@ fn finish_merge_registration(
             path.display()
         )));
     }
-    if db.get_session(&pending.session.id)?.is_none() {
+    // Receipts written before measured durations were stored used the input estimate.
+    if pending.result.duration_ms.is_none() && pending.session.duration_ms > 0 {
+        let measured = crate::post::media_duration_ms(path).await.ok_or_else(|| {
+            AppError::Ffmpeg("无法核对旧登记单的成品时长，请检查 ffprobe 后重试".into())
+        })?;
+        let duration =
+            i64::try_from(measured).map_err(|_| AppError::Ffmpeg("成品时长超限".into()))?;
+        if pending
+            .result
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("比预期略短"))
+        {
+            let gap = (pending.session.duration_ms as u64).saturating_sub(measured);
+            pending.result.shortfall_ms = (gap >= 3000).then_some(gap);
+        }
+        pending.result.duration_ms = Some(measured);
+        pending.session.duration_ms = duration;
+        if let Some(end) = pending.session.ended_at {
+            pending.session.started_at = end - duration / 1000;
+        }
+    }
+    if let Some(existing) = db.get_session(&pending.session.id)? {
+        if existing.duration_ms != pending.session.duration_ms {
+            db.update_merged_duration(&pending.session)?;
+        }
+    } else {
         db.create_session(&pending.session).map_err(|e| {
             AppError::User(format!(
                 "成品已保存在 {}，登记失败：{e}。重新合并同一组片段可重试登记。",
@@ -1923,7 +1953,7 @@ async fn execute_merge(
             {
                 std::fs::remove_file(receipt)?;
             } else {
-                return finish_merge_registration(db, receipt, pending);
+                return finish_merge_registration(db, receipt, pending).await;
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1954,7 +1984,6 @@ async fn execute_merge(
         plan.room_id.as_deref().unwrap_or_default(),
         &merged,
         danmaku.as_deref(),
-        total_ms,
     );
     let modified = std::fs::metadata(&merged.path)?.modified()?;
     let pending = PendingMerge {
@@ -1977,7 +2006,7 @@ async fn execute_merge(
             pending.result.path
         )));
     }
-    finish_merge_registration(db, receipt, pending)
+    finish_merge_registration(db, receipt, pending).await
 }
 
 /// 把合并产物登记成一条普通录像，媒体库才能挂上弹幕轨、继续导出/删除。
@@ -1985,10 +2014,9 @@ fn merged_session(
     room_id: &str,
     merged: &PostResult,
     danmaku: Option<&std::path::Path>,
-    duration_ms: i64,
 ) -> RecordSession {
     let now = now_ts();
-    let duration_ms = duration_ms.max(0);
+    let duration_ms = i64::try_from(merged.duration_ms.unwrap_or(0)).unwrap_or(i64::MAX);
     RecordSession {
         id: uuid::Uuid::new_v4().to_string(),
         room_id: room_id.to_string(),
@@ -2497,6 +2525,86 @@ mod tests {
         assert_eq!(crate::post::media_duration_ms(out).await, Some(2000));
     }
 
+    #[tokio::test]
+    #[ignore = "需要本机 FFmpeg 和 ffprobe"]
+    async fn flv_merge_measures_output_and_repairs_legacy_receipt() {
+        let db = fixture_db();
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = crate::jobs::Jobs::new();
+        let mut clips = Vec::new();
+        for (i, (color, seconds)) in [("red", "200"), ("blue", "5")].into_iter().enumerate() {
+            let file = dir.path().join(format!("{color}.flv"));
+            let status = crate::process::background_async(crate::ffmpeg::binary())
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color={color}:s=80x60:r=5"),
+                    "-t",
+                    seconds,
+                    "-c:v",
+                    "libx264",
+                    "-bf",
+                    "0",
+                ])
+                .arg(&file)
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success());
+            if i == 1 {
+                let mut bytes = std::fs::read(&file).unwrap();
+                let key = b"duration\0";
+                let pos = bytes.windows(key.len()).position(|p| p == key).unwrap() + key.len();
+                bytes[pos..pos + 8].copy_from_slice(&8.5_f64.to_be_bytes());
+                // Only damage the final FLV previous-tag size.
+                *bytes.last_mut().unwrap() ^= 1;
+                std::fs::write(&file, bytes).unwrap();
+            }
+            clips.push(session(color, i as i64, file));
+        }
+        db.exec_batch_for_test("CREATE TRIGGER refuse BEFORE INSERT ON media_file BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(run_merge(&db, &jobs, dir.path(), clips.clone(), None)
+            .await
+            .is_err());
+        let receipt = std::fs::read_dir(dir.path().join("pending-merges"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(old["result"]["durationMs"], 205_000);
+        assert_eq!(old["result"]["shortfallMs"], 3500);
+        old["result"].as_object_mut().unwrap().remove("durationMs");
+        old["result"].as_object_mut().unwrap().remove("shortfallMs");
+        old["session"]["durationMs"] = 208_500.into();
+        let legacy = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&receipt, &legacy).unwrap();
+        db.exec_batch_for_test("DROP TRIGGER refuse;").unwrap();
+        let result = run_merge(&db, &jobs, dir.path(), clips.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (result.duration_ms, result.shortfall_ms),
+            (Some(205_000), Some(3500))
+        );
+        // Simulate an older app having committed the row but failed to remove its receipt.
+        db.exec_batch_for_test("UPDATE record_session SET duration_ms=208500 WHERE reason='merge'")
+            .unwrap();
+        std::fs::write(&receipt, &legacy).unwrap();
+        let replay = run_merge(&db, &jobs, dir.path(), clips, None)
+            .await
+            .unwrap();
+        assert_eq!(replay.path, result.path);
+        let rows = db.list_sessions(Some("room"), 10, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_ms, 205_000);
+    }
+
     fn fixture_db() -> crate::db::Db {
         let db = crate::db::Db::open(Path::new(":memory:")).unwrap();
         db.exec_batch_for_test("INSERT INTO room (id,platform,room_key,canonical_url,host_name,title,created_at,updated_at) VALUES ('room','bilibili','1','test','','',1,1)").unwrap();
@@ -2939,16 +3047,13 @@ mod tests {
             kind: "merge".into(),
             path: video.display().to_string(),
             size: 12,
+            duration_ms: Some(125_000),
+            shortfall_ms: None,
             message: Some("合并 2 段".into()),
         };
 
-        db.create_session(&merged_session(
-            "room-merge",
-            &merged,
-            Some(&jsonl),
-            125_000,
-        ))
-        .unwrap();
+        db.create_session(&merged_session("room-merge", &merged, Some(&jsonl)))
+            .unwrap();
 
         let (items, total) = db
             .media_list(&MediaFilter {

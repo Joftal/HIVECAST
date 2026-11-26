@@ -491,7 +491,13 @@ pub struct PostResult {
     pub path: String,
     #[ts(type = "number")]
     pub size: i64,
-    /// 额外说明（例如合并了几段），前端直接展示
+    /// 合并成品实测时长。
+    #[ts(type = "number | null")]
+    pub duration_ms: Option<u64>,
+    /// 达到提醒阈值的合并时长差。
+    #[ts(type = "number | null")]
+    pub shortfall_ms: Option<u64>,
+    /// 额外说明（例如合并了几段）
     pub message: Option<String>,
 }
 

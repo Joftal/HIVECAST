@@ -82,6 +82,7 @@
     "fileDeleted": "已删",
     "fileMissing": "缺失",
     "merge": "合并选中",
+    "mergeDoneShort": "已合并（{{size}}），成品比预期短 {{seconds}} 秒。请核对后再清理原片。",
     "mergeDone": "已合并：{{size}}",
     "mergeHint": "至少选两段录像才能合并",
     "progress": "播放进度",
