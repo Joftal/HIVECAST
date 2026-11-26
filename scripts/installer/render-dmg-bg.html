@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>HIVECAST macOS DMG Background (680x420)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 680px;
+      height: 420px;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .canvas {
+      position: relative;
+      width: 680px;
+      height: 420px;
+      overflow: hidden;
+      background:
+        radial-gradient(ellipse 52% 58% at 26% 52%, rgba(114, 162, 255, 0.24), transparent 68%),
+        radial-gradient(ellipse 50% 56% at 74% 52%, rgba(255, 174, 198, 0.24), transparent 68%),
+        radial-gradient(ellipse 60% 42% at 50% 0%, rgba(255, 255, 255, 0.92), transparent 72%),
+        linear-gradient(148deg, #f3f7ff 0%, #ffffff 48%, #fdf4f8 100%);
+      color: #14171c;
+    }
+    /* Subtle liquid-glass hairline border frame */
+    .canvas::before {
+      content: "";
+      position: absolute;
+      inset: 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(47, 107, 255, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.48) 0%, rgba(255, 255, 255, 0.12) 100%);
+      pointer-events: none;
+    }
+    .header {
+      position: absolute;
+      top: 28px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      z-index: 2;
+    }
+    .brand-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      color: #14171c;
+    }
+    .pill {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      padding: 2.5px 9px;
+      border-radius: 999px;
+      background: rgba(47, 107, 255, 0.10);
+      color: #2456d6;
+      border: 1px solid rgba(47, 107, 255, 0.16);
+    }
+    .subtitle {
+      margin-top: 7px;
+      font-size: 12.5px;
+      font-weight: 450;
+      color: #5b6678;
+      letter-spacing: 0.01em;
+    }
+    /* Whisper-soft ambient drop rings under Finder's real icons at (180, 206) and (500, 206) */
+    .halo {
+      position: absolute;
+      top: 134px;
+      width: 144px;
+      height: 144px;
+      border-radius: 36px;
+      z-index: 1;
+    }
+    .halo-left {
+      left: 108px;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.78) 0%, rgba(255, 255, 255, 0.18) 65%, transparent 100%);
+      box-shadow: 0 12px 34px -18px rgba(47, 107, 255, 0.25);
+    }
+    .halo-right {
+      left: 428px;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.78) 0%, rgba(255, 255, 255, 0.18) 65%, transparent 100%);
+      box-shadow: 0 12px 34px -18px rgba(235, 109, 90, 0.22);
+    }
+    /* Sleek graduated 3-chevron flow centered at (340, 198) */
+    .chevrons {
+      position: absolute;
+      left: 50%;
+      top: 198px;
+      transform: translate(-50%, -50%);
+      display: flex;
+      align-items: center;
+      z-index: 2;
+    }
+    .footer {
+      position: absolute;
+      bottom: 48px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 11px;
+      color: #7c8799;
+      letter-spacing: 0.03em;
+      z-index: 2;
+    }
+    .footer .sep {
+      margin: 0 6px;
+      opacity: 0.45;
+    }
+  </style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="header">
+      <div class="brand-row">
+        <span class="brand">HIVECAST</span>
+        <span class="pill">Apple Silicon</span>
+      </div>
+      <div class="subtitle">将 HIVECAST 拖入「应用程序」以完成安装</div>
+    </div>
+
+    <div class="halo halo-left"></div>
+    <div class="halo halo-right"></div>
+
+    <div class="chevrons">
+      <svg width="78" height="32" viewBox="0 0 78 32" fill="none">
+        <path d="M12 7L21 16L12 25" stroke="#2F6BFF" stroke-opacity="0.28" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M34 7L43 16L34 25" stroke="#2F6BFF" stroke-opacity="0.58" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M56 7L65 16L56 25" stroke="#2F6BFF" stroke-opacity="0.92" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <div class="footer">
+      <span>多平台直播录制</span><span class="sep">·</span>
+      <span>四路分屏观看</span><span class="sep">·</span>
+      <span>哔哩哔哩</span><span class="sep">·</span>
+      <span>斗鱼</span><span class="sep">·</span>
+      <span>虎牙</span><span class="sep">·</span>
+      <span>抖音</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -33,8 +33,10 @@ case "$PUBLIC" in
 esac
 STAGE="$(mktemp -d)"
 KEYCHAIN=""
+MOUNT_DIR=""
 cleanup() {
   local rc=$?
+  if [[ -n "$MOUNT_DIR" ]]; then hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true; fi
   if [[ -n "$KEYCHAIN" ]]; then security delete-keychain "$KEYCHAIN" >/dev/null || true; fi
   rm -rf "$STAGE"
   exit "$rc"
@@ -84,10 +86,50 @@ fi
 codesign --verify --deep --strict "$APP_COPY"
 ln -s /Applications "$STAGE/payload/Applications"
 
+BG_TIFF="$ROOT/src-tauri/installer/macos/dmg-bg.tiff"
+VOL_ICON="$ROOT/src-tauri/icons/icon.icns"
+DS_GEN="$ROOT/scripts/installer/make-ds-store.py"
+[[ -f "$BG_TIFF" ]] || { echo "找不到 DMG 背景图：$BG_TIFF" >&2; exit 1; }
+[[ -f "$DS_GEN" ]] || { echo "找不到 .DS_Store 生成脚本：$DS_GEN" >&2; exit 1; }
+
+mkdir -p "$STAGE/payload/.background"
+cp "$BG_TIFF" "$STAGE/payload/.background/bg.tiff"
+if [[ -f "$VOL_ICON" ]]; then
+  cp "$VOL_ICON" "$STAGE/payload/.VolumeIcon.icns"
+fi
+
 mkdir -p "$OUT_DIR"
 rm -f "$DMG"
+RW_DMG="$STAGE/rw.dmg"
+MOUNT_DIR="$STAGE/mnt"
+mkdir -p "$MOUNT_DIR"
 # 保留 hdiutil 以兼容 GitHub Actions macos-15 runner（macOS 26/27 才提供 diskutil image）。
-hdiutil create -volname HIVECAST -srcfolder "$STAGE/payload" -ov -format UDZO "$DMG" >/dev/null
+# 先建 HFS+ 读写镜像，无 Finder / 无 AppleScript 直接写入 .DS_Store 与视网膜背景，再压成 UDZO。
+hdiutil create -volname HIVECAST -fs HFS+ -srcfolder "$STAGE/payload" -ov -format UDRW "$RW_DMG" >/dev/null
+hdiutil attach -readwrite -noverify -noautoopen -nobrowse -mountpoint "$MOUNT_DIR" "$RW_DMG" >/dev/null
+if command -v SetFile >/dev/null 2>&1; then
+  SetFile -a V "$MOUNT_DIR/.background" || true
+  if [[ -f "$MOUNT_DIR/.VolumeIcon.icns" ]]; then
+    SetFile -a V "$MOUNT_DIR/.VolumeIcon.icns" || true
+    SetFile -a C "$MOUNT_DIR" || true
+  fi
+fi
+python3 "$DS_GEN" \
+  --volume "$MOUNT_DIR" \
+  --name HIVECAST \
+  --bg-dir .background \
+  --bg-file bg.tiff \
+  --width 680 \
+  --height 452 \
+  --icon-size 120 \
+  --app-x 180 \
+  --app-y 206 \
+  --apps-x 500 \
+  --apps-y 206 >/dev/null
+sync
+hdiutil detach "$MOUNT_DIR" >/dev/null
+MOUNT_DIR=""
+hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG" >/dev/null
 if [[ "$PUBLIC" == true ]]; then
   codesign "${signing_args[@]}" "$DMG"
   xcrun notarytool submit "$DMG" "${notary[@]}" --wait

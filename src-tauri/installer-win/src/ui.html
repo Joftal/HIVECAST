@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HIVECAST</title>
+<style>
+  :root {
+    --bg-a: #f4f7fc;
+    --bg-b: #eef2fa;
+    --blob-1: rgba(120, 174, 245, 0.34);
+    --blob-2: rgba(246, 174, 188, 0.28);
+    --blob-3: rgba(164, 198, 250, 0.24);
+    --surface: rgba(255, 255, 255, 0.68);
+    --surface-strong: rgba(255, 255, 255, 0.84);
+    --surface-subtle: rgba(255, 255, 255, 0.46);
+    --border: rgba(255, 255, 255, 0.78);
+    --border-soft: rgba(15, 23, 42, 0.08);
+    --text: #101828;
+    --text-2: #475467;
+    --text-3: #667085;
+    --accent: #3b82f6;
+    --accent-2: #60a5fa;
+    --accent-deep: #2563eb;
+    --accent-shadow: rgba(59, 130, 246, 0.28);
+    --ok-bg: rgba(16, 185, 129, 0.11);
+    --ok-text: #047857;
+    --ok-border: rgba(16, 185, 129, 0.24);
+    --warn-bg: rgba(245, 158, 11, 0.11);
+    --warn-text: #b45309;
+    --warn-border: rgba(245, 158, 11, 0.24);
+    --danger: #e11d48;
+    --danger-bg: rgba(225, 29, 72, 0.09);
+    --danger-border: rgba(225, 29, 72, 0.22);
+    --track: rgba(15, 23, 42, 0.08);
+    --ctrl-hover: rgba(15, 23, 42, 0.06);
+    --icon-ring: rgba(255, 255, 255, 0.88);
+    --icon-shadow: rgba(37, 99, 235, 0.16);
+  }
+
+  html.dark {
+    --bg-a: #0c1220;
+    --bg-b: #101828;
+    --blob-1: rgba(59, 130, 246, 0.26);
+    --blob-2: rgba(236, 118, 152, 0.18);
+    --blob-3: rgba(96, 165, 250, 0.16);
+    --surface: rgba(22, 32, 50, 0.68);
+    --surface-strong: rgba(28, 40, 62, 0.84);
+    --surface-subtle: rgba(255, 255, 255, 0.05);
+    --border: rgba(255, 255, 255, 0.13);
+    --border-soft: rgba(255, 255, 255, 0.10);
+    --text: #f3f6fc;
+    --text-2: #cbd5e1;
+    --text-3: #94a3b8;
+    --accent: #60a5fa;
+    --accent-2: #93c5fd;
+    --accent-deep: #3b82f6;
+    --accent-shadow: rgba(59, 130, 246, 0.34);
+    --ok-bg: rgba(16, 185, 129, 0.16);
+    --ok-text: #6ee7b7;
+    --ok-border: rgba(52, 211, 153, 0.28);
+    --warn-bg: rgba(245, 158, 11, 0.16);
+    --warn-text: #fcd34d;
+    --warn-border: rgba(251, 191, 36, 0.28);
+    --danger: #fb7185;
+    --danger-bg: rgba(244, 63, 94, 0.14);
+    --danger-border: rgba(251, 113, 133, 0.28);
+    --track: rgba(255, 255, 255, 0.10);
+    --ctrl-hover: rgba(255, 255, 255, 0.10);
+    --icon-ring: rgba(255, 255, 255, 0.18);
+    --icon-shadow: rgba(0, 0, 0, 0.42);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", -apple-system, sans-serif;
+    color: var(--text);
+    background: linear-gradient(155deg, var(--bg-a) 0%, var(--bg-b) 100%);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background:
+      radial-gradient(280px 240px at 16% 12%, var(--blob-1), transparent 72%),
+      radial-gradient(260px 240px at 88% 18%, var(--blob-2), transparent 74%),
+      radial-gradient(280px 220px at 54% 96%, var(--blob-3), transparent 75%),
+      linear-gradient(160deg, var(--bg-a), var(--bg-b));
+  }
+
+  .shell::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.44) 0%, rgba(255, 255, 255, 0) 26%);
+    opacity: 0.7;
+  }
+
+  html.dark .shell::before {
+    opacity: 0.12;
+  }
+
+  .topbar {
+    position: relative;
+    z-index: 4;
+    height: 44px;
+    padding: 0 12px 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .drag-area {
+    flex: 1;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: default;
+  }
+
+  .brand-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-2);
+  }
+
+  .ver-pill {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-3);
+    background: var(--surface-subtle);
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    padding: 2px 8px;
+  }
+
+  .win-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .icon-btn {
+    height: 28px;
+    min-width: 28px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+  }
+
+  .icon-btn:hover {
+    background: var(--ctrl-hover);
+    color: var(--text);
+  }
+
+  .icon-btn.close:hover {
+    background: rgba(225, 29, 72, 0.14);
+    color: var(--danger);
+  }
+
+  .main {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 6px 26px 22px;
+    overflow: hidden;
+  }
+
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    margin-top: 8px;
+  }
+
+  .app-icon-wrap {
+    position: relative;
+    width: 82px;
+    height: 82px;
+    border-radius: 24px;
+    background: var(--surface-strong);
+    border: 1px solid var(--icon-ring);
+    box-shadow:
+      0 14px 32px -10px var(--icon-shadow),
+      inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(16px);
+  }
+
+  .app-icon-wrap img {
+    width: 64px;
+    height: 64px;
+    border-radius: 16px;
+    display: block;
+  }
+
+  h1 {
+    margin-top: 14px;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+
+  .subtitle {
+    margin-top: 5px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.45;
+  }
+
+  .pill-row {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface);
+    color: var(--text-2);
+    backdrop-filter: blur(14px);
+  }
+
+  .status-pill.ok {
+    background: var(--ok-bg);
+    color: var(--ok-text);
+    border-color: var(--ok-border);
+  }
+
+  .status-pill.warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
+  }
+
+  .status-pill.upgrade {
+    background: rgba(59, 130, 246, 0.11);
+    color: var(--accent-deep);
+    border-color: rgba(59, 130, 246, 0.24);
+  }
+
+  html.dark .status-pill.upgrade {
+    color: var(--accent-2);
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .view {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    margin-top: 18px;
+    min-height: 0;
+  }
+
+  .view.active {
+    display: flex;
+  }
+
+  .glass-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 14px 16px;
+    backdrop-filter: blur(18px);
+    box-shadow: 0 8px 24px -16px rgba(15, 23, 42, 0.18);
+  }
+
+  .cta-wrap {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .primary-btn {
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+    height: 46px;
+    border: none;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
+    color: #ffffff;
+    font-size: 14.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    box-shadow:
+      0 10px 24px -8px var(--accent-shadow),
+      inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    transition: transform 120ms ease, filter 140ms ease, opacity 140ms ease;
+  }
+
+  .primary-btn:hover:not(:disabled) {
+    filter: brightness(1.05);
+    transform: translateY(-1px);
+  }
+
+  .primary-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  .primary-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .primary-btn.danger {
+    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+    box-shadow: 0 10px 24px -8px rgba(225, 29, 72, 0.32);
+  }
+
+  .secondary-btn {
+    width: 100%;
+    height: 40px;
+    border-radius: 12px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 140ms ease;
+  }
+
+  .secondary-btn:hover {
+    background: var(--surface-strong);
+  }
+
+  .options-toggle {
+    align-self: center;
+    background: transparent;
+    border: none;
+    color: var(--text-3);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    transition: color 140ms ease, background 140ms ease;
+  }
+
+  .options-toggle:hover {
+    color: var(--text);
+    background: var(--ctrl-hover);
+  }
+
+  .chevron {
+    display: inline-block;
+    transition: transform 180ms ease;
+  }
+
+  .options-toggle.open .chevron {
+    transform: rotate(180deg);
+  }
+
+  .options-panel {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .options-panel.open {
+    display: flex;
+  }
+
+  .field-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-2);
+    margin-bottom: 5px;
+  }
+
+  .path-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .path-input {
+    flex: 1;
+    min-width: 0;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-strong);
+    color: var(--text);
+    font-size: 12px;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    outline: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .path-input:focus {
+    border-color: var(--accent);
+  }
+
+  .browse-btn {
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-strong);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .browse-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent-deep);
+  }
+
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+
+  .check-row input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .foot-note {
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+
+  .error-box {
+    display: none;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-border);
+    color: var(--danger);
+    font-size: 12px;
+    line-height: 1.45;
+    margin-bottom: 10px;
+  }
+
+  .error-box.show {
+    display: block;
+  }
+
+  .progress-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+
+  .progress-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .progress-pct {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent-deep);
+    font-variant-numeric: tabular-nums;
+  }
+
+  html.dark .progress-pct {
+    color: var(--accent-2);
+  }
+
+  .progress-track {
+    position: relative;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--track);
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    position: relative;
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent), var(--accent-deep));
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    overflow: hidden;
+  }
+
+  .progress-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+    transform: translateX(-100%);
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    100% {
+      transform: translateX(100%);
+    }
+  }
+
+  .step-list {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .step-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12.5px;
+    color: var(--text-3);
+    transition: color 180ms ease;
+  }
+
+  .step-item.active {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .step-item.done {
+    color: var(--ok-text);
+  }
+
+  .step-dot {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid currentColor;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .step-item.done .step-dot {
+    background: var(--ok-bg);
+  }
+
+  .done-badge {
+    width: 48px;
+    height: 48px;
+    margin: 2px auto 12px;
+    border-radius: 50%;
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-border);
+    color: var(--ok-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  .done-title {
+    text-align: center;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .done-desc {
+    margin-top: 6px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.5;
+    word-break: break-all;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-row .primary-btn {
+    flex: 1.6;
+  }
+
+  .btn-row .secondary-btn {
+    flex: 1;
+    height: 46px;
+  }
+
+  .info-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar">
+    <div class="drag-area" id="dragArea">
+      <span class="brand-label">HIVECAST</span>
+      <span class="ver-pill" id="versionPill">v0.1.0</span>
+    </div>
+    <div class="win-actions">
+      <button class="icon-btn" id="langBtn" title="Switch language">EN</button>
+      <button class="icon-btn" id="themeBtn" title="Toggle theme">☾</button>
+      <button class="icon-btn" id="minBtn" title="Minimize">─</button>
+      <button class="icon-btn close" id="closeBtn" title="Close">✕</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="hero">
+      <div class="app-icon-wrap">
+        <img src="__ICON_DATA_URI__" alt="HIVECAST" />
+      </div>
+      <h1 id="heroTitle">HIVECAST</h1>
+      <div class="subtitle" id="heroSub">多平台直播录制与弹幕同步桌面端</div>
+      <div class="pill-row" id="pillRow"></div>
+    </div>
+
+    <!-- Ready View (Install) -->
+    <div class="view active" id="viewReady">
+      <div class="error-box" id="readyError"></div>
+
+      <div class="glass-card options-panel" id="optionsPanel">
+        <div>
+          <div class="field-label" id="dirLabel">安装目录</div>
+          <div class="path-row">
+            <input class="path-input" id="installDirInput" type="text" spellcheck="false" />
+            <button class="browse-btn" id="browseBtn">浏览...</button>
+          </div>
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="shortcutCheck" checked />
+          <span id="shortcutLabel">创建桌面快捷方式（同时创建开始菜单入口）</span>
+        </label>
+      </div>
+
+      <div class="cta-wrap">
+        <button class="options-toggle" id="optionsToggle">
+          <span id="optionsToggleText">自定义安装选项</span>
+          <span class="chevron">▾</span>
+        </button>
+        <button class="primary-btn" id="installBtn">立即安装</button>
+        <div class="foot-note" id="footNote">安装到当前用户目录，无需管理员权限</div>
+      </div>
+    </div>
+
+    <!-- Progress View -->
+    <div class="view" id="viewProgress">
+      <div class="glass-card">
+        <div class="progress-head">
+          <span class="progress-title" id="progressTitle">正在准备安装...</span>
+          <span class="progress-pct" id="progressPct">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="step-list" id="stepList">
+          <div class="step-item" data-step="0"><span class="step-dot">1</span><span id="stepText0">校验并释放主程序</span></div>
+          <div class="step-item" data-step="1"><span class="step-dot">2</span><span id="stepText1">创建快捷方式与卸载入口</span></div>
+          <div class="step-item" data-step="2"><span class="step-dot">3</span><span id="stepText2">完成安装校验</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Done View -->
+    <div class="view" id="viewDone">
+      <div class="glass-card">
+        <div class="done-badge">✓</div>
+        <div class="done-title" id="doneTitle">HIVECAST 已准备就绪</div>
+        <div class="done-desc" id="doneDesc"></div>
+      </div>
+      <div class="cta-wrap">
+        <div class="btn-row" id="doneInstallBtns">
+          <button class="primary-btn" id="launchBtn">立即启动</button>
+          <button class="secondary-btn" id="finishBtn">完成</button>
+        </div>
+        <button class="primary-btn" id="uninstallDoneBtn" style="display:none;">关闭窗口</button>
+      </div>
+    </div>
+
+    <!-- Uninstall Confirm View -->
+    <div class="view" id="viewUninstall">
+      <div class="error-box" id="uninstallError"></div>
+      <div class="glass-card">
+        <div class="info-list">
+          <div id="uninstLine1">将从本机移除 HIVECAST 主程序、桌面及开始菜单快捷方式。</div>
+          <div id="uninstLine2" style="color: var(--ok-text); font-weight: 600;">您的录制视频、数据库与平台账号配置将被完整保留。</div>
+          <div id="uninstPath" style="font-family: Consolas, monospace; font-size: 11.5px; color: var(--text-3); word-break: break-all;"></div>
+        </div>
+      </div>
+      <div class="cta-wrap">
+        <div class="btn-row">
+          <button class="primary-btn danger" id="confirmUninstallBtn">确认卸载</button>
+          <button class="secondary-btn" id="cancelUninstallBtn">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BOOT = __BOOT_JSON__;
+
+const I18N = {
+  zh: {
+    subtitleInstall: "多平台直播录制与弹幕同步桌面端",
+    subtitleUninstall: "卸载桌面客户端（保留录像与配置）",
+    ffmpegOk: "已检测到 FFmpeg",
+    ffmpegMissing: "首次录制前需配置 FFmpeg",
+    upgradePill: "检测到已安装版本 · 保留数据覆盖升级",
+    dirLabel: "安装目录",
+    browse: "浏览...",
+    shortcut: "创建桌面快捷方式（同时创建开始菜单入口）",
+    optShow: "自定义安装选项",
+    optHide: "收起安装选项",
+    installBtn: "立即安装",
+    upgradeBtn: "立即升级",
+    footNote: "安装到当前用户目录，无需管理员权限",
+    step0: "校验 SHA-256 并释放主程序",
+    step1: "创建快捷方式与卸载入口",
+    step2: "完成安装校验",
+    progExtract: "正在释放并校验 HIVECAST...",
+    progShortcut: "正在创建快捷方式与卸载信息...",
+    progDone: "安装完成",
+    doneInstallTitle: "HIVECAST 安装完成",
+    doneUpgradeTitle: "HIVECAST 升级完成",
+    doneUninstallTitle: "已卸载 HIVECAST",
+    doneUninstallDesc: "主程序与快捷方式已移除，您的录像和配置仍保存在本地。",
+    launch: "立即启动",
+    finish: "完成",
+    closeWin: "关闭窗口",
+    uninstLine1: "将从本机移除 HIVECAST 主程序、桌面及开始菜单快捷方式。",
+    uninstLine2: "您的录制视频、数据库与平台账号配置将被完整保留。",
+    confirmUninst: "确认卸载",
+    cancel: "取消",
+    progUninst: "正在移除程序与快捷方式..."
+  },
+  en: {
+    subtitleInstall: "Multi-platform live recording & danmaku studio",
+    subtitleUninstall: "Uninstall desktop app (recordings & settings kept)",
+    ffmpegOk: "FFmpeg detected",
+    ffmpegMissing: "Configure FFmpeg before first recording",
+    upgradePill: "Existing install detected · Data preserved",
+    dirLabel: "Install folder",
+    browse: "Browse...",
+    shortcut: "Create Desktop shortcut (Start Menu always added)",
+    optShow: "Customize options",
+    optHide: "Hide options",
+    installBtn: "Install Now",
+    upgradeBtn: "Upgrade Now",
+    footNote: "Installs for current user · No admin required",
+    step0: "Verify SHA-256 & extract binary",
+    step1: "Create shortcuts & uninstall entry",
+    step2: "Finalize installation",
+    progExtract: "Extracting & verifying HIVECAST...",
+    progShortcut: "Creating shortcuts & app registration...",
+    progDone: "Installation complete",
+    doneInstallTitle: "HIVECAST is ready",
+    doneUpgradeTitle: "HIVECAST upgraded",
+    doneUninstallTitle: "HIVECAST uninstalled",
+    doneUninstallDesc: "Application binaries and shortcuts were removed. Recordings and settings were kept.",
+    launch: "Launch HIVECAST",
+    finish: "Done",
+    closeWin: "Close",
+    uninstLine1: "Removes the HIVECAST executable, Start Menu and Desktop shortcuts.",
+    uninstLine2: "Your recordings, database, and saved credentials will be preserved.",
+    confirmUninst: "Uninstall",
+    cancel: "Cancel",
+    progUninst: "Removing application & shortcuts..."
+  }
+};
+
+const state = {
+  lang: BOOT.lang === "en" ? "en" : "zh",
+  dark: !!BOOT.dark,
+  mode: BOOT.mode === "uninstall" ? "uninstall" : "install",
+  existing: !!BOOT.existingInstall,
+  ffmpegFound: !!BOOT.ffmpegFound,
+  optionsOpen: false,
+  busy: false,
+  installedExe: "",
+  installDir: BOOT.installDir || ""
+};
+
+function send(cmd, payload = {}) {
+  if (window.ipc && typeof window.ipc.postMessage === "function") {
+    window.ipc.postMessage(JSON.stringify({ cmd, ...payload }));
+  }
+}
+
+function t(key) {
+  return (I18N[state.lang] && I18N[state.lang][key]) || key;
+}
+
+function showView(id) {
+  for (const el of document.querySelectorAll(".view")) {
+    el.classList.toggle("active", el.id === id);
+  }
+}
+
+function applyTheme() {
+  document.documentElement.classList.toggle("dark", state.dark);
+  document.getElementById("themeBtn").textContent = state.dark ? "☀" : "☾";
+}
+
+function renderTexts() {
+  document.getElementById("versionPill").textContent = "v" + BOOT.version;
+  document.getElementById("langBtn").textContent = state.lang === "zh" ? "EN" : "中";
+  document.getElementById("heroSub").textContent =
+    state.mode === "uninstall" ? t("subtitleUninstall") : t("subtitleInstall");
+
+  const pillRow = document.getElementById("pillRow");
+  pillRow.innerHTML = "";
+  if (state.mode === "install") {
+    const ff = document.createElement("span");
+    ff.className = "status-pill " + (state.ffmpegFound ? "ok" : "warn");
+    ff.innerHTML = `<span class="dot"></span><span>${state.ffmpegFound ? t("ffmpegOk") : t("ffmpegMissing")}</span>`;
+    pillRow.appendChild(ff);
+
+    if (state.existing) {
+      const up = document.createElement("span");
+      up.className = "status-pill upgrade";
+      up.innerHTML = `<span class="dot"></span><span>${t("upgradePill")}</span>`;
+      pillRow.appendChild(up);
+    }
+  }
+
+  document.getElementById("dirLabel").textContent = t("dirLabel");
+  document.getElementById("browseBtn").textContent = t("browse");
+  document.getElementById("shortcutLabel").textContent = t("shortcut");
+  document.getElementById("optionsToggleText").textContent = state.optionsOpen ? t("optHide") : t("optShow");
+  document.getElementById("installBtn").textContent = state.existing ? t("upgradeBtn") : t("installBtn");
+  document.getElementById("footNote").textContent = t("footNote");
+
+  document.getElementById("stepText0").textContent = t("step0");
+  document.getElementById("stepText1").textContent = t("step1");
+  document.getElementById("stepText2").textContent = t("step2");
+  document.getElementById("launchBtn").textContent = t("launch");
+  document.getElementById("finishBtn").textContent = t("finish");
+  document.getElementById("uninstallDoneBtn").textContent = t("closeWin");
+
+  document.getElementById("uninstLine1").textContent = t("uninstLine1");
+  document.getElementById("uninstLine2").textContent = t("uninstLine2");
+  document.getElementById("confirmUninstallBtn").textContent = t("confirmUninst");
+  document.getElementById("cancelUninstallBtn").textContent = t("cancel");
+  document.getElementById("uninstPath").textContent = state.installDir;
+}
+
+function setProgress(pct, stage) {
+  const clamped = Math.max(0, Math.min(100, pct | 0));
+  document.getElementById("progressPct").textContent = clamped + "%";
+  document.getElementById("progressFill").style.width = clamped + "%";
+  const titles = [t("progExtract"), t("progShortcut"), t("progDone")];
+  document.getElementById("progressTitle").textContent =
+    state.mode === "uninstall" ? t("progUninst") : (titles[stage] || t("progExtract"));
+  document.querySelectorAll("#stepList .step-item").forEach((el, idx) => {
+    el.classList.remove("active", "done");
+    const dot = el.querySelector(".step-dot");
+    if (idx < stage || clamped >= 100) {
+      el.classList.add("done");
+      dot.textContent = "✓";
+    } else if (idx === stage) {
+      el.classList.add("active");
+      dot.textContent = String(idx + 1);
+    } else {
+      dot.textContent = String(idx + 1);
+    }
+  });
+}
+
+function showError(msg) {
+  state.busy = false;
+  if (state.mode === "uninstall") {
+    showView("viewUninstall");
+    const box = document.getElementById("uninstallError");
+    box.textContent = msg;
+    box.classList.add("show");
+  } else {
+    showView("viewReady");
+    const box = document.getElementById("readyError");
+    box.textContent = msg;
+    box.classList.add("show");
+  }
+}
+
+window.__installerEvent = function (ev) {
+  if (!ev || typeof ev !== "object") return;
+  switch (ev.type) {
+    case "dirSelected":
+      state.installDir = ev.dir || state.installDir;
+      state.existing = !!ev.existing;
+      document.getElementById("installDirInput").value = state.installDir;
+      renderTexts();
+      break;
+    case "progress":
+      setProgress(ev.percent || 0, ev.stage || 0);
+      break;
+    case "installDone":
+      state.busy = false;
+      state.installedExe = ev.exePath || "";
+      state.installDir = ev.installDir || state.installDir;
+      document.getElementById("doneTitle").textContent =
+        state.existing ? t("doneUpgradeTitle") : t("doneInstallTitle");
+      document.getElementById("doneDesc").textContent = state.installDir;
+      document.getElementById("doneInstallBtns").style.display = "flex";
+      document.getElementById("uninstallDoneBtn").style.display = "none";
+      showView("viewDone");
+      break;
+    case "uninstallDone":
+      state.busy = false;
+      document.getElementById("doneTitle").textContent = t("doneUninstallTitle");
+      document.getElementById("doneDesc").textContent = t("doneUninstallDesc");
+      document.getElementById("doneInstallBtns").style.display = "none";
+      document.getElementById("uninstallDoneBtn").style.display = "block";
+      showView("viewDone");
+      break;
+    case "error":
+      showError(ev.message || "Unknown error");
+      break;
+  }
+};
+
+// Wire controls
+document.getElementById("dragArea").addEventListener("mousedown", (e) => {
+  if (e.button === 0) send("drag");
+});
+document.getElementById("minBtn").addEventListener("click", () => send("minimize"));
+document.getElementById("closeBtn").addEventListener("click", () => {
+  if (!state.busy) send("close");
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  state.dark = !state.dark;
+  applyTheme();
+  send("theme", { dark: state.dark });
+});
+document.getElementById("langBtn").addEventListener("click", () => {
+  state.lang = state.lang === "zh" ? "en" : "zh";
+  renderTexts();
+});
+document.getElementById("optionsToggle").addEventListener("click", () => {
+  state.optionsOpen = !state.optionsOpen;
+  document.getElementById("optionsToggle").classList.toggle("open", state.optionsOpen);
+  document.getElementById("optionsPanel").classList.toggle("open", state.optionsOpen);
+  renderTexts();
+});
+document.getElementById("browseBtn").addEventListener("click", () => {
+  send("browse", { currentDir: document.getElementById("installDirInput").value });
+});
+document.getElementById("installBtn").addEventListener("click", () => {
+  if (state.busy) return;
+  document.getElementById("readyError").classList.remove("show");
+  state.busy = true;
+  state.installDir = document.getElementById("installDirInput").value.trim();
+  showView("viewProgress");
+  document.getElementById("stepList").style.display = "flex";
+  setProgress(2, 0);
+  send("install", {
+    dir: state.installDir,
+    desktopShortcut: document.getElementById("shortcutCheck").checked
+  });
+});
+document.getElementById("launchBtn").addEventListener("click", () => {
+  send("launch", { exePath: state.installedExe });
+});
+document.getElementById("finishBtn").addEventListener("click", () => send("close"));
+document.getElementById("uninstallDoneBtn").addEventListener("click", () => send("close"));
+document.getElementById("cancelUninstallBtn").addEventListener("click", () => send("close"));
+document.getElementById("confirmUninstallBtn").addEventListener("click", () => {
+  if (state.busy) return;
+  document.getElementById("uninstallError").classList.remove("show");
+  state.busy = true;
+  showView("viewProgress");
+  document.getElementById("stepList").style.display = "none";
+  setProgress(35, 0);
+  send("uninstall", { dir: state.installDir });
+});
+
+// Prevent browser refresh / context menu so it feels native.
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r")) {
+    e.preventDefault();
+  }
+});
+
+// Boot
+document.getElementById("installDirInput").value = state.installDir;
+applyTheme();
+renderTexts();
+showView(state.mode === "uninstall" ? "viewUninstall" : "viewReady");
+</script>
+</body>
+</html>
