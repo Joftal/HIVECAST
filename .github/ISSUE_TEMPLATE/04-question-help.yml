@@ -1,0 +1,32 @@
+name: 💬 使用咨询 / Question & Help
+description: 安装放行、FFmpeg 配置、录制规则设置等使用求助
+title: "[Help]: "
+labels:
+  - "type: question"
+  - "status: needs-triage"
+body:
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - macOS (Apple Silicon arm64)
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 版本与运行环境（可选）
+      placeholder: "HIVECAST v0.1.0 | macOS aarch64 | FFmpeg 9.0.2"
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 你遇到了什么问题？
+      description: 请尽量描述你已经尝试过的步骤和提示信息（请勿粘贴 Cookie）
+    validations:
+      required: true

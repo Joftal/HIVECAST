@@ -1,0 +1,70 @@
+name: 📡 平台适配失效 / Platform Broken
+description: 某个直播平台改版导致解析失败、开播检测异常、无法录制、弹幕断开或登录异常
+title: "[Platform]: "
+labels:
+  - "type: platform-fix"
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        直播平台接口与风控会不定期调整。提交此表单有助于快速归类同一平台的批量失效问题。
+        > **隐私提醒**：切勿粘贴完整 Cookie 或敏感请求头。
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 异常平台
+      options:
+        - 哔哩哔哩 (Bilibili)
+        - 斗鱼 (Douyu)
+        - 虎牙 (Huya)
+        - 抖音 (Douyin)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 异常环节
+      options:
+        - 直播监控与录制
+        - 弹幕捕获与同步
+        - 账号登录与凭据
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - macOS (Apple Silicon arm64)
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 版本与运行环境
+      description: 可在「设置 → 关于」点击「复制版本与环境」粘贴
+      placeholder: "HIVECAST v0.1.0 | Windows x64 | FFmpeg 9.0.2"
+    validations:
+      required: true
+
+  - type: input
+    id: room
+    attributes:
+      label: 公开测试房间号或链接（可选）
+      placeholder: "例如：https://live.bilibili.com/xxx 或房间号"
+
+  - type: textarea
+    id: details
+    attributes:
+      label: 现象与脱敏报错日志
+      description: 请说明是否登录了该平台账号、是否所有房间均异常，并附关键错误提示
+    validations:
+      required: true

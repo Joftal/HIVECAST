@@ -1,0 +1,97 @@
+name: Sync Issue Labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/labels.yml"
+      - ".github/workflows/sync-labels.yml"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    name: Sync repository labels from .github/labels.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - name: Create or update labels via GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const raw = fs.readFileSync(".github/labels.yml", "utf8");
+          const labels = [];
+          let cur = null;
+          for (const line of raw.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#")) continue;
+            const mName = /^-\s+name:\s*"([^"]+)"$/.exec(trimmed);
+            if (mName) {
+              if (cur) labels.push(cur);
+              cur = { name: mName[1], color: "ededed", description: "" };
+              continue;
+            }
+            const mColor = /^color:\s*"([^"]+)"$/.exec(trimmed);
+            if (mColor && cur) { cur.color = mColor[1].replace(/^#/, ""); continue; }
+            const mDesc = /^description:\s*"([^"]*)"$/.exec(trimmed);
+            if (mDesc && cur) { cur.description = mDesc[1]; continue; }
+          }
+          if (cur) labels.push(cur);
+
+          const base = `https://api.github.com/repos/${process.env.GH_REPO}/labels`;
+          const headers = {
+            Authorization: `Bearer ${process.env.GH_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "HIVECAST-Label-Sync",
+          };
+
+          (async () => {
+            for (const label of labels) {
+              const target = `${base}/${encodeURIComponent(label.name)}`;
+              const patch = await fetch(target, {
+                method: "PATCH",
+                headers,
+                body: JSON.stringify({
+                  new_name: label.name,
+                  color: label.color,
+                  description: label.description,
+                }),
+              });
+              if (patch.ok) {
+                console.log(`updated: ${label.name}`);
+                continue;
+              }
+              if (patch.status === 404) {
+                const post = await fetch(base, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(label),
+                });
+                if (!post.ok) {
+                  throw new Error(`create ${label.name} failed: HTTP ${post.status} ${await post.text()}`);
+                }
+                console.log(`created: ${label.name}`);
+                continue;
+              }
+              throw new Error(`patch ${label.name} failed: HTTP ${patch.status} ${await patch.text()}`);
+            }
+            console.log(`synced ${labels.length} labels`);
+          })().catch((err) => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE

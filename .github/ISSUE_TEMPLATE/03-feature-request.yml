@@ -1,0 +1,41 @@
+name: ✨ 功能建议 / Feature Request
+description: 提出新功能想法、新直播平台适配建议或交互体验改进
+title: "[Feature]: "
+labels:
+  - "type: enhancement"
+  - "status: needs-triage"
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: 建议所属模块
+      options:
+        - 直播监控与录制
+        - 弹幕捕获与同步
+        - 转封装 / 合并 / 后处理
+        - 本地回放与画廊
+        - 账号登录与凭据
+        - 安装器 / 启动 / 更新
+        - 界面显示与国际化
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与痛点
+      description: 希望解决什么问题？为什么当前方案不够顺手？
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的实现方式或界面交互
+      description: 可以用文字、草图或参考示例描述你理想中的效果
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息（可选）
+      description: 若是新直播平台建议，可附上平台主页地址和公开直播间样例

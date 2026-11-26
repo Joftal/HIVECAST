@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 更新日志与最新版本说明
+    url: https://joftal.github.io/HIVECAST/
+    about: 反馈问题前可先查看最新版本是否已经修复相关问题
+  - name: 📦 GitHub Releases 下载与校验指引
+    url: https://github.com/Joftal/HIVECAST/releases
+    about: 下载 macOS / Windows 最新安装包及 SHA256SUMS.txt 校验清单

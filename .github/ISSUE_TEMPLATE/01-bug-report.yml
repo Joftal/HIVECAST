@@ -1,0 +1,97 @@
+name: 🐛 Bug 反馈 / Bug Report
+description: 反馈程序异常、崩溃、录制中断、合并错误或界面显示问题
+title: "[Bug]: "
+labels:
+  - "type: bug"
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量补充版本环境与复现步骤，以便快速定位修复。
+        > **隐私提醒**：上传日志或截图前，请务必删除或打码个人 **Cookie / 账号密码 / Token**。
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 涉及直播平台
+      description: 若与具体直播平台无关，请保持「通用 / 不限平台」
+      options:
+        - 通用 / 不限平台
+        - 哔哩哔哩 (Bilibili)
+        - 斗鱼 (Douyu)
+        - 虎牙 (Huya)
+        - 抖音 (Douyin)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及功能模块
+      options:
+        - 直播监控与录制
+        - 弹幕捕获与同步
+        - 转封装 / 合并 / 后处理
+        - 本地回放与画廊
+        - 账号登录与凭据
+        - 安装器 / 启动 / 更新
+        - 界面显示与国际化
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - macOS (Apple Silicon arm64)
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 版本与运行环境
+      description: 可在 HIVECAST「设置 → 关于」点击「复制版本与环境」后直接粘贴
+      placeholder: "HIVECAST v0.1.0 | macOS aarch64 | FFmpeg 9.0.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述与复现步骤
+      description: 请描述发生了什么，以及如何稳定复现该问题
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      placeholder: 正常情况下应该……
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志片段或截图（可选）
+      description: 可通过「设置 → 关于 → 日志目录」获取相关日志；请确保已脱敏不含 Cookie
+      render: text
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认提交内容不包含真实 Cookie、账号密码或其他隐私凭据
+          required: true
+        - label: 我已搜索现有 Issues，未找到完全相同的未关闭问题
+          required: false
