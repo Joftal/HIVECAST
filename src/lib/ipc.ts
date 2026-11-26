@@ -3,6 +3,7 @@ import { invoke } from "./invoke";
 import type { ActiveTask } from "./bindings/ActiveTask";
 import type { AddRoomResult } from "./bindings/AddRoomResult";
 import type { AppInfo } from "./bindings/AppInfo";
+import type { ChangelogNote } from "./bindings/ChangelogNote";
 import type { CredentialInfo } from "./bindings/CredentialInfo";
 import type { FfmpegStatus } from "./bindings/FfmpegStatus";
 import type { FilenamePreview } from "./bindings/FilenamePreview";
@@ -19,6 +20,7 @@ import type { LiveStatus } from "./bindings/LiveStatus";
 import type { QrPoll } from "./bindings/QrPoll";
 import type { QrTicket } from "./bindings/QrTicket";
 import type { RefreshStatus } from "./bindings/RefreshStatus";
+import type { ReleaseEntry } from "./bindings/ReleaseEntry";
 import type { DanmakuBatch } from "./bindings/DanmakuBatch";
 import type { DanmakuMessage } from "./bindings/DanmakuMessage";
 import type { LineInfo } from "./bindings/LineInfo";
@@ -50,6 +52,7 @@ import type { SystemHealth } from "./bindings/SystemHealth";
 import type { TaskView } from "./bindings/TaskView";
 import type { TaskRecord } from "./bindings/TaskRecord";
 import type { TrashInfo } from "./bindings/TrashInfo";
+import type { UpdateCheckResult } from "./bindings/UpdateCheckResult";
 import type { PostResult } from "./bindings/PostResult";
 import type { AppNotice } from "./bindings/AppNotice";
 import type { RecordSession } from "./bindings/RecordSession";
@@ -119,6 +122,9 @@ export type {
   Settings,
   StreamDescriptor,
   StreamOptions,
+  ChangelogNote,
+  ReleaseEntry,
+  UpdateCheckResult,
   ViewSlotInfo,
 };
 
@@ -129,6 +135,14 @@ export function isTauri(): boolean {
 
 export async function appInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
+}
+
+export async function appOpenDataDir(): Promise<void> {
+  return invoke<void>("app_open_data_dir");
+}
+
+export async function appCheckUpdate(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("app_check_update");
 }
 
 // M0 演示流：本机 ffmpeg 生成 HLS，经本地 HTTP 服务交给 hls.js。

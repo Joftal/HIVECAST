@@ -14,13 +14,13 @@ import {
   trashInfo,
   trashOpen,
   settingsUpdate,
+  type AppInfo,
   type FfmpegStatus,
   type FilenamePreview,
   type LogStatus,
   type Settings,
   type TrashInfo,
 } from "../../lib/ipc";
-import appIcon from "../../assets/app-icon.png";
 import { Button, Segmented, Switch, cx } from "../../components/ui/Controls";
 import { ButtonGroup } from "../../components/arc/button-group/button-group";
 import { useNotify } from "../../lib/notify";
@@ -28,6 +28,7 @@ import { SearchField } from "../../components/arc/search-field/search-field";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import InfoTip from "../../components/ui/InfoTip";
 import AccountSection from "./AccountSection";
+import { AboutSection } from "./AboutSection";
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -312,7 +313,7 @@ export default function SettingsView({
   const [settings, setSettings] = useState<Settings | null>(null);
   const [initial, setInitial] = useState("");
   const [saving, setSaving] = useState(false);
-  const [version, setVersion] = useState("");
+  const [info, setInfo] = useState<AppInfo | null>(null);
   const notify = useNotify();
   const [query, setQuery] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
@@ -347,8 +348,8 @@ export default function SettingsView({
   useEffect(() => {
     if (!isTauri()) return;
     void appInfo()
-      .then((info) => setVersion(info.version))
-      .catch(() => setVersion(""));
+      .then((loadedInfo) => setInfo(loadedInfo))
+      .catch(() => setInfo(null));
   }, []);
 
   const ffmpegSourceLabel = useMemo(() => {
@@ -1522,30 +1523,11 @@ export default function SettingsView({
     }
 
     return (
-      <div className="space-y-7">
-        <Section title={t("settings.groupAbout")}>
-          <div id="set-about" className={cx("flex items-center gap-3 px-4 py-4", focusId === "set-about" && "bg-accent-soft")}>
-            <img
-              src={appIcon}
-              alt=""
-              width={48}
-              height={48}
-              className="h-12 w-12 shrink-0 select-none rounded-[11px]"
-              draggable={false}
-            />
-            <div className="min-w-0">
-              <div className="text-[12.5px] font-semibold text-ink">HIVECAST</div>
-              <div className="mt-0.5 font-mono text-[10.5px] text-faint">
-                {version ? "v" + version : "—"}
-                <span className="ml-2 font-sans">{t("settings.aboutBuild")}</span>
-              </div>
-            </div>
-          </div>
-          <div className="px-4 py-3">
-            <p className="text-[11px] leading-4 text-faint">{t("settings.aboutHint")}</p>
-          </div>
-        </Section>
-      </div>
+      <AboutSection
+        info={info}
+        ffmpeg={ffmpeg}
+        highlighted={focusId === "set-about"}
+      />
     );
   };
 

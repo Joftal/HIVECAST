@@ -1319,3 +1319,41 @@ pub struct QrPoll {
     /// 只有 confirmed 时才有
     pub credential: Option<CredentialInfo>,
 }
+
+/// 单条结构化更新日志项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ChangelogNote {
+    /// feat | fix | perf | other
+    pub kind: String,
+    pub text: String,
+}
+
+/// 单个发布版本的摘要与更新条目。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct ReleaseEntry {
+    pub version: String,
+    pub published_at: String,
+    pub url: String,
+    pub prerelease: bool,
+    pub notes: Vec<ChangelogNote>,
+}
+
+/// 版本更新检查结果（优先走 jsDelivr CDN，回退 GitHub Pages 与 GitHub API）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/lib/bindings/")]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub has_update: bool,
+    pub download_url: String,
+    pub changelog_url: String,
+    /// jsdelivr | gh-pages | github-api | offline
+    pub source: String,
+    pub error: Option<String>,
+    pub releases: Vec<ReleaseEntry>,
+}

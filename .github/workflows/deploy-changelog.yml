@@ -1,0 +1,55 @@
+name: Deploy Changelog & Update Feed
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-changelog
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & publish GitHub Pages + jsDelivr feed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - name: Generate changelog site and JSON feeds
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/ci/generate-changelog-site.mjs --out dist-site
+
+      - name: Push to gh-pages branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist-site
+          git init
+          git checkout -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: sync changelog site and update feed"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" gh-pages
+
+      - name: Purge jsDelivr CDN cache
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          curl -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/changelog.json" || true
+          curl -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/latest.json" || true

@@ -8,7 +8,7 @@ use hivecast_ipc::{
     LiveStatus, LogStatus, MediaFile, MediaItem, MediaPage, MonitorStatus, Playback, PostResult,
     QrPoll, QrTicket, RecordSession, RecordingUsage, RefreshStatus, RemovedRoom, RoomRecord,
     RoomView, SessionSummary, Settings, StreamDescriptor, StreamOptions, TaskBoard, TaskCenter,
-    TaskEventSearch, TaskRecord, TrashInfo, ViewSlotInfo,
+    TaskEventSearch, TaskRecord, TrashInfo, UpdateCheckResult, ViewSlotInfo,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -25,6 +25,21 @@ use crate::stream::demo;
 #[tauri::command]
 pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo, AppError> {
     Ok(state.info.clone())
+}
+
+/// 在系统文件管理器中打开应用数据目录（含数据库与凭据配置）。
+#[tauri::command]
+pub fn app_open_data_dir(state: State<'_, AppState>) -> Result<(), AppError> {
+    let dir = std::path::PathBuf::from(&state.info.data_dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| AppError::Internal(format!("无法访问数据目录：{err}")))?;
+    open_directory(&dir)
+}
+
+/// 多源检查新版本并拉取近期更新日志（jsDelivr CDN -> GitHub Pages -> GitHub API）。
+#[tauri::command]
+pub async fn app_check_update(state: State<'_, AppState>) -> Result<UpdateCheckResult, AppError> {
+    Ok(crate::updater::check_for_updates(&state.info.version).await)
 }
 
 /// 当前实际使用的 ffmpeg：手动配置、PATH、候选目录或缺失。
