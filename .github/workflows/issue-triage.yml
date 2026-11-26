@@ -6,6 +6,7 @@ on:
 
 permissions:
   issues: write
+  contents: read
 
 jobs:
   triage:
@@ -13,82 +14,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Parse Issue Form selections and apply labels
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Reconcile labels derived from the issue form
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          node - <<'NODE'
-          const body = process.env.ISSUE_BODY || "";
-          const sections = new Map();
-          let currentHeading = null;
-          for (const rawLine of body.split(/\r?\n/)) {
-            const m = /^###\s+(.+?)\s*$/.exec(rawLine);
-            if (m) {
-              currentHeading = m[1];
-              sections.set(currentHeading, []);
-            } else if (currentHeading) {
-              sections.get(currentHeading).push(rawLine.trim());
-            }
-          }
-          const getVal = (...headings) => {
-            for (const h of headings) {
-              const lines = sections.get(h);
-              if (lines) {
-                const joined = lines.filter(Boolean).join(" ");
-                if (joined && joined !== "_No response_") return joined;
-              }
-            }
-            return "";
-          };
-
-          const toAdd = new Set();
-
-          const platform = getVal("涉及直播平台", "异常平台");
-          if (platform.includes("Bilibili") || platform.includes("哔哩哔哩")) toAdd.add("platform: bilibili");
-          if (platform.includes("Douyu") || platform.includes("斗鱼")) toAdd.add("platform: douyu");
-          if (platform.includes("Huya") || platform.includes("虎牙")) toAdd.add("platform: huya");
-          if (platform.includes("Douyin") || platform.includes("抖音")) toAdd.add("platform: douyin");
-
-          const os = getVal("操作系统");
-          if (os.includes("macOS")) toAdd.add("os: macos");
-          if (os.includes("Windows")) toAdd.add("os: windows");
-
-          const area = getVal("涉及功能模块", "异常环节", "建议所属模块");
-          if (area.includes("监控") || area.includes("录制")) toAdd.add("area: recorder");
-          if (area.includes("弹幕")) toAdd.add("area: danmaku");
-          if (area.includes("合并") || area.includes("后处理") || area.includes("转封装")) toAdd.add("area: postprocess");
-          if (area.includes("回放") || area.includes("画廊")) toAdd.add("area: playback");
-          if (area.includes("账号") || area.includes("凭据")) toAdd.add("area: auth");
-          if (area.includes("安装器") || area.includes("更新") || area.includes("启动")) toAdd.add("area: installer");
-          if (area.includes("界面") || area.includes("国际化")) toAdd.add("area: ui");
-
-          const labels = Array.from(toAdd);
-          if (labels.length === 0) {
-            console.log("no derived labels to add");
-            process.exit(0);
-          }
-
-          (async () => {
-            const url = `https://api.github.com/repos/${process.env.GH_REPO}/issues/${process.env.ISSUE_NUMBER}/labels`;
-            const resp = await fetch(url, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${process.env.GH_TOKEN}`,
-                Accept: "application/vnd.github+json",
-                "Content-Type": "application/json",
-                "User-Agent": "HIVECAST-Issue-Triage",
-              },
-              body: JSON.stringify({ labels }),
-            });
-            if (!resp.ok) {
-              throw new Error(`add labels failed: HTTP ${resp.status} ${await resp.text()}`);
-            }
-            console.log(`applied labels to #${process.env.ISSUE_NUMBER}:`, labels.join(", "));
-          })().catch((err) => {
-            console.error(err);
-            process.exit(1);
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { reconcileLabels } from "./scripts/ci/issue-labels.mjs";
+          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+          await reconcileLabels(event.issue.url, event.changes?.body?.from, {
+            Authorization: "Bearer " + process.env.GH_TOKEN,
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json"
           });
           NODE

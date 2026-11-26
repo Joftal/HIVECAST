@@ -97,6 +97,8 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
         if (manual) {
           if (res.source === "offline") {
             notify.warning(t("settings.aboutUpdateOffline"));
+          } else if (!res.latestVersion) {
+            notify.warning(t("settings.aboutNoRelease"));
           } else if (res.hasUpdate && res.latestVersion) {
             notify.info(
               t("settings.aboutUpdateAvailable", {
@@ -176,7 +178,7 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
   }, [notify]);
 
   const releases: ReleaseEntry[] = useMemo(() => {
-    if (updateResult?.releases && updateResult.releases.length > 0) {
+    if (updateResult) {
       return updateResult.releases.slice(0, 3);
     }
     return [
@@ -556,10 +558,10 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
                   })}
                 </span>
               </>
-            ) : updateResult?.source === "offline" ? (
+            ) : !updateResult?.latestVersion ? (
               <>
                 <AlertTriangle className="h-4 w-4 shrink-0 text-warn" />
-                <span className="text-warn">{t("settings.aboutUpdateOffline")}</span>
+                <span className="text-warn">{t(updateResult?.source === "offline" ? "settings.aboutUpdateOffline" : "settings.aboutNoRelease")}</span>
               </>
             ) : (
               <>
@@ -614,7 +616,9 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
               <FileText className="h-3.5 w-3.5 text-muted" />
               <span>{t("settings.aboutChangelogTitle")}</span>
               <span className="rounded-full bg-raised px-2 py-0.5 text-[10.5px] font-medium text-faint">
-                {t("settings.aboutChangelogSync")}
+                {t(!updateResult || updateResult.source === "offline"
+                  ? "settings.aboutBundledNotes"
+                  : "settings.aboutChangelogSync")}
               </span>
             </div>
             <span className="inline-flex items-center gap-1 text-[11.5px] text-faint">
@@ -633,7 +637,7 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 font-mono text-[13px] font-bold text-ink">
                       <span>v{rel.version}</span>
-                      {idx === 0 && updateResult?.latestVersion === rel.version ? (
+                      {updateResult?.latestVersion === rel.version ? (
                         <span className="rounded-full bg-accent-soft px-1.5 py-0.5 font-sans text-[10px] font-semibold text-accent-text">
                           Latest
                         </span>

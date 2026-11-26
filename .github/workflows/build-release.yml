@@ -116,6 +116,7 @@ jobs:
         run: |
           pnpm check:docs
           pnpm check:i18n
+          node --test scripts/ci/release-regression.test.mjs
 
       - name: Test Rust core
         shell: bash
@@ -201,8 +202,8 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           $setupOut = "release-assets/HIVECAST-v$env:VERSION-Windows-x64-setup.exe"
-          & $stub --pack $stub $exe $env:VERSION $setupOut
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . ./scripts/ci/windows-process.ps1
+          Invoke-Installer $stub @("--pack", $stub, $exe, $env:VERSION, $setupOut)
 
           $stage = Join-Path $env:RUNNER_TEMP "portable-stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -222,12 +223,10 @@ jobs:
 
           # 1. Verify modern Liquid Glass installer SFX self-test, silent install, launch, and silent uninstall.
           $setup = Get-Item "release-assets/*-Windows-x64-setup.exe"
-          & $setup.FullName --self-test
-          if ($LASTEXITCODE -ne 0) { throw "安装器自检失败" }
-
+          . ./scripts/ci/windows-process.ps1
+          Invoke-Installer $setup.FullName @("--self-test")
           $installDir = Join-Path $env:RUNNER_TEMP "HIVECAST 安装测试"
-          & $setup.FullName --silent --dir $installDir --no-shortcut
-          if ($LASTEXITCODE -ne 0) { throw "静默安装失败" }
+          Invoke-Installer $setup.FullName @("--silent", "--dir", $installDir, "--no-shortcut")
 
           $installedExe = Join-Path $installDir "HIVECAST.exe"
           $uninstExe = Join-Path $installDir "uninstall.exe"
@@ -251,9 +250,12 @@ jobs:
           Stop-Process -Id $p.Id -Force
           Start-Sleep -Seconds 1
 
-          & $uninstExe --uninstall --silent --dir $installDir
-          if ($LASTEXITCODE -ne 0) { throw "静默卸载失败" }
-          Start-Sleep -Seconds 4
+          Invoke-Installer $uninstExe @("--uninstall", "--silent", "--dir", $installDir)
+          $deadline = [DateTime]::UtcNow.AddSeconds(30)
+          while ((Test-Path -LiteralPath $installDir) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+          }
+          if (Test-Path -LiteralPath $installDir) { throw "卸载后安装目录仍存在" }
           if (Test-Path $installedExe) { throw "静默卸载后 HIVECAST.exe 仍存在" }
           if (Test-Path $regPath) { throw "静默卸载后卸载注册表仍存在" }
 
@@ -266,6 +268,7 @@ jobs:
             throw "绿色版解压校验失败"
           }
           Write-Host "smoke ok (installer + portable) pid=$($p.Id)"
+          ./scripts/ci/windows-upgrade-smoke.ps1 -Setup $setup.FullName -Stub "src-tauri/installer-win/target/release/hivecast-installer.exe"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -354,3 +357,11 @@ jobs:
             --notes-file release-notes.md \
             --generate-notes \
             "${args[@]}"
+
+  publish-changelog:
+    needs: release
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-changelog.yml

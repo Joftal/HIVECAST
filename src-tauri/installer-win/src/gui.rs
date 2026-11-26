@@ -90,7 +90,10 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
     }
 
     let dark = win_os::is_system_dark();
-    let initial_dir = win_os::read_installed_dir().unwrap_or_else(install::default_install_dir);
+    let initial_dir = match mode {
+        GuiMode::Install => crate::preferred_install_dir(),
+        GuiMode::Uninstall => crate::resolve_uninstall_dir(None)?,
+    };
     let existing = install::has_existing_install(&initial_dir);
 
     let boot = BootState {
@@ -151,7 +154,7 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
 
     window.set_visible(true);
 
-    let mut pending_cleanup: Option<(PathBuf, PathBuf)> = None;
+    let mut busy = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -160,12 +163,14 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                if let Some((self_exe, dir)) = pending_cleanup.take() {
-                    win_os::schedule_self_cleanup(&self_exe, &dir);
+                if !busy {
+                    *control_flow = ControlFlow::Exit;
                 }
-                *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(AppEvent::EmitJs(payload)) => {
+                if matches!(payload["type"].as_str(), Some("installDone" | "uninstallDone" | "error")) {
+                    busy = false;
+                }
                 if let Ok(json) = serde_json::to_string(&payload) {
                     let js = format!("window.__installerEvent && window.__installerEvent({json});");
                     let _ = webview.evaluate_script(&js);
@@ -183,10 +188,9 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         window.set_minimized(true);
                     }
                     IpcCommand::Close => {
-                        if let Some((self_exe, dir)) = pending_cleanup.take() {
-                            win_os::schedule_self_cleanup(&self_exe, &dir);
+                        if !busy {
+                            *control_flow = ControlFlow::Exit;
                         }
-                        *control_flow = ControlFlow::Exit;
                     }
                     IpcCommand::Theme { dark } => {
                         win_os::apply_window_material(window.hwnd(), dark);
@@ -211,6 +215,10 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         dir,
                         desktop_shortcut,
                     } => {
+                        if busy {
+                            return;
+                        }
+                        busy = true;
                         let worker_proxy = proxy.clone();
                         thread::spawn(move || {
                             let target = match install::validate_install_dir(&dir) {
@@ -265,13 +273,12 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                                 return;
                             }
                         };
-                        if let Ok(self_exe) = env::current_exe() {
-                            if self_exe.starts_with(&target) {
-                                pending_cleanup = Some((self_exe, target.clone()));
-                            }
+                        if busy {
+                            return;
                         }
+                        busy = true;
                         let worker_proxy = proxy.clone();
-                        thread::spawn(move || match perform_uninstall(&target, false) {
+                        thread::spawn(move || match perform_uninstall(&target) {
                             Ok(()) => {
                                 let _ = worker_proxy.send_event(AppEvent::EmitJs(
                                     serde_json::json!({ "type": "progress", "percent": 100, "stage": 2 }),

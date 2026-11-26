@@ -13,7 +13,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join, resolve } from "node:path";
 
 const REPO = process.env.GITHUB_REPOSITORY || "Joftal/HIVECAST";
-const API_URL = `https://api.github.com/repos/${REPO}/releases?per_page=30`;
+const API_URL = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
 const REPO_URL = `https://github.com/${REPO}`;
 const RELEASES_URL = `${REPO_URL}/releases`;
 const ISSUES_URL = `${REPO_URL}/issues`;
@@ -77,20 +77,18 @@ function classifyNote(text) {
 function parseReleaseNotes(body) {
   if (!body || typeof body !== "string") return [];
   const notes = [];
-  let inInstallGuide = false;
+  let guideDepth = 0;
   for (const rawLine of body.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
     if (line.startsWith("#")) {
-      const lower = line.toLowerCase();
-      inInstallGuide =
-        lower.includes("安装说明") ||
-        lower.includes("macos") ||
-        lower.includes("windows") ||
-        lower.includes("录制与更新");
+      const [, marks, title] = /^(#+)\s*(.*)$/.exec(line);
+      if (!guideDepth || marks.length <= guideDepth) {
+        guideDepth = ["安装说明", "installation", "installation instructions", "录制与更新"].includes(title.toLowerCase()) ? marks.length : 0;
+      }
       continue;
     }
-    if (inInstallGuide) continue;
+    if (guideDepth) continue;
     let bullet = null;
     if (line.startsWith("- ")) bullet = line.slice(2).trim();
     else if (line.startsWith("* ")) bullet = line.slice(2).trim();
@@ -130,37 +128,29 @@ function normalizeReleases(rawReleases) {
     });
 }
 
-function fallbackReleases() {
-  const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
-  const ver = pkg.version || "0.1.0";
-  return [
-    {
-      version: ver,
-      name: `HIVECAST v${ver}`,
-      publishedAt: new Date().toISOString().slice(0, 10),
-      url: RELEASES_URL,
-      prerelease: ver.includes("-"),
-      notes: [
-        {
-          kind: "feat",
-          text: "支持 Bilibili、斗鱼、虎牙、抖音四平台直播监控、自动开播录制、实时弹幕同步与本地画廊回放。",
-        },
-        {
-          kind: "feat",
-          text: "双端液态玻璃极简安装器：macOS Retina DMG 与 Windows 独立现代安装/卸载器。",
-        },
-        {
-          kind: "feat",
-          text: "新版「关于」界面：自动对齐 CI 发布版本号、多源全球版本更新检测与一键复制环境信息。",
-        },
-        {
-          kind: "fix",
-          text: "FLV 多段合并增加包数完整性核验与实测时长校准，差值超过 3 秒时提示核对原片。",
-        },
-      ],
-      assets: [],
-    },
-  ];
+const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][A-Za-z0-9-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][A-Za-z0-9-]*))*))?(?:\+[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)?$/;
+
+function compareIdentifier(a, b) {
+  if (a === b) return 0;
+  const an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
+  if (an && bn) return BigInt(a) < BigInt(b) ? -1 : 1;
+  if (an !== bn) return an ? -1 : 1;
+  return a < b ? -1 : 1;
+}
+
+function compareVersion(a, b) {
+  const x = versionPattern.exec(a.version), y = versionPattern.exec(b.version);
+  for (let i = 1; i <= 3; i++) {
+    const order = compareIdentifier(x[i], y[i]);
+    if (order) return order;
+  }
+  if (!x[4] || !y[4]) return Number(!x[4]) - Number(!y[4]);
+  const left = x[4].split("."), right = y[4].split(".");
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const order = compareIdentifier(left[i], right[i]);
+    if (order) return order;
+  }
+  return left.length - right.length;
 }
 
 async function fetchReleases(inputFile) {
@@ -174,12 +164,13 @@ async function fetchReleases(inputFile) {
   if (process.env.GITHUB_TOKEN) {
     headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   }
-  const resp = await fetch(API_URL, { headers });
-  if (!resp.ok) {
-    throw new Error(`GitHub Releases API returned HTTP ${resp.status}`);
+  const releases = [];
+  for (let page = 1; ; page++) {
+    const resp = await fetch(API_URL + "&page=" + page, { headers });
+    if (!resp.ok) throw new Error("GitHub Releases API returned HTTP " + resp.status);
+    releases.push(...normalizeReleases(await resp.json()));
+    if (!resp.headers.get("link")?.includes('rel="next"')) return releases;
   }
-  const data = await resp.json();
-  return normalizeReleases(data);
 }
 
 function escapeHtml(str) {
@@ -192,7 +183,7 @@ function escapeHtml(str) {
 
 function renderHtml(feed) {
   const embeddedJson = JSON.stringify(feed).replace(/</g, "\\u003c");
-  const latestVer = feed.latestStable || feed.latestAll || "0.1.0";
+  const latestVer = feed.latestStable || feed.latestAll;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -942,7 +933,7 @@ function renderHtml(feed) {
             <h1>HIVECAST</h1>
             <div class="badge-row">
               <span class="badge" data-i18n="ossBadge">自由 · 开源</span>
-              <span class="badge ok">v${escapeHtml(latestVer)}</span>
+              ${latestVer ? '<span class="badge ok">v' + escapeHtml(latestVer) + '</span>' : ''}
             </div>
           </div>
         </div>
@@ -1049,6 +1040,7 @@ const I18N = {
     spotEmpty: "等待首个正式 Release 发布后自动展示安装包直链",
     viewOnGh: "Release 详情 ↗",
     noNotes: "完整发行说明请查看 GitHub Release 页面。",
+    noReleases: "暂无发布版本。",
     emptySearch: "没有匹配该筛选条件的版本记录。",
     footerSign: "为热爱的直播瞬间打造，也在开源社区持续演进",
     footerSub: "开源免费软件 · 所有凭据与录像仅存储于您的本地设备 · 支持全球 CDN 自动更新检测",
@@ -1081,6 +1073,7 @@ const I18N = {
     spotEmpty: "Direct installer links will appear here once the first release is published.",
     viewOnGh: "View Release ↗",
     noNotes: "See the GitHub Release page for full details.",
+    noReleases: "No releases have been published.",
     emptySearch: "No releases match your filter.",
     footerSign: "Crafted for live moments, growing with the open-source community",
     footerSub: "Free open-source software · All recordings stay local · Global CDN update feed",
@@ -1130,7 +1123,7 @@ function applyTheme() {
 }
 
 function renderSpotlight() {
-  const latest = FEED.releases.find((r) => !r.prerelease) || FEED.releases[0];
+  const latest = FEED.releases.find((r) => r.version === (FEED.latestStable || FEED.latestAll));
   const el = document.getElementById("spotlight");
   if (!latest) { el.innerHTML = ""; return; }
   const dlAssets = (latest.assets || []).filter((a) => !a.name.toLowerCase().includes("sha256")).slice(0, 3);
@@ -1182,13 +1175,13 @@ function renderTimeline() {
 
   const root = document.getElementById("timeline");
   if (filtered.length === 0) {
-    root.innerHTML = '<div class="empty-state">' + esc(t("emptySearch")) + '</div>';
+    root.innerHTML = '<div class="empty-state">' + esc(t(FEED.releases.length ? "emptySearch" : "noReleases")) + '</div>';
     return;
   }
 
   const tags = t("tags");
-  root.innerHTML = filtered.map((r, idx) => {
-    const isLatest = idx === 0 && !r.prerelease && state.channel !== "pre";
+  root.innerHTML = filtered.map((r) => {
+    const isLatest = !r.prerelease && r.version === FEED.latestStable;
     const pill = r.prerelease
       ? '<span class="pill pre">Pre-release</span>'
       : (isLatest ? '<span class="pill">Latest</span>' : '');
@@ -1266,13 +1259,10 @@ renderAll();
 
 async function main() {
   const { outDir, inputFile } = parseArgs(process.argv.slice(2));
-  let releases = await fetchReleases(inputFile);
-  if (releases.length === 0) {
-    releases = fallbackReleases();
-  }
-
-  const latestStable = releases.find((r) => !r.prerelease) || null;
-  const latestAll = releases[0] || null;
+  const releases = await fetchReleases(inputFile);
+  const ranked = releases.filter(r => versionPattern.test(r.version)).sort((a, b) => compareVersion(b, a));
+  const latestStable = ranked.find(r => !r.prerelease && !versionPattern.exec(r.version)[4]);
+  const latestAll = ranked[0];
   const generatedAt = new Date().toISOString();
 
   const changelogFeed = {
@@ -1295,7 +1285,7 @@ async function main() {
   const latestPayload = {
     schemaVersion: 1,
     generatedAt,
-    version: latestFeed ? latestFeed.version : "0.1.0",
+    version: latestFeed ? latestFeed.version : null,
     publishedAt: latestFeed ? latestFeed.publishedAt : "",
     url: latestFeed ? latestFeed.url : RELEASES_URL,
     prerelease: latestFeed ? latestFeed.prerelease : false,

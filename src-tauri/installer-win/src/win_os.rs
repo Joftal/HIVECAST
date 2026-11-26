@@ -1,20 +1,22 @@
 //! Windows-specific OS integration (DWM styling, WebView2 check, shortcuts, Uninstall registry).
 
-use std::env;
-use std::fs;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{
+    GetLastError, ERROR_ALREADY_EXISTS, HWND, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, REG_SZ,
+    RegCloseKey, RegCreateKeyTransactedW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD,
+    REG_SZ,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -182,65 +184,95 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 }
 
-/// Create Start Menu shortcut and optionally Desktop shortcut via env-var-safe PowerShell COM.
-pub fn create_shortcuts(install_dir: &Path, exe_path: &Path, desktop: bool) -> Result<(), String> {
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$shell = New-Object -ComObject WScript.Shell
-$startDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-New-Item -ItemType Directory -Force -Path $startDir | Out-Null
-$startLnk = $shell.CreateShortcut((Join-Path $startDir 'HIVECAST.lnk'))
-$startLnk.TargetPath = $env:HIVECAST_EXE
-$startLnk.WorkingDirectory = $env:HIVECAST_DIR
-$startLnk.IconLocation = "$env:HIVECAST_EXE,0"
-$startLnk.Description = 'HIVECAST Live Recording Studio'
-$startLnk.Save()
-
-if ($env:HIVECAST_DESKTOP -eq '1') {
-  $deskDir = [Environment]::GetFolderPath('Desktop')
-  if ($deskDir) {
-    $deskLnk = $shell.CreateShortcut((Join-Path $deskDir 'HIVECAST.lnk'))
-    $deskLnk.TargetPath = $env:HIVECAST_EXE
-    $deskLnk.WorkingDirectory = $env:HIVECAST_DIR
-    $deskLnk.IconLocation = "$env:HIVECAST_EXE,0"
-    $deskLnk.Description = 'HIVECAST Live Recording Studio'
-    $deskLnk.Save()
-  }
+pub fn operation_lock() -> Result<OwnedHandle, String> {
+    let name = to_wide(r"Local\HIVECAST-Install-Uninstall");
+    unsafe {
+        let raw =
+            windows_sys::Win32::System::Threading::CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        let error = GetLastError();
+        if raw.is_null() {
+            return Err(format!("无法锁定安装状态：{error}"));
+        }
+        let handle = OwnedHandle::from_raw_handle(raw);
+        if error == ERROR_ALREADY_EXISTS {
+            return Err("另一个安装或卸载操作正在进行".into());
+        }
+        Ok(handle)
+    }
 }
+
+// Resolve shortcut locations identically during installation and removal, including redirected desktops.
+fn shortcut_command(
+    exe: &Path,
+    desktop: bool,
+    staged: &Path,
+    script: &str,
+) -> Result<String, String> {
+    let common = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$shell = New-Object -ComObject WScript.Shell
+$folders = @(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+if ($env:HIVECAST_DESKTOP -eq '1') {
+    $desk = [Environment]::GetFolderPath('DesktopDirectory')
+    if ($desk) { $folders += $desk }
+}
+$paths = @($folders | ForEach-Object { Join-Path $_ 'HIVECAST.lnk' })
 "#;
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("HIVECAST_EXE", exe_path)
-        .env("HIVECAST_DIR", install_dir)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("{common}\n{script}"),
+        ])
+        .env("HIVECAST_STAGED_LINK", staged)
+        .env("HIVECAST_EXE", exe)
         .env("HIVECAST_DESKTOP", if desktop { "1" } else { "0" })
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("无法创建快捷方式：{e}"))?;
-
+        .map_err(|e| e.to_string())?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("创建快捷方式失败：{stderr}"));
+        return Err(format!(
+            "快捷方式操作失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-pub fn remove_shortcuts() {
-    if let Ok(appdata) = env::var("APPDATA") {
-        let start_lnk = PathBuf::from(appdata)
-            .join("Microsoft")
-            .join("Windows")
-            .join("Start Menu")
-            .join("Programs")
-            .join("HIVECAST.lnk");
-        let _ = fs::remove_file(start_lnk);
+pub fn stage_shortcut(exe: &Path, desktop: bool, staging: &Path) -> Result<Vec<PathBuf>, String> {
+    // WScript requires a .lnk extension. The stage directory is private to this operation.
+    let staged = staging.join("HIVECAST.lnk");
+    let script = r#"
+$link = $shell.CreateShortcut($env:HIVECAST_STAGED_LINK)
+$link.TargetPath = $env:HIVECAST_EXE
+$link.WorkingDirectory = [IO.Path]::GetDirectoryName($env:HIVECAST_EXE)
+$link.IconLocation = "$env:HIVECAST_EXE,0"
+$link.Description = 'HIVECAST Live Recording Studio'
+$link.Save()
+ConvertTo-Json -Compress -InputObject $paths
+"#;
+    let json = shortcut_command(exe, desktop, &staged, script)?;
+    serde_json::from_str(&json).map_err(|e| format!("读取快捷方式目录失败：{e}"))
+}
+
+pub fn remove_shortcuts(exe: &Path) -> Result<(), String> {
+    shortcut_command(
+        exe,
+        true,
+        Path::new(""),
+        r#"
+foreach ($path in $paths) {
+    if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+        ($shell.CreateShortcut($path).TargetPath -eq $env:HIVECAST_EXE)) {
+        Remove-Item -LiteralPath $path
     }
-    for var in ["USERPROFILE", "OneDrive", "OneDriveConsumer"] {
-        if let Ok(base) = env::var(var) {
-            let desk_lnk = PathBuf::from(base).join("Desktop").join("HIVECAST.lnk");
-            let _ = fs::remove_file(desk_lnk);
-        }
-    }
+}
+"#,
+    )
+    .map(|_| ())
 }
 
 pub fn write_uninstall_registry(
@@ -250,10 +282,27 @@ pub fn write_uninstall_registry(
     version: &str,
     estimated_kb: u32,
 ) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{CommitTransaction, CreateTransaction};
+    let raw = unsafe {
+        CreateTransaction(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // Closing an uncommitted transaction rolls back all of its registry changes.
+    let transaction = unsafe { OwnedHandle::from_raw_handle(raw) };
     let subkey_w = to_wide(UNINSTALL_REG_SUBKEY);
     let mut hkey: HKEY = std::ptr::null_mut();
     let rc = unsafe {
-        RegCreateKeyExW(
+        RegCreateKeyTransactedW(
             HKEY_CURRENT_USER,
             subkey_w.as_ptr(),
             0,
@@ -263,6 +312,8 @@ pub fn write_uninstall_registry(
             std::ptr::null(),
             &raw mut hkey,
             std::ptr::null_mut(),
+            transaction.as_raw_handle(),
+            std::ptr::null(),
         )
     };
     if rc != 0 {
@@ -290,18 +341,35 @@ pub fn write_uninstall_registry(
     unsafe {
         RegCloseKey(hkey);
     }
-    res
+    res?;
+    if unsafe { CommitTransaction(transaction.as_raw_handle()) } == 0 {
+        return Err(format!(
+            "提交卸载登记失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 pub fn read_installed_dir() -> Option<PathBuf> {
-    let raw = read_reg_string(HKEY_CURRENT_USER, UNINSTALL_REG_SUBKEY, "InstallLocation")?;
-    crate::install::validate_install_dir(&raw).ok()
+    read_reg_string(HKEY_CURRENT_USER, UNINSTALL_REG_SUBKEY, "InstallLocation").and_then(|s| {
+        let clean = crate::install::sanitize_dir_input(&s);
+        let trimmed = clean.as_str();
+        let path = trimmed
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(trimmed);
+        crate::install::validate_install_dir(path).ok()
+    })
 }
 
-pub fn delete_uninstall_registry() {
+pub fn delete_uninstall_registry() -> Result<(), String> {
     let subkey_w = to_wide(UNINSTALL_REG_SUBKEY);
-    unsafe {
-        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, subkey_w.as_ptr());
+    let rc = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, subkey_w.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("清除卸载登记失败：{rc}"))
     }
 }
 
@@ -316,19 +384,29 @@ pub fn launch_app(exe_path: &Path) -> Result<(), String> {
 }
 
 /// Remove the running uninstaller executable and remove `install_dir` ONLY if empty.
-pub fn schedule_self_cleanup(self_exe: &Path, install_dir: &Path) {
-    let _ = Command::new("cmd.exe")
-        .args([
-            "/C",
-            "ping 127.0.0.1 -n 3 >NUL & del /F /Q \"%HIVECAST_SELF%\" >NUL 2>&1 & rmdir \"%HIVECAST_CLEAN_DIR%\" >NUL 2>&1",
-        ])
+pub fn schedule_self_cleanup(self_exe: &Path, install_dir: &Path) -> Result<(), String> {
+    // Wait for the actual uninstaller (GUI users can keep its completion screen open).
+    // An unregistered nonempty directory cannot be reused by the installer until cleanup finishes.
+    let script = r#"
+$parent = Get-Process -Id $env:HIVECAST_PARENT -ErrorAction SilentlyContinue
+if ($parent) { $parent.WaitForExit() }
+for ($i = 0; $i -lt 100; $i++) {
+    try { [IO.File]::Delete($env:HIVECAST_SELF); break } catch { Start-Sleep -Milliseconds 100 }
+}
+try { [IO.Directory]::Delete($env:HIVECAST_CLEAN_DIR, $false) } catch [IO.IOException] {}
+"#;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("HIVECAST_PARENT", std::process::id().to_string())
         .env("HIVECAST_SELF", self_exe)
         .env("HIVECAST_CLEAN_DIR", install_dir)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法启动卸载清理：{e}"))
 }
 
 fn set_reg_sz(hkey: HKEY, name: &str, value: &str) -> Result<(), String> {

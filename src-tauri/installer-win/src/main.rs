@@ -38,7 +38,7 @@ fn main() {
             desktop_shortcut,
         } => {
             let raw_dir = dir
-                .unwrap_or_else(install::default_install_dir)
+                .unwrap_or_else(preferred_install_dir)
                 .display()
                 .to_string();
             install::validate_install_dir(&raw_dir).and_then(|target| {
@@ -46,8 +46,7 @@ fn main() {
             })
         }
         CliAction::SilentUninstall { dir } => {
-            let target = resolve_uninstall_dir(dir);
-            perform_uninstall(&target, true)
+            resolve_uninstall_dir(dir).and_then(|target| perform_uninstall(&target))
         }
         CliAction::GuiInstall => launch_gui(false),
         CliAction::GuiUninstall => launch_gui(true),
@@ -83,20 +82,98 @@ fn run_self_test() -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_uninstall_dir(cli_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(dir) = cli_dir {
-        return dir;
-    }
+fn preferred_install_dir() -> PathBuf {
     #[cfg(windows)]
-    if let Some(reg_dir) = win_os::read_installed_dir() {
-        return reg_dir;
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            return parent.to_path_buf();
-        }
+    if let Some(path) = win_os::read_installed_dir() {
+        return path;
     }
     install::default_install_dir()
+}
+
+fn resolve_uninstall_dir(cli_dir: Option<PathBuf>) -> Result<PathBuf, String> {
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    if exe
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("uninstall.exe"))
+    {
+        let parent = exe.parent().ok_or("无法定位卸载程序目录")?;
+        if cli_dir
+            .as_ref()
+            .is_some_and(|dir| !same_location(dir, parent))
+        {
+            return Err("卸载目标与卸载程序所在目录不一致".into());
+        }
+        return Ok(parent.to_owned());
+    }
+    Ok(cli_dir.unwrap_or_else(preferred_install_dir))
+}
+
+fn same_location(a: &Path, b: &Path) -> bool {
+    fs::canonicalize(a)
+        .ok()
+        .zip(fs::canonicalize(b).ok())
+        .is_some_and(|(a, b)| a == b)
+}
+
+// Keep original files on their own volume until registry and shortcut changes have succeeded.
+struct Replacement {
+    dest: PathBuf,
+    previous: Option<tempfile::TempDir>,
+}
+
+fn replace_file(source: &Path, dest: &Path, changes: &mut Vec<Replacement>) -> Result<(), String> {
+    let parent = dest.parent().ok_or("目标路径缺少上级目录")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let next = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    fs::copy(source, next.path()).map_err(|e| e.to_string())?;
+    let previous = if dest.try_exists().map_err(|e| e.to_string())? {
+        if !dest.is_file() {
+            return Err(format!("目标不是文件：{}", dest.display()));
+        }
+        let backup = tempfile::tempdir_in(parent).map_err(|e| e.to_string())?;
+        fs::rename(dest, backup.path().join("original"))
+            .map_err(|e| format!("备份 {} 失败：{e}", dest.display()))?;
+        Some(backup)
+    } else {
+        None
+    };
+    let result = next.persist_noclobber(dest);
+    if previous.is_some() || result.is_ok() {
+        changes.push(Replacement {
+            dest: dest.to_owned(),
+            previous,
+        });
+    }
+    result.map_err(|e| format!("写入 {} 失败：{e}", dest.display()))?;
+    Ok(())
+}
+
+fn rollback(changes: Vec<Replacement>, cause: String) -> String {
+    let mut errors = vec![cause];
+    for change in changes.into_iter().rev() {
+        let result = match change.previous {
+            Some(backup) => fs::rename(backup.path().join("original"), &change.dest).map_err(|e| {
+                format!(
+                    "恢复 {} 失败：{e}，原文件备份在 {}",
+                    change.dest.display(),
+                    backup.keep().display()
+                )
+            }),
+            None => fs::remove_file(&change.dest)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| e.to_string()),
+        };
+        if let Err(e) = result {
+            errors.push(e);
+        }
+    }
+    errors.join("；")
 }
 
 pub(crate) fn perform_install<F>(
@@ -112,14 +189,41 @@ where
         return Err("检测到 HIVECAST 正在运行，请先关闭应用后再安装或升级。".into());
     }
 
+    #[cfg(windows)]
+    let _lock = win_os::operation_lock()?;
+    fs::create_dir_all(install_dir).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        let registered = win_os::read_installed_dir();
+        let owned = registered.as_ref().is_some_and(|dir| {
+            same_location(dir, install_dir) && install::has_existing_install(dir)
+        });
+        if !owned {
+            if registered
+                .as_ref()
+                .is_some_and(|dir| install::has_existing_install(dir))
+            {
+                return Err("请使用已登记的安装目录升级，或先卸载原版本".into());
+            }
+            if fs::read_dir(install_dir)
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_some()
+            {
+                return Err("目录非空，请选择新的 HIVECAST 专用子目录".into());
+            }
+        }
+    }
+    let staging = tempfile::tempdir_in(install_dir).map_err(|e| e.to_string())?;
     let self_exe = env::current_exe().map_err(|e| format!("无法获取安装程序路径：{e}"))?;
     let located = payload::locate_payload(&self_exe)
         .map_err(|e| format!("读取安装包结构失败：{e}"))?
         .ok_or_else(|| "当前程序不包含内嵌载荷，请下载正式安装包。".to_string())?;
 
     on_progress(5, 0);
-    let dest_exe = install_dir.join(&located.meta.exe_name);
-    payload::extract_verified(&self_exe, &located, &dest_exe, |pct| {
+    let dest_exe = install_dir.join("HIVECAST.exe");
+    let staged_app = staging.path().join("HIVECAST.exe");
+    payload::extract_verified(&self_exe, &located, &staged_app, |pct| {
         // Map extraction 0..=100 into overall 5..=80%.
         let scaled = 5u8.saturating_add(((u16::from(pct) * 75) / 100) as u8);
         on_progress(scaled, 0);
@@ -128,73 +232,83 @@ where
 
     on_progress(84, 1);
     let uninstall_exe = install_dir.join("uninstall.exe");
-    payload::copy_clean_uninstaller(&self_exe, &located, &uninstall_exe)
+    let staged_uninstaller = staging.path().join("uninstall.exe");
+    payload::copy_clean_uninstaller(&self_exe, &located, &staged_uninstaller)
         .map_err(|e| format!("写入卸载程序失败：{e}"))?;
 
-    #[cfg(windows)]
-    {
-        win_os::create_shortcuts(install_dir, &dest_exe, desktop_shortcut)?;
-        on_progress(92, 1);
-        let estimated_kb = (located.meta.raw_size / 1024).min(u64::from(u32::MAX)) as u32;
-        win_os::write_uninstall_registry(
-            install_dir,
-            &dest_exe,
-            &uninstall_exe,
-            &located.meta.version,
-            estimated_kb,
-        )?;
-    }
-    #[cfg(not(windows))]
-    {
+    let mut changes = Vec::new();
+    let result = (|| {
+        #[cfg(windows)]
+        let links = win_os::stage_shortcut(&dest_exe, desktop_shortcut, staging.path())?;
+        replace_file(&staged_app, &dest_exe, &mut changes)?;
+        replace_file(&staged_uninstaller, &uninstall_exe, &mut changes)?;
+        #[cfg(windows)]
+        {
+            for link in links {
+                replace_file(&staging.path().join("HIVECAST.lnk"), &link, &mut changes)?;
+            }
+            on_progress(92, 1);
+            let estimated_kb = (located.meta.raw_size / 1024).min(u64::from(u32::MAX)) as u32;
+            win_os::write_uninstall_registry(
+                install_dir,
+                &dest_exe,
+                &uninstall_exe,
+                &located.meta.version,
+                estimated_kb,
+            )?;
+        }
+        #[cfg(not(windows))]
         let _ = desktop_shortcut;
+        Ok(())
+    })();
+    if let Err(err) = result {
+        return Err(rollback(changes, err));
     }
 
     on_progress(100, 2);
     Ok(dest_exe)
 }
 
-pub(crate) fn perform_uninstall(
-    install_dir: &Path,
-    immediate_self_cleanup: bool,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    if win_os::is_app_running() {
-        return Err("检测到 HIVECAST 正在运行，请先关闭应用后再卸载。".into());
-    }
-
+pub(crate) fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
     let app_exe = install_dir.join("HIVECAST.exe");
+    let uninstaller = install_dir.join("uninstall.exe");
+    #[cfg(windows)]
+    let _lock = win_os::operation_lock()?;
+    #[cfg(windows)]
+    {
+        if !win_os::read_installed_dir()
+            .is_some_and(|registered| same_location(&registered, install_dir))
+        {
+            return Err("卸载目录与当前安装登记不符".into());
+        }
+        if win_os::is_app_running() {
+            return Err("检测到 HIVECAST 正在运行，请先关闭应用后再卸载。".into());
+        }
+        win_os::remove_shortcuts(&app_exe)?;
+    }
     if app_exe.exists() {
         fs::remove_file(&app_exe).map_err(|e| format!("删除主程序失败：{e}"))?;
     }
-
     #[cfg(windows)]
     {
-        win_os::remove_shortcuts();
-        win_os::delete_uninstall_registry();
-        if let Ok(self_exe) = env::current_exe() {
-            if self_exe.starts_with(install_dir) {
-                if immediate_self_cleanup {
-                    win_os::schedule_self_cleanup(&self_exe, install_dir);
-                }
-            } else {
-                let uninst = install_dir.join("uninstall.exe");
-                if uninst.exists() {
-                    let _ = fs::remove_file(&uninst);
-                }
-                let _ = fs::remove_dir(install_dir);
-            }
+        let exe = env::current_exe().map_err(|e| e.to_string())?;
+        if same_location(&exe, &uninstaller) {
+            win_os::delete_uninstall_registry()?;
+            return win_os::schedule_self_cleanup(&exe, install_dir);
         }
     }
-    #[cfg(not(windows))]
+    if uninstaller.exists() {
+        fs::remove_file(uninstaller).map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
+    win_os::delete_uninstall_registry()?;
+    if fs::read_dir(install_dir)
+        .map_err(|e| e.to_string())?
+        .next()
+        .is_none()
     {
-        let _ = immediate_self_cleanup;
-        let uninst = install_dir.join("uninstall.exe");
-        if uninst.exists() {
-            let _ = fs::remove_file(&uninst);
-        }
-        let _ = fs::remove_dir(install_dir);
+        fs::remove_dir(install_dir).map_err(|e| e.to_string())?;
     }
-
     Ok(())
 }
 

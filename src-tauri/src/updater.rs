@@ -2,7 +2,7 @@
 //!
 //! 走后端 `reqwest` 发起请求，自动继承系统代理、避开 WebView CORS 限制并统一控制超时。
 
-use std::cmp::Ordering;
+use semver::Version;
 use std::time::Duration;
 
 use hivecast_ipc::{ChangelogNote, ReleaseEntry, UpdateCheckResult};
@@ -15,91 +15,18 @@ const JSDELIVR_CHANGELOG_URL: &str =
     "https://cdn.jsdelivr.net/gh/Joftal/HIVECAST@gh-pages/changelog.json";
 const GHPAGES_CHANGELOG_URL: &str = "https://joftal.github.io/HIVECAST/changelog.json";
 const GITHUB_API_RELEASES_URL: &str =
-    "https://api.github.com/repos/Joftal/HIVECAST/releases?per_page=8";
+    "https://api.github.com/repos/Joftal/HIVECAST/releases?per_page=100";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SemVer {
-    pub major: u64,
-    pub minor: u64,
-    pub patch: u64,
-    pub pre: Option<String>,
-}
-
-impl SemVer {
-    pub fn parse(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
-        let (core, pre) = match trimmed.split_once('-') {
-            Some((c, p)) if !p.is_empty() => (c, Some(p.to_string())),
-            _ => (trimmed, None),
-        };
-        let mut parts = core.split('.');
-        let major = parts.next()?.parse::<u64>().ok()?;
-        let minor = parts.next()?.parse::<u64>().ok()?;
-        let patch = parts.next()?.parse::<u64>().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
-        Some(Self {
-            major,
-            minor,
-            patch,
-            pre,
-        })
-    }
-
-    pub fn is_prerelease(&self) -> bool {
-        self.pre.is_some()
-    }
-}
-
-impl Ord for SemVer {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.major, self.minor, self.patch)
-            .cmp(&(other.major, other.minor, other.patch))
-            .then_with(|| match (&self.pre, &other.pre) {
-                (None, None) => Ordering::Equal,
-                (None, Some(_)) => Ordering::Greater,
-                (Some(_), None) => Ordering::Less,
-                (Some(a), Some(b)) => compare_pre(a, b),
-            })
-    }
-}
-
-impl PartialOrd for SemVer {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-fn compare_pre(a: &str, b: &str) -> Ordering {
-    let mut ai = a.split('.');
-    let mut bi = b.split('.');
-    loop {
-        match (ai.next(), bi.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) => {
-                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
-                    (Ok(nx), Ok(ny)) => nx.cmp(&ny),
-                    (Ok(_), Err(_)) => Ordering::Less,
-                    (Err(_), Ok(_)) => Ordering::Greater,
-                    (Err(_), Err(_)) => x.cmp(y),
-                };
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-        }
-    }
+fn parse_version(raw: &str) -> Option<Version> {
+    let tag = raw.trim();
+    Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StaticChangelogFeed {
-    #[serde(default)]
     releases: Vec<ReleaseEntry>,
 }
 
@@ -132,25 +59,30 @@ pub async fn check_for_updates(current_version: &str) -> UpdateCheckResult {
 
     let mut errors: Vec<String> = Vec::new();
 
+    let mut no_candidate = None;
     for (source, url) in [
         ("jsdelivr", JSDELIVR_CHANGELOG_URL),
         ("gh-pages", GHPAGES_CHANGELOG_URL),
+        ("github-api", GITHUB_API_RELEASES_URL),
     ] {
-        match fetch_static_feed(&client, url).await {
-            Ok(releases) if !releases.is_empty() => {
-                return build_result(current_version, source, releases);
+        let fetched = if source == "github-api" {
+            fetch_github_api_releases(&client, url).await
+        } else {
+            fetch_static_feed(&client, url).await
+        };
+        match fetched {
+            Ok(releases) => {
+                let result = build_result(current_version, source, releases);
+                if result.latest_version.is_some() {
+                    return result;
+                }
+                no_candidate.get_or_insert(result);
             }
-            Ok(_) => errors.push(format!("{source}: empty feed")),
             Err(err) => errors.push(format!("{source}: {err}")),
         }
     }
-
-    match fetch_github_api_releases(&client, GITHUB_API_RELEASES_URL).await {
-        Ok(releases) if !releases.is_empty() => {
-            return build_result(current_version, "github-api", releases);
-        }
-        Ok(_) => errors.push("github-api: no published releases".to_string()),
-        Err(err) => errors.push(format!("github-api: {err}")),
+    if let Some(result) = no_candidate {
+        return result;
     }
 
     tracing::warn!(
@@ -185,30 +117,42 @@ async fn fetch_github_api_releases(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<Vec<ReleaseEntry>, String> {
-    let resp = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+    let mut releases = Vec::new();
+    for page in 1.. {
+        let resp = client
+            .get(format!("{url}&page={page}"))
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let more = resp
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("rel=\"next\""));
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        releases.extend(parse_github_api_releases(&text)?);
+        if !more {
+            break;
+        }
     }
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    parse_github_api_releases(&text)
+    Ok(releases)
 }
 
 pub fn parse_static_feed(raw: &str) -> Result<Vec<ReleaseEntry>, String> {
     let feed: StaticChangelogFeed =
         serde_json::from_str(raw).map_err(|e| format!("JSON 解析失败：{e}"))?;
-    Ok(feed.releases.into_iter().take(8).collect())
+    Ok(feed.releases)
 }
 
 pub fn parse_github_api_releases(raw: &str) -> Result<Vec<ReleaseEntry>, String> {
     let items: Vec<GitHubApiRelease> =
         serde_json::from_str(raw).map_err(|e| format!("GitHub API 解析失败：{e}"))?;
     let mut out = Vec::new();
-    for item in items.into_iter().filter(|r| !r.draft).take(8) {
+    for item in items.into_iter().filter(|r| !r.draft) {
         let version = item
             .tag_name
             .trim()
@@ -236,21 +180,22 @@ pub fn parse_github_api_releases(raw: &str) -> Result<Vec<ReleaseEntry>, String>
 /// 从 GitHub Release Markdown 正文提取简明变更条目，跳过纯安装说明段落。
 pub fn parse_release_notes(body: &str) -> Vec<ChangelogNote> {
     let mut notes = Vec::new();
-    let mut in_install_guide = false;
+    let mut guide_depth = None;
     for raw_line in body.lines() {
         let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
         if line.starts_with('#') {
-            let lower = line.to_ascii_lowercase();
-            in_install_guide = lower.contains("安装说明")
-                || lower.contains("macos")
-                || lower.contains("windows")
-                || lower.contains("录制与更新");
+            let title = line.trim_start_matches('#');
+            let depth = line.len() - title.len();
+            if guide_depth.is_none_or(|d| depth <= d) {
+                guide_depth = matches!(
+                    title.trim().to_ascii_lowercase().as_str(),
+                    "安装说明" | "installation" | "installation instructions" | "录制与更新"
+                )
+                .then_some(depth);
+            }
             continue;
         }
-        if in_install_guide {
+        if guide_depth.is_some() {
             continue;
         }
         let bullet = line
@@ -337,18 +282,22 @@ pub fn build_result(
     source: &str,
     releases: Vec<ReleaseEntry>,
 ) -> UpdateCheckResult {
-    let current = SemVer::parse(current_version);
-    let allow_prerelease = current.as_ref().is_some_and(SemVer::is_prerelease);
+    let current = parse_version(current_version);
+    let allow_prerelease = current.as_ref().is_some_and(|v| !v.pre.is_empty());
 
     let best = releases
         .iter()
         .filter(|r| allow_prerelease || !r.prerelease)
-        .filter_map(|r| SemVer::parse(&r.version).map(|v| (v, r)))
-        .max_by(|(va, _), (vb, _)| va.cmp(vb));
+        .filter_map(|r| {
+            parse_version(&r.version)
+                .filter(|v| allow_prerelease || v.pre.is_empty())
+                .map(|v| (v, r))
+        })
+        .max_by(|(va, _), (vb, _)| va.cmp_precedence(vb));
 
     let (latest_version, has_update, download_url) = match (current, best) {
         (Some(cur), Some((latest_v, entry))) => {
-            let newer = latest_v > cur;
+            let newer = latest_v.cmp_precedence(&cur).is_gt();
             (
                 Some(entry.version.clone()),
                 newer,
@@ -373,20 +322,22 @@ pub fn build_result(
 
     UpdateCheckResult {
         current_version: current_version.to_string(),
+        error: latest_version
+            .is_none()
+            .then(|| "当前更新通道暂无有效发布".into()),
         latest_version,
         has_update,
         download_url,
         changelog_url: CHANGELOG_SITE_URL.to_string(),
         source: source.to_string(),
-        error: None,
-        releases,
+        releases: releases.into_iter().take(8).collect(),
     }
 }
 
 pub fn embedded_fallback_releases(current_version: &str) -> Vec<ReleaseEntry> {
     vec![ReleaseEntry {
         version: current_version.to_string(),
-        published_at: "2026-11-26".to_string(),
+        published_at: String::new(),
         url: RELEASES_URL.to_string(),
         prerelease: current_version.contains('-'),
         notes: vec![
@@ -425,15 +376,15 @@ mod tests {
 
     #[test]
     fn semver_ordering_handles_stable_and_prerelease() {
-        let v010 = SemVer::parse("0.1.0").unwrap();
-        let v020_rc1 = SemVer::parse("v0.2.0-rc.1").unwrap();
-        let v020_rc2 = SemVer::parse("0.2.0-rc.2").unwrap();
-        let v020 = SemVer::parse("0.2.0").unwrap();
+        let v010 = parse_version("0.1.0").unwrap();
+        let v020_rc1 = parse_version("v0.2.0-rc.1").unwrap();
+        let v020_rc2 = parse_version("0.2.0-rc.2").unwrap();
+        let v020 = parse_version("0.2.0").unwrap();
 
         assert!(v010 < v020_rc1);
         assert!(v020_rc1 < v020_rc2);
         assert!(v020_rc2 < v020);
-        assert!(SemVer::parse("invalid").is_none());
+        assert!(parse_version("invalid").is_none());
     }
 
     #[test]
@@ -462,6 +413,69 @@ mod tests {
         let pre_res = build_result("0.1.0-rc.1", "jsdelivr", releases);
         assert!(pre_res.has_update);
         assert_eq!(pre_res.latest_version.as_deref(), Some("0.2.0-rc.1"));
+    }
+
+    #[test]
+    fn choose_stable_before_limiting_history() {
+        let mut raw = vec![
+            serde_json::json!({"tag_name":"v2.0.0-rc.1","prerelease":true,"html_url":"rc"});
+            8
+        ];
+        raw.push(serde_json::json!({"tag_name":"v1.1.0","html_url":"stable"}));
+        let api = parse_github_api_releases(&serde_json::to_string(&raw).unwrap()).unwrap();
+        let feed = serde_json::json!({"releases":api});
+        for entries in [api, parse_static_feed(&feed.to_string()).unwrap()] {
+            let r = build_result("1.0.0", "fixture", entries);
+            assert!(r.has_update);
+            assert_eq!(r.latest_version.as_deref(), Some("1.1.0"));
+            assert_eq!(r.releases.len(), 8);
+        }
+        assert!(build_result("1.0.0", "fixture", vec![]).error.is_some());
+        let notes = parse_release_notes("## 安装说明\n### Windows（x64）\n- setup\n## Windows fixes\n- fix: capture\n## macOS 修复\n- fix: playback");
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "capture");
+    }
+
+    #[tokio::test]
+    async fn api_follows_next_page_before_selecting_release() {
+        use axum::{http::Uri, response::IntoResponse, routing::get, Router};
+        let server = Router::new().route(
+            "/releases",
+            get(|uri: Uri| async move {
+                match uri.query() {
+                    Some("per_page=100&page=1") => (
+                        [("link", "<next>; rel=\"next\"")],
+                        r#"[{"tag_name":"v3.0.0-rc.1","prerelease":true,"html_url":"rc"}]"#,
+                    )
+                        .into_response(),
+                    Some("per_page=100&page=2") => {
+                        r#"[{"tag_name":"v2.0.0","html_url":"stable"}]"#.into_response()
+                    }
+                    _ => axum::http::StatusCode::BAD_REQUEST.into_response(),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!(
+            "http://{}/releases?per_page=100",
+            listener.local_addr().unwrap()
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let entries = fetch_github_api_releases(&client, &url).await.unwrap();
+        task.abort();
+        assert_eq!(
+            build_result("1.0.0", "github-api", entries)
+                .latest_version
+                .as_deref(),
+            Some("2.0.0")
+        );
     }
 
     #[test]

@@ -1,0 +1,61 @@
+param(
+    [Parameter(Mandatory)][string]$Setup,
+    [Parameter(Mandatory)][string]$Stub
+)
+$ErrorActionPreference = "Stop"
+. "$PSScriptRoot/windows-process.ps1"
+$registry = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HIVECAST"
+if (Test-Path $registry) { throw "Upgrade test requires a user without an existing HIVECAST installation" }
+
+function Assert-InstallerRejects([string]$Program, [string[]]$Arguments) {
+    try { Invoke-Installer $Program $Arguments } catch {
+        if ($_.Exception.Message -match "exited with code 1$") { return }
+        throw
+    }
+    throw "Expected installer rejection from $Program"
+}
+
+$work = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP ("upgrade-" + [guid]::NewGuid()))
+$originalAppData = $env:APPDATA
+try {
+    $env:APPDATA = Join-Path $work "Roaming"
+    $foreign = New-Item -ItemType Directory -Path (Join-Path $work "other app")
+    $otherUninstaller = Join-Path $foreign "uninstall.exe"
+    Copy-Item -LiteralPath $Stub -Destination $otherUninstaller
+    $stubHash = (Get-FileHash $Stub).Hash
+    Assert-InstallerRejects $Setup @("--silent", "--dir", $foreign.FullName)
+    if ((Get-FileHash $otherUninstaller).Hash -ne $stubHash) { throw "Unrelated uninstaller changed" }
+
+    $dir = Join-Path $work "旧 安装"
+    $seed = Join-Path $work "old setup.exe"
+    $oldVersion = "0.0.0-fixture.1"
+    Invoke-Installer $Stub @("--pack", $Stub, $Stub, $oldVersion, $seed)
+    Invoke-Installer $seed @("--silent", "--dir", $dir, "--no-shortcut")
+    # Legacy REG_SZ can combine Explorer direction marks, NSIS quotes and bytes after NUL.
+    $legacyLocation = [string][char]0x202A + '"' + $dir + '"' + [char]0x202C + [char]0 + "trailing"
+    Set-ItemProperty $registry InstallLocation $legacyLocation
+    $app = Join-Path $dir "HIVECAST.exe"
+    $uninstall = Join-Path $dir "uninstall.exe"
+    $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\HIVECAST.lnk"
+    foreach ($path in @($uninstall, $shortcut)) {
+        $lock = [IO.File]::Open($path, 'Open', 'Read', 'Read')
+        try { Assert-InstallerRejects $Setup @("--silent", "--no-shortcut") } finally { $lock.Dispose() }
+        if ((Get-FileHash $app).Hash -ne $stubHash -or (Get-FileHash $uninstall).Hash -ne $stubHash -or
+            (Get-ItemProperty $registry).DisplayVersion -ne $oldVersion) { throw "Incomplete upgrade rollback" }
+    }
+    Invoke-Installer $Setup @("--silent", "--no-shortcut")
+    $entry = Get-ItemProperty $registry
+    if ($entry.InstallLocation -ne $dir -or $entry.DisplayVersion -ne $env:VERSION) { throw "Lost original install location or version" }
+    Assert-InstallerRejects $otherUninstaller @("--uninstall", "--silent")
+    Assert-InstallerRejects $otherUninstaller @("--uninstall", "--silent", "--dir", $dir)
+    $keep = Join-Path $dir "keep.txt"
+    Set-Content -LiteralPath $keep -Value "user file" -NoNewline
+    Invoke-Installer $uninstall @("--uninstall", "--silent")
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-Path $uninstall) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    if ((Test-Path $registry) -or (Test-Path $shortcut) -or @(Get-ChildItem -Force $dir).Count -ne 1 -or
+        (Get-Content -LiteralPath $keep -Raw) -ne "user file") { throw "Uninstall did not preserve only the user file" }
+    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry and uninstall)"
+} finally {
+    $env:APPDATA = $originalAppData
+}
