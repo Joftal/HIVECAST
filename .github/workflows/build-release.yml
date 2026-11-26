@@ -252,12 +252,21 @@ jobs:
 
           Invoke-Installer $uninstExe @("--uninstall", "--silent", "--dir", $installDir)
           $deadline = [DateTime]::UtcNow.AddSeconds(30)
-          while ((Test-Path -LiteralPath $installDir) -and [DateTime]::UtcNow -lt $deadline) {
+          while ((Test-Path -LiteralPath $uninstExe) -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 200
           }
-          if (Test-Path -LiteralPath $installDir) { throw "卸载后安装目录仍存在" }
-          if (Test-Path $installedExe) { throw "静默卸载后 HIVECAST.exe 仍存在" }
+          if (Test-Path -LiteralPath $installedExe) { throw "静默卸载后 HIVECAST.exe 仍存在" }
+          if (Test-Path -LiteralPath $uninstExe) { throw "静默卸载后 uninstall.exe 仍存在" }
           if (Test-Path $regPath) { throw "静默卸载后卸载注册表仍存在" }
+          $startShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\HIVECAST.lnk"
+          if (Test-Path -LiteralPath $startShortcut) { throw "静默卸载后开始菜单快捷方式仍存在" }
+          # HIVECAST.exe 首次启动会在安装目录下创建默认录像目录 Recording/，卸载必须保留用户录像目录且不残留程序文件。
+          if (Test-Path -LiteralPath $installDir) {
+            $remaining = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name)
+            if ($remaining.Count -ne 1 -or $remaining[0] -ne "Recording") {
+              throw "静默卸载后安装目录存在预期外残留：$($remaining -join ', ')"
+            }
+          }
 
           # 2. Verify portable zip extract & SHA-256.
           $zip = Get-Item "release-assets/*-Windows-x64-portable.zip"

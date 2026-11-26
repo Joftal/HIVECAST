@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory)][string]$Setup,
     [Parameter(Mandatory)][string]$Stub
 )
@@ -55,7 +55,17 @@ try {
     while ((Test-Path $uninstall) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
     if ((Test-Path $registry) -or (Test-Path $shortcut) -or @(Get-ChildItem -Force $dir).Count -ne 1 -or
         (Get-Content -LiteralPath $keep -Raw) -ne "user file") { throw "Uninstall did not preserve only the user file" }
-    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry and uninstall)"
+
+    $emptyDir = Join-Path $work "空 目录"
+    Invoke-Installer $Setup @("--silent", "--dir", $emptyDir, "--no-shortcut")
+    $emptyUninst = Join-Path $emptyDir "uninstall.exe"
+    Invoke-Installer $emptyUninst @("--uninstall", "--silent")
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-Path -LiteralPath $emptyDir) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    if ((Test-Path -LiteralPath $emptyDir) -or (Test-Path $registry) -or (Test-Path $shortcut)) {
+        throw "Empty install directory was not removed after uninstall"
+    }
+    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry, preserve user file and empty-dir cleanup)"
 } finally {
     $env:APPDATA = $originalAppData
 }

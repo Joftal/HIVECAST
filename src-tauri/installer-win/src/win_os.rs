@@ -462,10 +462,20 @@ if ($parent) { $parent.WaitForExit() }
 for ($i = 0; $i -lt 100; $i++) {
     try { [IO.File]::Delete($env:HIVECAST_SELF); break } catch { Start-Sleep -Milliseconds 100 }
 }
-try { [IO.Directory]::Delete($env:HIVECAST_CLEAN_DIR, $false) } catch [IO.IOException] {}
+for ($i = 0; $i -lt 20; $i++) {
+    try {
+        [IO.Directory]::Delete($env:HIVECAST_CLEAN_DIR, $false)
+        break
+    } catch [IO.DirectoryNotFoundException] {
+        break
+    } catch {
+        Start-Sleep -Milliseconds 100
+    }
+}
 "#;
     Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .current_dir(std::env::temp_dir())
         .env("HIVECAST_PARENT", std::process::id().to_string())
         .env("HIVECAST_SELF", self_exe)
         .env("HIVECAST_CLEAN_DIR", install_dir)
