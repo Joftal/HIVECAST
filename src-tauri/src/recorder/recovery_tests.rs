@@ -303,3 +303,67 @@ async fn missing_marker_reaps_only_the_matching_live_process() {
     assert_eq!(db.close_orphan_sessions(&deferred).unwrap(), 1);
     unrelated.kill().await.unwrap();
 }
+
+#[tokio::test]
+async fn missing_danmaku_track_with_online_parent_completes_recovery_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("chat_gone.flv");
+    let missing_chat = source.with_extension("jsonl");
+    let dbfile = dir.path().join("test.db");
+    let db = Db::open(&dbfile).unwrap();
+    seed_recovery_session(&db, &source);
+    std::fs::write(segment::part_name(&source, 0), [5; 188]).unwrap();
+    let sql = rusqlite::Connection::open(&dbfile).unwrap();
+    sql.execute(
+        "UPDATE record_session SET post_state='recording', danmaku_path=?1",
+        [missing_chat.to_str().unwrap()],
+    )
+    .unwrap();
+    db.close_orphan_sessions(&Default::default()).unwrap();
+
+    assert_eq!(recover_parts(&db, &Default::default()).await, (1, 188));
+    let row = db.get_session("s1").unwrap().unwrap();
+    assert_eq!(row.file_size, 188);
+    assert_eq!(row.danmaku_count, 0);
+    assert!(row.danmaku_path.is_none());
+    assert!(
+        !row.post_error
+            .as_deref()
+            .is_some_and(|err| err.contains("弹幕")),
+        "missing .jsonl with online parent must not record danmaku error: {:?}",
+        row.post_error
+    );
+    assert!(db.manifest_sessions().unwrap().is_empty());
+    assert!(!manifest_path(&source).exists());
+    assert!(!Path::new(&segment::part_name(&source, 0)).exists());
+    // 二次启动必须幂等，不能重复恢复。
+    assert_eq!(recover_parts(&db, &Default::default()).await, (0, 0));
+}
+
+#[tokio::test]
+async fn missing_danmaku_track_with_offline_parent_keeps_manifest_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("live.flv");
+    let offline_chat = dir.path().join("unmounted-drive").join("live.jsonl");
+    let dbfile = dir.path().join("test.db");
+    let db = Db::open(&dbfile).unwrap();
+    seed_recovery_session(&db, &source);
+    std::fs::write(segment::part_name(&source, 0), [5; 188]).unwrap();
+    let sql = rusqlite::Connection::open(&dbfile).unwrap();
+    sql.execute(
+        "UPDATE record_session SET post_state='recording', danmaku_path=?1",
+        [offline_chat.to_str().unwrap()],
+    )
+    .unwrap();
+    db.close_orphan_sessions(&Default::default()).unwrap();
+
+    assert_eq!(recover_parts(&db, &Default::default()).await, (1, 188));
+    let row = db.get_session("s1").unwrap().unwrap();
+    assert_eq!(row.danmaku_path.as_deref(), offline_chat.to_str());
+    assert!(row
+        .post_error
+        .as_deref()
+        .is_some_and(|e| e.contains("弹幕")));
+    assert_eq!(db.manifest_sessions().unwrap().len(), 1);
+    assert!(manifest_path(&source).is_file());
+}

@@ -34,21 +34,33 @@ esac
 STAGE="$(mktemp -d)"
 KEYCHAIN=""
 cleanup() {
+  local rc=$?
   if [[ -n "$KEYCHAIN" ]]; then security delete-keychain "$KEYCHAIN" >/dev/null || true; fi
   rm -rf "$STAGE"
+  exit "$rc"
 }
 trap cleanup EXIT
+require_env() {
+  local name="$1"
+  local message="$2"
+  if [[ -z "${!name:-}" ]]; then
+    echo "$name: $message" >&2
+    exit 1
+  fi
+}
 APP_COPY="$STAGE/payload/HIVECAST.app"
 mkdir -p "$STAGE/payload"
 ditto "$APP" "$APP_COPY"
 
 if [[ "$PUBLIC" == true ]]; then
-  : "${APPLE_SIGNING_IDENTITY:?需要 Developer ID Application 身份}"
-  : "${APPLE_ID:?需要公证账号}" "${APPLE_TEAM_ID:?需要开发者团队 ID}" "${APPLE_PASSWORD:?需要公证专用密码}"
+  require_env APPLE_SIGNING_IDENTITY "需要 Developer ID Application 身份"
+  require_env APPLE_ID "需要公证账号"
+  require_env APPLE_TEAM_ID "需要开发者团队 ID"
+  require_env APPLE_PASSWORD "需要公证专用密码"
   case "$APPLE_SIGNING_IDENTITY" in "Developer ID Application:"*) ;; *) echo "需要 Developer ID Application 身份" >&2; exit 1;; esac
   signing_args=(--force --timestamp --sign "$APPLE_SIGNING_IDENTITY")
   if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
-    : "${APPLE_CERTIFICATE_PASSWORD:?需要证书密码}"
+    require_env APPLE_CERTIFICATE_PASSWORD "需要证书密码"
     KEYCHAIN="$STAGE/signing.keychain-db"
     pass="$(openssl rand -hex 24)"
     security create-keychain -p "$pass" "$KEYCHAIN"

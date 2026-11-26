@@ -981,7 +981,7 @@ async fn commit_output(temp: &Path, target: &Path) -> Result<PathBuf, String> {
 }
 
 /// 不覆盖的复制：create_new 占位，失败时清掉自己写了一半的文件。
-fn copy_no_clobber(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_no_clobber(source: &Path, destination: &Path) -> std::io::Result<()> {
     let mut input = std::fs::File::open(source)?;
     let mut output = std::fs::OpenOptions::new()
         .write(true)

@@ -1,10 +1,10 @@
 # 205 · 录像恢复修复、Windows 验收与 macOS 专机测试点
 
-2026-11-26 · HIVECAST 0.1.0 · Windows x64 · 基线 `main@7e5f00f927185a75e2eb9694eba842823966f2b0` 加本轮工作树修改
+2026-11-26 · HIVECAST 0.1.0 · Windows x64 · 基线 `main@7e5f00f927185a75e2eb9694eba842823966f2b0`（后续入库提交 `c9503e453e9c49e86d8004f9ebd6b5e91d258800`）
 
-**Windows 已通过本轮修复验收，可交付候选包。macOS 等待专机复验，公开分发还需最终 DMG 通过 Developer ID、公证、Gatekeeper 和下载首开验收。** 两个曾导致分片丢失的场景，以及缺 PID 时仍有 FFmpeg 写入的场景，都在 Windows 用生产代码复验。202 号的安装升级和四路并录有独立的历史包哈希。
+**Windows 已通过本轮修复验收，可交付候选包。macOS 专机复验已同步完成并已就地修复新发现的 1 项 P1（脚本退出码）、2 项 P2（双端启动探测阻塞与缺 JSONL 卡死）与 3 项 P3，macOS 回归及留给 Windows 的复测清单见 [206 号报告](206-c9503e4修复复核与macOS专机实机验收.md)；macOS 公开分发还需最终 DMG 通过 Developer ID、公证、Gatekeeper 和下载首开验收。** 两个曾导致分片丢失的场景，以及缺 PID 时仍有 FFmpeg 写入的场景，都在 Windows 用生产代码复验。202 号的安装升级和四路并录有独立的历史包哈希。
 
-[204 号缺陷与原复现数据](204-上线前独立代码审查与Windows复验.md) · [203 号 Mac 实测](203-macOS独立审查与d3108fa真机验收.md) · [202 号 Windows 历史验收](202-Windows上线前最终验收报告.md)
+[206 号 c9503e4 复核与 Mac 实机验收](206-c9503e4修复复核与macOS专机实机验收.md) · [204 号缺陷与原复现数据](204-上线前独立代码审查与Windows复验.md) · [203 号 Mac 实测](203-macOS独立审查与d3108fa真机验收.md) · [202 号 Windows 历史验收](202-Windows上线前最终验收报告.md)
 
 本轮有 16 份变更的产品源码、配置、构建脚本和测试文件。以基线提交为首行，按路径排序并在换行归一化后计算各文件 SHA-256；本机清单为 `build/accept-205/source-manifest.sha256`，清单 SHA-256 为 `cca2f98be4ab2930130e49e2accdeba5a1e2eac968c9a889036fe9bd543bd203`。Mac 专机可用此清单核对复测版本。
 

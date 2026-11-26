@@ -1,25 +1,48 @@
 //! Inspect the recorder's final output argument before touching a surviving process.
 use std::path::Path;
 
-fn same_executable(name: &str) -> bool {
+fn exe_eq(actual: &str, expected: &str) -> bool {
+    if cfg!(windows) {
+        actual.eq_ignore_ascii_case(expected)
+    } else {
+        actual == expected
+    }
+}
+
+/// 进程枚举时只读内存里的手动配置与默认可执行文件名，避免对每个 OS 进程反复拉起 `ffmpeg -version`。
+fn expected_executables() -> Vec<String> {
+    let default = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let mut names = vec![default.to_string()];
+    if let Some(configured) = crate::ffmpeg::configured_path() {
+        if let Some(name) = configured.file_name().and_then(|n| n.to_str()) {
+            if !names.iter().any(|item| exe_eq(item, name)) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn matches_executable(name: &str, expected: &[String]) -> bool {
     let Some(actual) = Path::new(name).file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    let binary = crate::ffmpeg::binary();
-    let expected = Path::new(&binary).file_name().and_then(|n| n.to_str());
-    let matches = |value: &str| {
-        if cfg!(windows) {
-            actual.eq_ignore_ascii_case(value)
-        } else {
-            actual == value
-        }
-    };
-    expected.is_some_and(matches)
-        || matches(if cfg!(windows) {
-            "ffmpeg.exe"
-        } else {
-            "ffmpeg"
-        })
+    expected.iter().any(|value| exe_eq(actual, value))
+}
+
+fn same_executable(name: &str) -> bool {
+    matches_executable(name, &expected_executables())
+}
+
+#[cfg(windows)]
+fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
 }
 
 fn recording_args(args: &[String], path: &Path) -> bool {
@@ -81,8 +104,9 @@ pub fn stop_if_owned(pid: u32, path: &Path) -> bool {
     let script = format!(
         r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction Stop | Select-Object Name,CommandLine | ConvertTo-Json -Compress"#
     );
-    let info = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    let mut cmd = std::process::Command::new("powershell");
+    no_window(&mut cmd).args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let info = cmd
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -212,10 +236,12 @@ pub fn stop_unmarked(path: &Path) -> bool {
 
 #[cfg(windows)]
 fn recorder_pids() -> Option<Vec<u32>> {
-    let output = std::process::Command::new("powershell").args([
+    let mut cmd = std::process::Command::new("powershell");
+    no_window(&mut cmd).args([
         "-NoProfile", "-NonInteractive", "-Command",
         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object Name,ProcessId)"
-    ]).output().ok()?;
+    ]);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -230,9 +256,10 @@ fn recorder_pids() -> Option<Vec<u32>> {
     if rows.is_empty() {
         return None;
     }
+    let expected = expected_executables();
     Some(
         rows.into_iter()
-            .filter(|p| same_executable(&p.name))
+            .filter(|p| matches_executable(&p.name, &expected))
             .map(|p| p.pid)
             .collect(),
     )
@@ -247,10 +274,11 @@ fn recorder_pids() -> Option<Vec<u32>> {
     if !output.status.success() || output.stdout.is_empty() {
         return None;
     }
+    let expected = expected_executables();
     let mut pids = Vec::new();
     for line in std::str::from_utf8(&output.stdout).ok()?.lines() {
         let (pid, name) = line.trim().split_once(char::is_whitespace)?;
-        if same_executable(name.trim()) {
+        if matches_executable(name.trim(), &expected) {
             pids.push(pid.parse().ok()?);
         }
     }
@@ -286,6 +314,38 @@ mod tests {
             &split_windows(&format!("ffmpeg.exe -i x -f segment \"{template}\"")).unwrap(),
             &path
         ));
+    }
+
+    #[test]
+    fn executable_matcher_covers_default_and_custom_names_without_probing() {
+        let default_exe = if cfg!(windows) {
+            "C:\\tools\\FFMPEG.EXE"
+        } else {
+            "/opt/homebrew/bin/ffmpeg"
+        };
+        let expected = vec![
+            if cfg!(windows) {
+                "ffmpeg.exe".into()
+            } else {
+                "ffmpeg".into()
+            },
+            if cfg!(windows) {
+                "custom-ffmpeg.exe".into()
+            } else {
+                "custom-ffmpeg".into()
+            },
+        ];
+        assert!(matches_executable(default_exe, &expected));
+        assert!(matches_executable(
+            if cfg!(windows) {
+                "D:\\bin\\Custom-FFmpeg.exe"
+            } else {
+                "/usr/local/bin/custom-ffmpeg"
+            },
+            &expected
+        ));
+        assert!(!matches_executable("/usr/bin/ffprobe", &expected));
+        assert!(!matches_executable("/bin/sleep", &expected));
     }
     #[cfg(windows)]
     #[test]

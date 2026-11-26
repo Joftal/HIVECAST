@@ -4127,29 +4127,59 @@ async fn recover_split_manifest(db: &Db, file: &Path, session_id: &str) -> Optio
                 }
             }
             let mut count = existing.danmaku_count;
+            let mut danmaku_path = existing.danmaku_path.clone();
             // In a split recording the original track can still span all clips.
             // Only a single-clip receipt unambiguously owns the complete writer track.
             if manifest.clips.len() == 1 {
                 if let Some(track) = existing.danmaku_path.as_deref().map(Path::new) {
-                    let result = crate::postprocess::recovered_chat_count(track)
-                        .map_err(AppError::from)
-                        .and_then(|n| {
+                    let ass_path = track.with_extension("ass");
+                    match crate::postprocess::recovered_chat_count(track) {
+                        Ok(n) => {
                             count = n;
-                            if n > 0 && !track.with_extension("ass").is_file() {
-                                crate::postprocess::write_danmaku_ass(track, true)?;
+                            if n > 0 && !ass_path.is_file() {
+                                match crate::postprocess::write_danmaku_ass(track, true) {
+                                    Ok(_) => {}
+                                    Err(AppError::Io(ref err))
+                                        if err.kind() == std::io::ErrorKind::AlreadyExists
+                                            && ass_path.is_file() => {}
+                                    Err(err) => {
+                                        tracing::warn!(%err, "恢复弹幕字幕失败，保留清单重试");
+                                        post_error = Some(format!(
+                                            "{}恢复弹幕字幕失败：{err}",
+                                            post_error
+                                                .as_ref()
+                                                .map(|s| format!("{s}；"))
+                                                .unwrap_or_default()
+                                        ));
+                                        db_ok = false;
+                                    }
+                                }
                             }
-                            Ok(())
-                        });
-                    if let Err(err) = result {
-                        tracing::warn!(%err, "恢复弹幕字幕失败，保留清单重试");
-                        post_error = Some(format!(
-                            "{}恢复弹幕字幕失败：{err}",
-                            post_error
-                                .as_ref()
-                                .map(|s| format!("{s}；"))
-                                .unwrap_or_default()
-                        ));
-                        db_ok = false;
+                        }
+                        Err(err)
+                            if err.kind() == std::io::ErrorKind::NotFound
+                                && track.parent().is_some_and(Path::is_dir) =>
+                        {
+                            // 父目录在线而 .jsonl 确实已缺失（如用户手动删除或退出时清理了 0 字节空弹幕）：
+                            // 清空失效路径并按 0 条放行，避免收尾清单永不清零并反复触发恢复。
+                            tracing::warn!(
+                                path = %track.display(),
+                                "弹幕文件已缺失，跳过弹幕恢复并继续完成收尾"
+                            );
+                            count = 0;
+                            danmaku_path = None;
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, "读取弹幕文件失败，保留清单重试");
+                            post_error = Some(format!(
+                                "{}恢复弹幕字幕失败：{err}",
+                                post_error
+                                    .as_ref()
+                                    .map(|s| format!("{s}；"))
+                                    .unwrap_or_default()
+                            ));
+                            db_ok = false;
+                        }
                     }
                 }
             }
@@ -4165,7 +4195,7 @@ async fn recover_split_manifest(db: &Db, file: &Path, session_id: &str) -> Optio
                 &post_state,
                 existing.source_deleted,
                 post_error.as_deref(),
-                existing.danmaku_path.as_deref(),
+                danmaku_path.as_deref(),
                 count,
                 manifest.error.as_deref(),
             )

@@ -1707,14 +1707,37 @@ pub async fn media_delete_source(
 }
 
 fn room_merge_candidate(session: &RecordSession) -> bool {
-    session.status != "recording"
-        && !(matches!(session.status.as_str(), "failed" | "aborted")
-            && session
-                .file_path
-                .as_deref()
-                .is_none_or(|p| p.trim().is_empty())
-            && session.file_size == 0
-            && session.source_path.is_none())
+    if session.status == "recording" {
+        return false;
+    }
+    if !matches!(session.status.as_str(), "failed" | "aborted") || session.file_size > 0 {
+        return true;
+    }
+    let path = session
+        .file_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let source = session
+        .source_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    match (path, source) {
+        (None, None) => false,
+        (Some(p), s) if s.is_none() || s == Some(p) => {
+            let p = Path::new(p);
+            let empty_on_disk = p.is_absolute()
+                && p.parent().is_some_and(Path::is_dir)
+                && match std::fs::metadata(p) {
+                    Ok(meta) => meta.is_file() && meta.len() == 0,
+                    Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+                }
+                && crate::segment::collect_parts(p).is_empty();
+            !empty_on_disk
+        }
+        _ => true,
+    }
 }
 
 /// 把某个房间已完成的分段按时间顺序合并成一个 mp4。
@@ -2194,6 +2217,30 @@ mod tests {
         }
         row.source_path = Some("master.flv".into());
         assert!(room_merge_candidate(&row));
+        // 0 字节失败尝试：父目录在线、成品不存在或为 0 字节、且无遗留分片时跳过整房合并。
+        let dir = tempfile::tempdir().unwrap();
+        let placeholder = dir.path().join("zero.flv");
+        std::fs::write(&placeholder, []).unwrap();
+        let mut zero_attempt = session("zero", 11, placeholder.clone());
+        zero_attempt.status = "failed".into();
+        zero_attempt.file_size = 0;
+        zero_attempt.source_path = zero_attempt.file_path.clone();
+        assert!(!room_merge_candidate(&zero_attempt));
+        std::fs::remove_file(&placeholder).unwrap();
+        assert!(!room_merge_candidate(&zero_attempt));
+        // 若仍有待恢复分片，不能跳过。
+        std::fs::write(crate::segment::part_name(&placeholder, 0), b"ts").unwrap();
+        assert!(room_merge_candidate(&zero_attempt));
+        // 父目录离线（卷未挂载）时不能静默跳过。
+        let mut offline = session(
+            "offline",
+            12,
+            dir.path().join("missing-vol").join("zero.flv"),
+        );
+        offline.status = "failed".into();
+        offline.file_size = 0;
+        offline.source_path = offline.file_path.clone();
+        assert!(room_merge_candidate(&offline));
         row.source_path = None;
         row.status = "finished".into();
         assert!(room_merge_candidate(&row));

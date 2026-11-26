@@ -280,13 +280,21 @@ pub async fn fallback_concat_range(
             Ok(_) => break,
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 staging = e.file;
-                candidate = target.with_file_name(format!(
-                    "{} ({index}).ts",
-                    target.file_stem().unwrap_or_default().to_string_lossy()
-                ));
             }
-            Err(e) => return Err(e.error.to_string()),
+            Err(e) => {
+                // exFAT / FAT32 等卷不支持 hard_link 时回退到 create_new + 复制，同样保证绝不覆盖。
+                staging = e.file;
+                match crate::post::copy_no_clobber(staging.path(), &candidate) {
+                    Ok(()) => break,
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err.to_string()),
+                }
+            }
         }
+        candidate = target.with_file_name(format!(
+            "{} ({index}).ts",
+            target.file_stem().unwrap_or_default().to_string_lossy()
+        ));
     }
     let target = candidate;
     tracing::info!(

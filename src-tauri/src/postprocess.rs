@@ -580,11 +580,19 @@ pub fn write_danmaku_ass(jsonl: &Path, exclusive: bool) -> Result<PostResult, Ap
     std::io::Write::write_all(&mut file, ass.as_bytes())?;
     file.as_file().sync_all()?;
     if exclusive {
-        file.persist_noclobber(&out)
+        match file.persist_noclobber(&out) {
+            Ok(_) => {}
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(e.error.into());
+            }
+            Err(e) => {
+                // exFAT / FAT32 不支持 hard_link 时回退到 create_new + 复制，仍保证排他不覆盖。
+                crate::post::copy_no_clobber(e.file.path(), &out)?;
+            }
+        }
     } else {
-        file.persist(&out)
+        file.persist(&out).map_err(|e| e.error)?;
     }
-    .map_err(|e| e.error)?;
     tracing::info!(
         target: "hivecast_lib::postprocess",
         task = "ass",
