@@ -264,10 +264,38 @@ fn ensure_file(src: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeDurationExpectation {
+    pub total_ms: u64,
+    pub min_clip_ms: Option<u64>,
+}
+
+/// 拷流拼接会在各段首尾音视频帧边界产生约 10–30 ms 舍入误差。
+/// 容差随段数温和增长（封顶 2.5 秒），同时不超过最短单段时长的一半（下限 250 ms），
+/// 既避免几十段真实直播因累计舍入被误拒，又能拦截任意非极短片段的静默漏片。
+fn merge_duration_tolerance_ms(clip_count: usize, min_clip_ms: Option<u64>) -> u64 {
+    let scaled = 250u64
+        .saturating_add(clip_count.saturating_sub(2) as u64 * 40)
+        .min(2_500);
+    match min_clip_ms {
+        Some(shortest) => scaled.min((shortest / 2).max(250)),
+        None => scaled,
+    }
+}
+
+fn merge_duration_is_short(
+    actual_ms: u64,
+    clip_count: usize,
+    expected: MergeDurationExpectation,
+) -> bool {
+    let tolerance = merge_duration_tolerance_ms(clip_count, expected.min_clip_ms);
+    actual_ms.saturating_add(tolerance) < expected.total_ms
+}
+
 // 多段录制合并成一个 mp4：用 concat 解复用器直接拷流，不做二次编码。
 pub async fn merge(
     sources: &[PathBuf],
-    expected_ms: Option<i64>,
+    expected: Option<MergeDurationExpectation>,
     progress: Option<&Progress<'_>>,
 ) -> Result<PostResult, AppError> {
     if sources.len() < 2 {
@@ -333,14 +361,15 @@ pub async fn merge(
     if size == 0 {
         return Err(AppError::Ffmpeg("合并输出为空".into()));
     }
-    if let Some(expected_ms) = expected_ms {
+    if let Some(expected) = expected {
         let actual_ms = crate::post::media_duration_ms(&out)
             .await
             .ok_or_else(|| AppError::Ffmpeg("无法验证合并产物时长".into()))?;
-        // Stream copy can round timestamps at container/packet boundaries.
-        if actual_ms.saturating_add(250) < expected_ms as u64 {
+        if merge_duration_is_short(actual_ms, sources.len(), expected) {
+            let tolerance = merge_duration_tolerance_ms(sources.len(), expected.min_clip_ms);
             return Err(AppError::Ffmpeg(format!(
-                "合并产物时长不足：预期 {expected_ms} 毫秒，实际 {actual_ms} 毫秒"
+                "合并产物时长不足：预期 {} 毫秒，实际 {} 毫秒（允许误差 {} 毫秒）",
+                expected.total_ms, actual_ms, tolerance
             )));
         }
     }
@@ -1025,7 +1054,16 @@ mod tests {
             .await
             .is_err());
         // A playable output still fails validation if it falls short of the input timeline.
-        assert!(merge(&[first, second], Some(10_000), None).await.is_err());
+        assert!(merge(
+            &[first, second],
+            Some(MergeDurationExpectation {
+                total_ms: 10_000,
+                min_clip_ms: Some(3_000),
+            }),
+            None,
+        )
+        .await
+        .is_err());
         assert_eq!(
             std::fs::read_dir(&dir)
                 .unwrap()
@@ -1053,6 +1091,42 @@ mod tests {
         assert_eq!(two.parent(), Some(dir.as_path()));
         assert!(one.is_file() && two.is_file(), "占位文件必须原子创建");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_duration_tolerance_scales_without_hiding_dropped_clips() {
+        // 2 段 1 秒录像保持 250 ms 容差：正常舍入放行，漏掉 1 段拦住。
+        let two_clips = MergeDurationExpectation {
+            total_ms: 2_000,
+            min_clip_ms: Some(1_000),
+        };
+        assert_eq!(merge_duration_tolerance_ms(2, Some(1_000)), 250);
+        assert!(!merge_duration_is_short(1_800, 2, two_clips));
+        assert!(merge_duration_is_short(1_000, 2, two_clips));
+
+        // 30 段 10 分钟真实直播合并：各段累计舍入 450 ms 放行，漏掉 1 段拦住。
+        let thirty_clips = MergeDurationExpectation {
+            total_ms: 18_000_000,
+            min_clip_ms: Some(600_000),
+        };
+        assert_eq!(merge_duration_tolerance_ms(30, Some(600_000)), 1_370);
+        assert!(!merge_duration_is_short(17_999_550, 30, thirty_clips));
+        assert!(merge_duration_is_short(17_400_000, 30, thirty_clips));
+
+        // 61 段长录像容差封顶 2500 ms。
+        assert_eq!(merge_duration_tolerance_ms(61, Some(600_000)), 2_500);
+
+        // 61 段 1 秒短录像：容差受最短段一半（500 ms）约束，漏掉 1 秒片段仍会拦住。
+        let short_many = MergeDurationExpectation {
+            total_ms: 61_000,
+            min_clip_ms: Some(1_000),
+        };
+        assert_eq!(merge_duration_tolerance_ms(61, Some(1_000)), 500);
+        assert!(!merge_duration_is_short(60_600, 61, short_many));
+        assert!(merge_duration_is_short(60_000, 61, short_many));
+
+        // 极短片段不会把容差压到低于原本的 250 ms。
+        assert_eq!(merge_duration_tolerance_ms(30, Some(200)), 250);
     }
 
     #[test]

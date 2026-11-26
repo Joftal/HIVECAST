@@ -86,6 +86,7 @@ ln -s /Applications "$STAGE/payload/Applications"
 
 mkdir -p "$OUT_DIR"
 rm -f "$DMG"
+# 保留 hdiutil 以兼容 GitHub Actions macos-15 runner（macOS 26/27 才提供 diskutil image）。
 hdiutil create -volname HIVECAST -srcfolder "$STAGE/payload" -ov -format UDZO "$DMG" >/dev/null
 if [[ "$PUBLIC" == true ]]; then
   codesign "${signing_args[@]}" "$DMG"

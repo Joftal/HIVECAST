@@ -1934,6 +1934,13 @@ async fn execute_merge(
     }
     let durations = probe_merge_durations(&plan.files).await?;
     let expected_ms = actual_total_ms(&durations);
+    let expected = expected_ms.map(|total_ms| postprocess::MergeDurationExpectation {
+        total_ms: total_ms.max(0) as u64,
+        min_clip_ms: durations
+            .iter()
+            .filter_map(|value| value.filter(|ms| *ms > 0).map(|ms| ms as u64))
+            .min(),
+    });
     let total_ms = expected_ms.unwrap_or(plan.total_ms);
     let sources = retime_danmaku_sources(plan.danmaku, &durations);
     let progress = app.map(|app| postprocess::Progress {
@@ -1941,7 +1948,7 @@ async fn execute_merge(
         task: "merge",
         total_ms,
     });
-    let merged = postprocess::merge(&plan.files, expected_ms, progress.as_ref()).await?;
+    let merged = postprocess::merge(&plan.files, expected, progress.as_ref()).await?;
     let danmaku = merge_danmaku_files(&sources, &merged.path);
     let session = merged_session(
         plan.room_id.as_deref().unwrap_or_default(),
@@ -2637,6 +2644,33 @@ mod tests {
     }
 
     #[test]
+    fn external_url_validation_rejects_bad_schemes_and_control_chars() {
+        assert_eq!(
+            validate_external_url("  https://live.bilibili.com/6?from=app  ").unwrap(),
+            "https://live.bilibili.com/6?from=app"
+        );
+        assert_eq!(
+            validate_external_url("http://example.com/path").unwrap(),
+            "http://example.com/path"
+        );
+        for bad in [
+            "",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://",
+            "https://live.bilibili.com/6\nopen /Applications/Calculator.app",
+            "https://live.bilibili.com/6\r\n",
+            "http://example.com/\0bad",
+            "ftp://example.com/a",
+        ] {
+            assert!(
+                validate_external_url(bad).is_err(),
+                "expected invalid url to fail: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn canonical_reference_promotes_huya_alias_to_numeric_room() {
         let reference = RoomRef {
             platform: "huya".into(),
@@ -3131,26 +3165,36 @@ pub fn ui_log(level: String, message: String, context: Option<String>) -> Result
     Ok(())
 }
 
+fn validate_external_url(raw: &str) -> Result<String, AppError> {
+    if raw.chars().any(|c| c.is_control()) {
+        return Err(AppError::User("链接包含非法控制字符".into()));
+    }
+    let trimmed = raw.trim();
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| AppError::User("只支持有效的 http/https 链接".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AppError::User("只支持 http/https 链接".into()));
+    }
+    Ok(parsed.into())
+}
+
 /// 打开直播间网页：只允许 http/https，避免把任意协议交给系统。
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), AppError> {
-    let url = url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(AppError::User("只支持 http/https 链接".into()));
-    }
+    let safe_url = validate_external_url(&url)?;
     #[cfg(target_os = "windows")]
     std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", url])
+        .args(["url.dll,FileProtocolHandler", &safe_url])
         .status()
         .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
-        .arg(url)
+        .arg(&safe_url)
         .status()
         .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     std::process::Command::new("xdg-open")
-        .arg(url)
+        .arg(&safe_url)
         .status()
         .map_err(|err| AppError::Internal(format!("无法打开链接：{err}")))?;
     Ok(())

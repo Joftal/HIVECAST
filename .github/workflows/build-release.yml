@@ -120,6 +120,7 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked --lib
+          cargo test --manifest-path ipc-types/Cargo.toml --locked
 
       - name: Build macOS app
         if: runner.os == 'macOS'

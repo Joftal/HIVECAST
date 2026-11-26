@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, useReducedMotion } from "motion/react";import { Button, IconButton, cx } from "./components/ui/Controls";
+import { motion, useReducedMotion } from "motion/react";
+import { Button, IconButton, cx } from "./components/ui/Controls";
 import WindowControls from "./components/WindowControls";
 import { ToastStack } from "./components/arc/toast-stack/toast-stack";
 import { UndoToast } from "./components/arc/undo-toast/undo-toast";
 import ResizeHandles from "./components/ResizeHandles";
-import RoomRecordingsPage from "./features/media/RoomRecordingsPage";
 import MonitorPage from "./features/monitor/MonitorPage";
-import SettingsView, { type PageKey } from "./features/settings/SettingsView";
-import TasksPage from "./features/tasks/TasksPage";
-import WatchPage, { type WatchSeed } from "./features/watch/WatchPage";
+import type { PageKey } from "./features/settings/SettingsView";
+import type { WatchSeed } from "./features/watch/WatchPage";
+
+const RoomRecordingsPage = lazy(() => import("./features/media/RoomRecordingsPage"));
+const SettingsView = lazy(() => import("./features/settings/SettingsView"));
+const TasksPage = lazy(() => import("./features/tasks/TasksPage"));
+const WatchPage = lazy(() => import("./features/watch/WatchPage"));
 import { setLanguage, setLanguagePreference, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
 import CloseDialog from "./features/close/CloseDialog";
@@ -494,6 +498,7 @@ export default function App() {
         transition={{ duration: reduceMotion ? 0 : 0.16, ease: PAGE_EASE }}
         className="flex min-h-0 flex-1 flex-col"
       >
+        <Suspense fallback={null}>
         {tab === "monitor" ? (
           roomFiles ? (
             <RoomRecordingsPage
@@ -565,6 +570,7 @@ export default function App() {
             }}
           />
         )}
+        </Suspense>
       </motion.main>
 
       {closeTasks ? (

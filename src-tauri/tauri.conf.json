@@ -38,7 +38,7 @@
     "copyright": "© 2026 HIVECAST",
     "category": "Video",
     "shortDescription": "多平台直播录制与分屏观看",
-    "longDescription": "HIVECAST 是一套桌面端直播工具：同时录制哔哩哔哩、斗鱼、虎牙、抖音的直播间，支持四路分屏观看、弹幕与媒体库管理。",
+    "longDescription": "HIVECAST 是一套桌面端直播工具：同时录制哔哩哔哩、斗鱼、虎牙、抖音的直播间，支持四路分屏观看、弹幕记录、录制文件管理与任务追踪。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

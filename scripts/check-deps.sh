@@ -54,6 +54,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
 
 step "Rust 测试"
 cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo test --manifest-path src-tauri/ipc-types/Cargo.toml --locked
 
 if ((outdated)); then
   step "前端过期检查"
