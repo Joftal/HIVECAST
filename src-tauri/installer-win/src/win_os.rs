@@ -144,7 +144,7 @@ pub fn is_app_running() -> bool {
 /// Show native folder picker dialog via STA PowerShell (initial directory passed via env var).
 pub fn pick_folder(initial: &Path) -> Option<PathBuf> {
     let script = r#"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
 $dlg.Description = '选择 HIVECAST 安装目录'
@@ -157,7 +157,15 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 "#;
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-STA",
+            "-Command",
+            script,
+        ])
         .env("HIVECAST_INIT_DIR", initial)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
@@ -166,7 +174,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     if !output.status.success() {
         return None;
     }
-    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let chosen = crate::install::sanitize_dir_input(&String::from_utf8_lossy(&output.stdout));
     if chosen.is_empty() {
         None
     } else {
@@ -227,9 +235,11 @@ pub fn remove_shortcuts() {
             .join("HIVECAST.lnk");
         let _ = fs::remove_file(start_lnk);
     }
-    if let Ok(profile) = env::var("USERPROFILE") {
-        let desk_lnk = PathBuf::from(profile).join("Desktop").join("HIVECAST.lnk");
-        let _ = fs::remove_file(desk_lnk);
+    for var in ["USERPROFILE", "OneDrive", "OneDriveConsumer"] {
+        if let Ok(base) = env::var(var) {
+            let desk_lnk = PathBuf::from(base).join("Desktop").join("HIVECAST.lnk");
+            let _ = fs::remove_file(desk_lnk);
+        }
     }
 }
 
@@ -284,9 +294,8 @@ pub fn write_uninstall_registry(
 }
 
 pub fn read_installed_dir() -> Option<PathBuf> {
-    read_reg_string(HKEY_CURRENT_USER, UNINSTALL_REG_SUBKEY, "InstallLocation")
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
+    let raw = read_reg_string(HKEY_CURRENT_USER, UNINSTALL_REG_SUBKEY, "InstallLocation")?;
+    crate::install::validate_install_dir(&raw).ok()
 }
 
 pub fn delete_uninstall_registry() {
@@ -435,8 +444,12 @@ fn read_reg_string(root: HKEY, subkey: &str, name: &str) -> Option<String> {
     if q2 != 0 {
         return None;
     }
-    while buf.last() == Some(&0) {
-        buf.pop();
+    let valid_u16s = (byte_len as usize) / 2;
+    if valid_u16s < buf.len() {
+        buf.truncate(valid_u16s);
+    }
+    if let Some(nul_pos) = buf.iter().position(|&c| c == 0) {
+        buf.truncate(nul_pos);
     }
     Some(String::from_utf16_lossy(&buf))
 }

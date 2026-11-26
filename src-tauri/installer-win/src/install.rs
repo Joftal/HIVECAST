@@ -79,15 +79,33 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
     }
 }
 
+/// Strip surrounding whitespace, trailing NULs, and invisible Unicode BOM/bidi marks
+/// (commonly injected when reading legacy registry values or copying paths from Explorer).
+pub fn sanitize_dir_input(raw: &str) -> String {
+    let before_nul = raw.split('\0').next().unwrap_or("");
+    before_nul
+        .trim()
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '\u{feff}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
+            )
+        })
+        .trim()
+        .to_string()
+}
+
 pub fn default_install_dir() -> PathBuf {
     if let Ok(local) = env::var("LOCALAPPDATA") {
-        if !local.trim().is_empty() {
-            return PathBuf::from(local).join("HIVECAST");
+        let clean = sanitize_dir_input(&local);
+        if !clean.is_empty() {
+            return PathBuf::from(clean).join("HIVECAST");
         }
     }
     if let Ok(home) = env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
-        if !home.trim().is_empty() {
-            return PathBuf::from(home).join("HIVECAST");
+        let clean = sanitize_dir_input(&home);
+        if !clean.is_empty() {
+            return PathBuf::from(clean).join("HIVECAST");
         }
     }
     PathBuf::from("HIVECAST")
@@ -95,15 +113,15 @@ pub fn default_install_dir() -> PathBuf {
 
 /// Validate that a chosen install path is safe (absolute, non-root, non-system).
 pub fn validate_install_dir(raw: &str) -> Result<PathBuf, String> {
-    let trimmed = raw.trim();
+    let trimmed = sanitize_dir_input(raw);
     if trimmed.is_empty() {
         return Err("安装路径不能为空".into());
     }
-    if trimmed.chars().any(|c| c.is_control()) {
-        return Err("安装路径包含非法控制字符".into());
+    if let Some(bad) = trimmed.chars().find(|c| c.is_control()) {
+        return Err(format!("安装路径包含非法控制字符（U+{:04X}）", bad as u32));
     }
-    let path = PathBuf::from(trimmed);
-    if !path.is_absolute() && !looks_like_windows_absolute(trimmed) {
+    let path = PathBuf::from(&trimmed);
+    if !path.is_absolute() && !looks_like_windows_absolute(&trimmed) {
         return Err("请选择完整的绝对路径".into());
     }
     let normalized = trimmed
@@ -234,6 +252,11 @@ mod tests {
     fn install_dir_validation_blocks_roots_and_system_dirs() {
         assert!(validate_install_dir(r"C:\Users\alice\AppData\Local\HIVECAST").is_ok());
         assert!(validate_install_dir(r"D:\工具\HIVECAST").is_ok());
+        // Legacy registry NUL tail & Explorer BOM/bidi marks are sanitized cleanly.
+        assert_eq!(
+            validate_install_dir("\u{feff}\u{202a}C:\\Users\\alice\\HIVECAST\0garbage").unwrap(),
+            PathBuf::from(r"C:\Users\alice\HIVECAST")
+        );
         for bad in [
             "",
             "   ",

@@ -171,6 +171,7 @@
     font-size: 11.5px;
     font-weight: 600;
     cursor: pointer;
+    outline: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -180,6 +181,10 @@
   .icon-btn:hover {
     background: var(--ctrl-hover);
     color: var(--text);
+  }
+
+  .icon-btn:focus-visible {
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
   }
 
   .icon-btn.close:hover {
@@ -205,27 +210,13 @@
     margin-top: 8px;
   }
 
-  .app-icon-wrap {
-    position: relative;
-    width: 82px;
-    height: 82px;
-    border-radius: 24px;
-    background: var(--surface-strong);
-    border: 1px solid var(--icon-ring);
-    box-shadow:
-      0 14px 32px -10px var(--icon-shadow),
-      inset 0 1px 0 rgba(255, 255, 255, 0.8);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(16px);
-  }
-
-  .app-icon-wrap img {
-    width: 64px;
-    height: 64px;
-    border-radius: 16px;
+  .app-logo {
+    width: 84px;
+    height: 84px;
     display: block;
+    object-fit: contain;
+    filter: drop-shadow(0 12px 22px var(--icon-shadow));
+    -webkit-user-drag: none;
   }
 
   h1 {
@@ -328,6 +319,7 @@
     width: 100%;
     height: 46px;
     border: none;
+    outline: none;
     border-radius: 14px;
     background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
     color: #ffffff;
@@ -338,7 +330,7 @@
     box-shadow:
       0 10px 24px -8px var(--accent-shadow),
       inset 0 1px 0 rgba(255, 255, 255, 0.35);
-    transition: transform 120ms ease, filter 140ms ease, opacity 140ms ease;
+    transition: transform 120ms ease, filter 140ms ease, opacity 140ms ease, box-shadow 140ms ease;
   }
 
   .primary-btn:hover:not(:disabled) {
@@ -348,6 +340,12 @@
 
   .primary-btn:active:not(:disabled) {
     transform: translateY(0);
+  }
+
+  .primary-btn:focus-visible {
+    box-shadow:
+      0 10px 24px -8px var(--accent-shadow),
+      0 0 0 3px rgba(59, 130, 246, 0.34);
   }
 
   .primary-btn:disabled {
@@ -370,6 +368,7 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    outline: none;
     transition: background 140ms ease;
   }
 
@@ -381,6 +380,7 @@
     align-self: center;
     background: transparent;
     border: none;
+    outline: none;
     color: var(--text-3);
     font-size: 12px;
     font-weight: 500;
@@ -668,17 +668,19 @@
     </div>
     <div class="win-actions">
       <button class="icon-btn" id="langBtn" title="Switch language">EN</button>
-      <button class="icon-btn" id="themeBtn" title="Toggle theme">☾</button>
-      <button class="icon-btn" id="minBtn" title="Minimize">─</button>
-      <button class="icon-btn close" id="closeBtn" title="Close">✕</button>
+      <button class="icon-btn" id="themeBtn" title="Toggle theme"></button>
+      <button class="icon-btn" id="minBtn" title="Minimize">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <button class="icon-btn close" id="closeBtn" title="Close">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+      </button>
     </div>
   </div>
 
   <div class="main">
     <div class="hero">
-      <div class="app-icon-wrap">
-        <img src="__ICON_DATA_URI__" alt="HIVECAST" />
-      </div>
+      <img class="app-logo" src="__ICON_DATA_URI__" alt="HIVECAST" />
       <h1 id="heroTitle">HIVECAST</h1>
       <div class="subtitle" id="heroSub">多平台直播录制与弹幕同步桌面端</div>
       <div class="pill-row" id="pillRow"></div>
@@ -705,7 +707,7 @@
       <div class="cta-wrap">
         <button class="options-toggle" id="optionsToggle">
           <span id="optionsToggleText">自定义安装选项</span>
-          <span class="chevron">▾</span>
+          <svg class="chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
         <button class="primary-btn" id="installBtn">立即安装</button>
         <div class="foot-note" id="footNote">安装到当前用户目录，无需管理员权限</div>
@@ -866,9 +868,12 @@ function showView(id) {
   }
 }
 
+const SUN_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+const MOON_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
+
 function applyTheme() {
   document.documentElement.classList.toggle("dark", state.dark);
-  document.getElementById("themeBtn").textContent = state.dark ? "☀" : "☾";
+  document.getElementById("themeBtn").innerHTML = state.dark ? SUN_ICON : MOON_ICON;
 }
 
 function renderTexts() {
@@ -945,6 +950,12 @@ function showError(msg) {
     box.classList.add("show");
   } else {
     showView("viewReady");
+    if (msg.includes("安装路径") && !state.optionsOpen) {
+      state.optionsOpen = true;
+      document.getElementById("optionsToggle").classList.add("open");
+      document.getElementById("optionsPanel").classList.add("open");
+      renderTexts();
+    }
     const box = document.getElementById("readyError");
     box.textContent = msg;
     box.classList.add("show");
