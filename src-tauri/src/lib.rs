@@ -43,8 +43,8 @@ mod updater;
 mod view;
 mod window_state;
 
-use std::sync::Arc;
 use state::AppState;
+use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
