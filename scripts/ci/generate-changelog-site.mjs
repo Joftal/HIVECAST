@@ -681,21 +681,47 @@ function renderHtml(feed) {
     overflow-y: auto;
   }
   .ver-nav-link {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 9px;
+    padding: 6px 10px 6px 12px;
     border-radius: 7px;
     text-decoration: none;
     color: var(--c-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 12px;
     font-weight: 600;
-    transition: background 120ms ease, color 120ms ease;
+    transition: background 140ms ease, color 140ms ease;
   }
-  .ver-nav-link:hover, .ver-nav-link.first {
+  .ver-nav-link::before {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 7px;
+    bottom: 7px;
+    width: 3px;
+    border-radius: 999px;
+    background: var(--c-accent);
+    opacity: 0;
+    transform: scaleY(0.5);
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+  .ver-nav-link:hover {
+    background: var(--c-raised);
+    color: var(--c-ink);
+  }
+  .ver-nav-link.active {
     background: var(--c-accent-soft);
     color: var(--c-accent-text);
+  }
+  .ver-nav-link.active::before {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  .ver-nav-link.active .ver-nav-date {
+    color: var(--c-accent-text);
+    opacity: 0.78;
   }
   .ver-nav-date {
     font-size: 10px;
@@ -706,7 +732,7 @@ function renderHtml(feed) {
   /* Timeline Column */
   .timeline {
     position: relative;
-    padding-left: 24px;
+    padding-left: 28px;
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -714,11 +740,12 @@ function renderHtml(feed) {
   .timeline::before {
     content: "";
     position: absolute;
-    left: 6px;
-    top: 12px;
-    bottom: 12px;
+    left: 9px;
+    top: 28px;
+    bottom: 28px;
     width: 2px;
-    background: linear-gradient(180deg, var(--c-accent) 0%, var(--c-line-strong) 24%, var(--c-line) 100%);
+    border-radius: 999px;
+    background: var(--c-line);
   }
   .release-card {
     position: relative;
@@ -728,23 +755,33 @@ function renderHtml(feed) {
     background: var(--c-surface-solid);
     padding: 20px 22px;
     box-shadow: var(--shadow-card);
-    transition: border-color 150ms ease;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
   }
   .release-card:hover { border-color: var(--c-line-strong); }
+  .release-card.is-active {
+    border-color: var(--c-accent-line);
+  }
   .release-card::before {
     content: "";
     position: absolute;
-    left: -24px;
-    top: 24px;
-    width: 14px;
-    height: 14px;
+    left: -25px;
+    top: 25px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
-    background: var(--c-line-strong);
-    border: 3px solid var(--c-canvas);
+    background: var(--c-surface-solid);
+    border: 2.5px solid var(--c-line-strong);
+    box-shadow: 0 0 0 4px var(--c-canvas);
+    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
   }
   .release-card.latest::before {
+    border-color: var(--c-accent);
+  }
+  .release-card.is-active::before {
     background: var(--c-accent);
-    box-shadow: 0 0 0 4px var(--c-accent-soft);
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 4px var(--c-canvas), 0 0 0 7px var(--c-accent-soft);
+    transform: scale(1.08);
   }
   .card-head {
     display: flex;
@@ -1109,7 +1146,8 @@ const state = {
   lang: (localStorage.getItem("hivecast-cl-lang") || (navigator.language.startsWith("zh") ? "zh" : "en")) === "en" ? "en" : "zh",
   theme: localStorage.getItem("hivecast-cl-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
   channel: "all",
-  query: ""
+  query: "",
+  activeVersion: null
 };
 
 function t(k) { return I18N[state.lang][k]; }
@@ -1179,6 +1217,75 @@ function renderSpotlight() {
     '<div class="spot-downloads">' + rowsHtml + '</div>';
 }
 
+function readHashVersion() {
+  if (typeof location === "undefined" || !location.hash) return null;
+  const m = /^#rel-(.+)$/.exec(location.hash);
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+}
+
+function setActiveVersion(ver) {
+  if (!ver || state.activeVersion === ver) return;
+  state.activeVersion = ver;
+  document.querySelectorAll(".ver-nav-link").forEach((el) => {
+    el.classList.toggle("active", el.dataset.ver === ver);
+  });
+  document.querySelectorAll(".release-card").forEach((el) => {
+    el.classList.toggle("is-active", el.dataset.ver === ver);
+  });
+}
+
+function syncActiveFromScroll() {
+  if (typeof window === "undefined") return;
+  const cards = Array.from(document.querySelectorAll(".release-card"));
+  if (cards.length === 0) return;
+  const docEl = document.documentElement;
+  const atBottom =
+    docEl &&
+    typeof window.scrollY === "number" &&
+    typeof window.innerHeight === "number" &&
+    window.scrollY > 40 &&
+    window.scrollY + window.innerHeight >= docEl.scrollHeight - 24;
+  if (atBottom) {
+    setActiveVersion(cards[cards.length - 1].dataset.ver);
+    return;
+  }
+  const anchorY = 140;
+  let current = cards[0].dataset.ver;
+  for (const card of cards) {
+    if (typeof card.getBoundingClientRect !== "function") break;
+    if (card.getBoundingClientRect().top <= anchorY) {
+      current = card.dataset.ver;
+    } else {
+      break;
+    }
+  }
+  setActiveVersion(current);
+}
+
+let scrollRaf = 0;
+let clickLockUntil = 0;
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("scroll", () => {
+    if (Date.now() < clickLockUntil) return;
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      syncActiveFromScroll();
+    });
+  }, { passive: true });
+  window.addEventListener("hashchange", () => {
+    const hashVer = readHashVersion();
+    if (!hashVer) return;
+    clickLockUntil = Date.now() + 450;
+    setActiveVersion(hashVer);
+    const target = document.getElementById("rel-" + hashVer);
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
+}
+
 function renderTimeline() {
   const q = state.query.trim().toLowerCase();
   const filtered = FEED.releases.filter((r) => {
@@ -1189,13 +1296,43 @@ function renderTimeline() {
     return (r.notes || []).some((n) => (n.text || "").toLowerCase().includes(q));
   });
 
+  let hashMatched = false;
+  if (filtered.length === 0) {
+    state.activeVersion = null;
+  } else if (!filtered.some((r) => r.version === state.activeVersion)) {
+    const hashVer = readHashVersion();
+    if (hashVer && filtered.some((r) => r.version === hashVer)) {
+      state.activeVersion = hashVer;
+      hashMatched = true;
+    } else {
+      state.activeVersion = filtered[0].version;
+    }
+  }
+
   const nav = document.getElementById("verNavList");
-  nav.innerHTML = filtered.map((r, i) =>
-    '<a class="ver-nav-link ' + (i === 0 ? 'first' : '') + '" href="#rel-' + esc(r.version) + '">' +
+  nav.innerHTML = filtered.map((r) =>
+    '<a class="ver-nav-link ' + (r.version === state.activeVersion ? 'active' : '') + '" data-ver="' + esc(r.version) + '" href="#rel-' + esc(r.version) + '">' +
       '<span>v' + esc(r.version) + '</span>' +
       '<span class="ver-nav-date">' + esc((r.publishedAt || "").slice(5)) + '</span>' +
     '</a>'
   ).join("");
+
+  document.querySelectorAll(".ver-nav-link").forEach((link) => {
+    link.addEventListener("click", (e) => {
+      const ver = link.dataset.ver;
+      if (!ver) return;
+      clickLockUntil = Date.now() + 650;
+      setActiveVersion(ver);
+      const target = document.getElementById("rel-" + ver);
+      if (target && typeof target.scrollIntoView === "function") {
+        e.preventDefault();
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (typeof history !== "undefined" && typeof history.replaceState === "function") {
+          history.replaceState(null, "", "#rel-" + ver);
+        }
+      }
+    });
+  });
 
   const root = document.getElementById("timeline");
   if (filtered.length === 0) {
@@ -1206,6 +1343,7 @@ function renderTimeline() {
   const tags = t("tags");
   root.innerHTML = filtered.map((r) => {
     const isLatest = !r.prerelease && r.version === FEED.latestStable;
+    const isActive = r.version === state.activeVersion;
     const pill = r.prerelease
       ? '<span class="pill pre">Pre-release</span>'
       : (isLatest ? '<span class="pill">Latest</span>' : '');
@@ -1222,7 +1360,7 @@ function renderTimeline() {
           '</a>'
         ).join("") + '</div>'
       : '';
-    return '<article class="release-card ' + (isLatest ? 'latest' : '') + '" id="rel-' + esc(r.version) + '">' +
+    return '<article class="release-card ' + (isLatest ? 'latest ' : '') + (isActive ? 'is-active' : '') + '" data-ver="' + esc(r.version) + '" id="rel-' + esc(r.version) + '">' +
       '<div class="card-head">' +
         '<div class="card-ver-row">' +
           '<a class="ver-link" href="' + esc(r.url) + '" target="_blank" rel="noopener">v' + esc(r.version) + '</a>' +
@@ -1237,6 +1375,15 @@ function renderTimeline() {
       assetsHtml +
     '</article>';
   }).join("");
+  if (hashMatched && state.activeVersion) {
+    clickLockUntil = Date.now() + 450;
+    const target = document.getElementById("rel-" + state.activeVersion);
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "auto", block: "start" });
+    }
+  } else if (Date.now() >= clickLockUntil) {
+    syncActiveFromScroll();
+  }
 }
 
 function renderAll() {

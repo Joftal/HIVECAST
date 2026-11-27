@@ -491,19 +491,13 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
       {/* 2. Version, Update Check & Embedded Changelog Panel */}
       <section className="overflow-hidden rounded-[12px] border border-line bg-surface shadow-[var(--shadow-card)]">
         <div className="flex flex-wrap items-center justify-between gap-3 px-[18px] pb-3.5 pt-4">
-          <div>
-            <div className="text-[11.5px] text-faint">
-              {t("settings.aboutCurrentVersion")} · {t("settings.aboutVersionSynced")}
-            </div>
-            <div className="mt-0.5 flex items-baseline gap-2">
-              <span className="font-mono text-[20px] font-bold tracking-[-0.02em] text-ink">
-                v{version}
-              </span>
-              <span className="rounded-full border border-line bg-raised px-2 py-0.5 text-[11px] font-medium text-muted">
-                {platformLabel}
-                {archLabel ? ` ${archLabel}` : ""} · OSS
-              </span>
-            </div>
+          <div className="flex items-baseline gap-2.5">
+            <span className="text-[12.5px] font-medium text-muted">
+              {t("settings.aboutCurrentVersion")}
+            </span>
+            <span className="font-mono text-[20px] font-bold tracking-[-0.02em] text-ink">
+              v{version}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -537,7 +531,7 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
             ) : !updateResult ? (
               <>
                 <RefreshCw className="h-4 w-4 shrink-0 text-muted" />
-                <span className="text-muted">{t("settings.aboutVersionSynced")}</span>
+                <span className="text-muted">{t("settings.aboutCheckUpdate")}</span>
               </>
             ) : updateResult.hasUpdate && updateResult.latestVersion ? (
               <>
@@ -564,11 +558,6 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
               <>
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-ok" />
                 <span className="text-ok">{t("settings.aboutUpToDate")}</span>
-                {updateResult.source ? (
-                  <span className="ml-1 hidden font-mono text-[10.5px] text-faint sm:inline">
-                    ({t("settings.aboutUpdateSource", { source: updateResult.source })})
-                  </span>
-                ) : null}
               </>
             )}
           </div>
@@ -612,9 +601,6 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
             <div className="flex items-center gap-2 text-[12.5px] font-semibold text-ink">
               <FileText className="h-3.5 w-3.5 text-muted" />
               <span>{t("settings.aboutChangelogTitle")}</span>
-              <span className="rounded-full bg-raised px-2 py-0.5 text-[10.5px] font-medium text-faint">
-                {t("settings.aboutChangelogSync")}
-              </span>
             </div>
             <span className="inline-flex items-center gap-1 text-[11.5px] text-faint">
               {changelogOpen ? t("settings.aboutChangelogCollapse") : t("settings.aboutChangelogExpand")}
