@@ -24,9 +24,31 @@ pub enum CliAction {
     },
 }
 
+pub fn is_uninstaller_exe(exe_path: &Path) -> bool {
+    exe_path
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("uninstall.exe"))
+}
+
+#[cfg(test)]
 pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
+    parse_cli_for_exe(None, true, args)
+}
+
+pub fn parse_cli_for_exe(
+    exe_path: Option<&Path>,
+    has_payload: bool,
+    args: &[String],
+) -> Result<CliAction, String> {
+    // 卸载程序（名为 uninstall.exe，或不含内嵌安装载荷的独立卸载体）只允许进入卸载流程，
+    // 安装与覆盖升级严格由携带载荷的安装包（setup.exe）负责。
+    let uninstaller_only = !has_payload || exe_path.is_some_and(is_uninstaller_exe);
     if args.is_empty() {
-        return Ok(CliAction::GuiInstall);
+        return Ok(if uninstaller_only {
+            CliAction::GuiUninstall
+        } else {
+            CliAction::GuiInstall
+        });
     }
     if args[0] == "--pack" {
         if args.len() != 5 {
@@ -43,7 +65,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
         return Ok(CliAction::SelfTest);
     }
 
-    let mut uninstall = false;
+    let mut uninstall = uninstaller_only;
     let mut silent = false;
     let mut desktop_shortcut = true;
     let mut purge_data = false;
@@ -387,6 +409,40 @@ mod tests {
         assert_eq!(
             normalize_browsed_dir(Path::new(r"D:\")),
             Path::new(r"D:\").join("HIVECAST")
+        );
+    }
+
+    #[test]
+    fn uninstaller_exe_defaults_to_uninstall_without_flag() {
+        assert_eq!(
+            parse_cli_for_exe(Some(Path::new("uninstall.exe")), false, &[]).unwrap(),
+            CliAction::GuiUninstall
+        );
+        // Even if renamed, a payload-less uninstaller binary must never enter install/upgrade mode.
+        assert_eq!(
+            parse_cli_for_exe(Some(Path::new("remove-hivecast.exe")), false, &[]).unwrap(),
+            CliAction::GuiUninstall
+        );
+        assert_eq!(
+            parse_cli_for_exe(
+                Some(Path::new("/tmp/UNINSTALL.EXE")),
+                false,
+                &["--silent".into(), "--purge-data".into()]
+            )
+            .unwrap(),
+            CliAction::SilentUninstall {
+                dir: None,
+                purge_data: true,
+            }
+        );
+        assert_eq!(
+            parse_cli_for_exe(
+                Some(Path::new("HIVECAST-v1.0.0-Windows-x64-setup.exe")),
+                true,
+                &[]
+            )
+            .unwrap(),
+            CliAction::GuiInstall
         );
     }
 }

@@ -120,7 +120,10 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
-        .with_title("HIVECAST Setup")
+        .with_title(match mode {
+            GuiMode::Install => "HIVECAST Setup",
+            GuiMode::Uninstall => "HIVECAST Uninstall",
+        })
         .with_inner_size(LogicalSize::new(432.0, 520.0))
         .with_decorations(false)
         .with_resizable(false)
@@ -198,6 +201,9 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         win_os::apply_window_material(window.hwnd(), dark);
                     }
                     IpcCommand::Browse { current_dir } => {
+                        if mode != GuiMode::Install {
+                            return;
+                        }
                         let worker_proxy = proxy.clone();
                         let init = PathBuf::from(current_dir);
                         thread::spawn(move || {
@@ -218,7 +224,7 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         dir,
                         desktop_shortcut,
                     } => {
-                        if busy {
+                        if mode != GuiMode::Install || busy {
                             return;
                         }
                         busy = true;
@@ -258,6 +264,9 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         *control_flow = ControlFlow::Exit;
                     }
                     IpcCommand::Uninstall { dir, purge_data } => {
+                        if mode != GuiMode::Uninstall {
+                            return;
+                        }
                         let target = match install::validate_install_dir(&dir) {
                             Ok(p) => p,
                             Err(msg) => {

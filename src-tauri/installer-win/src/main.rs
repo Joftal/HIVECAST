@@ -17,7 +17,12 @@ use crate::install::CliAction;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let action = match install::parse_cli(&args) {
+    let current_exe = env::current_exe().ok();
+    let has_payload = current_exe
+        .as_deref()
+        .and_then(|exe| payload::locate_payload(exe).ok().flatten())
+        .is_some();
+    let action = match install::parse_cli_for_exe(current_exe.as_deref(), has_payload, &args) {
         Ok(action) => action,
         Err(err) => {
             eprintln!("{err}");
@@ -92,10 +97,7 @@ fn preferred_install_dir() -> PathBuf {
 
 fn resolve_uninstall_dir(cli_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     let exe = env::current_exe().map_err(|e| e.to_string())?;
-    if exe
-        .file_name()
-        .is_some_and(|n| n.eq_ignore_ascii_case("uninstall.exe"))
-    {
+    if install::is_uninstaller_exe(&exe) {
         let parent = exe.parent().ok_or("无法定位卸载程序目录")?;
         if cli_dir
             .as_ref()

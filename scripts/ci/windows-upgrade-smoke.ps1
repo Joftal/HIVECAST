@@ -61,7 +61,8 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $emptyDir "cache"), (Join-Path $emptyDir "webview"), (Join-Path $emptyDir "logs") | Out-Null
     Set-Content -LiteralPath (Join-Path $emptyDir "logs\app.log") -Value "log" -NoNewline
     $emptyUninst = Join-Path $emptyDir "uninstall.exe"
-    Invoke-Installer $emptyUninst @("--uninstall", "--silent")
+    # Verify running uninstall.exe directly without --uninstall defaults to uninstall mode.
+    Invoke-Installer $emptyUninst @("--silent")
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ((Test-Path -LiteralPath $emptyDir) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
     if ((Test-Path -LiteralPath $emptyDir) -or (Test-Path $registry) -or (Test-Path $shortcut)) {
