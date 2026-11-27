@@ -13,6 +13,8 @@ mod error;
 mod ffmpeg;
 mod filename;
 mod huya_auth;
+#[cfg(windows)]
+mod install_receipt;
 mod instance;
 mod jce;
 mod jobs;
@@ -33,6 +35,7 @@ mod replay_index;
 mod retention;
 mod secret;
 mod segment;
+mod session_cache;
 mod settings;
 mod state;
 mod stream;
@@ -64,6 +67,20 @@ pub fn run() {
             // 锁跟着进程走，崩溃遗留的 lock 文件不会挡住下次启动。
             let lock = match crate::instance::acquire(&paths.data_dir) {
                 Ok(lock) => lock,
+                Err(err) if err.kind() != std::io::ErrorKind::WouldBlock => {
+                    let message = format!(
+                        "无法访问 HIVECAST 数据目录 {}：{err}。请检查目录类型和写入权限。",
+                        paths.data_dir.display()
+                    );
+                    tracing::error!("{message}");
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("HIVECAST")
+                        .body(&message)
+                        .show();
+                    return Err(message.into());
+                }
                 Err(err) => {
                     tracing::warn!(%err, "已有实例在运行，本次启动退出");
                     eprintln!("HIVECAST 已在运行，本次启动退出");
@@ -227,6 +244,18 @@ pub fn run() {
                             "创建 WebView2 数据目录失败，回落到系统默认目录"
                         );
                     } else {
+                        if paths::portable_root()
+                            .is_some_and(|root| root.join("webview") == *webview_dir)
+                            && std::fs::read_dir(webview_dir)
+                                .is_ok_and(|mut entries| entries.next().is_none())
+                        {
+                            use std::io::Write;
+                            if let Ok(mut marker) =
+                                std::fs::File::create_new(webview_dir.join(".hivecast-webview"))
+                            {
+                                let _ = marker.write_all(b"HIVECAST WebView2 v1");
+                            }
+                        }
                         win_builder = win_builder.data_directory(webview_dir.clone());
                     }
                 }
@@ -336,6 +365,7 @@ pub fn run() {
             commands::sessions_merge,
             commands::settings_get,
             commands::settings_update,
+            commands::settings_preferences,
             commands::filename_preview,
             commands::layout_get,
             commands::layout_set,

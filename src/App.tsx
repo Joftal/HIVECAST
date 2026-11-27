@@ -30,6 +30,8 @@ import {
   onCloseReady,
   settingsGet,
   settingsUpdate,
+  settingsPreferences,
+  type Preferences,
   type ActiveTask,
   type RoomRecord,
   type Settings,
@@ -51,9 +53,9 @@ export default function App() {
   const [settingsChangedCount, setSettingsChangedCount] = useState(0);
   const [settingsSaving, setSettingsSaving] = useState(false);
   // 未保存时离开设置：先默认保存，再用底部 Undo toast 给一次反悔机会。
-  const [settingsUndo, setSettingsUndo] = useState<{ before: Settings; count: number } | null>(null);
+  const [settingsUndo, setSettingsUndo] = useState<{ before: Partial<Settings>; count: number } | null>(null);
   // SettingsView 把保存函数注册到这里；返回保存前的快照，失败返回 null。
-  const settingsSaveRef = useRef<((options?: { quiet?: boolean }) => Promise<Settings | null>) | null>(null);
+  const settingsSaveRef = useRef<((options?: { quiet?: boolean }) => Promise<Partial<Settings> | null>) | null>(null);
   // 顶栏改主题/语言时，通知设置页同步本地副本，避免保存时把旧值写回。
   const settingsSyncRef = useRef<((patch: Partial<Settings>) => void) | null>(null);
   // 设置是常规页签，记住进入前的页面，关闭时回到那里。
@@ -98,7 +100,7 @@ export default function App() {
     setSettingsChangedCount(changedCount);
   }, []);
 
-  const registerSettingsSave = useCallback((save: ((options?: { quiet?: boolean }) => Promise<Settings | null>) | null) => {
+  const registerSettingsSave = useCallback((save: ((options?: { quiet?: boolean }) => Promise<Partial<Settings> | null>) | null) => {
     settingsSaveRef.current = save;
   }, []);
 
@@ -286,11 +288,16 @@ export default function App() {
     [],
   );
 
-  const persist = (patch: Record<string, unknown>) => {
+  const persist = (patch: Preferences) => {
     if (!isTauri()) return;
-    void settingsGet()
-      .then((settings) => settingsUpdate({ ...settings, ...patch }))
-      .catch(() => undefined);
+    void settingsPreferences(patch).then((saved) => {
+      notifyRef.current = saved;
+      if (patch.theme) {
+        setTheme(saved.theme as ThemeMode);
+        setAppearance(applyTheme(saved.theme as ThemeMode));
+      }
+      if (patch.language) setLanguagePreference(saved.language as Language | "system");
+    }).catch((err) => notify.error(err));
   };
 
   // 顶栏语言切换也写回设置，免得重启后被设置里的旧值覆盖。
@@ -312,11 +319,11 @@ export default function App() {
     setAppearance(next);
     // 设置页可能正开着：同步它的本地副本，保存时才不会把旧主题写回去。
     settingsSyncRef.current?.({ theme: next });
+    persist({ theme: next });
     themeTimer.current = window.setTimeout(() => {
       themeTimer.current = null;
       const apply = () => {
         applyTheme(next);
-        persist({ theme: next });
       };
       if (!document.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         apply();

@@ -37,10 +37,11 @@ try {
     $app = Join-Path $dir "HIVECAST.exe"
     $uninstall = Join-Path $dir "uninstall.exe"
     $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\HIVECAST.lnk"
+    $oldUninstallerHash = (Get-FileHash $uninstall).Hash
     foreach ($path in @($uninstall, $shortcut)) {
         $lock = [IO.File]::Open($path, 'Open', 'Read', 'Read')
         try { Assert-InstallerRejects $Setup @("--silent", "--no-shortcut") } finally { $lock.Dispose() }
-        if ((Get-FileHash $app).Hash -ne $stubHash -or (Get-FileHash $uninstall).Hash -ne $stubHash -or
+        if ((Get-FileHash $app).Hash -ne $stubHash -or (Get-FileHash $uninstall).Hash -ne $oldUninstallerHash -or
             (Get-ItemProperty $registry).DisplayVersion -ne $oldVersion) { throw "Incomplete upgrade rollback" }
     }
     Invoke-Installer $Setup @("--silent", "--no-shortcut")
@@ -59,7 +60,7 @@ try {
     $emptyDir = Join-Path $work "空 目录"
     Invoke-Installer $Setup @("--silent", "--dir", $emptyDir, "--no-shortcut")
     New-Item -ItemType Directory -Force -Path (Join-Path $emptyDir "cache"), (Join-Path $emptyDir "webview"), (Join-Path $emptyDir "logs") | Out-Null
-    Set-Content -LiteralPath (Join-Path $emptyDir "logs\app.log") -Value "log" -NoNewline
+
     $emptyUninst = Join-Path $emptyDir "uninstall.exe"
     # Verify running uninstall.exe directly without --uninstall defaults to uninstall mode.
     Invoke-Installer $emptyUninst @("--silent")
@@ -73,7 +74,17 @@ try {
     $reuseDir = Join-Path $work "复用 目录"
     Invoke-Installer $Setup @("--silent", "--dir", $reuseDir, "--no-shortcut")
     New-Item -ItemType Directory -Force -Path (Join-Path $reuseDir "data"), (Join-Path $reuseDir "Recording"), (Join-Path $reuseDir "cache") | Out-Null
-    Set-Content -LiteralPath (Join-Path $reuseDir "data\hivecast.db") -Value "db" -NoNewline
+    $appProcess = Start-Process -FilePath (Join-Path $reuseDir "HIVECAST.exe") -PassThru
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(45)
+        while (-not (Test-Path (Join-Path $reuseDir "cache\thumbs")) -and [DateTime]::UtcNow -lt $deadline) {
+            if ($appProcess.HasExited) { throw "Installed app exited before opening its profile" }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not (Test-Path (Join-Path $reuseDir "data\secret.bin"))) { throw "Missing real profile" }
+    } finally {
+        if (-not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id; $appProcess.WaitForExit() }
+    }
     Set-Content -LiteralPath (Join-Path $reuseDir "Recording\clip.mp4") -Value "vid" -NoNewline
     $reuseUninst = Join-Path $reuseDir "uninstall.exe"
     Invoke-Installer $reuseUninst @("--uninstall", "--silent")
@@ -93,7 +104,10 @@ try {
     # Verify registry-lost / moved HIVECAST directory can be upgraded/repaired in place without losing data/ or Recording/.
     $movedDir = Join-Path $work "迁移 目录"
     New-Item -ItemType Directory -Force -Path (Join-Path $movedDir "data"), (Join-Path $movedDir "Recording") | Out-Null
-    Copy-Item -LiteralPath $Stub -Destination (Join-Path $movedDir "HIVECAST.exe")
+    $portable = Join-Path $work "green seed"
+    Invoke-Installer $Setup @("--silent","--dir",$portable,"--no-shortcut")
+    Copy-Item -LiteralPath (Join-Path $portable "HIVECAST.exe") -Destination (Join-Path $movedDir "HIVECAST.exe")
+    Invoke-Installer $Setup @("--uninstall","--silent","--dir",$portable)
     Set-Content -LiteralPath (Join-Path $movedDir "data\hivecast.db") -Value "moved-db" -NoNewline
     Set-Content -LiteralPath (Join-Path $movedDir "Recording\clip.mp4") -Value "moved-vid" -NoNewline
     Invoke-Installer $Setup @("--silent", "--dir", $movedDir, "--no-shortcut")

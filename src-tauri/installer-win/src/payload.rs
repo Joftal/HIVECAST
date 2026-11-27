@@ -296,6 +296,19 @@ pub fn verify_embedded_payload(exe_path: &Path) -> io::Result<PayloadMeta> {
     Ok(located.meta)
 }
 
+const UNINSTALL_TRAILER: &[u8; 16] = b"HIVECAST-REMOVE1";
+
+pub fn is_uninstall_stub(path: &Path) -> bool {
+    let check = || -> io::Result<bool> {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::End(-16))?;
+        let mut trailer = [0; 16];
+        file.read_exact(&mut trailer)?;
+        Ok(&trailer == UNINSTALL_TRAILER)
+    };
+    check().unwrap_or(false)
+}
+
 /// Copy only the lightweight stub executable (excluding the appended payload) as `uninstall.exe`.
 pub fn copy_clean_uninstaller(
     exe_path: &Path,
@@ -307,6 +320,7 @@ pub fn copy_clean_uninstaller(
     let mut limited = src.take(located.stub_len);
     let mut out = File::create(&tmp)?;
     let copied = io::copy(&mut limited, &mut out)?;
+    out.write_all(UNINSTALL_TRAILER)?;
     out.sync_all()?;
     drop(out);
     if copied != located.stub_len {
@@ -367,7 +381,12 @@ mod tests {
         // Clean uninstaller excludes the payload.
         let uninst = dir.path().join("installed/uninstall.exe");
         copy_clean_uninstaller(&setup, &located, &uninst).unwrap();
-        assert_eq!(fs::read(&uninst).unwrap(), stub_bytes);
+        assert_eq!(
+            fs::read(&uninst).unwrap(),
+            [stub_bytes.as_slice(), UNINSTALL_TRAILER].concat()
+        );
+        assert!(is_uninstall_stub(&uninst));
+        assert!(!is_uninstall_stub(&setup));
         assert!(locate_payload(&uninst).unwrap().is_none());
     }
 

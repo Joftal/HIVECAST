@@ -75,7 +75,6 @@ impl Secret {
         String::from_utf8(plain).ok()
     }
 
-    #[cfg(test)]
     pub fn is_sealed(stored: &str) -> bool {
         stored.starts_with(PREFIX)
     }

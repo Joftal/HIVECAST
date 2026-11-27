@@ -202,20 +202,21 @@ pub fn load(db: &Db) -> Option<WindowState> {
 }
 
 /// 将窗口状态写入 `app_setting`。
-pub fn save(db: &Db, state: &WindowState) {
+pub fn save(db: &Db, state: &WindowState) -> bool {
     if !state.is_valid() {
-        return;
+        return false;
     }
-    match serde_json::to_string(state) {
-        Ok(json) => {
-            if let Err(err) = db.set_setting(KEY_WINDOW_STATE, &json) {
-                tracing::warn!(target: "hivecast_lib::window_state", error = %err, "写入窗口状态失败");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(target: "hivecast_lib::window_state", error = %err, "序列化窗口状态失败");
-        }
+    let result = serde_json::to_string(state)
+        .map_err(|err| err.to_string())
+        .and_then(|json| {
+            db.set_setting(KEY_WINDOW_STATE, &json)
+                .map_err(|err| err.to_string())
+        });
+    if let Err(err) = result {
+        tracing::warn!(target: "hivecast_lib::window_state", error = %err, "写入窗口状态失败");
+        return false;
     }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -434,6 +435,37 @@ pub fn restore_and_show<R: Runtime>(
     tracker.seed(baseline, persisted_baseline);
 }
 
+// During WM_WINDOWPOSCHANGED the toolkit may still expose the previous maximize
+// flag with the new client bounds. Check the native restore rectangle as well.
+#[cfg(windows)]
+fn normal_placement<R: Runtime>(window: &WebviewWindow<R>) -> Option<bool> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, GetWindowRect, IsZoomed, SW_SHOWMAXIMIZED, WINDOWPLACEMENT,
+    };
+    let hwnd = window.hwnd().ok()?.0;
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    let mut rect = RECT::default();
+    unsafe {
+        if GetWindowPlacement(hwnd, &mut placement) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        if IsZoomed(hwnd) != 0 || placement.showCmd == SW_SHOWMAXIMIZED as u32 {
+            return Some(false);
+        }
+    }
+    let normal = placement.rcNormalPosition;
+    if rect.right - rect.left != normal.right - normal.left
+        || rect.bottom - rect.top != normal.bottom - normal.top
+    {
+        return None;
+    }
+    Some(true)
+}
+
 /// 从当前可见主窗口采样几何并更新内存快照；不会在最小化/全屏/隐藏时覆盖正常宽高。
 fn sample_window_into_tracker<R: Runtime>(
     window: &WebviewWindow<R>,
@@ -452,10 +484,12 @@ fn sample_window_into_tracker<R: Runtime>(
         return None;
     }
 
-    let maximized = window.is_maximized().unwrap_or(false);
-    let mut guard = tracker.inner.lock().ok()?;
-
+    #[cfg(windows)]
+    let maximized = !normal_placement(window)?;
+    #[cfg(not(windows))]
+    let maximized = window.is_maximized().ok()?;
     if maximized {
+        let mut guard = tracker.inner.lock().ok()?;
         if let Some(state) = guard.current.as_mut() {
             state.maximized = true;
             return Some(state.clone());
@@ -479,8 +513,10 @@ fn sample_window_into_tracker<R: Runtime>(
         return None;
     }
 
+    let position = window.outer_position();
+    let mut guard = tracker.inner.lock().ok()?;
     let prev = guard.current.as_ref();
-    let (x, y) = match window.outer_position() {
+    let (x, y) = match position {
         Ok(pos) if is_valid_coord(pos.x) && is_valid_coord(pos.y) => (Some(pos.x), Some(pos.y)),
         _ => (prev.and_then(|s| s.x), prev.and_then(|s| s.y)),
     };
@@ -498,34 +534,30 @@ fn sample_window_into_tracker<R: Runtime>(
 }
 
 fn persist_if_changed(db: &Db, tracker: &WindowStateTracker) {
-    let to_save = {
-        let Ok(guard) = tracker.inner.lock() else {
-            return;
-        };
-        let Some(ref current) = guard.current else {
-            return;
-        };
-        if guard.last_persisted.as_ref() == Some(current) {
-            return;
-        }
-        current.clone()
+    // Serialize commits with close/exit. This section never calls a window API.
+    let Ok(mut guard) = tracker.inner.lock() else {
+        return;
     };
-
-    save(db, &to_save);
-
-    if let Ok(mut guard) = tracker.inner.lock() {
-        if guard.current.as_ref() == Some(&to_save) {
-            guard.last_persisted = Some(to_save);
-        }
+    let Some(current) = guard.current.as_ref() else {
+        return;
+    };
+    if guard.last_persisted.as_ref() != Some(current) && save(db, current) {
+        guard.last_persisted = Some(current.clone());
     }
 }
 
-/// 收到 `Resized` / `Moved` 事件时调度一次防抖采样与落盘。
+/// 在事件回调中采样，后台任务只合并数据库写入。
 pub fn schedule_save<R: Runtime>(app: &AppHandle<R>) {
     let Some(tracker) = app.try_state::<Arc<WindowStateTracker>>() else {
         return;
     };
     if !tracker.is_ready() {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if sample_window_into_tracker(&window, &tracker).is_none() {
         return;
     }
     let gen = tracker.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -536,10 +568,6 @@ pub fn schedule_save<R: Runtime>(app: &AppHandle<R>) {
         if tracker.generation.load(Ordering::SeqCst) != gen {
             return;
         }
-        let Some(window) = handle.get_webview_window("main") else {
-            return;
-        };
-        let _ = sample_window_into_tracker(&window, &tracker);
         if let Some(state) = handle.try_state::<AppState>() {
             persist_if_changed(&state.db, &tracker);
         }
@@ -760,5 +788,31 @@ mod tests {
 
         db.set_setting(KEY_WINDOW_STATE, "{not-valid-json").unwrap();
         assert_eq!(load(&db), None);
+    }
+    #[test]
+    fn failed_commit_stays_dirty_until_flush_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        let tracker = WindowStateTracker::default();
+        let state = WindowState {
+            width: 1300.0,
+            height: 800.0,
+            x: Some(20),
+            y: Some(30),
+            scale_factor: 1.0,
+            maximized: true,
+        };
+        tracker.seed(state.clone(), None);
+        db.exec_batch_for_test(
+            "CREATE TRIGGER reject_window BEFORE INSERT ON app_setting
+            WHEN NEW.key='ui.window_state' BEGIN SELECT RAISE(ABORT,'test'); END;",
+        )
+        .unwrap();
+        persist_if_changed(&db, &tracker);
+        assert!(tracker.inner.lock().unwrap().last_persisted.is_none());
+        db.exec_batch_for_test("DROP TRIGGER reject_window")
+            .unwrap();
+        persist_if_changed(&db, &tracker);
+        assert_eq!(load(&db), Some(state));
     }
 }

@@ -786,7 +786,7 @@ const I18N = {
   zh: {
     subtitleInstall: "多平台直播录制与弹幕同步桌面端",
     subtitleUninstall: "卸载桌面客户端（保留录像与配置）",
-    subtitleUninstallPurge: "卸载桌面客户端（仅保留录像）",
+    subtitleUninstallPurge: "卸载桌面客户端并清理本安装的配置",
     ffmpegOk: "已检测到 FFmpeg",
     ffmpegMissing: "未检测到 FFmpeg · 录制前请先安装 FFmpeg",
     upgradePill: "检测到已安装版本 · 保留数据覆盖升级",
@@ -808,13 +808,13 @@ const I18N = {
     doneUpgradeTitle: "HIVECAST 升级完成",
     doneUninstallTitle: "已卸载 HIVECAST",
     doneUninstallDesc: "主程序、缓存与快捷方式已移除，您的录像和账号配置仍保存在本地。",
-    doneUninstallPurgedDesc: "主程序、快捷方式及账号配置数据已移除，您的录制视频仍保存在本地。",
+    doneUninstallPurgedDesc: "已移除程序和可确认归属的账号配置。录像、共享档案及自定义目录保留在本地。",
     launch: "立即启动",
     finish: "完成",
     closeWin: "关闭窗口",
     uninstLine1: "将从本机移除 HIVECAST 主程序、运行缓存/日志及快捷方式。",
     uninstLine2: "您的录制视频、数据库与平台账号配置将被完整保留。",
-    uninstLine2Purge: "将同时删除数据库、房间与平台账号配置，仅保留录制视频。",
+    uninstLine2Purge: "将清理本安装的数据库、房间与账号配置。录像、共享档案与自定义目录保留。",
     purgeDataLabel: "同时删除账号与设置数据（保留录像）",
     confirmUninst: "确认卸载",
     cancel: "取消",
@@ -823,7 +823,7 @@ const I18N = {
   en: {
     subtitleInstall: "Multi-platform live recording & danmaku studio",
     subtitleUninstall: "Uninstall desktop app (recordings & settings kept)",
-    subtitleUninstallPurge: "Uninstall desktop app (recordings kept only)",
+    subtitleUninstallPurge: "Uninstall desktop app and remove its profile",
     ffmpegOk: "FFmpeg detected",
     ffmpegMissing: "FFmpeg not found · Install before recording",
     upgradePill: "Existing install detected · Data preserved",
@@ -845,13 +845,13 @@ const I18N = {
     doneUpgradeTitle: "HIVECAST upgraded",
     doneUninstallTitle: "HIVECAST uninstalled",
     doneUninstallDesc: "App binaries, cache, and shortcuts were removed. Recordings and account data were kept.",
-    doneUninstallPurgedDesc: "App binaries, shortcuts, and account/settings data were removed. Recordings were kept.",
+    doneUninstallPurgedDesc: "Removed the application and its identified profile. Recordings, shared profiles and custom directories were kept.",
     launch: "Launch HIVECAST",
     finish: "Done",
     closeWin: "Close",
     uninstLine1: "Removes the HIVECAST executable, cache/logs, and Start Menu/Desktop shortcuts.",
     uninstLine2: "Your recordings, database, and saved credentials will be preserved.",
-    uninstLine2Purge: "Database, rooms, and saved accounts will also be deleted. Recordings are kept.",
+    uninstLine2Purge: "Remove this installation’s database, rooms and accounts. Keep recordings, shared profiles and custom directories.",
     purgeDataLabel: "Also delete account & settings data (keep recordings)",
     confirmUninst: "Uninstall",
     cancel: "Cancel",
@@ -997,6 +997,11 @@ function showError(msg, installDirError) {
 window.__installerEvent = function (ev) {
   if (!ev || typeof ev !== "object") return;
   switch (ev.type) {
+    case "dirInspected":
+      if (state.busy || ev.dir !== document.getElementById("installDirInput").value) break;
+      state.existing = !!ev.existing;
+      renderTexts();
+      break;
     case "dirSelected":
       state.installDir = ev.dir || state.installDir;
       state.existing = !!ev.existing;
@@ -1007,6 +1012,7 @@ window.__installerEvent = function (ev) {
       setProgress(ev.percent || 0, ev.stage || 0);
       break;
     case "installDone":
+      state.existing = !!ev.existing;
       state.busy = false;
       state.installedExe = ev.exePath || "";
       state.installDir = ev.installDir || state.installDir;
@@ -1052,6 +1058,12 @@ document.getElementById("langBtn").addEventListener("click", () => {
 });
 document.getElementById("optionsToggle").addEventListener("click", () => {
   setOptionsOpen(!state.optionsOpen);
+});
+let inspectTimer;
+document.getElementById("installDirInput").addEventListener("input", (event) => {
+  state.installDir = event.target.value;
+  clearTimeout(inspectTimer);
+  inspectTimer = setTimeout(() => send("inspect", { dir: state.installDir }), 150);
 });
 document.getElementById("browseBtn").addEventListener("click", () => {
   send("browse", { currentDir: document.getElementById("installDirInput").value });

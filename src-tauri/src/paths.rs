@@ -38,7 +38,7 @@ pub fn portable_root() -> Option<PathBuf> {
         ROOT.get_or_init(|| {
             let exe = std::env::current_exe().ok()?;
             let dir = strip_windows_verbatim(exe.parent()?);
-            if is_unc_path(&dir) {
+            if is_remote_volume(&dir) {
                 return None;
             }
             if ensure_writable(&dir) {
@@ -67,7 +67,10 @@ pub fn resolve(app: &AppHandle) -> Result<AppPaths, String> {
 
     if let Some(root) = portable_root() {
         return Ok(AppPaths {
-            data_dir: env_data.unwrap_or_else(|| root.join("data")),
+            data_dir: match env_data {
+                Some(dir) => dir,
+                None => select_profile(&root.join("data"), &system_data)?,
+            },
             cache_dir: env_cache.unwrap_or_else(|| root.join("cache")),
             log_dir,
             webview_data_dir: Some(env_webview.unwrap_or_else(|| root.join("webview"))),
@@ -82,6 +85,101 @@ pub fn resolve(app: &AppHandle) -> Result<AppPaths, String> {
         webview_data_dir: env_webview,
         portable_install_dir: false,
     })
+}
+
+// An existing portable profile travels with the executable. Otherwise an upgrade
+// continues using the system profile and its matching encryption key.
+fn profile_has_user_data(file: &Path) -> Option<bool> {
+    use rusqlite::{Connection, OpenFlags};
+    let db = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM room UNION ALL SELECT 1 FROM credential
+        UNION ALL SELECT 1 FROM record_session UNION ALL SELECT 1 FROM task_history
+        UNION ALL SELECT 1 FROM douyin_follow UNION ALL SELECT 1 FROM app_setting
+        WHERE key NOT IN ('ui.window_state','db.task_event_fts_v1'))",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+fn select_profile(local: &Path, system: &Path) -> Result<PathBuf, String> {
+    for dir in [local, system] {
+        if dir.is_file() {
+            continue;
+        }
+        let db = dir.join("hivecast.db");
+        if db
+            .try_exists()
+            .map_err(|e| format!("{}: {e}", db.display()))?
+        {
+            if dir == local
+                && system.join("hivecast.db").is_file()
+                && profile_has_user_data(&db) == Some(false)
+                && profile_has_user_data(&system.join("hivecast.db")) == Some(true)
+            {
+                // An older release may already have bootstrapped an unused empty
+                // portable profile over a populated legacy one. Keep both files.
+                return Ok(system.to_owned());
+            }
+            return Ok(dir.to_owned());
+        }
+    }
+    Ok(if ensure_writable(local) {
+        local
+    } else {
+        system
+    }
+    .to_owned())
+}
+
+#[cfg(windows)]
+fn is_remote_volume(dir: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    if is_unc_path(dir) {
+        return true;
+    }
+    let Some(root) = dir.ancestors().last() else {
+        return true;
+    };
+    let wide: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    // DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR and DRIVE_REMOTE cannot host a portable WAL.
+    matches!(unsafe { GetDriveTypeW(wide.as_ptr()) }, 0 | 1 | 4)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn relocated(path: &Path, old_root: &Path, root: &Path) -> Option<PathBuf> {
+    let path = strip_windows_verbatim(path);
+    let mut parts = path.components();
+    for expected in strip_windows_verbatim(old_root).components() {
+        let actual = parts.next()?;
+        if !actual
+            .as_os_str()
+            .eq_ignore_ascii_case(expected.as_os_str())
+        {
+            return None;
+        }
+    }
+    let tail = parts.as_path();
+    tail.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then(|| root.join(tail))
+}
+
+pub(crate) fn path_key(path: &Path) -> PathBuf {
+    let path = strip_windows_verbatim(path);
+    if cfg!(windows) {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    } else {
+        path
+    }
+}
+
+pub(crate) fn overlap(a: &Path, b: &Path) -> bool {
+    let key = |path: &Path| path_key(&path.canonicalize().unwrap_or_else(|_| path.to_owned()));
+    let (a, b) = (key(a), key(b));
+    a.starts_with(&b) || b.starts_with(&a)
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -180,5 +278,39 @@ mod tests {
             strip_windows_verbatim(Path::new(r"\\?\D:\Apps\HIVECAST")),
             PathBuf::from(r"D:\Apps\HIVECAST")
         );
+    }
+    #[test]
+    fn existing_profiles_and_unusable_portable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("data");
+        let system = dir.path().join("roaming");
+        std::fs::write(&local, b"not a directory").unwrap();
+        assert_eq!(select_profile(&local, &system).unwrap(), system);
+        std::fs::remove_file(&local).unwrap();
+        std::fs::create_dir(&system).unwrap();
+        std::fs::write(system.join("hivecast.db"), b"existing").unwrap();
+        assert_eq!(select_profile(&local, &system).unwrap(), system);
+        assert!(!local.exists());
+        std::fs::create_dir(&local).unwrap();
+        std::fs::write(local.join("hivecast.db"), b"portable").unwrap();
+        assert_eq!(select_profile(&local, &system).unwrap(), local);
+    }
+    #[test]
+    fn upgrade_recovers_an_already_bootstrapped_empty_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("data");
+        let system = root.path().join("system");
+        for dir in [&local, &system] {
+            std::fs::create_dir(dir).unwrap();
+            drop(crate::db::Db::open(&dir.join("hivecast.db")).unwrap());
+        }
+        let db = crate::db::Db::open(&system.join("hivecast.db")).unwrap();
+        db.set_setting("ui.language", "en-US").unwrap();
+        assert_eq!(select_profile(&local, &system).unwrap(), system);
+        crate::db::Db::open(&local.join("hivecast.db"))
+            .unwrap()
+            .set_setting("ui.theme", "dark")
+            .unwrap();
+        assert_eq!(select_profile(&local, &system).unwrap(), local);
     }
 }

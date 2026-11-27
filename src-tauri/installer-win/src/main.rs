@@ -1,7 +1,12 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod cleanup;
 mod install;
+#[path = "../../src/install_receipt.rs"]
+mod install_receipt;
 mod payload;
+#[path = "../../src/session_cache.rs"]
+mod session_cache;
 
 #[cfg(windows)]
 mod gui;
@@ -22,11 +27,18 @@ fn main() {
         .as_deref()
         .and_then(|exe| payload::locate_payload(exe).ok().flatten())
         .is_some();
-    let action = match install::parse_cli_for_exe(current_exe.as_deref(), has_payload, &args) {
+    let uninstall_stub = current_exe
+        .as_deref()
+        .filter(|exe| payload::is_uninstall_stub(exe));
+    let action = match install::parse_cli_for_exe(uninstall_stub, has_payload, &args) {
         Ok(action) => action,
         Err(err) => {
+            #[cfg(windows)]
+            if args.is_empty() {
+                win_os::show_package_error(&err);
+            }
             eprintln!("{err}");
-            process::exit(2);
+            process::exit(1);
         }
     };
 
@@ -198,7 +210,7 @@ pub(crate) fn perform_install<F>(
     raw_dir: &str,
     desktop_shortcut: bool,
     mut on_progress: F,
-) -> Result<(PathBuf, PathBuf), InstallError>
+) -> Result<(PathBuf, PathBuf, bool), InstallError>
 where
     F: FnMut(u8, u8),
 {
@@ -229,6 +241,7 @@ where
 
     on_progress(5, 0);
     let dest_exe = install_dir.join("HIVECAST.exe");
+    let upgrading = install::has_existing_install(install_dir);
     let staged_app = staging.path().join("HIVECAST.exe");
     payload::extract_verified(&self_exe, &located, &staged_app, |pct| {
         // Map extraction 0..=100 into overall 5..=80%.
@@ -247,6 +260,14 @@ where
     let result = (|| {
         #[cfg(windows)]
         let links = win_os::stage_shortcut(&dest_exe, desktop_shortcut, staging.path())?;
+        let marker = staging.path().join(install::MARKER);
+        let previous_class = install_receipt::read(install_dir).and_then(|(_, class)| class);
+        fs::write(
+            &marker,
+            install_receipt::content(&located.meta.sha256, previous_class.as_deref()),
+        )
+        .map_err(|e| e.to_string())?;
+        replace_file(&marker, &install_dir.join(install::MARKER), &mut changes)?;
         replace_file(&staged_app, &dest_exe, &mut changes)?;
         replace_file(&staged_uninstaller, &uninstall_exe, &mut changes)?;
         #[cfg(windows)]
@@ -273,35 +294,7 @@ where
     }
 
     on_progress(100, 2);
-    Ok((target, dest_exe))
-}
-
-fn remove_real_dir_if_exists(dir: &Path) -> Result<bool, String> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_dir() => {
-            let mut last_err = None;
-            for attempt in 0..20 {
-                match fs::remove_dir_all(dir) {
-                    Ok(()) => return Ok(true),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-                    Err(err) => {
-                        last_err = Some(err);
-                        if attempt < 19 {
-                            std::thread::sleep(std::time::Duration::from_millis(150));
-                        }
-                    }
-                }
-            }
-            Err(format!(
-                "清理目录 {} 失败：{}",
-                dir.display(),
-                last_err.map_or_else(|| "未知错误".to_string(), |e| e.to_string())
-            ))
-        }
-        Ok(_) => Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(format!("检查目录 {} 失败：{err}", dir.display())),
-    }
+    Ok((target, dest_exe, upgrading))
 }
 
 pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<(), String> {
@@ -319,30 +312,21 @@ pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<
         if win_os::is_app_running() {
             return Err("检测到 HIVECAST 正在运行，请先关闭应用后再卸载。".into());
         }
-        win_os::remove_shortcuts(&app_exe)?;
     }
+    if app_exe.exists() && !install::has_existing_install(install_dir) {
+        return Err("登记目录的主程序与产品不符，已保留目录内容".into());
+    }
+    cleanup::clean(install_dir, purge_data)?;
+    #[cfg(windows)]
+    win_os::remove_shortcuts(&app_exe)?;
     if app_exe.exists() {
         fs::remove_file(&app_exe).map_err(|e| format!("删除主程序失败：{e}"))?;
-    }
-    for ephemeral in ["cache", "webview", "logs"] {
-        let _ = remove_real_dir_if_exists(&install_dir.join(ephemeral))?;
-    }
-    if purge_data {
-        let removed_local_data = remove_real_dir_if_exists(&install_dir.join("data"))?;
-        #[cfg(windows)]
-        if !removed_local_data {
-            if let Ok(appdata) = env::var("APPDATA") {
-                let fallback_data = PathBuf::from(appdata).join("com.hivecast.desktop");
-                let _ = remove_real_dir_if_exists(&fallback_data)?;
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = removed_local_data;
     }
     #[cfg(windows)]
     {
         let exe = env::current_exe().map_err(|e| e.to_string())?;
         if install::same_location(&exe, &uninstaller) {
+            cleanup::finish(install_dir)?;
             win_os::delete_uninstall_registry()?;
             return win_os::schedule_self_cleanup(&exe, install_dir);
         }
@@ -350,6 +334,7 @@ pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<
     if uninstaller.exists() {
         fs::remove_file(uninstaller).map_err(|e| e.to_string())?;
     }
+    cleanup::finish(install_dir)?;
     #[cfg(windows)]
     win_os::delete_uninstall_registry()?;
     if fs::read_dir(install_dir)

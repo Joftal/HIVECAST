@@ -3781,6 +3781,32 @@ fn write_manifest(path: &Path, manifest: &SplitManifest) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn relocate_manifest(file: &Path, previous: &Path, root: &Path) -> Result<(), AppError> {
+    let Ok(mut manifest) = read_manifest(file) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    let mut relocate = |value: &mut String| {
+        if let Some(path) = crate::paths::relocated(Path::new(value), previous, root) {
+            *value = path.to_string_lossy().into_owned();
+            changed = true;
+        }
+    };
+    relocate(&mut manifest.source);
+    for clip in &mut manifest.clips {
+        relocate(&mut clip.output);
+        relocate(&mut clip.path);
+        if let Some(path) = &mut clip.final_path {
+            relocate(path);
+        }
+    }
+    if changed {
+        write_manifest(file, &manifest).map_err(AppError::Internal)?;
+    }
+    Ok(())
+}
+
 fn read_manifest(path: &Path) -> Result<SplitManifest, String> {
     let body =
         std::fs::read_to_string(path).map_err(|err| format!("读 {}: {err}", path.display()))?;

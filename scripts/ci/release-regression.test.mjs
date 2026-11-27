@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { reconcileLabels } from "./issue-labels.mjs";
-import { buildReleaseNotes, selectPreviousTag } from "./generate-release-notes.mjs";
+import { buildReleaseNotes, selectPreviousTag, shouldMarkLatest } from "./generate-release-notes.mjs";
 
 function generate(t, releases) {
   const dir = mkdtempSync(join(tmpdir(), "hivecast-site-"));
@@ -151,4 +151,13 @@ test("generated release notes lead with categorized commits and feed cleanly int
   assert.equal(largeLatest.notes.length, 24);
   assert.equal(largeLatest.notes[0].text, "item-1 同步异常");
   assert.equal(largeLatest.notes[23].text, "item-24 同步异常");
+});
+
+test("GitHub Latest skips maintenance releases, drafts and prereleases", () => {
+  const releases = [{ tag_name: "v2.0.0" }, { tag_name: "v4.0.0", draft: true },
+    { tag_name: "v3.0.1", prerelease: true }, { tag_name: "v4.1.0-rc.1" }];
+  assert.equal(shouldMarkLatest("1.1.9", releases), false);
+  assert.equal(shouldMarkLatest("2.0.1", releases), true);
+  assert.equal(shouldMarkLatest("9.0.0-rc.1", []), false);
+  assert.equal(shouldMarkLatest("1.0.0", []), true);
 });

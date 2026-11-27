@@ -67,6 +67,17 @@ export function compareSemver(a, b) {
   return va.pre.length - vb.pre.length;
 }
 
+/** GitHub's Latest follows the same stable SemVer ordering as the update feed. */
+export function shouldMarkLatest(version, releases) {
+  const target = parseSemver(version);
+  if (!target || target.pre.length) return false;
+  return releases.every(release => {
+    const published = parseSemver(release.tag_name);
+    return release.draft || release.prerelease || !published || published.pre.length > 0
+      || compareSemver(target, published) > 0;
+  });
+}
+
 /**
  * Pick the best previous reachable SemVer tag for `targetVersion`.
  * - Stable releases compare against the latest reachable stable tag (< targetVersion),
@@ -217,7 +228,7 @@ export function buildReleaseNotes({
     "## 安装说明",
     "",
     `- **macOS（Universal 通用版，支持 M 芯片与 Intel）**：打开 \`HIVECAST-v${cleanVersion}-macOS-universal.dmg\` 拖入「应用程序」（${macosSignNote}）。`,
-    `- **Windows（x64）**：运行 \`HIVECAST-v${cleanVersion}-Windows-x64-setup.exe\` 安装或覆盖升级（数据与日志默认存放在安装目录，卸载默认保留录像与配置，可勾选清除账号设置），或解压 \`HIVECAST-v${cleanVersion}-Windows-x64-portable.zip\` 运行。`,
+    `- **Windows（x64）**：运行 \`HIVECAST-v${cleanVersion}-Windows-x64-setup.exe\` 安装或覆盖升级（新安装优先使用安装目录，升级沿用已有档案；卸载保留录像，可选择清理此安装的账号设置），或解压 \`HIVECAST-v${cleanVersion}-Windows-x64-portable.zip\` 运行。`,
     "- **使用提示**：录制需本机安装 FFmpeg；文件校验见 `SHA256SUMS.txt`；应用内「设置 → 关于」支持自动检测新版本。",
     "",
   );

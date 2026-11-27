@@ -40,17 +40,7 @@ pub fn parse_cli_for_exe(
     has_payload: bool,
     args: &[String],
 ) -> Result<CliAction, String> {
-    // 卸载程序（名为 uninstall.exe，或不含内嵌安装载荷的独立卸载体）只允许进入卸载流程，
-    // 安装与覆盖升级严格由携带载荷的安装包（setup.exe）负责。
-    let uninstaller_only = !has_payload || exe_path.is_some_and(is_uninstaller_exe);
-    if args.is_empty() {
-        return Ok(if uninstaller_only {
-            CliAction::GuiUninstall
-        } else {
-            CliAction::GuiInstall
-        });
-    }
-    if args[0] == "--pack" {
+    if args.first().is_some_and(|arg| arg == "--pack") {
         if args.len() != 5 {
             return Err("用法: --pack <stub.exe> <HIVECAST.exe> <version> <out-setup.exe>".into());
         }
@@ -65,7 +55,11 @@ pub fn parse_cli_for_exe(
         return Ok(CliAction::SelfTest);
     }
 
-    let mut uninstall = uninstaller_only;
+    let uninstaller = !has_payload && exe_path.is_some_and(is_uninstaller_exe);
+    if !has_payload && !uninstaller {
+        return Err("安装包缺少有效载荷或已损坏，请重新下载安装包。".into());
+    }
+    let mut uninstall = uninstaller;
     let mut silent = false;
     let mut desktop_shortcut = true;
     let mut purge_data = false;
@@ -221,7 +215,23 @@ pub fn detect_ffmpeg() -> Option<String> {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn has_existing_install(dir: &Path) -> bool {
-    dir.join("HIVECAST.exe").is_file()
+    let exe = dir.join("HIVECAST.exe");
+    if !exe.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    if crate::win_os::has_description(&exe, "HIVECAST") {
+        return true;
+    }
+    install_hash(dir).is_some_and(|hash| {
+        crate::payload::sha256_file(&exe).is_ok_and(|(_, digest)| digest == hash)
+    })
+}
+
+pub use crate::install_receipt::MARKER;
+
+pub fn install_hash(dir: &Path) -> Option<String> {
+    crate::install_receipt::read(dir).map(|(hash, _)| hash)
 }
 
 pub fn same_location(a: &Path, b: &Path) -> bool {
@@ -231,12 +241,8 @@ pub fn same_location(a: &Path, b: &Path) -> bool {
         .is_some_and(|(a, b)| a == b)
 }
 
-/// 安装/升级前的目录归属与非空策略校验：
-/// - 已登记的原安装目录允许就地覆盖升级；
-/// - 若存在其它路径的已登记有效安装，禁止在别处再装一份；
-/// - 若无其它有效登记安装（首次安装、目录被手动迁移、重装系统丢注册表或绿色版转安装版），
-///   允许空目录、仅保留 `data/` + `Recording/` 的旧卸载目录、或已含 `HIVECAST.exe` 的目录就地覆盖；
-/// - 仍严格拒绝无关非空目录（包括仅含其他软件 `uninstall.exe` 的目录）。
+/// 只在空目录、可验证的产品安装或留有归属凭据的目录安装。
+/// 已登记的有效安装须原位升级，绿色版与其他程序混放时拒绝覆盖。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn check_target_dir_policy(
     install_dir: &Path,
@@ -246,11 +252,47 @@ pub fn check_target_dir_policy(
     if dir_exists && !install_dir.is_dir() {
         return Err("所选路径不是有效文件夹".into());
     }
-    let owned = dir_exists
-        && registered_dir
-            .is_some_and(|dir| same_location(dir, install_dir) && has_existing_install(dir));
-    if owned {
-        return Ok(());
+    if dir_exists {
+        let exe = install_dir.join("HIVECAST.exe");
+        if exe.try_exists().map_err(|e| e.to_string())? && !has_existing_install(install_dir) {
+            return Err("所选目录含有无法确认为 HIVECAST 的同名程序".into());
+        }
+        if install_dir.join(MARKER).exists() && install_hash(install_dir).is_none() {
+            return Err("安装标记冲突，请选择新的专用目录".into());
+        }
+        if registered_dir.is_some_and(|dir| same_location(dir, install_dir))
+            && (has_existing_install(install_dir) || install_hash(install_dir).is_some())
+        {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        if install_dir.join("uninstall.exe").exists()
+            && !crate::win_os::has_description(&install_dir.join("uninstall.exe"), "HIVECAST Setup")
+        {
+            return Err("所选目录含有其他卸载程序".into());
+        }
+    }
+    // A portable executable in Downloads does not make the entire folder an installation.
+    if dir_exists && install_hash(install_dir).is_none() && has_existing_install(install_dir) {
+        for entry in std::fs::read_dir(install_dir).map_err(|e| e.to_string())? {
+            let name = entry
+                .map_err(|e| e.to_string())?
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            if !matches!(
+                name.as_str(),
+                "hivecast.exe"
+                    | "uninstall.exe"
+                    | "cache"
+                    | "webview"
+                    | "logs"
+                    | "data"
+                    | "recording"
+            ) {
+                return Err("绿色版与其他文件混放，请先将程序和数据移入专用目录".into());
+            }
+        }
     }
     if registered_dir.is_some_and(has_existing_install) {
         return Err("请使用已登记的安装目录升级，或先卸载原版本".into());
@@ -284,31 +326,10 @@ pub fn normalize_browsed_dir(chosen: &Path) -> PathBuf {
     chosen.join("HIVECAST")
 }
 
-/// 卸载后保留了 `data/` 和/或 `Recording/` 的原安装目录，允许再次安装复用，
-/// 但仍严格拒绝包含其它未知文件或目录的外部非空目录。
+/// 复用安装回执或旧产品数据库确认的残留目录。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_reusable_preserved_dir(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    let mut count = 0usize;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return false;
-        };
-        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
-            return false;
-        };
-        if !meta.file_type().is_dir() {
-            return false;
-        }
-        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        if !matches!(name.as_str(), "data" | "recording") {
-            return false;
-        }
-        count += 1;
-    }
-    count > 0
+    install_hash(dir).is_some() || crate::cleanup::product_db(&dir.join("data")).is_some()
 }
 
 #[cfg(test)]
@@ -401,17 +422,19 @@ mod tests {
     }
 
     #[test]
-    fn reusable_preserved_dir_allows_only_data_and_recording_subdirs() {
+    fn preserved_directory_requires_evidence_of_product_ownership() {
         let root = tempfile::tempdir().unwrap();
         assert!(!is_reusable_preserved_dir(root.path()));
 
         let only_recording = root.path().join("only-recording");
         std::fs::create_dir_all(only_recording.join("Recording")).unwrap();
-        assert!(is_reusable_preserved_dir(&only_recording));
+        assert!(!is_reusable_preserved_dir(&only_recording));
 
         let both = root.path().join("both");
         std::fs::create_dir_all(both.join("data")).unwrap();
         std::fs::create_dir_all(both.join("Recording")).unwrap();
+        assert!(!is_reusable_preserved_dir(&both));
+        std::fs::write(both.join(MARKER), "a".repeat(64)).unwrap();
         assert!(is_reusable_preserved_dir(&both));
 
         let foreign_file = root.path().join("foreign-file");
@@ -443,11 +466,17 @@ mod tests {
         let existing_custom = root.path().join("MyStudio");
         std::fs::create_dir_all(&existing_custom).unwrap();
         std::fs::write(existing_custom.join("HIVECAST.exe"), b"exe").unwrap();
-        assert_eq!(normalize_browsed_dir(&existing_custom), existing_custom);
+        assert_eq!(
+            normalize_browsed_dir(&existing_custom),
+            existing_custom.join("HIVECAST")
+        );
 
         let preserved_custom = root.path().join("KeptData");
         std::fs::create_dir_all(preserved_custom.join("data")).unwrap();
-        assert_eq!(normalize_browsed_dir(&preserved_custom), preserved_custom);
+        assert_eq!(
+            normalize_browsed_dir(&preserved_custom),
+            preserved_custom.join("HIVECAST")
+        );
 
         // Windows drive root path appends HIVECAST instead of blocking the user.
         assert_eq!(
@@ -462,11 +491,9 @@ mod tests {
             parse_cli_for_exe(Some(Path::new("uninstall.exe")), false, &[]).unwrap(),
             CliAction::GuiUninstall
         );
-        // Even if renamed, a payload-less uninstaller binary must never enter install/upgrade mode.
-        assert_eq!(
-            parse_cli_for_exe(Some(Path::new("remove-hivecast.exe")), false, &[]).unwrap(),
-            CliAction::GuiUninstall
-        );
+        for name in ["remove-hivecast.exe", "damaged-setup.exe"] {
+            assert!(parse_cli_for_exe(Some(Path::new(name)), false, &["--silent".into()]).is_err());
+        }
         assert_eq!(
             parse_cli_for_exe(
                 Some(Path::new("/tmp/UNINSTALL.EXE")),
@@ -499,6 +526,9 @@ mod tests {
         std::fs::create_dir_all(lost_reg.join("data")).unwrap();
         std::fs::write(lost_reg.join("HIVECAST.exe"), b"old-exe").unwrap();
         std::fs::write(lost_reg.join("data").join("hivecast.db"), b"db").unwrap();
+        assert!(check_target_dir_policy(&lost_reg, None).is_err());
+        let (_, hash) = crate::payload::sha256_file(&lost_reg.join("HIVECAST.exe")).unwrap();
+        std::fs::write(lost_reg.join(MARKER), hash).unwrap();
         assert!(check_target_dir_policy(&lost_reg, None).is_ok());
 
         // 2. Old registered path no longer exists (user moved folder) -> upgrading new location succeeds.

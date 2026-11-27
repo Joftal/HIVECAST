@@ -60,6 +60,65 @@ pub fn apply_window_material(hwnd: isize, dark: bool) {
     }
 }
 
+/// Read the localized VERSIONINFO resource without running the selected executable.
+pub fn has_description(path: &Path, expected: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let len = GetFileVersionInfoSizeW(name.as_ptr(), std::ptr::null_mut());
+        if len == 0 {
+            return false;
+        }
+        let mut data = vec![0u32; (len as usize).div_ceil(4)];
+        let ptr = data.as_mut_ptr().cast();
+        if GetFileVersionInfoW(name.as_ptr(), 0, len, ptr) == 0 {
+            return false;
+        }
+        let mut value = std::ptr::null_mut();
+        let mut size = 0;
+        if VerQueryValueW(
+            ptr,
+            to_wide(r"\VarFileInfo\Translation").as_ptr(),
+            &mut value,
+            &mut size,
+        ) == 0
+            || size < 4
+        {
+            return false;
+        }
+        let lang = value.cast::<u16>().read_unaligned();
+        let code = value.cast::<u16>().add(1).read_unaligned();
+        ["ProductName", "FileDescription"]
+            .into_iter()
+            .zip(["HIVECAST", expected])
+            .all(|(key, wanted)| {
+                let key = to_wide(&format!(r"\StringFileInfo\{lang:04x}{code:04x}\{key}"));
+                VerQueryValueW(ptr, key.as_ptr(), &mut value, &mut size) != 0
+                    && size > 0
+                    && String::from_utf16_lossy(std::slice::from_raw_parts(
+                        value.cast(),
+                        size as usize,
+                    ))
+                    .trim_end_matches('\0')
+                        == wanted
+            })
+    }
+}
+
+pub fn show_package_error(message: &str) {
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            to_wide(message).as_ptr(),
+            to_wide("HIVECAST Setup").as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        );
+    }
+}
+
 pub fn is_system_zh() -> bool {
     let lang_id = unsafe { GetUserDefaultUILanguage() };
     (lang_id & 0x03ff) == 0x04

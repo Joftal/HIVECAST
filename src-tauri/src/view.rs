@@ -470,41 +470,14 @@ impl ViewManager {
 
     /// 启动时清掉上次异常退出留下的分片目录。
     pub async fn clean_cache(&self) {
-        let mut entries = match tokio::fs::read_dir(&self.root).await {
-            Ok(entries) => entries,
-            Err(err) => {
-                tracing::debug!(dir = %self.root.display(), error = %err, "读取观看缓存目录失败，尝试重建");
-                if let Err(err) = tokio::fs::create_dir_all(&self.root).await {
-                    tracing::warn!(dir = %self.root.display(), error = %err, "重建观看缓存目录失败");
-                }
-                return;
-            }
-        };
-        let mut removed = 0usize;
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(err) => {
-                    tracing::warn!(dir = %self.root.display(), error = %err, "遍历观看缓存目录中断");
-                    break;
-                }
-            };
-            let path = entry.path();
-            let result = if path.is_dir() {
-                tokio::fs::remove_dir_all(&path).await
-            } else {
-                tokio::fs::remove_file(&path).await
-            };
-            match result {
-                Ok(()) => removed += 1,
-                Err(err) => {
-                    tracing::debug!(path = %path.display(), error = %err, "清理观看缓存条目失败")
-                }
-            }
-        }
-        if removed > 0 {
-            tracing::info!(removed, dir = %self.root.display(), "清理上次遗留的观看缓存");
+        let root = self.root.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            std::fs::create_dir_all(&root)?;
+            crate::session_cache::clean(&root)
+        })
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!(dir = %self.root.display(), ?result, "清理观看缓存失败");
         }
     }
 

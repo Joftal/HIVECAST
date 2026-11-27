@@ -14,6 +14,9 @@ import {
   trashInfo,
   trashOpen,
   settingsUpdate,
+  settingsPreferences,
+  settingsChanges,
+  type Preferences,
   type AppInfo,
   type FfmpegStatus,
   type FilenamePreview,
@@ -280,7 +283,7 @@ function Row({
     >
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="text-[12.5px] font-medium text-ink">{title}</div>
-        {tip ? <InfoTip content={tip} /> : null}
+        {tip ? <InfoTip content={tip} field={title} /> : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">{children}</div>
     </div>
@@ -305,7 +308,7 @@ function Section({ title, tip, children }: { title: string; tip?: ReactNode; chi
     <section className="space-y-2.5">
       <div className="flex items-center gap-1.5 px-0.5">
         <h3 className="text-[12.5px] font-semibold tracking-[-0.005em] text-ink">{title}</h3>
-        {tip ? <InfoTip content={tip} /> : null}
+        {tip ? <InfoTip content={tip} field={title} /> : null}
       </div>
       <div className="overflow-hidden rounded-[10px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
         <div className="divide-y divide-line">{children}</div>
@@ -319,7 +322,7 @@ type Props = {
   onSaved: (settings: Settings) => void;
   onDirtyChange?: (dirty: boolean, changedCount: number) => void;
   /** 把保存动作交给 App：离开设置时先默认保存，并记住保存前的值用于撤销。 */
-  onRegisterSave?: (save: ((options?: { quiet?: boolean }) => Promise<Settings | null>) | null) => void;
+  onRegisterSave?: (save: ((options?: { quiet?: boolean }) => Promise<Partial<Settings> | null>) | null) => void;
   /** 顶栏改了主题/语言后，把新值同步进来，避免保存时用旧值覆盖。 */
   onRegisterSync?: (sync: ((patch: Partial<Settings>) => void) | null) => void;
 };
@@ -440,65 +443,28 @@ export default function SettingsView({
     setSettings((current) => (current ? { ...current, ...next } : current));
   };
 
-  // 维护最新已落库快照 ref，确保连续快速切换多个即时开关时按序叠加，不会互相覆盖。
-  const persistedRef = useRef<Settings | null>(null);
-  useEffect(() => {
-    if (!initial) {
-      persistedRef.current = null;
-      return;
-    }
-    try {
-      persistedRef.current = JSON.parse(initial) as Settings;
-    } catch {
-      persistedRef.current = null;
-    }
-  }, [initial]);
-
-  // 系统级开关（关闭窗口行为、防休眠）点选即落库，避免用户切完「直接退出程序」
-  // 顺手点关窗测试时后端仍读到旧数据库值；只提交本次变更字段，不干扰其他页未保存草稿。
-  const immediateQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Each response advances the persisted baseline. Only roll back a control if
+  // the user has not selected another value while its write was in flight.
   const saveImmediate = useCallback(
-    (next: Partial<Settings>) => {
-      if (!settings || !persistedRef.current) return;
-      const previous = settings;
-      setSettings((current) => (current ? { ...current, ...next } : current));
-      if (!isTauri()) return;
-      const run = async () => {
-        const base = persistedRef.current;
-        if (!base) return;
-        const payload: Settings = { ...base, ...next };
-        try {
-          const result = await settingsUpdate(payload);
-          const applied: Partial<Settings> = {};
-          for (const key of Object.keys(next) as Array<keyof Settings>) {
-            (applied as Record<string, unknown>)[key] = result[key];
-          }
-          persistedRef.current = { ...base, ...applied };
-          setSettings((current) => (current ? { ...current, ...applied } : current));
-          setInitial((current) => {
-            if (!current) return JSON.stringify(result);
-            try {
-              return JSON.stringify({ ...(JSON.parse(current) as Settings), ...applied });
-            } catch {
-              return JSON.stringify(result);
-            }
-          });
-          onSaved(result);
-        } catch (err) {
-          setSettings((current) => {
-            if (!current) return current;
-            const rollback: Partial<Settings> = {};
-            for (const key of Object.keys(next) as Array<keyof Settings>) {
-              (rollback as Record<string, unknown>)[key] = previous[key];
-            }
-            return { ...current, ...rollback };
-          });
-          notify.error(err);
-        }
-      };
-      immediateQueueRef.current = immediateQueueRef.current.then(run, run);
+    async (next: Preferences) => {
+      if (!settings || !isTauri()) return;
+      setSettings((current) => current && { ...current, ...next });
+      try {
+        await settingsPreferences(next);
+        setInitial((base) => base && JSON.stringify({ ...JSON.parse(base), ...next }));
+      } catch (err) {
+        const stored = await settingsGet().catch(() => settings);
+        setSettings((current) => {
+          if (!current) return current;
+          const rollback = Object.fromEntries(Object.entries(next)
+            .filter(([key, value]) => current[key as keyof Preferences] === value)
+            .map(([key]) => [key, stored[key as keyof Preferences]]));
+          return { ...current, ...rollback };
+        });
+        notify.error(err);
+      }
     },
-    [notify, onSaved, settings],
+    [notify, settings],
   );
 
   // 顶栏是设置页之外的另一个写入口：它改主题/语言时，把新值同步到本地
@@ -515,10 +481,10 @@ export default function SettingsView({
     });
   }, []);
 
-  const savingRef = useRef<Promise<Settings | null> | null>(null);
+  const savingRef = useRef<Promise<Partial<Settings> | null> | null>(null);
 
   // 返回保存前的快照，App 用它做「撤销本次保存」；失败返回 null。
-  const save = useCallback((options?: { quiet?: boolean }): Promise<Settings | null> => {
+  const save = useCallback((options?: { quiet?: boolean }): Promise<Partial<Settings> | null> => {
     const running = savingRef.current;
     if (running) return running;
     if (!settings || !initial) return Promise.resolve(null);
@@ -532,9 +498,14 @@ export default function SettingsView({
     const task = (async () => {
       setSaving(true);
       try {
-        const result = await settingsUpdate(settings);
-        setSettings(result);
-        setInitial(JSON.stringify(result));
+        const changed = settingsChanges(previous, settings);
+        delete changed.closeAction;
+        delete changed.preventSleep;
+        const result = Object.keys(changed).length ? await settingsUpdate(changed) : await settingsPreferences({});
+        setSettings((current) => current && { ...result, ...settingsChanges(settings, current) });
+        setInitial((current) => JSON.stringify({
+          ...result, ...(current ? settingsChanges(previous, JSON.parse(current) as Settings) : {}),
+        }));
         // 存活的是「偏好」而不是解析后的语言：选「跟随系统」后再次保存也要把 system 写进 localStorage，
         // 否则下次启动仍会读到上一次的具体语言。
         setLanguagePreference(result.language === "system" ? "system" : (result.language as Language));
@@ -542,7 +513,7 @@ export default function SettingsView({
         void loadLogs();
         void loadFfmpeg();
         if (!options?.quiet) notify.success(t("settings.savedAll"));
-        return previous;
+        return Object.fromEntries(Object.keys(changed).map((key) => [key, previous[key as keyof Settings]]));
       } catch (err) {
         notify.error(err);
         return null;
@@ -1048,7 +1019,7 @@ export default function SettingsView({
             >
               <div className="flex items-center gap-1.5">
                 <div className="text-[12.5px] font-medium text-ink">{t("settings.postMode")}</div>
-                <InfoTip content={t("settings.postModeHint")} />
+                <InfoTip content={t("settings.postModeHint")} field={t("settings.postMode")} />
               </div>
               <div role="radiogroup" aria-label={t("settings.postMode")} className="mt-3 grid gap-2 sm:grid-cols-3">
                 {POST_MODES.map((mode) => {

@@ -141,6 +141,7 @@ END;
 
 -- 一条录像登记在册的全部文件：主文件、源封装母带、后处理派生文件。
 -- record_session 的 file_path/source_path 仍是播放与兼容的主索引，这张表负责完整清单。
+CREATE TABLE IF NOT EXISTS media_root_history (path TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS media_file (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES record_session(id) ON DELETE CASCADE,
@@ -284,6 +285,8 @@ pub struct Db {
     conn: Mutex<Connection>,
     /// 凭据列的加解密器；密钥文件与库文件同目录。
     secret: crate::secret::Secret,
+    /// FTS 回填是否成功；失败时检索退回 LIKE，不能让全文索引缺失变成 0 条结果。
+    fts_ready: std::sync::atomic::AtomicBool,
 }
 
 impl Db {
@@ -298,16 +301,52 @@ impl Db {
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         conn.execute_batch(EXTRA_SCHEMA).map_err(db_err)?;
+        migrate(&conn)?;
         // 密钥跟库文件放一起；内存库（单测）落到临时目录，避免在仓库里生成文件。
         let key_path = match path.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.join("secret.bin"),
             _ => std::env::temp_dir().join(format!("hivecast-memory-{}.bin", std::process::id())),
         };
         let secret = crate::secret::Secret::load_or_create(&key_path)?;
-        Ok(Self {
+        let db = Self {
             conn: Mutex::new(conn),
             secret,
-        })
+            fts_ready: std::sync::atomic::AtomicBool::new(false),
+        };
+        // 老库没有 media_file 表：启动时按 file_path/source_path 回填一次。
+        match db.backfill_media_files() {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "数据库迁移：回填媒体文件登记")
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "回填媒体文件登记失败"),
+        }
+        // 早期版本只给后续片段写 group_id，首片段为空；COALESCE 已经能兼容，
+        // 这里把首片段也指向自己，让所有旧场次都有稳定的分组键。
+        match db.backfill_session_groups() {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "数据库迁移：补全旧录制场次分组")
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "补全旧录制场次分组失败"),
+        }
+        // 跨 Run 检索的 FTS 索引：老库第一次启动时回填一次。失败不阻塞启动，
+        // 检索会自动退回 LIKE（见 task_event_search），最多慢一点，不会功能缺失。
+        let fts_ready = match db.ensure_task_event_fts() {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(count, "数据库迁移：回填任务事件全文索引");
+                }
+                true
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "回填任务事件全文索引失败，检索将回退 LIKE");
+                false
+            }
+        };
+        db.fts_ready
+            .store(fts_ready, std::sync::atomic::Ordering::Relaxed);
+        Ok(db)
     }
 
     /// 只给单测用：跨模块播种数据（retention 等测试需要直接写表）。
@@ -1375,6 +1414,30 @@ impl Db {
     pub fn set_settings(&self, values: &[(&str, String)]) -> Result<(), AppError> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
+        if let Some((_, root)) = values
+            .iter()
+            .find(|(key, _)| *key == crate::settings::KEY_MEDIA_ROOT)
+        {
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM app_setting WHERE key=?1",
+                    [crate::settings::KEY_MEDIA_ROOT],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(db_err)?;
+            if let Some(previous) = previous
+                .as_deref()
+                .filter(|v| *v != root && Path::new(v).is_absolute())
+            {
+                tx.execute(
+                    "INSERT OR IGNORE INTO media_root_history(path) VALUES(?1)",
+                    [previous],
+                )
+                .map_err(db_err)?;
+            }
+            Self::locate_legacy_paths_on(&tx, Path::new(root), previous.as_deref().map(Path::new))?;
+        }
         {
             let mut stmt = tx
                 .prepare(
@@ -1845,6 +1908,43 @@ impl Db {
         Ok(())
     }
 
+    /// 老库第一次引入 FTS 时回填；用 app_setting 标记，避免每次启动重建。
+    /// 触发器已经接管新事件，因此只需把历史行按 id 写进索引。
+    fn ensure_task_event_fts(&self) -> Result<usize, AppError> {
+        let mut conn = self.lock();
+        let ready: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = 'db.task_event_fts_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        if ready.as_deref() == Some("1") {
+            return Ok(0);
+        }
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute("DELETE FROM task_event_fts", [])
+            .map_err(db_err)?;
+        let count = tx
+            .execute(
+                "INSERT INTO task_event_fts(rowid, body)
+                 SELECT id, COALESCE(message, '') || ' ' || stage || ' ' || state || ' ' ||
+                        kind || ' ' || task_id
+                   FROM task_event",
+                [],
+            )
+            .map_err(db_err)?;
+        tx.execute(
+            "INSERT INTO app_setting (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params!["db.task_event_fts_v1", "1", now_ts()],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(count)
+    }
+
     /// 追加一条阶段事件。id 由 SQLite 自增，传入值会被忽略。
     pub fn task_event(&self, event: &hivecast_ipc::TaskEvent) -> Result<(), AppError> {
         self.lock()
@@ -1924,7 +2024,9 @@ impl Db {
         let state_values = crate::labels::matching_states(query);
         // trigram 索引至少 3 个字符；1–2 字符仍走 message LIKE，但阶段/状态
         // 已经由 IN 命中，不会每次都对整张表做无索引扫描。
-        let use_fts = query.chars().count() >= 3 && query.chars().any(|ch| ch.is_alphanumeric());
+        let use_fts = self.fts_ready.load(std::sync::atomic::Ordering::Relaxed)
+            && query.chars().count() >= 3
+            && query.chars().any(|ch| ch.is_alphanumeric());
         let mut clauses = vec!["?2 = 0".to_string()];
         if use_fts {
             clauses.push(
@@ -2257,6 +2359,268 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
+    fn media_paths(conn: &Connection) -> Result<Vec<Option<String>>, AppError> {
+        let mut q = conn.prepare("SELECT file_path FROM record_session UNION SELECT source_path FROM record_session
+                UNION SELECT danmaku_path FROM record_session UNION SELECT split_manifest FROM record_session
+                UNION SELECT path FROM media_file").map_err(db_err)?;
+        let rows = q
+            .query_map([], |row| row.get::<_, Option<String>>(0))
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)
+    }
+
+    pub fn cache_overlaps_media(&self, cache: &Path, media: &Path) -> Result<bool, AppError> {
+        if crate::paths::overlap(cache, media) {
+            return Ok(true);
+        }
+        let conn = self.lock();
+        let mut roots = conn
+            .prepare("SELECT path FROM media_root_history")
+            .map_err(db_err)?;
+        for row in roots
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(db_err)?
+        {
+            if crate::paths::overlap(cache, Path::new(&row.map_err(db_err)?)) {
+                return Ok(true);
+            }
+        }
+        let cache_key = crate::paths::path_key(cache);
+        Ok(Self::media_paths(&conn)?
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_empty())
+            .any(|p| crate::paths::path_key(Path::new(p)).starts_with(&cache_key)))
+    }
+
+    /// Locate legacy relative media paths under the selected library. Only adopt a
+    /// unique existing file; unresolved rows can be retried when the user selects its volume.
+    pub fn locate_legacy_media(
+        &self,
+        root: &Path,
+        previous_root: Option<&Path>,
+    ) -> Result<(), AppError> {
+        let mut guard = self.lock();
+        let tx = guard.transaction().map_err(db_err)?;
+        Self::locate_legacy_paths_on(&tx, root, previous_root)?;
+        tx.commit().map_err(db_err)
+    }
+
+    fn locate_legacy_paths_on(
+        tx: &rusqlite::Transaction<'_>,
+        root: &Path,
+        previous_root: Option<&Path>,
+    ) -> Result<(), AppError> {
+        if !root.is_absolute() {
+            return Ok(());
+        }
+        let paths = Self::media_paths(tx)?;
+        for old in paths.into_iter().flatten() {
+            let rel = Path::new(&old);
+            if old.is_empty()
+                || rel.components().any(|c| {
+                    !matches!(
+                        c,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                continue;
+            }
+            let mut candidates = vec![root.join(rel)];
+            for prefix in [
+                previous_root.filter(|p| p.is_relative()),
+                previous_root.and_then(Path::file_name).map(Path::new),
+                root.file_name().map(Path::new),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Ok(tail) = rel.strip_prefix(prefix) {
+                    candidates.push(root.join(tail));
+                }
+            }
+            // Keep the directory entry itself (including symlinks) as the deletion target.
+            candidates.retain(|p| p.is_file());
+            candidates.sort();
+            candidates.dedup();
+            let [located] = candidates.as_slice() else {
+                continue;
+            };
+            Self::replace_media_path(tx, &old, located)?;
+        }
+        Ok(())
+    }
+
+    fn replace_media_path(
+        tx: &rusqlite::Transaction<'_>,
+        old: &str,
+        located: &Path,
+    ) -> Result<(), AppError> {
+        let new = located.to_string_lossy();
+        for column in ["file_path", "source_path", "danmaku_path", "split_manifest"] {
+            tx.execute(
+                &format!("UPDATE record_session SET {column}=?1 WHERE {column}=?2"),
+                params![new, old],
+            )
+            .map_err(db_err)?;
+        }
+        tx.execute("DELETE FROM media_file AS old WHERE path=?1 AND EXISTS
+                (SELECT 1 FROM media_file current WHERE current.session_id=old.session_id AND current.path=?2)",params![old,new]).map_err(db_err)?;
+        tx.execute(
+            "UPDATE media_file SET path=?1 WHERE path=?2",
+            params![new, old],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    pub fn relocate_portable_library(&self, root: &Path) -> Result<(), AppError> {
+        let key = "install.portable_root";
+        let previous = self.get_setting(key)?.map(std::path::PathBuf::from);
+        if previous.as_deref() == Some(root) {
+            return Ok(());
+        }
+        let media = self
+            .get_setting(crate::settings::KEY_MEDIA_ROOT)?
+            .map(std::path::PathBuf::from);
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        let paths = Self::media_paths(&tx)?;
+        // Versions without a root marker can only prove a move of the default Recording
+        // tree when an indexed file now exists at the corresponding destination.
+        let inferred = media.as_deref().filter(|dir| {
+            dir.is_absolute()
+                && !dir.exists()
+                && dir
+                    .file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("Recording"))
+                && paths.iter().flatten().any(|value| {
+                    Path::new(value)
+                        .strip_prefix(dir)
+                        .is_ok_and(|tail| root.join("Recording").join(tail).is_file())
+                })
+        });
+        if let Some(old_root) = previous
+            .as_deref()
+            .or_else(|| inferred.and_then(Path::parent))
+        {
+            for old in paths.into_iter().flatten() {
+                if let Some(new) = crate::paths::relocated(Path::new(&old), old_root, root) {
+                    Self::replace_media_path(&tx, &old, &new)?;
+                }
+            }
+            for setting in [
+                crate::settings::KEY_MEDIA_ROOT,
+                crate::settings::KEY_LOG_DIR,
+            ] {
+                let raw: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM app_setting WHERE key=?1",
+                        [setting],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(db_err)?;
+                if let Some(new) =
+                    raw.and_then(|raw| crate::paths::relocated(Path::new(&raw), old_root, root))
+                {
+                    tx.execute(
+                        "UPDATE app_setting SET value=?1 WHERE key=?2",
+                        params![new.to_string_lossy(), setting],
+                    )
+                    .map_err(db_err)?;
+                }
+            }
+            let history = {
+                let mut stmt = tx
+                    .prepare("SELECT path FROM media_root_history")
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(db_err)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)?
+            };
+            for previous in history {
+                if let Some(new) = crate::paths::relocated(Path::new(&previous), old_root, root) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO media_root_history(path) VALUES(?1)",
+                        [new.to_string_lossy()],
+                    )
+                    .map_err(db_err)?;
+                }
+            }
+            let mut manifests = tx.prepare("SELECT DISTINCT split_manifest FROM record_session WHERE split_manifest IS NOT NULL").map_err(db_err)?;
+            for file in manifests
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(db_err)?
+            {
+                let file = std::path::PathBuf::from(file.map_err(db_err)?);
+                if file.starts_with(root) && file.is_file() {
+                    crate::recorder::relocate_manifest(&file, old_root, root)?;
+                }
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO app_setting(key,value,updated_at) VALUES(?1,?2,?3)",
+            params![key, root.to_string_lossy(), now_ts()],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
+
+    /// 老库回填：之前只记了 file_path/source_path，启动时补进登记表。
+    pub fn backfill_media_files(&self) -> Result<usize, AppError> {
+        let mut guard = self.lock();
+        let conn = guard.transaction().map_err(db_err)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, source_path, source_deleted FROM record_session
+                  WHERE ((file_path IS NOT NULL AND file_path <> '')
+                     OR (source_path IS NOT NULL AND source_path <> '')) AND NOT EXISTS
+                       (SELECT 1 FROM media_file WHERE session_id=record_session.id)",
+            )
+            .map_err(db_err)?;
+        let rows: Vec<(String, Option<String>, Option<String>, i64)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(db_err)?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        let mut count = 0;
+        for (id, main, source, deleted) in rows {
+            sync_media_files_on(&conn, &id, main.as_deref(), source.as_deref(), deleted != 0)
+                .map_err(db_err)?;
+            count += 1;
+        }
+        conn.commit().map_err(db_err)?;
+        Ok(count)
+    }
+
+    /// 早期分割录制只在后续片段写 group_id，首片段为空。任务中心用
+    /// COALESCE(group_id, id) 已经能正确分组，但补上首片段自身 id 后，
+    /// 所有按 group_id 精确查询的路径也能覆盖旧数据。
+    ///
+    /// 只处理「已有片段明确指向它」的行，不猜测哪些 session 属于同一场。
+    pub fn backfill_session_groups(&self) -> Result<usize, AppError> {
+        self.lock()
+            .execute(
+                "UPDATE record_session
+                    SET group_id = id
+                  WHERE group_id IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM record_session AS clip
+                         WHERE clip.group_id = record_session.id
+                           AND clip.id <> record_session.id
+                    )",
+                [],
+            )
+            .map_err(db_err)
+    }
+
     /// 某场次待恢复的分割清单：片段 id 或同组任意片段上的清单都算。
     pub fn split_manifest_for(&self, session_id: &str) -> Result<Option<String>, AppError> {
         Ok(self.split_manifest_owner(session_id)?.map(|(_, path)| path))
@@ -2417,6 +2781,40 @@ impl Db {
             out.push(row);
         }
         Ok(out)
+    }
+
+    /// 把历史明文 Cookie 就地改成密文；返回改动了多少行。
+    ///
+    /// 只在启动时跑一次，幂等：已经带 enc:v1: 前缀的行会被跳过。
+    pub fn reseal_credentials(&self) -> Result<usize, AppError> {
+        let raw: Vec<(String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn
+                .prepare("SELECT platform, cookie FROM credential")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
+        };
+        let mut changed = 0;
+        for (platform, cookie) in raw {
+            if crate::secret::Secret::is_sealed(&cookie) {
+                continue;
+            }
+            let sealed = self.secret.seal(&cookie)?;
+            self.lock()
+                .execute(
+                    "UPDATE credential SET cookie = ?1 WHERE platform = ?2",
+                    params![sealed, platform],
+                )
+                .map_err(db_err)?;
+            changed += 1;
+        }
+        if changed > 0 {
+            tracing::info!(count = changed, "已把历史明文 Cookie 加密");
+        }
+        Ok(changed)
     }
 
     pub fn save_credential(&self, row: &CredentialRow) -> Result<(), AppError> {
@@ -2659,6 +3057,269 @@ pub struct CredentialRefreshRow {
     pub message: Option<String>,
     pub key_stale: bool,
     pub last_refreshed_at: i64,
+}
+
+/// 轻量迁移：老库缺弹幕列时补上。
+///
+/// 不用 migration 框架——目前只有两张表，直接按 PRAGMA 检查足够，
+/// 失败时保留旧数据比重建表更安全。
+fn migrate(conn: &Connection) -> Result<(), AppError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(record_session)")
+        .map_err(db_err)?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    if !columns.iter().any(|name| name == "danmaku_path") {
+        conn.execute(
+            "ALTER TABLE record_session ADD COLUMN danmaku_path TEXT",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!(column = "record_session.danmaku_path", "数据库迁移：新增列");
+    }
+    for (name, ddl) in [
+        (
+            "group_id",
+            "ALTER TABLE record_session ADD COLUMN group_id TEXT",
+        ),
+        (
+            "clip_index",
+            "ALTER TABLE record_session ADD COLUMN clip_index INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "split_reason",
+            "ALTER TABLE record_session ADD COLUMN split_reason TEXT",
+        ),
+        (
+            "split_manifest",
+            "ALTER TABLE record_session ADD COLUMN split_manifest TEXT",
+        ),
+        (
+            "source_path",
+            "ALTER TABLE record_session ADD COLUMN source_path TEXT",
+        ),
+        (
+            "post_mode",
+            "ALTER TABLE record_session ADD COLUMN post_mode TEXT NOT NULL DEFAULT 'source'",
+        ),
+        (
+            "post_state",
+            "ALTER TABLE record_session ADD COLUMN post_state TEXT NOT NULL DEFAULT 'done'",
+        ),
+        (
+            "source_deleted",
+            "ALTER TABLE record_session ADD COLUMN source_deleted INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "post_error",
+            "ALTER TABLE record_session ADD COLUMN post_error TEXT",
+        ),
+        (
+            "quality_history",
+            "ALTER TABLE record_session ADD COLUMN quality_history TEXT",
+        ),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
+    }
+    if !columns.iter().any(|name| name == "danmaku_count") {
+        conn.execute(
+            "ALTER TABLE record_session ADD COLUMN danmaku_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!(
+            column = "record_session.danmaku_count",
+            "数据库迁移：新增列"
+        );
+    }
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(task_history)")
+        .map_err(db_err)?;
+    let task_columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    for (name, ddl) in [
+        (
+            "queued_at",
+            "ALTER TABLE task_history ADD COLUMN queued_at INTEGER",
+        ),
+        (
+            "started_running_at",
+            "ALTER TABLE task_history ADD COLUMN started_running_at INTEGER",
+        ),
+    ] {
+        if !task_columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
+    }
+
+    let mut stmt = conn.prepare("PRAGMA table_info(room)").map_err(db_err)?;
+    let room_columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    if !room_columns.iter().any(|name| name == "record_line") {
+        conn.execute("ALTER TABLE room ADD COLUMN record_line TEXT", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.record_line", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "monitor_paused") {
+        conn.execute(
+            "ALTER TABLE room ADD COLUMN monitor_paused INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!(column = "room.monitor_paused", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "removed_at") {
+        conn.execute("ALTER TABLE room ADD COLUMN removed_at INTEGER", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.removed_at", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "platform_uid") {
+        conn.execute("ALTER TABLE room ADD COLUMN platform_uid TEXT", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.platform_uid", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "batch_follow") {
+        conn.execute(
+            "ALTER TABLE room ADD COLUMN batch_follow INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!(column = "room.batch_follow", "数据库迁移：新增列");
+    }
+    if !room_columns.iter().any(|name| name == "internal_room_id") {
+        conn.execute("ALTER TABLE room ADD COLUMN internal_room_id TEXT", [])
+            .map_err(db_err)?;
+        tracing::info!(column = "room.internal_room_id", "数据库迁移：新增列");
+    }
+    let mut backfill_last_session = false;
+    for (name, ddl) in [
+        (
+            "last_session_id",
+            "ALTER TABLE room ADD COLUMN last_session_id TEXT",
+        ),
+        (
+            "last_session_started_at",
+            "ALTER TABLE room ADD COLUMN last_session_started_at INTEGER",
+        ),
+        (
+            "last_session_duration_ms",
+            "ALTER TABLE room ADD COLUMN last_session_duration_ms INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_session_status",
+            "ALTER TABLE room ADD COLUMN last_session_status TEXT",
+        ),
+        (
+            "last_session_reason",
+            "ALTER TABLE room ADD COLUMN last_session_reason TEXT",
+        ),
+        (
+            "last_session_file_size",
+            "ALTER TABLE room ADD COLUMN last_session_file_size INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_session_quality",
+            "ALTER TABLE room ADD COLUMN last_session_quality TEXT",
+        ),
+        (
+            "note",
+            "ALTER TABLE room ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "tags",
+            "ALTER TABLE room ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "title_include",
+            "ALTER TABLE room ADD COLUMN title_include TEXT",
+        ),
+        (
+            "title_exclude",
+            "ALTER TABLE room ADD COLUMN title_exclude TEXT",
+        ),
+        (
+            "split_max_duration_sec",
+            "ALTER TABLE room ADD COLUMN split_max_duration_sec INTEGER",
+        ),
+        (
+            "split_max_size_mb",
+            "ALTER TABLE room ADD COLUMN split_max_size_mb INTEGER",
+        ),
+        (
+            "notify_live",
+            "ALTER TABLE room ADD COLUMN notify_live INTEGER",
+        ),
+        (
+            "notify_error",
+            "ALTER TABLE room ADD COLUMN notify_error INTEGER",
+        ),
+    ] {
+        if !room_columns.iter().any(|column| column == name) {
+            conn.execute(ddl, []).map_err(db_err)?;
+            backfill_last_session = true;
+            tracing::info!(column = name, "数据库迁移：新增列");
+        }
+    }
+    // 老库补列后必须回填一次，否则升级后监控列表的「最近录制」会全是空，
+    // 直到该房间再次产生 session。批量 UPDATE 走 idx_record_session_room。
+    if backfill_last_session {
+        conn.execute(
+            "UPDATE room SET
+                last_session_id = (
+                    SELECT id FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_started_at = (
+                    SELECT started_at FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_duration_ms = COALESCE((
+                    SELECT duration_ms FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ), 0),
+                last_session_status = (
+                    SELECT status FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_reason = (
+                    SELECT reason FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ),
+                last_session_file_size = COALESCE((
+                    SELECT file_size FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                ), 0),
+                last_session_quality = (
+                    SELECT quality FROM record_session
+                    WHERE room_id = room.id
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                )",
+            [],
+        )
+        .map_err(db_err)?;
+        tracing::info!("数据库迁移：回填 room 最近录制摘要");
+    }
+    Ok(())
 }
 
 /// 把用户输入转成 LIKE 模式，转义 `%`、`_` 和反斜杠本身。
@@ -3631,6 +4292,24 @@ mod tests {
     }
 
     #[test]
+    fn reseals_legacy_plaintext_once() {
+        let (db, _path) = temp_db("legacy");
+        db.lock()
+            .execute(
+                "INSERT INTO credential (platform, cookie, updated_at) VALUES ('douyu', 'dy_did=1', 0)",
+                [],
+            )
+            .expect("插明文失败");
+        assert_eq!(raw_cookie(&db, "douyu"), "dy_did=1");
+        assert_eq!(db.reseal_credentials().expect("迁移失败"), 1);
+        let stored = raw_cookie(&db, "douyu");
+        assert!(crate::secret::Secret::is_sealed(&stored));
+        // 幂等：第二次跑没有可迁移的行。
+        assert_eq!(db.reseal_credentials().expect("二次迁移失败"), 0);
+        assert_eq!(db.credentials().expect("读失败")[0].cookie, "dy_did=1");
+    }
+
+    #[test]
     fn profile_update_keeps_the_existing_cookie() {
         let (db, _path) = temp_db("profile");
         db.save_credential(&row("bilibili", "SESSDATA=old"))
@@ -4014,6 +4693,60 @@ mod tests {
     }
 
     #[test]
+    fn task_event_fts_backfills_old_events_once() {
+        let (db, _path) = temp_db("task-event-fts-backfill");
+        db.task_event(&hivecast_ipc::TaskEvent {
+            id: 0,
+            task_id: "post:s-a1".into(),
+            run_id: Some("session:s-a1".into()),
+            kind: "post".into(),
+            stage: "thumbnail".into(),
+            state: "done".into(),
+            percent: 100,
+            message: Some("封面回填".into()),
+            at: 10,
+        })
+        .expect("写事件失败");
+        // 模拟升级前的老库：事件已经在，但索引为空且没有回填标记。
+        db.lock()
+            .execute(
+                "DELETE FROM app_setting WHERE key = 'db.task_event_fts_v1'",
+                [],
+            )
+            .expect("清标记失败");
+        db.lock()
+            .execute("DELETE FROM task_event_fts", [])
+            .expect("清索引失败");
+        // 索引不可用时退回 LIKE，不能因为 FTS 缺失就返回 0 条。
+        db.fts_ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            1
+        );
+        db.fts_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            0
+        );
+
+        assert_eq!(db.ensure_task_event_fts().expect("回填失败"), 1);
+        assert_eq!(
+            db.task_event_search("封面回填", false, None, 100)
+                .expect("检索失败")
+                .total,
+            1
+        );
+        // 标记写入后再次打开不再重复扫全表。
+        assert_eq!(db.ensure_task_event_fts().expect("回填失败"), 0);
+    }
+
+    #[test]
     fn task_events_keeps_the_newest_events_when_capped() {
         let (db, _path) = temp_db("task-event-newest");
         for at in 1..=5 {
@@ -4304,6 +5037,38 @@ mod tests {
     }
 
     #[test]
+    fn backfills_group_of_a_legacy_first_clip_only() {
+        let (db, _path) = temp_db("backfill-groups");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO room (id, platform, room_key, canonical_url, host_name, title, created_at, updated_at)
+                 VALUES ('rm-a', 'bilibili', '1', 'https://live.bilibili.com/1', '主播甲', '房间甲', 0, 0);
+                 INSERT INTO record_session (id, room_id, started_at, status, file_path, file_size, duration_ms, group_id, clip_index)
+                 VALUES ('s1', 'rm-a', 100, 'finished', '/tmp/s1.flv', 10, 100, NULL, 0),
+                        ('s2', 'rm-a', 200, 'finished', '/tmp/s2.flv', 10, 100, 's1', 1),
+                        ('s3', 'rm-a', 300, 'finished', '/tmp/s3.flv', 10, 100, NULL, 0);",
+            )
+            .expect("播种场次失败");
+
+        assert_eq!(db.backfill_session_groups().expect("回填失败"), 1);
+        let conn = db.lock();
+        let group = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT group_id FROM record_session WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("读分组失败")
+        };
+        assert_eq!(group("s1").as_deref(), Some("s1"));
+        assert_eq!(group("s2").as_deref(), Some("s1"));
+        assert_eq!(group("s3"), None, "没有片段指向的旧场次不能猜分组");
+        drop(conn);
+        // 幂等：再跑一次不会改任何行。
+        assert_eq!(db.backfill_session_groups().expect("再次回填失败"), 0);
+    }
+
+    #[test]
     fn split_manifest_falls_back_to_any_clip_in_the_group() {
         let (db, _path) = temp_db("split-manifest-group");
         db.lock()
@@ -4368,6 +5133,54 @@ mod tests {
             db.get_setting("after").unwrap(),
             None,
             "失败后不能留下后续键"
+        );
+    }
+    #[test]
+    fn portable_move_rebases_install_paths_and_keeps_external_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old");
+        let new = dir.path().join("new");
+        let outside = dir.path().join("independent").join("clip.mp4");
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        db.set_setting("install.portable_root", &old.to_string_lossy())
+            .unwrap();
+        db.set_setting(
+            crate::settings::KEY_MEDIA_ROOT,
+            &old.join("Recording").to_string_lossy(),
+        )
+        .unwrap();
+        {
+            let conn = db.lock();
+            conn.execute_batch(
+                "INSERT INTO room(id,platform,room_key,canonical_url,created_at,updated_at)
+                VALUES('r','test','1','test',1,1)",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO record_session(id,room_id,started_at,status,file_path,source_path,danmaku_path)
+                VALUES('s','r',1,'finished',?1,?2,?3)",params![old.join("Recording/clip.mp4").to_string_lossy(),outside.to_string_lossy(),old.join("Recording/chat.jsonl").to_string_lossy()]).unwrap();
+        }
+        db.backfill_media_files().unwrap();
+        db.relocate_portable_library(&new).unwrap();
+        db.relocate_portable_library(&new).unwrap();
+        let paths = Db::media_paths(&db.lock())
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        for path in [
+            new.join("Recording/clip.mp4"),
+            new.join("Recording/chat.jsonl"),
+            outside,
+        ] {
+            assert!(paths.contains(&path));
+        }
+        assert!(!paths.iter().any(|p| p.starts_with(&old)));
+        assert_eq!(
+            db.get_setting(crate::settings::KEY_MEDIA_ROOT)
+                .unwrap()
+                .unwrap(),
+            new.join("Recording").to_string_lossy()
         );
     }
 }

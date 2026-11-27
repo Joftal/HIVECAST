@@ -324,10 +324,61 @@ fn absolute_media_root(raw: &str) -> String {
         .to_string()
 }
 
+fn validate_media_location(media: &Path, install: &Path) -> Result<(), AppError> {
+    for name in ["cache", "logs", "webview", "data"] {
+        let reserved = install.join(name);
+        if crate::paths::overlap(media, &reserved) {
+            return Err(AppError::User(format!(
+                "媒体目录与程序运行目录 {} 重叠，请选择独立的录像目录",
+                reserved.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 只把媒体目录写回设置：启动时目录不可用、回落默认目录后用（H2）。
 /// 不走 save()，因为这里已经知道目录能建出来，校验只会重复一次 IO。
 pub fn persist_media_root(db: &Db, path: &str) -> Result<(), AppError> {
     db.set_setting(KEY_MEDIA_ROOT, path)
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Preferences {
+    close_action: Option<String>,
+    prevent_sleep: Option<bool>,
+    theme: Option<String>,
+    language: Option<String>,
+}
+
+pub(crate) fn save_preferences(db: &Db, patch: Preferences) -> Result<Settings, AppError> {
+    let mut values = Vec::new();
+    for (key, value, allowed) in [
+        (
+            KEY_CLOSE_ACTION,
+            patch.close_action,
+            &[CLOSE_QUIT, CLOSE_TRAY][..],
+        ),
+        (KEY_THEME, patch.theme, &["light", "dark", "system"][..]),
+        (
+            KEY_LANGUAGE,
+            patch.language,
+            &["zh-CN", "en-US", "system"][..],
+        ),
+    ] {
+        if let Some(value) = value {
+            if !allowed.contains(&value.as_str()) {
+                return Err(AppError::User(format!("无效的设置值：{key}")));
+            }
+            values.push((key, value));
+        }
+    }
+    if let Some(enabled) = patch.prevent_sleep {
+        values.push((KEY_PREVENT_SLEEP, enabled.to_string()));
+    }
+    db.set_settings(&values)?;
+    Ok(load(db))
 }
 
 /// 校验并落库；返回纠正过的值（例如数值越界被夹到合法区间），前端据此回填输入框。
@@ -403,6 +454,9 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let path = path
         .canonicalize()
         .map_err(|err| AppError::from_io(err, &path))?;
+    if let Some(root) = crate::paths::portable_root() {
+        validate_media_location(&path, &root)?;
+    }
     settings.media_root = crate::paths::strip_windows_verbatim(&path)
         .display()
         .to_string();
@@ -949,5 +1003,27 @@ mod tests {
         input.post_custom_command = "-i {input} -c copy {output}".into();
         assert!(save(&db, &input).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn preferences_ignore_unrelated_invalid_tool_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        db.set_setting(KEY_FFMPEG_PATH, "missing-tool.exe").unwrap();
+        let patch =
+            serde_json::from_value(serde_json::json!({"closeAction":"quit","preventSleep":true}))
+                .unwrap();
+        let saved = save_preferences(&db, patch).unwrap();
+        assert_eq!(saved.close_action, CLOSE_QUIT);
+        assert!(saved.prevent_sleep);
+        assert_eq!(
+            db.get_setting(KEY_FFMPEG_PATH).unwrap().as_deref(),
+            Some("missing-tool.exe")
+        );
+        for name in ["cache", "logs", "webview", "data"] {
+            assert!(
+                validate_media_location(&dir.path().join(name).join("clips"), dir.path()).is_err()
+            );
+        }
+        assert!(validate_media_location(&dir.path().join("Recording"), dir.path()).is_ok());
     }
 }

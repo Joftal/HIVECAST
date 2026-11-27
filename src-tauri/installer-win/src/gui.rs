@@ -48,6 +48,9 @@ enum IpcCommand {
     Theme {
         dark: bool,
     },
+    Inspect {
+        dir: String,
+    },
     Browse {
         #[serde(rename = "currentDir")]
         current_dir: String,
@@ -200,6 +203,13 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                     IpcCommand::Theme { dark } => {
                         win_os::apply_window_material(window.hwnd(), dark);
                     }
+                    IpcCommand::Inspect { dir } => {
+                        let worker_proxy = proxy.clone();
+                        thread::spawn(move || {
+                            let existing = install::validate_install_dir(&dir).is_ok_and(|dir| install::has_existing_install(&dir));
+                            let _ = worker_proxy.send_event(AppEvent::EmitJs(serde_json::json!({"type":"dirInspected","dir":dir,"existing":existing})));
+                        });
+                    }
                     IpcCommand::Browse { current_dir } => {
                         if mode != GuiMode::Install {
                             return;
@@ -240,10 +250,11 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                                     }),
                                 ));
                             }) {
-                                Ok((target, exe_path)) => {
+                                Ok((target, exe_path, upgrading)) => {
                                     let _ = worker_proxy.send_event(AppEvent::EmitJs(
                                         serde_json::json!({
                                             "type": "installDone",
+                                            "existing": upgrading,
                                             "installDir": target.display().to_string(),
                                             "exePath": exe_path.display().to_string(),
                                         }),

@@ -416,8 +416,29 @@ export async function ffmpegStatus(): Promise<FfmpegStatus> {
   return invoke<FfmpegStatus>("ffmpeg_status");
 }
 
-export async function settingsUpdate(settings: Settings): Promise<Settings> {
-  return invoke<Settings>("settings_update", { settings });
+export type Preferences = Partial<Pick<Settings, "closeAction" | "preventSleep" | "theme" | "language">>;
+
+let settingsWrites: Promise<void> = Promise.resolve();
+
+function enqueueSettings(write: () => Promise<Settings>): Promise<Settings> {
+  const result = settingsWrites.then(write);
+  settingsWrites = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+export function settingsPreferences(patch: Preferences): Promise<Settings> {
+  return enqueueSettings(() => invoke<Settings>("settings_preferences", { patch }));
+}
+
+export function settingsChanges(before: Settings, after: Settings): Partial<Settings> {
+  return Object.fromEntries(Object.entries(after).filter(([key, value]) => before[key as keyof Settings] !== value));
+}
+
+export function settingsUpdate(patch: Partial<Settings>): Promise<Settings> {
+  return enqueueSettings(async () => {
+    const current = await settingsGet();
+    return invoke<Settings>("settings_update", { settings: { ...current, ...patch } });
+  });
 }
 
 /** 日志运行状态：实际目录、当前文件、丢弃计数与最近错误。 */

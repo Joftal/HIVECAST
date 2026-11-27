@@ -161,6 +161,7 @@ export default function AccountSection() {
 
   /** 每次打开/关闭/刷新二维码或组件卸载递增，丢弃迟到的 generate/poll 响应。 */
   const qrSeq = useRef(0);
+  const cookieSeq = useRef(0);
   /** 记录已通知后端取消过的 qrcodeKey，确保每个虎牙 session 只取消一次且无重复 IPC。 */
   const cancelledKeysRef = useRef<Set<string>>(new Set());
   const checkingSetRef = useRef<Set<Platform>>(new Set());
@@ -170,6 +171,7 @@ export default function AccountSection() {
   useEffect(() => {
     return () => {
       qrSeq.current += 1;
+      cookieSeq.current += 1;
     };
   }, []);
 
@@ -295,6 +297,8 @@ export default function AccountSection() {
       setConfirming(null);
       setModalPlatform(platform);
       setModalOpen(true);
+      cookieSeq.current += 1;
+      setSavingCookie(false);
       setAuthTab(nextTab);
       setDraft("");
       if (nextTab === "qr" && spec.supportsQr) {
@@ -307,6 +311,7 @@ export default function AccountSection() {
   );
 
   const closeAuthModal = useCallback(() => {
+    cookieSeq.current += 1;
     stopQr();
     setModalOpen(false);
     setDraft("");
@@ -318,6 +323,8 @@ export default function AccountSection() {
       if (!modalPlatform || nextTab === authTab) return;
       const spec = SPEC_MAP[modalPlatform];
       if (nextTab === "qr" && !spec.supportsQr) return;
+      cookieSeq.current += 1;
+      setSavingCookie(false);
       setAuthTab(nextTab);
       if (nextTab === "qr") {
         void startQr(modalPlatform);
@@ -330,7 +337,7 @@ export default function AccountSection() {
 
   const checkRefresh = useCallback(
     async (platform: Platform, silent = false) => {
-      if (checkingSetRef.current.has(platform)) return;
+      if (checkingAllRef.current || checkingSetRef.current.has(platform)) return;
       checkingSetRef.current.add(platform);
       setCheckingPlatforms((prev) => ({ ...prev, [platform]: true }));
       try {
@@ -357,7 +364,7 @@ export default function AccountSection() {
   );
 
   const checkAllRefreshable = useCallback(async () => {
-    if (checkingAllRef.current) return;
+    if (checkingAllRef.current || checkingSetRef.current.size > 0) return;
     const targets = PLATFORM_SPECS.filter((spec) => {
       const cred = credMap.get(spec.id);
       return Boolean(cred && cred.status !== "expired" && cred.refreshable);
@@ -369,7 +376,6 @@ export default function AccountSection() {
     let failed = 0;
     try {
       for (const spec of targets) {
-        if (checkingSetRef.current.has(spec.id)) continue;
         checkingSetRef.current.add(spec.id);
         setCheckingPlatforms((prev) => ({ ...prev, [spec.id]: true }));
         try {
@@ -400,16 +406,21 @@ export default function AccountSection() {
 
   const saveCookie = useCallback(
     async (platform: Platform) => {
+      const seq = ++cookieSeq.current;
       setSavingCookie(true);
       try {
         const saved = await credentialSave(platform, draft);
+        if (cookieSeq.current !== seq) {
+          await load();
+          return;
+        }
         closeAuthModal();
         notify.success(t("account.savedAs", { name: saved.accountName }));
         await load();
       } catch (err) {
-        notify.error(err);
+        if (cookieSeq.current === seq) notify.error(err);
       } finally {
-        setSavingCookie(false);
+        if (cookieSeq.current === seq) setSavingCookie(false);
       }
     },
     [closeAuthModal, draft, load, notify, t],
@@ -667,7 +678,7 @@ export default function AccountSection() {
         <Button
           size="sm"
           variant="secondary"
-          disabled={checkingAll || stats.refreshable === 0 || items === null}
+          disabled={checkingAll || Object.keys(checkingPlatforms).length > 0 || stats.refreshable === 0 || items === null}
           onClick={() => void checkAllRefreshable()}
         >
           <RefreshCw className={cx("h-3.5 w-3.5", checkingAll && "animate-spin")} />

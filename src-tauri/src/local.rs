@@ -466,8 +466,61 @@ mod tests {
              INSERT INTO record_session (id,room_id,started_at,status,file_path,file_size,duration_ms) VALUES ('s','r',1,'finished','{clip_sql}',1000,2000);"
         ))
         .unwrap();
+        db.set_setting(crate::settings::KEY_MEDIA_ROOT, &root.to_string_lossy())
+            .unwrap();
+        db.relocate_portable_library(&root).unwrap();
         drop(db);
-        let db = Db::open(&database).unwrap();
+        let moved = root.with_file_name(uuid::Uuid::new_v4().to_string());
+        std::fs::rename(&root, &moved).unwrap();
+        let root = moved;
+        let db = Db::open(&root.join("local.sqlite")).unwrap();
+        db.relocate_portable_library(&root).unwrap();
+        assert_eq!(
+            Path::new(&crate::settings::load(&db).media_root)
+                .canonicalize()
+                .unwrap(),
+            root.canonicalize().unwrap()
+        );
+        let settings = crate::settings::load(&db);
+        let recorder = crate::recorder::Recorder::new(
+            std::sync::Arc::new(db),
+            PathBuf::from(&settings.media_root),
+            None,
+        );
+        crate::settings::apply(&settings, &recorder);
+        let parts = crate::filename::NameParts {
+            platform_id: "test",
+            platform: "test",
+            host: "fixture",
+            title: "moved",
+            area: "test",
+            room_key: "1",
+            qn: 10000,
+        };
+        let new_clip = crate::recorder::session_path(
+            &recorder.media_root(),
+            &parts,
+            1700000000,
+            "mp4",
+            &recorder.naming(),
+        );
+        std::fs::create_dir_all(new_clip.parent().unwrap()).unwrap();
+        assert!(Command::new(ffmpeg::binary())
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(root.join("video.mp4"))
+            .args(["-t", "1", "-c", "copy"])
+            .arg(&new_clip)
+            .status()
+            .await
+            .unwrap()
+            .success());
+        assert!(new_clip
+            .canonicalize()
+            .unwrap()
+            .starts_with(root.canonicalize().unwrap()));
+        assert!(new_clip.metadata().unwrap().len() > 0);
+        drop(recorder);
+        let db = Db::open(&root.join("local.sqlite")).unwrap();
         let player = LocalPlayer::new(root.join("cache"), StreamServer::start().await.unwrap());
         let opened = player.open(&db, "s", None, false).await.unwrap();
         let http = reqwest::Client::builder().no_proxy().build().unwrap();

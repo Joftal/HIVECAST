@@ -276,8 +276,8 @@ jobs:
           if (Test-Path -LiteralPath $startShortcut) { throw "静默卸载后开始菜单快捷方式仍存在" }
           # 默认卸载应清除程序与运行期缓存/日志/webview，仅保留用户数据 data/ 与录像目录 Recording/。
           $remaining = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name | Sort-Object)
-          if (($remaining -join ',') -ne 'data,Recording') {
-            throw "默认卸载后安装目录残留不符合预期（期望 data,Recording）：$($remaining -join ', ')"
+          if (($remaining -join ',') -ne '.hivecast-install,data,Recording') {
+            throw "默认卸载后安装目录残留不符合预期（期望安装标记、data、Recording）：$($remaining -join ', ')"
           }
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "data\hivecast.db"))) {
             throw "默认卸载后 data\hivecast.db 被误删"
@@ -290,9 +290,9 @@ jobs:
           while ((Test-Path -LiteralPath $uninstExe) -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 200
           }
-          $afterPurge = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name)
-          if ($afterPurge.Count -ne 1 -or $afterPurge[0] -ne "Recording") {
-            throw "--purge-data 卸载后应仅保留 Recording/，实际：$($afterPurge -join ', ')"
+          $afterPurge = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name | Sort-Object)
+          if (($afterPurge -join ',') -ne ".hivecast-install,Recording") {
+            throw "--purge-data 卸载后应仅保留安装标记与 Recording/，实际：$($afterPurge -join ', ')"
           }
 
           # 2. Verify portable zip extract & SHA-256.
@@ -316,6 +316,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    concurrency:
+      group: publish-github-release
+      cancel-in-progress: false
     needs: [validate, build]
     if: inputs.publish
     runs-on: ubuntu-24.04
@@ -376,7 +379,13 @@ jobs:
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
           else
-            args+=(--latest)
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+            latest=$(node --input-type=module -e '
+              import {readFileSync} from "node:fs";
+              import {shouldMarkLatest} from "./scripts/ci/generate-release-notes.mjs";
+              console.log(shouldMarkLatest(process.env.VERSION, JSON.parse(readFileSync("releases.json")).flat()));
+            ')
+            args+=("--latest=$latest")
           fi
           gh release create "v$VERSION" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \

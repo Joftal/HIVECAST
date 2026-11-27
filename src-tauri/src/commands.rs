@@ -2627,6 +2627,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_volume_relocation_requires_unique_existing_files() {
+        let db = fixture_db();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let nested = root.join("old");
+        std::fs::create_dir_all(&nested).unwrap();
+        let rel = PathBuf::from("old").join("clip.mp4");
+        db.create_session(&session("r", 1, rel.clone())).unwrap();
+        let file = root.join("clip.mp4");
+        let ambiguous = root.join(&rel);
+        std::fs::write(&file, b"media").unwrap();
+        std::fs::write(&ambiguous, b"other").unwrap();
+        let previous = root.with_file_name("old");
+        db.locate_legacy_media(&root, Some(&previous)).unwrap();
+        let rec = db.get_session("r").unwrap().unwrap();
+        assert_eq!(Path::new(rec.file_path.as_ref().unwrap()), rel);
+        assert!(delete_recording_files(&db, &rec).await.is_err());
+        std::fs::remove_file(ambiguous).unwrap();
+        db.locate_legacy_media(&root, Some(&previous)).unwrap();
+        let rec = db.get_session("r").unwrap().unwrap();
+        assert_eq!(session_video(&rec, false).unwrap(), file);
+        assert_eq!(merge_plan(vec![rec.clone()]).files, vec![file.clone()]);
+        assert_eq!(Path::new(&db.media_files("r").unwrap()[0].path), file);
+        delete_recording_files(&db, &rec).await.unwrap();
+        assert!(!file.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn deletion_retries_after_main_or_source_volume_returns() {
         let db = fixture_db();
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
@@ -3168,6 +3196,17 @@ pub fn filename_preview(
         valid: true,
         error: None,
     }
+}
+
+#[tauri::command]
+pub(crate) fn settings_preferences(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    patch: crate::settings::Preferences,
+) -> Result<Settings, AppError> {
+    let saved = crate::settings::save_preferences(&state.db, patch)?;
+    crate::tray::refresh(&app);
+    Ok(saved)
 }
 
 #[tauri::command]

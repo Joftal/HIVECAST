@@ -14,6 +14,8 @@
 
 ## 文档索引
 
+当前上线前复验记录见 [209 · Windows 修复验收与 macOS 专机测试点](docs/209-8042f91新增功能与Windows上线前审查.md)。
+
 | 文档 | 内容 | 什么时候看 |
 | --- | --- | --- |
 | [01-参考项目-bililive-go-架构解析](docs/01-参考项目-bililive-go-架构解析.md) | bililive-go 的分层、启动顺序、Live/Listener/Recorder/Pipeline 状态机、API 与前端 | 要理解"服务端式录制器"怎么组织时 |
@@ -248,4 +250,8 @@ HIVECAST/
 └── data/                运行期数据（配置、数据库、录制产物），不入版本库
 ```
 
-运行期数据不写仓库：开发态在系统缓存/应用数据目录（macOS 为 `~/Library/Caches/com.hivecast.desktop` 与 `~/Library/Application Support/com.hivecast.desktop`），录制产物落在媒体库 `~/Movies/HIVECAST`。
+开发态使用系统应用数据和缓存目录。macOS 的默认媒体库为 `~/Movies/HIVECAST`。
+
+Windows 发布版在可写的本地安装目录优先使用 `data/` 保存新档案，默认将录像写入 `Recording/`。从使用系统档案的旧版本升级时，程序会继续使用原数据库和配套密钥。若本地库和系统库都有用户数据，优先打开本地库，可用 `HIVECAST_DATA_DIR` 指定另一份档案。通过 UNC 或映射网络盘启动时，默认使用系统数据和缓存目录。
+
+普通卸载会保留账号设置和录像。选择清理账号设置时，安装器会核对档案归属，并保留已登记的录像及用户文件。手动备份或搬迁档案时，请先退出程序，将数据库和 `secret.bin` 一同保留。

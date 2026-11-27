@@ -19,6 +19,7 @@ pub struct AppState {
     pub info: AppInfo,
     pub server: Arc<StreamServer>,
     pub cache_root: PathBuf,
+    _isolated_cache: Option<tempfile::TempDir>,
     #[allow(dead_code)]
     pub media_root: PathBuf,
     pub db: Arc<Db>,
@@ -66,14 +67,62 @@ impl AppState {
         })?;
 
         let db_path = data_dir.join("hivecast.db");
+        #[cfg(windows)]
+        let new_system_profile = !db_path
+            .try_exists()
+            .map_err(|err| AppError::from_io(err, &db_path))?
+            && std::env::var_os("HIVECAST_DATA_DIR").is_none()
+            && crate::paths::portable_root().is_none_or(|root| data_dir != root.join("data"));
         let db = Arc::new(Db::open(&db_path).map_err(|err| {
             tracing::error!(db = %db_path.display(), error = %err, "打开数据库失败");
             err
         })?);
+        #[cfg(windows)]
+        if !cfg!(debug_assertions) {
+            if let Some(root) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(PathBuf::from))
+            {
+                let owner_key = "install.system_profile_owner";
+                if new_system_profile {
+                    db.set_setting(owner_key, &root.to_string_lossy())?;
+                } else if let Some(owner) = db.get_setting(owner_key)? {
+                    // Once opened by a second installation the system profile is shared.
+                    if !owner.is_empty()
+                        && PathBuf::from(owner).canonicalize().ok() != root.canonicalize().ok()
+                    {
+                        db.set_setting(owner_key, "")?;
+                    }
+                }
+            }
+        }
         tracing::info!(db = %db_path.display(), "数据库已打开");
         // 设置要最早读：手动 ffmpeg 路径必须在后处理恢复启动前生效，
         // 否则启动瞬间的合成会退回 PATH，日志里还会报「未找到 ffmpeg」。
+        #[cfg(windows)]
+        if let Some(root) = crate::paths::portable_root() {
+            let explicit = std::env::var("HIVECAST_DATA_DIR").is_ok_and(|s| !s.trim().is_empty());
+            let class = if explicit {
+                "external"
+            } else if data_dir == root.join("data") {
+                "local"
+            } else {
+                "system"
+            };
+            crate::install_receipt::record_profile(&root, class)
+                .map_err(|e| AppError::from_io(e, &root))?;
+            if data_dir == root.join("data") {
+                db.relocate_portable_library(&root)?;
+            }
+        }
+        db.reseal_credentials()?;
         let mut settings = crate::settings::load(&db);
+        db.locate_legacy_media(
+            std::path::Path::new(&settings.media_root),
+            db.get_setting(crate::settings::KEY_MEDIA_ROOT)?
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
         crate::settings::apply_ffmpeg_path(&settings.ffmpeg_path);
         // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
         // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
@@ -220,11 +269,33 @@ impl AppState {
             media_root.clone(),
             Some(danmaku.clone()),
         ));
+        // Older versions allowed a recording library inside the cache. Never run
+        // cache cleanup against that library, even after its configured root changed.
+        let isolated_cache = if db.cache_overlaps_media(&cache_root, &media_root)? {
+            Some(
+                tempfile::Builder::new()
+                    .prefix("hivecast-cache-")
+                    .tempdir()
+                    .map_err(|e| AppError::from_io(e, &cache_root))?,
+            )
+        } else {
+            None
+        };
+        let cache_root = isolated_cache
+            .as_ref()
+            .map(|d| d.path().to_owned())
+            .unwrap_or(cache_root);
         let view = ViewManager::new(cache_root.join("view"), server.clone(), danmaku.clone());
         view.clean_cache().await;
         crate::settings::apply(&settings, &recorder);
         let local = LocalPlayer::new(cache_root.join("play"), server.clone());
-        let _ = tokio::fs::remove_dir_all(cache_root.join("play")).await;
+        let play_root = cache_root.join("play");
+        let cleanup =
+            tauri::async_runtime::spawn_blocking(move || crate::session_cache::clean(&play_root))
+                .await;
+        if !matches!(cleanup, Ok(Ok(()))) {
+            tracing::warn!(?cleanup, "清理回放缓存失败");
+        }
         let thumbs = Arc::new(crate::thumbs::Thumbs::new(
             cache_root.join("thumbs"),
             server.clone(),
@@ -270,6 +341,7 @@ impl AppState {
             info,
             server,
             cache_root: cache_root.join("streams"),
+            _isolated_cache: isolated_cache,
             media_root,
             db,
             broker,
