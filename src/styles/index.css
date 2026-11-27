@@ -124,6 +124,40 @@ body {
 
 .tnum { font-variant-numeric: tabular-nums; }
 
+/* 平台品牌图标徽章与已连接账号左侧色条：浅/深色主题通过 --brand / --brand-dark 自动适配。 */
+.platform-icon-frame {
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.08),
+    inset 0 0 0 1px rgba(16, 24, 40, 0.08);
+}
+[data-theme="dark"] .platform-icon-frame {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+.platform-badge {
+  background: color-mix(in oklab, var(--brand) 12%, var(--c-surface));
+  border: 1px solid color-mix(in oklab, var(--brand) 26%, var(--c-line));
+  color: var(--brand);
+}
+[data-theme="dark"] .platform-badge {
+  background: color-mix(in oklab, var(--brand-dark, var(--brand)) 16%, var(--c-raised));
+  border-color: color-mix(in oklab, var(--brand-dark, var(--brand)) 32%, var(--c-line));
+  color: var(--brand-dark, var(--brand));
+}
+.account-brand-bar {
+  background: var(--brand);
+}
+[data-theme="dark"] .account-brand-bar {
+  background: var(--brand-dark, var(--brand));
+}
+.platform-tile:hover {
+  border-color: color-mix(in oklab, var(--brand) 42%, var(--c-line-strong));
+}
+[data-theme="dark"] .platform-tile:hover {
+  border-color: color-mix(in oklab, var(--brand-dark, var(--brand)) 42%, var(--c-line-strong));
+}
+
 /* 播放器浮层统一玻璃材质：半透明主题面 + 背景模糊 + 细高光/描边，浅/深色主题自适应。 */
 .player-glass {
   background: color-mix(in oklab, var(--c-surface) 62%, transparent);
