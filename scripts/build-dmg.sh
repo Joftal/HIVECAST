@@ -8,20 +8,69 @@
 # 这里改成「先出 .app，再用 hdiutil 压成 dmg」：没有花哨的窗口布局，
 # 但任何机器/CI 都能稳定产出可双击安装的 dmg。
 #
-# 用法：scripts/build-dmg.sh            # 全量构建
-#       scripts/build-dmg.sh --no-build # 复用已有 .app 重新打包
+# 用法：scripts/build-dmg.sh                                          # 本机架构全量构建
+#       scripts/build-dmg.sh --no-build                               # 复用本机架构 .app 重新打包
+#       scripts/build-dmg.sh --target universal-apple-darwin          # 双架构 Universal 全量构建
+#       scripts/build-dmg.sh --target universal-apple-darwin --no-build
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-APP="$ROOT/src-tauri/target/release/bundle/macos/HIVECAST.app"
-OUT_DIR="$ROOT/src-tauri/target/release/bundle/dmg"
+
+NO_BUILD=false
+TARGET=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-build)
+      NO_BUILD=true
+      shift
+      ;;
+    --target)
+      [[ $# -ge 2 ]] || { echo "--target 需要传入目标三元组（例如 universal-apple-darwin）" >&2; exit 1; }
+      TARGET="$2"
+      shift 2
+      ;;
+    *)
+      echo "未知参数：$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$TARGET" in
+  "")
+    TARGET_BASE="$ROOT/src-tauri/target/release"
+    ARCH="$(uname -m)"
+    ;;
+  universal-apple-darwin)
+    TARGET_BASE="$ROOT/src-tauri/target/universal-apple-darwin/release"
+    ARCH="universal"
+    ;;
+  aarch64-apple-darwin)
+    TARGET_BASE="$ROOT/src-tauri/target/aarch64-apple-darwin/release"
+    ARCH="arm64"
+    ;;
+  x86_64-apple-darwin)
+    TARGET_BASE="$ROOT/src-tauri/target/x86_64-apple-darwin/release"
+    ARCH="x64"
+    ;;
+  *)
+    TARGET_BASE="$ROOT/src-tauri/target/${TARGET}/release"
+    ARCH="$TARGET"
+    ;;
+esac
+
+APP="$TARGET_BASE/bundle/macos/HIVECAST.app"
+OUT_DIR="$TARGET_BASE/bundle/dmg"
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-ARCH="$(uname -m)"
 DMG="$OUT_DIR/HIVECAST_${VERSION}_${ARCH}.dmg"
 
-if [[ "${1:-}" != "--no-build" ]]; then
-  PATH="$HOME/.local/bin:$PATH" pnpm tauri build --bundles app
+if [[ "$NO_BUILD" != true ]]; then
+  build_args=(tauri build --bundles app)
+  if [[ -n "$TARGET" ]]; then
+    build_args+=(--target "$TARGET")
+  fi
+  PATH="$HOME/.local/bin:$PATH" pnpm "${build_args[@]}"
 fi
 
 [[ -d "$APP" ]] || { echo "找不到 $APP，先跑一次构建" >&2; exit 1; }

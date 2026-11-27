@@ -109,7 +109,7 @@ function parseReleaseNotes(body) {
     const cleaned = stripMarkdownLinks(bullet);
     const note = classifyNote(cleaned, sectionKind);
     if (note.text) notes.push(note);
-    if (notes.length >= 16) break;
+    if (notes.length >= 80) break;
   }
   return notes;
 }
@@ -1059,7 +1059,10 @@ const I18N = {
     footerSub: "开源免费软件 · 所有凭据与录像仅存储于您的本地设备 · 支持全球 CDN 自动更新检测",
     linkRepo: "源码仓库 ↗",
     tags: { feat: "新增", fix: "修复", perf: "优化", other: "变更" },
-    assetMac: "macOS Apple Silicon (.dmg)",
+    assetMacUniversal: "macOS 通用版 · M 芯片 / Intel (.dmg)",
+    assetMacArm: "macOS Apple Silicon (.dmg)",
+    assetMacX64: "macOS Intel (.dmg)",
+    assetMac: "macOS (.dmg)",
     assetWinSetup: "Windows x64 安装版 (.exe)",
     assetWinZip: "Windows x64 绿色版 (.zip)",
     assetSha: "SHA256 校验清单"
@@ -1092,7 +1095,10 @@ const I18N = {
     footerSub: "Free open-source software · All recordings stay local · Global CDN update feed",
     linkRepo: "Source Repo ↗",
     tags: { feat: "New", fix: "Fix", perf: "Perf", other: "Note" },
-    assetMac: "macOS Apple Silicon (.dmg)",
+    assetMacUniversal: "macOS Universal · Apple Silicon / Intel (.dmg)",
+    assetMacArm: "macOS Apple Silicon (.dmg)",
+    assetMacX64: "macOS Intel (.dmg)",
+    assetMac: "macOS (.dmg)",
     assetWinSetup: "Windows x64 Installer (.exe)",
     assetWinZip: "Windows x64 Portable (.zip)",
     assetSha: "SHA256 Checksums"
@@ -1118,7 +1124,12 @@ function fmtBytes(b) {
 }
 function friendlyAssetLabel(name) {
   const lower = name.toLowerCase();
-  if (lower.endsWith(".dmg")) return t("assetMac");
+  if (lower.endsWith(".dmg")) {
+    if (lower.includes("universal")) return t("assetMacUniversal");
+    if (lower.includes("arm64") || lower.includes("aarch64")) return t("assetMacArm");
+    if (lower.includes("x64") || lower.includes("x86_64") || lower.includes("intel")) return t("assetMacX64");
+    return t("assetMac");
+  }
   if (lower.endsWith("setup.exe")) return t("assetWinSetup");
   if (lower.endsWith("portable.zip")) return t("assetWinZip");
   if (lower.includes("sha256")) return t("assetSha");
@@ -1139,7 +1150,7 @@ function renderSpotlight() {
   const latest = FEED.releases.find((r) => r.version === (FEED.latestStable || FEED.latestAll));
   const el = document.getElementById("spotlight");
   if (!latest) { el.innerHTML = ""; return; }
-  const dlAssets = (latest.assets || []).filter((a) => !a.name.toLowerCase().includes("sha256")).slice(0, 3);
+  const dlAssets = (latest.assets || []).filter((a) => !a.name.toLowerCase().includes("sha256")).slice(0, 6);
   const shaAsset = (latest.assets || []).find((a) => a.name.toLowerCase().includes("sha256"));
   let rowsHtml = "";
   if (dlAssets.length > 0) {

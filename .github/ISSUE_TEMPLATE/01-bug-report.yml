@@ -46,6 +46,7 @@ body:
       label: 操作系统
       options:
         - macOS (Apple Silicon arm64)
+        - macOS (Intel x64)
         - Windows 11 (x64)
         - Windows 10 (x64)
         - 其他

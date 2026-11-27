@@ -63,7 +63,7 @@
 # ---- 操作系统（OS）----
 - name: "os: macos"
   color: "64748b"
-  description: "macOS (Apple Silicon) 相关"
+  description: "macOS (Apple Silicon / Intel) 相关"
 - name: "os: windows"
   color: "2563eb"
   description: "Windows 10/11 (x64) 相关"

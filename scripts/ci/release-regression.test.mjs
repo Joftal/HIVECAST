@@ -104,14 +104,51 @@ test("generated release notes lead with categorized commits and feed cleanly int
   assert.match(body, /### 🔧 工程与维护/);
   assert.match(body, /\*\*installer\*\*：浏览目录自动补齐 HIVECAST/);
   assert.match(body, /compare\/v1\.0\.0\.\.\.v1\.0\.1/);
+  assert.match(body, /HIVECAST-v1\.0\.1-macOS-universal\.dmg/);
   assert.doesNotMatch(body, /当前版本请从发布页手动更新/);
 
-  const { latest } = generate(t, [{ tag_name: "v1.0.1", prerelease: false, body }]);
+  const { latest, elements } = generate(t, [
+    {
+      tag_name: "v1.0.1",
+      prerelease: false,
+      body,
+      assets: [
+        { name: "HIVECAST-v1.0.1-macOS-universal.dmg", size: 30 * 1024 * 1024, browser_download_url: "https://example.invalid/universal.dmg" },
+        { name: "HIVECAST-v1.0.1-Windows-x64-setup.exe", size: 15 * 1024 * 1024, browser_download_url: "https://example.invalid/setup.exe" },
+        { name: "HIVECAST-v1.0.1-Windows-x64-portable.zip", size: 14 * 1024 * 1024, browser_download_url: "https://example.invalid/portable.zip" },
+      ],
+    },
+    {
+      tag_name: "v1.0.0",
+      prerelease: false,
+      body: "## 更新内容\n### ✨ 新增功能\n- 首个正式版",
+      assets: [
+        { name: "HIVECAST-v1.0.0-macOS-arm64.dmg", size: 16 * 1024 * 1024, browser_download_url: "https://example.invalid/arm64.dmg" },
+      ],
+    },
+  ]);
   assert.equal(latest.version, "1.0.1");
+  assert.match(elements.get("spotlight").innerHTML, /macOS 通用版/);
+  assert.match(elements.get("timeline").innerHTML, /macOS Apple Silicon/);
   assert.deepEqual(latest.notes, [
     { kind: "feat", text: "Windows 采用安装目录优先布局" },
     { kind: "fix", text: "installer：浏览目录自动补齐 HIVECAST" },
     { kind: "perf", text: "对齐关于页图标视觉" },
     { kind: "other", text: "新增分诊工作流" },
   ]);
+
+  const manyCommits = Array.from({ length: 24 }, (_, idx) => ({
+    hash: `abcdef${String(idx).padStart(2, "0")}1234567890`,
+    shortHash: `abc${String(idx).padStart(4, "0")}`,
+    subject: `fix: 修复 \`item-${idx + 1}\` 同步异常`,
+  }));
+  const largeBody = buildReleaseNotes({
+    version: "1.0.2",
+    prevTag: "v1.0.1",
+    commits: manyCommits,
+  });
+  const { latest: largeLatest } = generate(t, [{ tag_name: "v1.0.2", prerelease: false, body: largeBody }]);
+  assert.equal(largeLatest.notes.length, 24);
+  assert.equal(largeLatest.notes[0].text, "item-1 同步异常");
+  assert.equal(largeLatest.notes[23].text, "item-24 同步异常");
 });

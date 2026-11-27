@@ -69,8 +69,8 @@ jobs:
       matrix:
         include:
           - os: macos-15
-            platform: macOS-arm64
-            artifact: macos-arm64
+            platform: macOS-universal
+            artifact: macos-universal
           - os: windows-2022
             platform: Windows-x64
             artifact: windows-x64
@@ -136,10 +136,11 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.validate.outputs.version }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
-          pnpm tauri build --bundles app
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          pnpm tauri build --target universal-apple-darwin --bundles app
 
       - name: Package and verify macOS distribution
         if: runner.os == 'macOS'
@@ -155,10 +156,10 @@ jobs:
           APPLE_PASSWORD: ${{ inputs.sign_macos && secrets.APPLE_PASSWORD || '' }}
         run: |
           set -euo pipefail
-          bash scripts/build-dmg.sh --no-build
+          bash scripts/build-dmg.sh --target universal-apple-darwin --no-build
           mkdir -p release-assets
-          dmg="release-assets/HIVECAST-v${VERSION}-macOS-arm64.dmg"
-          cp "src-tauri/target/release/bundle/dmg/HIVECAST_${VERSION}_$(uname -m).dmg" "$dmg"
+          dmg="release-assets/HIVECAST-v${VERSION}-macOS-universal.dmg"
+          cp "src-tauri/target/universal-apple-darwin/release/bundle/dmg/HIVECAST_${VERSION}_universal.dmg" "$dmg"
           shasum -a 256 "$dmg"
 
       - name: Smoke test macOS app
@@ -172,6 +173,12 @@ jobs:
           bundle="$mount/HIVECAST.app"
           codesign --verify --deep --strict "$bundle"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
+          archs="$(lipo -archs "$bundle/Contents/MacOS/$executable")"
+          echo "macOS universal archs: $archs"
+          if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
+            echo "::error::macOS 产物缺少双架构切片（期望同时包含 arm64 与 x86_64，实际：$archs）"
+            exit 1
+          fi
           "$bundle/Contents/MacOS/$executable" >/tmp/hivecast-smoke.log 2>&1 &
           pid=$!
           sleep 10

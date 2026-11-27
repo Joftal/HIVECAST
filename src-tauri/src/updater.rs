@@ -221,7 +221,7 @@ pub fn parse_release_notes(body: &str) -> Vec<ChangelogNote> {
                 text: body_text,
             });
         }
-        if notes.len() >= 8 {
+        if notes.len() >= 80 {
             break;
         }
     }
@@ -266,7 +266,7 @@ fn strip_markdown_links(input: &str) -> String {
         out.push(ch);
         i += ch.len_utf8();
     }
-    let cleaned = out.replace("**", "");
+    let cleaned = out.replace("**", "").replace('`', "");
     let trimmed = cleaned.trim();
     if let Some(open_idx) = trimmed.rfind('(') {
         if trimmed.ends_with(')') {
@@ -368,29 +368,6 @@ pub fn build_result(
     }
 }
 
-pub fn embedded_fallback_releases(current_version: &str) -> Vec<ReleaseEntry> {
-    vec![ReleaseEntry {
-        version: current_version.to_string(),
-        published_at: String::new(),
-        url: RELEASES_URL.to_string(),
-        prerelease: current_version.contains('-'),
-        notes: vec![
-            ChangelogNote {
-                kind: "feat".to_string(),
-                text: "支持 Bilibili、斗鱼、虎牙、抖音四平台自动监控、无损分段录制、弹幕同步与本地画廊回放。".to_string(),
-            },
-            ChangelogNote {
-                kind: "feat".to_string(),
-                text: "双端液态玻璃极简安装器（macOS Retina DMG 与 Windows 独立现代安装/卸载器）。".to_string(),
-            },
-            ChangelogNote {
-                kind: "fix".to_string(),
-                text: "多段 FLV 合并增加包数完整性核验与实测时长校准，差值超过 3 秒时提示核对原片。".to_string(),
-            },
-        ],
-    }]
-}
-
 fn offline_result(current_version: &str, error: String) -> UpdateCheckResult {
     UpdateCheckResult {
         current_version: current_version.to_string(),
@@ -400,7 +377,7 @@ fn offline_result(current_version: &str, error: String) -> UpdateCheckResult {
         changelog_url: CHANGELOG_SITE_URL.to_string(),
         source: "offline".to_string(),
         error: Some(error),
-        releases: embedded_fallback_releases(current_version),
+        releases: Vec::new(),
     }
 }
 
@@ -580,5 +557,20 @@ mod tests {
         assert_eq!(categorized[2].text, "对齐关于页图标视觉");
         assert_eq!(categorized[3].kind, "other");
         assert_eq!(categorized[3].text, "新增自动化分诊工作流");
+
+        let many_lines = (1..=20)
+            .map(|i| {
+                format!("- 修复 `item-{i}` 同步问题 ([1234567](https://example.invalid/c/{i}))")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let many_notes =
+            parse_release_notes(&format!("## 更新内容\n### 🐛 问题修复\n{many_lines}"));
+        assert_eq!(many_notes.len(), 20);
+        assert_eq!(many_notes[0].text, "item-1 同步问题");
+        assert_eq!(many_notes[19].text, "item-20 同步问题");
+
+        let offline = offline_result("1.0.0", "network error".into());
+        assert!(offline.releases.is_empty());
     }
 }

@@ -216,7 +216,7 @@ export function buildReleaseNotes({
     "",
     "## 安装说明",
     "",
-    `- **macOS（Apple Silicon）**：打开 \`HIVECAST-v${cleanVersion}-macOS-arm64.dmg\` 拖入「应用程序」（${macosSignNote}）。`,
+    `- **macOS（Universal 通用版，支持 M 芯片与 Intel）**：打开 \`HIVECAST-v${cleanVersion}-macOS-universal.dmg\` 拖入「应用程序」（${macosSignNote}）。`,
     `- **Windows（x64）**：运行 \`HIVECAST-v${cleanVersion}-Windows-x64-setup.exe\` 安装或覆盖升级（数据与日志默认存放在安装目录，卸载默认保留录像与配置，可勾选清除账号设置），或解压 \`HIVECAST-v${cleanVersion}-Windows-x64-portable.zip\` 运行。`,
     "- **使用提示**：录制需本机安装 FFmpeg；文件校验见 `SHA256SUMS.txt`；应用内「设置 → 关于」支持自动检测新版本。",
     "",

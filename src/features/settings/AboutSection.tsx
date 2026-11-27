@@ -80,6 +80,7 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(cachedUpdateResult);
   const [checking, setChecking] = useState(() => isTauri() && !cachedUpdateResult);
   const [changelogOpen, setChangelogOpen] = useState(true);
+  const [expandedReleases, setExpandedReleases] = useState<Record<string, boolean>>({});
   const [creditsOpen, setCreditsOpen] = useState(false);
 
   const version = info?.version || "0.1.0";
@@ -178,24 +179,9 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
   }, [notify]);
 
   const releases: ReleaseEntry[] = useMemo(() => {
-    if (updateResult) {
-      return updateResult.releases.slice(0, 3);
-    }
-    return [
-      {
-        version,
-        publishedAt: "",
-        url: GITHUB_RELEASES_URL,
-        prerelease: version.includes("-"),
-        notes: [
-          {
-            kind: "feat",
-            text: t("settings.aboutHeroDesc"),
-          },
-        ],
-      },
-    ];
-  }, [t, updateResult, version]);
+    if (!updateResult) return [];
+    return updateResult.releases.slice(0, 3);
+  }, [updateResult]);
 
   const changelogSiteUrl = updateResult?.changelogUrl || CHANGELOG_SITE_URL;
   const downloadUrl = updateResult?.downloadUrl || GITHUB_RELEASES_URL;
@@ -627,9 +613,7 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
               <FileText className="h-3.5 w-3.5 text-muted" />
               <span>{t("settings.aboutChangelogTitle")}</span>
               <span className="rounded-full bg-raised px-2 py-0.5 text-[10.5px] font-medium text-faint">
-                {t(!updateResult || updateResult.source === "offline"
-                  ? "settings.aboutBundledNotes"
-                  : "settings.aboutChangelogSync")}
+                {t("settings.aboutChangelogSync")}
               </span>
             </div>
             <span className="inline-flex items-center gap-1 text-[11.5px] text-faint">
@@ -640,42 +624,85 @@ export function AboutSection({ info, ffmpeg, highlighted }: AboutSectionProps) {
 
           {changelogOpen ? (
             <div className="space-y-2.5 px-[18px] pb-4">
-              {releases.length > 0 ? (
-                releases.map((rel, idx) => (
-                  <div
-                    key={`${rel.version}-${idx}`}
-                    className="rounded-[9px] border border-line bg-canvas px-3.5 py-3"
-                  >
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 font-mono text-[13px] font-bold text-ink">
-                        <span>v{rel.version}</span>
-                        {updateResult?.latestVersion === rel.version ? (
-                          <span className="rounded-full bg-accent-soft px-1.5 py-0.5 font-sans text-[10px] font-semibold text-accent-text">
-                            Latest
-                          </span>
+              {checking && !updateResult ? (
+                <p className="flex items-center gap-2 rounded-[9px] border border-line bg-canvas px-3.5 py-3 text-[12px] text-muted">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>{t("settings.aboutChangelogLoading")}</span>
+                </p>
+              ) : releases.length > 0 ? (
+                releases.map((rel, idx) => {
+                  const isExpanded = Boolean(expandedReleases[rel.version]);
+                  const visibleNotes = isExpanded ? rel.notes : rel.notes.slice(0, 6);
+                  const hiddenCount = rel.notes.length - visibleNotes.length;
+                  return (
+                    <div
+                      key={`${rel.version}-${idx}`}
+                      className="rounded-[9px] border border-line bg-canvas px-3.5 py-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 font-mono text-[13px] font-bold text-ink">
+                          <button
+                            type="button"
+                            onClick={() => void openExternal(rel.url || GITHUB_RELEASES_URL)}
+                            className="focus-ring inline-flex items-center gap-1 rounded hover:text-accent-text hover:underline"
+                          >
+                            <span>v{rel.version}</span>
+                            <ExternalLink className="h-3 w-3 opacity-60" />
+                          </button>
+                          {rel.prerelease ? (
+                            <span className="rounded-full bg-warn/12 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-warn">
+                              Pre-release
+                            </span>
+                          ) : updateResult?.latestVersion === rel.version ? (
+                            <span className="rounded-full bg-accent-soft px-1.5 py-0.5 font-sans text-[10px] font-semibold text-accent-text">
+                              Latest
+                            </span>
+                          ) : null}
+                        </div>
+                        {rel.publishedAt ? (
+                          <span className="font-mono text-[11px] text-faint">{rel.publishedAt}</span>
                         ) : null}
                       </div>
-                      {rel.publishedAt ? (
-                        <span className="font-mono text-[11px] text-faint">{rel.publishedAt}</span>
-                      ) : null}
+                      {rel.notes.length > 0 ? (
+                        <>
+                          <ul className="space-y-1.5 text-[12px] leading-relaxed text-ink-soft">
+                            {visibleNotes.map((note, noteIdx) => (
+                              <li key={noteIdx} className="flex items-baseline gap-2">
+                                {renderNoteBadge(note.kind)}
+                                <span>{note.text}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          {rel.notes.length > 6 ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedReleases((prev) => ({
+                                  ...prev,
+                                  [rel.version]: !prev[rel.version],
+                                }))
+                              }
+                              className="focus-ring mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium text-accent-text hover:underline"
+                            >
+                              {isExpanded
+                                ? t("settings.aboutChangelogShowLess")
+                                : t("settings.aboutChangelogShowMore", { count: hiddenCount })}
+                            </button>
+                          ) : null}
+                        </>
+                      ) : (
+                        <p className="text-[12px] text-faint">{t("settings.aboutChangelogEmpty")}</p>
+                      )}
                     </div>
-                    {rel.notes.length > 0 ? (
-                      <ul className="space-y-1.5 text-[12px] leading-relaxed text-ink-soft">
-                        {rel.notes.map((note, noteIdx) => (
-                          <li key={noteIdx} className="flex items-baseline gap-2">
-                            {renderNoteBadge(note.kind)}
-                            <span>{note.text}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-[12px] text-faint">{t("settings.aboutChangelogEmpty")}</p>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <p className="rounded-[9px] border border-line bg-canvas px-3.5 py-3 text-[12px] text-faint">
-                  {t("settings.aboutChangelogEmpty")}
+                  {t(
+                    updateResult?.source === "offline"
+                      ? "settings.aboutChangelogOffline"
+                      : "settings.aboutChangelogEmpty",
+                  )}
                 </p>
               )}
             </div>
