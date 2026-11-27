@@ -448,6 +448,9 @@ pub fn run() {
         }
         if let tauri::RunEvent::Exit = event {
             tracing::info!("应用开始退出收尾");
+            // macOS Dock 退出 / terminate() 等路径可能直接触发 RunEvent::Exit 而不经过 ExitRequested，
+            // 在此再做一次幂等补写，确保防抖期内或临时写库失败后的窗口几何不丢失。
+            crate::window_state::flush_now(handle);
             if let Some(state) = handle.try_state::<AppState>() {
                 tauri::async_runtime::block_on(async {
                     state.local.stop_all().await;
