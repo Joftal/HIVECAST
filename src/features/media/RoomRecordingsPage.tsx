@@ -357,6 +357,11 @@ export default function RoomRecordingsPage({
           for (const item of withThumbs) byId.set(item.id, item);
           return Array.from(byId.values());
         });
+        setPlaying((prev) => {
+          if (!prev) return prev;
+          const fresh = withThumbs.find((item) => item.id === prev.item.id);
+          return fresh ? { ...prev, item: fresh } : prev;
+        });
         setLoadedRows((prev) => (offset > 0 ? prev + page.items.length : page.items.length));
         setTotal(page.total);
         return true;
@@ -681,7 +686,9 @@ export default function RoomRecordingsPage({
           path: result.path,
           size: result.size,
           sourcePath,
-          hasSource: sourcePath ? item.hasSource || (switched && !item.sourcePath) : false,
+          // 源封装模式下 sourcePath 原本就等于旧 path、hasSource 为 false；转封装切换主文件后，
+          // 只要源文件未标记删除，抽屉应立即开放「播放源封装」与「仅删除源文件」。
+          hasSource: Boolean(sourcePath) && !sourceDeleted && (item.hasSource || switched),
           postMode: "convert",
           postState: "done",
           postError: null,

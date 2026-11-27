@@ -170,6 +170,12 @@ pub fn normalize(raw: &str) -> Result<String, String> {
                 continue;
             }
             let Some((name, value)) = piece.split_once('=') else {
+                // 真实浏览器（如抖音网页）在 Cookie 头里可能携带 RFC 6265 无名/无值裸片段
+                // （例如 `douyin.com;`）；单个不含空白与控制字符的裸片段直接忽略，
+                // 仅当整段没有任何 name=value 或包含明显非 Cookie 文本时才报错。
+                if !piece.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    continue;
+                }
                 return Err(format!("无法识别的 Cookie 片段：{piece}"));
             };
             let name = name.trim();
@@ -296,6 +302,17 @@ mod tests {
     #[test]
     fn keeps_last_duplicate() {
         assert_eq!(normalize("a=1; b=2; a=3").unwrap(), "a=3; b=2");
+    }
+
+    #[test]
+    fn ignores_nameless_cookie_tokens() {
+        let raw = "uc_secure=load_success; douyin.com; sessionid=abc123";
+        assert_eq!(
+            normalize(raw).unwrap(),
+            "uc_secure=load_success; sessionid=abc123"
+        );
+        // 带空格的整句非 Cookie 文本仍应报错。
+        assert!(normalize("sessionid=abc; not a cookie phrase").is_err());
     }
 
     #[test]
