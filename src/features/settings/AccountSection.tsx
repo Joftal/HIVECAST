@@ -585,7 +585,8 @@ export default function AccountSection() {
     }
   }, [filter, stats.expired]);
 
-  const { activeSpecs, catalogSpecs } = useMemo(() => {
+  // 统一网格：失效项置顶，其次已登录，未登录平台垫底；组内保持平台固定顺序，避免列表跳动。
+  const visibleSpecs = useMemo(() => {
     const q = query.trim().toLowerCase();
     const matched = PLATFORM_SPECS.filter((spec) => {
       const cred = credMap.get(spec.id);
@@ -605,15 +606,12 @@ export default function AccountSection() {
       return haystack.includes(q);
     });
 
-    const active = matched
-      .filter((spec) => credMap.has(spec.id))
-      .sort((a, b) => {
-        const ae = credMap.get(a.id)?.status === "expired" ? 0 : 1;
-        const be = credMap.get(b.id)?.status === "expired" ? 0 : 1;
-        return ae - be;
-      });
-    const catalog = matched.filter((spec) => !credMap.has(spec.id));
-    return { activeSpecs: active, catalogSpecs: catalog };
+    const rank = (spec: PlatformSpec) => {
+      const cred = credMap.get(spec.id);
+      if (!cred) return 2;
+      return cred.status === "expired" ? 0 : 1;
+    };
+    return [...matched].sort((a, b) => rank(a) - rank(b));
   }, [credMap, filter, query, t]);
 
   if (!isTauri()) return null;
@@ -725,7 +723,7 @@ export default function AccountSection() {
           })}
         </div>
 
-        <div className="relative w-full sm:w-[224px]">
+        <div className="relative w-full sm:w-[268px]">
           <Search
             aria-hidden
             className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint"
@@ -750,155 +748,185 @@ export default function AccountSection() {
         </div>
       </div>
 
-      {/* 3. 主内容：加载态 / 空筛选态 / 已关联 + 可添加分层 */}
+      {/* 3. 主内容：加载态 / 空筛选态 / 统一平台网格 */}
       {items === null ? (
-        <div className="space-y-2.5">
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
           {[0, 1].map((idx) => (
             <div
               key={idx}
-              className="h-[72px] animate-pulse rounded-[12px] border border-line bg-surface/70"
+              className="h-[168px] animate-pulse rounded-[12px] border border-line bg-surface/70"
             />
           ))}
         </div>
-      ) : activeSpecs.length === 0 && catalogSpecs.length === 0 ? (
+      ) : visibleSpecs.length === 0 ? (
         <div className="rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-7 text-center text-[12px] text-faint">
           {t("account.emptySearch")}
         </div>
       ) : (
-        <div className="space-y-5">
-          {/* 区块 A：已关联账号（失效项自动置顶） */}
-          {activeSpecs.length > 0 ? (
-            <section className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
-                <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-faint">
-                  {t("account.sectionConnected", { count: activeSpecs.length })}
-                </h3>
-                <span className="text-[11px] text-faint">{t("account.singleAccountHint")}</span>
-              </div>
+        <section className="space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
+            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-faint">
+              {t("account.sectionAccounts", { count: visibleSpecs.length })}
+            </h3>
+            <span className="text-[11px] text-faint">{t("account.singleAccountHint")}</span>
+          </div>
 
-              <div className="space-y-2">
-                {activeSpecs.map((spec) => {
-                  const item = credMap.get(spec.id)!;
-                  const expired = item.status === "expired";
-                  const name = t("platformName." + spec.id, { defaultValue: spec.id });
-                  const isChecking = Boolean(checkingPlatforms[spec.id]);
-                  const isLoggingOut = loggingOut === spec.id;
-                  const hasRefreshWarn =
-                    (item.refreshStatus.outcome === "failed" ||
-                      item.refreshStatus.outcome === "confirm_failed" ||
-                      item.refreshStatus.outcome === "not_refreshable" ||
-                      item.refreshStatus.keyStale) &&
-                    Boolean(item.refreshStatus.message);
+          <div className="grid grid-cols-1 items-stretch gap-2.5 sm:grid-cols-2">
+            {visibleSpecs.map((spec) => {
+              const item = credMap.get(spec.id);
+              const name = t("platformName." + spec.id, { defaultValue: spec.id });
 
-                  const autoRefreshDesc = expired
-                    ? t("account.expiredHint")
-                    : item.refreshable
-                      ? t(spec.autoRefreshOnKey)
-                      : t(spec.noRefreshKey);
+              if (!item) {
+                const hint = t(spec.hintKey);
+                return (
+                  <article
+                    key={spec.id}
+                    style={platformBrandStyle(spec.id)}
+                    className="platform-tile flex h-full flex-col rounded-[12px] border border-line bg-surface p-3.5 shadow-[var(--shadow-card)] transition-all hover:-translate-y-px hover:border-line-strong"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <PlatformBadge platform={spec.id} size="sm" />
+                      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <span className="shrink-0 text-[13px] font-semibold text-ink">{name}</span>
+                        <span className="shrink-0 rounded-[4px] border border-line bg-raised px-1.5 py-px text-[9.5px] font-semibold text-muted">
+                          {spec.supportsQr ? t("account.methodQr") : t("account.methodCookie")}
+                        </span>
+                      </div>
+                      <span className="shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] font-semibold leading-4 text-muted">
+                        {t("account.notConnected")}
+                      </span>
+                    </div>
 
-                  const checkSummary =
-                    item.refreshable && !expired
-                      ? item.refreshStatus.checkedAt > 0
-                        ? t("account.refreshChecked", {
-                            time: refreshTime(item.refreshStatus.checkedAt),
-                            result: refreshOutcomeLabel(item.refreshStatus),
-                          })
-                        : t("account.refreshNever")
-                      : null;
+                    <p
+                      className="mt-2.5 flex min-w-0 items-start gap-1.5 text-[11px] leading-4 text-faint"
+                      title={hint}
+                    >
+                      <span className="mt-[6px] h-[5px] w-[5px] shrink-0 rounded-full bg-faint/60" />
+                      <span className="line-clamp-2">{hint}</span>
+                    </p>
 
-                  return (
-                    <article
-                      key={spec.id}
-                      style={platformBrandStyle(spec.id)}
+                    <div className="mt-auto">
+                      <div className="mt-3 flex items-center justify-between gap-2 border-t border-line/70 pt-2.5">
+                        <span className="truncate text-[10.5px] text-faint">
+                          {spec.supportsQr
+                            ? t("account.catalogFooterQr")
+                            : t("account.catalogFooterCookie")}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="shrink-0"
+                          onClick={() => openAuthModal(spec.id)}
+                        >
+                          {t("account.signInAction")}
+                        </Button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              }
+
+              const expired = item.status === "expired";
+              const isChecking = Boolean(checkingPlatforms[spec.id]);
+              const isLoggingOut = loggingOut === spec.id;
+              const statusWarn = isRefreshWarning(item.refreshStatus);
+              const hasRefreshWarn = statusWarn && Boolean(item.refreshStatus.message);
+
+              const autoRefreshDesc = expired
+                ? t("account.expiredHint")
+                : item.refreshable
+                  ? t(spec.autoRefreshOnKey)
+                  : t(spec.noRefreshKey);
+
+              const checkSummary =
+                item.refreshable && !expired
+                  ? item.refreshStatus.checkedAt > 0
+                    ? t("account.refreshChecked", {
+                        time: refreshTime(item.refreshStatus.checkedAt),
+                        result: refreshOutcomeLabel(item.refreshStatus),
+                      })
+                    : t("account.refreshNever")
+                  : null;
+
+              const metaWarn = expired || statusWarn;
+              const showLastRotated =
+                item.refreshable &&
+                !expired &&
+                !hasRefreshWarn &&
+                item.refreshStatus.lastRefreshedAt > 0 &&
+                item.refreshStatus.outcome !== "refreshed";
+
+              return (
+                <article
+                  key={spec.id}
+                  style={platformBrandStyle(spec.id)}
+                  className={cx(
+                    "platform-tile flex h-full flex-col rounded-[12px] border p-3.5 shadow-[var(--shadow-card)] transition-all hover:-translate-y-px",
+                    expired
+                      ? "border-warn/40 bg-warn/[0.035]"
+                      : "border-line bg-surface hover:border-line-strong",
+                  )}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <PlatformBadge platform={spec.id} size="sm" />
+                    <div className="flex min-w-0 flex-1 items-center gap-x-1.5">
+                      <span className="shrink-0 text-[13px] font-semibold text-ink">{name}</span>
+                      <span className="text-line-strong" aria-hidden>
+                        ·
+                      </span>
+                      <span className="truncate text-[12.5px] font-medium text-ink-soft">
+                        {item.accountName || t("account.connected")}
+                      </span>
+                    </div>
+                    <span
                       className={cx(
-                        "relative flex flex-col gap-3 overflow-hidden rounded-[12px] border px-4 py-3.5 pl-[18px] shadow-[var(--shadow-card)] transition-colors sm:flex-row sm:items-center",
-                        expired
-                          ? "border-warn/40 bg-warn/[0.035]"
-                          : "border-line bg-surface hover:border-line-strong",
+                        "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-4",
+                        expired ? "bg-warn/15 text-warn" : "bg-ok/12 text-ok",
                       )}
                     >
+                      {expired ? t("account.expired") : t("account.connected")}
+                    </span>
+                  </div>
+
+                  <div className="mt-2.5 min-w-0">
+                    <p
+                      className={cx(
+                        "flex items-center gap-1.5 text-[11px] leading-4",
+                        metaWarn ? "text-warn" : "text-faint",
+                      )}
+                      title={autoRefreshDesc}
+                    >
                       <span
-                        aria-hidden
-                        className="account-brand-bar absolute bottom-2.5 left-0 top-2.5 w-[3px] rounded-r-full opacity-85"
+                        className={cx(
+                          "h-[5px] w-[5px] shrink-0 rounded-full",
+                          metaWarn ? "bg-warn" : isChecking ? "bg-accent" : "bg-live",
+                        )}
                       />
+                      <span className="truncate">{checkSummary ?? autoRefreshDesc}</span>
+                    </p>
 
-                      <div className="flex min-w-0 flex-1 items-start gap-3 sm:items-center">
-                        <PlatformBadge platform={spec.id} size="md" />
+                    {hasRefreshWarn ? (
+                      <p
+                        className="mt-0.5 truncate pl-[11px] text-[10.5px] leading-4 text-warn"
+                        title={item.refreshStatus.message ?? undefined}
+                      >
+                        {item.refreshStatus.message}
+                      </p>
+                    ) : showLastRotated ? (
+                      <p className="mt-0.5 truncate pl-[11px] text-[10px] leading-4 text-faint">
+                        {t("account.refreshLastRotated", {
+                          time: refreshTime(item.refreshStatus.lastRefreshedAt),
+                        })}
+                      </p>
+                    ) : null}
+                  </div>
 
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span className="text-[13px] font-semibold text-ink">{name}</span>
-                            <span className="text-line-strong" aria-hidden>
-                              ·
-                            </span>
-                            <span className="truncate text-[12.5px] font-medium text-ink-soft">
-                              {item.accountName || t("account.connected")}
-                            </span>
-                            <span
-                              className={cx(
-                                "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-semibold leading-4",
-                                expired
-                                  ? "bg-warn/15 text-warn"
-                                  : "bg-ok/12 text-ok",
-                              )}
-                            >
-                              {expired ? t("account.expired") : t("account.connected")}
-                            </span>
-                          </div>
-
-                          <div
-                            className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-[17px] text-faint"
-                            title={autoRefreshDesc}
-                          >
-                            <span
-                              className={cx(
-                                "inline-flex items-center gap-1.5",
-                                expired || !item.refreshable || item.refreshStatus.keyStale
-                                  ? "font-medium text-warn"
-                                  : "text-muted",
-                              )}
-                            >
-                              <span
-                                className={cx(
-                                  "h-[5px] w-[5px] shrink-0 rounded-full",
-                                  expired || !item.refreshable || item.refreshStatus.keyStale
-                                    ? "bg-warn"
-                                    : "bg-live",
-                                )}
-                              />
-                              <span className="truncate">
-                                {checkSummary ?? autoRefreshDesc}
-                              </span>
-                            </span>
-                            <span className="text-line-strong" aria-hidden>
-                              ·
-                            </span>
-                            <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-faint">
-                              {t("account.cookieCount", { n: item.cookieNames.length })}
-                            </span>
-                          </div>
-
-                          {hasRefreshWarn ? (
-                            <p
-                              className="mt-1 truncate text-[10.5px] leading-4 text-warn"
-                              title={item.refreshStatus.message ?? undefined}
-                            >
-                              {item.refreshStatus.message}
-                            </p>
-                          ) : item.refreshable &&
-                            !expired &&
-                            item.refreshStatus.lastRefreshedAt > 0 &&
-                            item.refreshStatus.outcome !== "refreshed" ? (
-                            <p className="mt-0.5 truncate text-[10px] leading-4 text-faint">
-                              {t("account.refreshLastRotated", {
-                                time: refreshTime(item.refreshStatus.lastRefreshedAt),
-                              })}
-                            </p>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      <div className="flex shrink-0 items-center justify-end gap-1.5 border-t border-line/70 pt-2.5 sm:border-t-0 sm:pt-0">
+                  <div className="mt-auto">
+                    <div className="mt-3 flex items-center justify-between gap-2 border-t border-line/70 pt-2.5">
+                      <span className="truncate font-mono text-[10.5px] tabular-nums text-faint">
+                        {t("account.cookieCount", { n: item.cookieNames.length })}
+                      </span>
+                      <div className="flex shrink-0 items-center gap-1">
                         {expired ? (
                           <Button
                             size="sm"
@@ -918,7 +946,14 @@ export default function AccountSection() {
                                 disabled={isChecking || checkingAll || isLoggingOut}
                                 onClick={() => void checkRefresh(spec.id)}
                               >
-                                {isChecking ? t("account.refreshChecking") : t("account.checkShort")}
+                                {isChecking ? (
+                                  <>
+                                    <RefreshCw className="h-3 w-3 animate-spin" />
+                                    <span>{t("account.refreshChecking")}</span>
+                                  </>
+                                ) : (
+                                  t("account.checkShort")
+                                )}
                               </Button>
                             ) : null}
                             <Button
@@ -950,67 +985,13 @@ export default function AccountSection() {
                             : t("account.logoutShort")}
                         </Button>
                       </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-          ) : null}
-
-          {/* 区块 B：可添加平台（紧凑磁贴目录，多平台自动 3 列） */}
-          {catalogSpecs.length > 0 ? (
-            <section className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
-                <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-faint">
-                  {t("account.sectionAvailable", { count: catalogSpecs.length })}
-                </h3>
-                <span className="text-[11px] text-faint">{t("account.catalogHint")}</span>
-              </div>
-
-              <div
-                className={cx(
-                  "grid grid-cols-1 gap-2.5 sm:grid-cols-2",
-                  catalogSpecs.length >= 5 && "lg:grid-cols-3",
-                )}
-              >
-                {catalogSpecs.map((spec) => {
-                  const name = t("platformName." + spec.id, { defaultValue: spec.id });
-                  const hint = t(spec.hintKey);
-                  return (
-                    <div
-                      key={spec.id}
-                      style={platformBrandStyle(spec.id)}
-                      className="platform-tile flex items-center gap-2.5 rounded-[11px] border border-line bg-surface px-3 py-2.5 transition-all hover:-translate-y-px"
-                    >
-                      <PlatformBadge platform={spec.id} size="sm" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate text-[12.5px] font-semibold text-ink">
-                            {name}
-                          </span>
-                          <span className="shrink-0 rounded-[4px] border border-line bg-raised px-1.5 py-px text-[9.5px] font-semibold text-muted">
-                            {spec.supportsQr ? t("account.methodQr") : t("account.methodCookie")}
-                          </span>
-                        </div>
-                        <p className="mt-0.5 truncate text-[11px] text-faint" title={hint}>
-                          {hint}
-                        </p>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="shrink-0"
-                        onClick={() => openAuthModal(spec.id)}
-                      >
-                        {t("account.signInAction")}
-                      </Button>
                     </div>
-                  );
-                })}
-              </div>
-            </section>
-          ) : null}
-        </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {/* 4. 独立登录 / 更新凭据弹窗 */}
