@@ -318,9 +318,8 @@ fn absolute_media_root(raw: &str) -> String {
             .unwrap_or_default();
         base.join(path)
     };
-    absolute
-        .canonicalize()
-        .unwrap_or(absolute)
+    let resolved = absolute.canonicalize().unwrap_or(absolute);
+    crate::paths::strip_windows_verbatim(&resolved)
         .display()
         .to_string()
 }
@@ -404,14 +403,18 @@ pub fn save(db: &Db, input: &Settings) -> Result<Settings, AppError> {
     let path = path
         .canonicalize()
         .map_err(|err| AppError::from_io(err, &path))?;
-    settings.media_root = path.display().to_string();
+    settings.media_root = crate::paths::strip_windows_verbatim(&path)
+        .display()
+        .to_string();
     settings.ffmpeg_path = settings.ffmpeg_path.trim().to_string();
     if !settings.ffmpeg_path.is_empty() {
         // 在保存时真正跑一次 -version：路径错了立刻报给用户，
         // 不要等到开录才在后台日志里发现。
         let ffmpeg = crate::ffmpeg::validate_selection(&settings.ffmpeg_path)
             .map_err(|reason| AppError::User(format!("ffmpeg 路径不可用：{reason}")))?;
-        settings.ffmpeg_path = ffmpeg.display().to_string();
+        settings.ffmpeg_path = crate::paths::strip_windows_verbatim(&ffmpeg)
+            .display()
+            .to_string();
     }
 
     // 一次性事务提交：中途失败不会留下「画质已改、路径没改」的半套设置。
@@ -583,7 +586,9 @@ fn validate_log_dir(raw: &str) -> Result<String, AppError> {
         .map_err(|err| AppError::from_io(err, &path))?;
     drop(file);
     let _ = std::fs::remove_file(&probe);
-    Ok(path.display().to_string())
+    Ok(crate::paths::strip_windows_verbatim(&path)
+        .display()
+        .to_string())
 }
 
 /// 全局录制档位只有「最高可用」：具体档位由每个房间的画质菜单决定。
@@ -897,6 +902,15 @@ mod tests {
             .join("legacy-recording-dir");
         assert_eq!(Path::new(&settings.media_root), expected);
         assert!(Path::new(&settings.media_root).is_absolute());
+    }
+
+    #[test]
+    fn absolute_media_root_strips_windows_verbatim_prefix() {
+        let stripped = absolute_media_root(r"\\?\D:\HIVECAST\Recording");
+        assert!(
+            !stripped.starts_with(r"\\?\"),
+            "媒体目录不应保留 Windows 逐字路径前缀：{stripped}"
+        );
     }
 
     #[test]

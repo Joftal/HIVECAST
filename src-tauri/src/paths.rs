@@ -108,7 +108,6 @@ pub(crate) fn is_unc_path(path: &Path) -> bool {
 }
 
 /// 去掉 Windows `\\?\C:\...` 逐字前缀，避免 UI 显示和 WebView2 COM 异常。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn strip_windows_verbatim(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if let Some(rest) = raw.strip_prefix(r"\\?\") {

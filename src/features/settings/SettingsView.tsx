@@ -42,6 +42,22 @@ function formatBytes(bytes: number): string {
   return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
 }
 
+function shortFfmpegVersion(raw?: string | null): string {
+  if (!raw) return "";
+  const cleaned = raw
+    .replace(/^ffmpeg\s+version\s+/i, "")
+    .replace(/\s+Copyright\b.*$/i, "")
+    .replace(/-(full|essentials)_build-[^\s]+/i, "")
+    .trim();
+  return cleaned || raw.trim();
+}
+
+function fileBasename(path?: string | null): string {
+  if (!path) return "";
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
 const POST_MODES: Array<{ value: "source" | "convert" | "custom"; labelKey: string; descKey: string }> = [
   { value: "source", labelKey: "settings.postModeSource", descKey: "settings.postModeSourceDesc" },
   { value: "convert", labelKey: "settings.postModeConvert", descKey: "settings.postModeConvertDesc" },
@@ -196,7 +212,6 @@ const SEARCH_INDEX: SearchEntry[] = [
 const FIELD =
   "focus-ring h-9 w-full rounded-[7px] border border-line bg-surface px-3 text-[12.5px] text-ink transition-colors placeholder:text-faint hover:border-line-strong";
 const GROUP = "text-[10px] font-semibold uppercase tracking-[0.12em] text-faint";
-const HINT = "mt-1 block max-w-[520px] text-[11.5px] leading-[18px] text-faint";
 
 function SelectField({
   value,
@@ -245,15 +260,13 @@ function StringSelectField({
 function Row({
   id,
   title,
-  desc,
   tip,
   children,
   focus,
 }: {
   id: string;
   title: string;
-  desc?: string;
-  tip?: string;
+  tip?: ReactNode;
   children: ReactNode;
   focus: boolean;
 }) {
@@ -261,28 +274,38 @@ function Row({
     <div
       id={id}
       className={cx(
-        "flex min-h-[58px] items-center gap-6 px-5 py-3.5 transition-colors",
+        "flex min-h-[52px] items-center justify-between gap-6 px-5 py-3 transition-colors",
         focus ? "bg-accent-soft" : "hover:bg-raised/45",
       )}
     >
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <div className="text-[12.5px] font-medium text-ink">{title}</div>
-          {tip ? <InfoTip content={tip} /> : null}
-        </div>
-        {desc ? <p className={HINT}>{desc}</p> : null}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div className="text-[12.5px] font-medium text-ink">{title}</div>
+        {tip ? <InfoTip content={tip} /> : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">{children}</div>
     </div>
   );
 }
 
-function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
+function StatusStrip({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div
+      className={cx(
+        "space-y-1 bg-canvas/70 px-5 py-2.5 text-[11px] leading-[17px] text-muted",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Section({ title, tip, children }: { title: string; tip?: ReactNode; children: ReactNode }) {
   return (
     <section className="space-y-2.5">
-      <div className="px-0.5">
+      <div className="flex items-center gap-1.5 px-0.5">
         <h3 className="text-[12.5px] font-semibold tracking-[-0.005em] text-ink">{title}</h3>
-        {desc ? <p className="mt-1 max-w-[620px] text-[11.5px] leading-[17px] text-muted">{desc}</p> : null}
+        {tip ? <InfoTip content={tip} /> : null}
       </div>
       <div className="overflow-hidden rounded-[10px] border border-line bg-surface shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
         <div className="divide-y divide-line">{children}</div>
@@ -738,13 +761,13 @@ export default function SettingsView({
     if (page === "danmaku") {
       const eventsDisabled = !settings.recordDanmaku;
       return (
-        <div className="space-y-7">
-          <Section title={t("settings.sectionDanmaku")} desc={t("settings.sectionDanmakuDesc")}>
+        <div className="space-y-6">
+          <Section title={t("settings.sectionDanmaku")} tip={t("settings.sectionDanmakuDesc")}>
             <Row
               id="set-danmaku-master"
               focus={focusId === "set-danmaku-master"}
               title={t("settings.danmakuRecord")}
-              desc={t("settings.danmakuRecordHint")}
+              tip={t("settings.danmakuRecordHint")}
             >
               <Switch
                 checked={settings.recordDanmaku}
@@ -756,13 +779,18 @@ export default function SettingsView({
 
           <Section
             title={t("settings.sectionDanmakuEvents")}
-            desc={t("settings.sectionDanmakuEventsDesc")}
+            tip={
+              <div className="space-y-1">
+                <p>{t("settings.sectionDanmakuEventsDesc")}</p>
+                <p className="opacity-80">{t("settings.danmakuChatAlways")}</p>
+              </div>
+            }
           >
             <Row
               id="set-danmaku-gift"
               focus={focusId === "set-danmaku-gift"}
               title={t("settings.danmakuGift")}
-              desc={t("settings.danmakuGiftHint")}
+              tip={t("settings.danmakuGiftHint")}
             >
               <Switch
                 checked={settings.recordDanmakuGift}
@@ -775,7 +803,7 @@ export default function SettingsView({
               id="set-danmaku-super-chat"
               focus={focusId === "set-danmaku-super-chat"}
               title={t("settings.danmakuSuperChat")}
-              desc={t("settings.danmakuSuperChatHint")}
+              tip={t("settings.danmakuSuperChatHint")}
             >
               <Switch
                 checked={settings.recordDanmakuSuperChat}
@@ -788,7 +816,7 @@ export default function SettingsView({
               id="set-danmaku-guard"
               focus={focusId === "set-danmaku-guard"}
               title={t("settings.danmakuGuard")}
-              desc={t("settings.danmakuGuardHint")}
+              tip={t("settings.danmakuGuardHint")}
             >
               <Switch
                 checked={settings.recordDanmakuGuard}
@@ -797,9 +825,6 @@ export default function SettingsView({
                 label={t("settings.danmakuGuard")}
               />
             </Row>
-            <div className="px-5 py-3 text-[10.5px] leading-4 text-faint">
-              {t("settings.danmakuChatAlways")}
-            </div>
           </Section>
         </div>
       );
@@ -807,13 +832,12 @@ export default function SettingsView({
 
     if (page === "record") {
       return (
-        <div className="space-y-7">
-          <Section title={t("settings.sectionStream")} desc={t("settings.sectionStreamDesc")}>
+        <div className="space-y-6">
+          <Section title={t("settings.sectionStream")} tip={t("settings.sectionStreamDesc")}>
             <Row
               id="set-record-quality"
               focus={focusId === "set-record-quality"}
               title={t("settings.recordQuality")}
-              desc={t("settings.recordQualityHint")}
               tip={t("settings.recordQualityHint")}
             >
               <SelectField
@@ -826,7 +850,6 @@ export default function SettingsView({
               id="set-source-format"
               focus={focusId === "set-source-format"}
               title={t("settings.sourceFormat")}
-              desc={t("settings.sourceFormatHint")}
               tip={t("settings.sourceFormatHint")}
             >
               <StringSelectField
@@ -844,7 +867,6 @@ export default function SettingsView({
               id="set-record-codec"
               focus={focusId === "set-record-codec"}
               title={t("settings.recordCodec")}
-              desc={t("settings.recordCodecHint")}
               tip={t("settings.recordCodecHint")}
             >
               <StringSelectField
@@ -864,7 +886,6 @@ export default function SettingsView({
               id="set-view-quality"
               focus={focusId === "set-view-quality"}
               title={t("settings.viewQuality")}
-              desc={t("settings.viewQualityHint")}
               tip={t("settings.viewQualityHint")}
             >
               <SelectField
@@ -875,12 +896,11 @@ export default function SettingsView({
             </Row>
           </Section>
 
-          <Section title={t("settings.sectionSplit")} desc={t("settings.sectionSplitDesc")}>
+          <Section title={t("settings.sectionSplit")} tip={t("settings.sectionSplitDesc")}>
             <Row
               id="set-split-title"
               focus={focusId === "set-split-title"}
               title={t("settings.splitOnTitle")}
-              desc={t("settings.splitOnTitleHint")}
               tip={t("settings.splitOnTitleHint")}
             >
               <Switch
@@ -893,7 +913,6 @@ export default function SettingsView({
               id="set-split-duration"
               focus={focusId === "set-split-duration"}
               title={t("settings.splitMaxDuration")}
-              desc={t("settings.splitMaxDurationHint")}
               tip={t("settings.splitMaxDurationHint")}
             >
               <div className="flex items-center gap-1.5">
@@ -918,7 +937,6 @@ export default function SettingsView({
               id="set-split-size"
               focus={focusId === "set-split-size"}
               title={t("settings.splitMaxSize")}
-              desc={t("settings.splitMaxSizeHint")}
               tip={t("settings.splitMaxSizeHint")}
             >
               <div className="flex items-center gap-1.5">
@@ -965,7 +983,6 @@ export default function SettingsView({
               id="set-monitor-interval"
               focus={focusId === "set-monitor-interval"}
               title={t("settings.monitorInterval")}
-              desc={t("settings.monitorIntervalHint")}
               tip={t("settings.monitorIntervalHint")}
             >
               <div className="flex items-center gap-1.5">
@@ -988,7 +1005,6 @@ export default function SettingsView({
               id="set-monitor-backoff"
               focus={focusId === "set-monitor-backoff"}
               title={t("settings.monitorBackoff")}
-              desc={t("settings.monitorBackoffHint")}
               tip={t("settings.monitorBackoffHint")}
             >
               <Switch
@@ -1001,7 +1017,7 @@ export default function SettingsView({
               id="set-monitor-backoff-cap"
               focus={focusId === "set-monitor-backoff-cap"}
               title={t("settings.monitorBackoffCap")}
-              desc={t("settings.monitorBackoffCapHint")}
+              tip={t("settings.monitorBackoffCapHint")}
             >
               <div className="flex items-center gap-1.5">
                 <div className="w-[88px]">
@@ -1034,7 +1050,6 @@ export default function SettingsView({
                 <div className="text-[12.5px] font-medium text-ink">{t("settings.postMode")}</div>
                 <InfoTip content={t("settings.postModeHint")} />
               </div>
-              <p className={HINT}>{t("settings.postModeHint")}</p>
               <div role="radiogroup" aria-label={t("settings.postMode")} className="mt-3 grid gap-2 sm:grid-cols-3">
                 {POST_MODES.map((mode) => {
                   const active = settings.postMode === mode.value;
@@ -1085,7 +1100,7 @@ export default function SettingsView({
               id="set-post-convert-format"
               focus={focusId === "set-post-convert-format"}
               title={t("settings.postConvertFormat")}
-              desc={t("settings.postConvertFormatHint")}
+              tip={t("settings.postConvertFormatHint")}
             >
               <StringSelectField
                 value={settings.postConvertFormat}
@@ -1101,7 +1116,7 @@ export default function SettingsView({
               id="set-post-delete-source"
               focus={focusId === "set-post-delete-source"}
               title={t("settings.postDeleteSource")}
-              desc={t("settings.postDeleteSourceHint")}
+              tip={t("settings.postDeleteSourceHint")}
             >
               <Switch
                 checked={settings.postDeleteSource}
@@ -1114,7 +1129,6 @@ export default function SettingsView({
               id="set-post-custom-command"
               focus={focusId === "set-post-custom-command"}
               title={t("settings.postCustomCommand")}
-              desc={t("settings.postCustomCommandHint")}
               tip={t("settings.postCustomCommandHint")}
             >
               <input
@@ -1130,7 +1144,7 @@ export default function SettingsView({
               id="set-post-custom-ext"
               focus={focusId === "set-post-custom-ext"}
               title={t("settings.postCustomOutputExt")}
-              desc={t("settings.postCustomOutputExtHint")}
+              tip={t("settings.postCustomOutputExtHint")}
             >
               <input
                 value={settings.postCustomOutputExt}
@@ -1145,7 +1159,7 @@ export default function SettingsView({
               id="set-post-custom-timeout"
               focus={focusId === "set-post-custom-timeout"}
               title={t("settings.postCustomTimeout")}
-              desc={t("settings.postCustomTimeoutHint")}
+              tip={t("settings.postCustomTimeoutHint")}
             >
               <div className="flex items-center gap-1.5">
                 <div className="w-[88px]">
@@ -1172,65 +1186,31 @@ export default function SettingsView({
     }
 
     if (page === "storage") {
-      return (
-        <div className="space-y-7">
-          <Section title={t("settings.sectionTools")}>
-            <Row
-              id="set-ffmpeg-path"
-              focus={focusId === "set-ffmpeg-path"}
-              title={t("settings.ffmpegPath")}
-              desc={t("settings.ffmpegPathHint")}
-            >
-              <div className="flex w-[480px] items-center gap-1.5">
-                <input
-                  value={settings.ffmpegPath}
-                  onChange={(event) => patch({ ffmpegPath: event.target.value })}
-                  placeholder={t("settings.ffmpegAuto")}
-                  className={FIELD + " font-mono text-[11px]"}
-                  spellCheck={false}
-                />
-                <Button size="sm" variant="secondary" onClick={() => void chooseFfmpeg()}>
-                  {t("settings.ffmpegChoose")}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => patch({ ffmpegPath: "" })}>
-                  {t("settings.ffmpegReset")}
-                </Button>
-              </div>
-            </Row>
-            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
-              {ffmpeg ? (
-                <>
-                  {ffmpeg.path ? (
-                    <p className="break-all font-mono">
-                      {t("settings.ffmpegActual", { path: ffmpeg.path })}
-                    </p>
-                  ) : (
-                    <p className="text-rec">{t("settings.ffmpegMissing")}</p>
-                  )}
-                  <p>
-                    {ffmpegSourceLabel}
-                    {ffmpeg.version ? " · " + t("settings.ffmpegVersion", { version: ffmpeg.version }) : ""}
-                  </p>
-                  {ffmpeg.configured && ffmpeg.source !== "manual" ? (
-                    <p className="break-all text-rec">
-                      {t("settings.ffmpegFallback", { path: ffmpeg.configured })}
-                    </p>
-                  ) : null}
-                </>
-              ) : (
-                <p>{t("settings.ffmpegUnavailable")}</p>
-              )}
-            </div>
-          </Section>
+      const ffmpegShortVer = shortFfmpegVersion(ffmpeg?.version);
+      const logCurrentName = fileBasename(logStatus?.currentFile);
+      const trashTip = (
+        <div className="space-y-1">
+          <p>{t("settings.trashHint")}</p>
+          <p className="opacity-80">{t("settings.trashNote")}</p>
+        </div>
+      );
+      const filenameTip = (
+        <div className="space-y-1.5">
+          <p>{t("settings.filenameTemplateHint")}</p>
+          <p className="font-mono text-[10.5px] leading-4 opacity-85">{t("settings.filenameVars")}</p>
+        </div>
+      );
 
-          <Section title={t("settings.sectionDirectory")}>
+      return (
+        <div className="space-y-6">
+          <Section title={t("settings.sectionMediaAndCleanup")}>
             <Row
               id="set-media-root"
               focus={focusId === "set-media-root"}
               title={t("settings.mediaRoot")}
-              desc={t("settings.mediaRootHint")}
+              tip={t("settings.mediaRootHint")}
             >
-              <div className="flex w-[420px] items-center gap-1.5">
+              <div className="flex w-[480px] items-center gap-1.5">
                 <input
                   value={settings.mediaRoot}
                   onChange={(event) => patch({ mediaRoot: event.target.value })}
@@ -1242,188 +1222,11 @@ export default function SettingsView({
                 </Button>
               </div>
             </Row>
-          </Section>
 
-          <Section title={t("settings.sectionLogs")}>
-            <Row
-              id="set-log-dir"
-              focus={focusId === "set-log-dir"}
-              title={t("settings.logDir")}
-              desc={t("settings.logDirHint")}
-            >
-              <div className="flex w-[420px] flex-col gap-1.5">
-                <div className="flex items-center gap-1.5">
-                  <input
-                    value={settings.logDir}
-                    onChange={(event) => patch({ logDir: event.target.value })}
-                    placeholder={logStatus?.defaultDir ?? ""}
-                    className={FIELD + " font-mono text-[11px]"}
-                    spellCheck={false}
-                  />
-                  <Button size="sm" variant="secondary" onClick={() => void chooseFolder("logDir")}>
-                    {t("settings.choose")}
-                  </Button>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Button size="sm" variant="ghost" onClick={() => void openLogs()}>
-                    {t("settings.logOpen")}
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => patch({ logDir: "" })}>
-                    {t("settings.logReset")}
-                  </Button>
-                </div>
-              </div>
-            </Row>
-            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
-              {logStatus ? (
-                <>
-                  <p className="break-all font-mono">
-                    {t("settings.logActual", { dir: logStatus.dir })}
-                  </p>
-                  <p>
-                    {t("settings.logFiles", {
-                      n: logStatus.fileCount,
-                      size: formatBytes(Number(logStatus.totalBytes)),
-                    })}
-                    {logStatus.currentFile
-                      ? " · " + t("settings.logCurrent", { file: logStatus.currentFile })
-                      : ""}
-                  </p>
-                  {logStatus.dropped > 0 ? (
-                    <p className="text-rec">
-                      {t("settings.logDropped", { n: logStatus.dropped })}
-                    </p>
-                  ) : null}
-                  {logStatus.fallback ? (
-                    <p className="break-all text-rec">
-                      {t("settings.logFallback", { detail: logStatus.fallback })}
-                    </p>
-                  ) : null}
-                  {logStatus.lastError ? (
-                    <p className="break-all text-rec">
-                      {t("settings.logError", { detail: logStatus.lastError })}
-                    </p>
-                  ) : null}
-                </>
-              ) : (
-                <p>{t("settings.logUnavailable")}</p>
-              )}
-            </div>
-            <Row
-              id="set-log-retention"
-              focus={focusId === "set-log-retention"}
-              title={t("settings.logRetention")}
-              desc={t("settings.logRetentionHint")}
-            >
-              <label className="flex items-center gap-2 whitespace-nowrap text-[11px] text-muted">
-                {t("settings.retentionDays")}
-                <div className="w-[72px]">
-                  <input
-                    type="number"
-                    min={0}
-                    max={3650}
-                    value={settings.logRetentionDays}
-                    onChange={(event) => patch({ logRetentionDays: Number(event.target.value) })}
-                    className={FIELD + " font-mono tabular-nums"}
-                  />
-                </div>
-                <span>{t("settings.unitDays")}</span>
-              </label>
-            </Row>
-          </Section>
-
-          <Section title={t("settings.sectionNaming")}>
-            <Row
-              id="set-filename-template"
-              focus={focusId === "set-filename-template"}
-              title={t("settings.filenameTemplate")}
-              desc={t("settings.filenameTemplateHint")}
-            >
-              <div className="w-[420px]">
-                <input
-                  value={settings.mediaFilenameTemplate}
-                  onChange={(event) => patch({ mediaFilenameTemplate: event.target.value })}
-                  className={FIELD + " font-mono text-[11px]"}
-                  spellCheck={false}
-                />
-              </div>
-            </Row>
-            <div className="px-5 pb-4">
-              <p className="text-[10.5px] leading-4 text-faint">{t("settings.filenameVars")}</p>
-              {preview && settings.mediaFilenameTemplate.trim() ? (
-                preview.valid ? (
-                  <p className="mt-1 break-all font-mono text-[10.5px] text-muted">{preview.path}</p>
-                ) : (
-                  <p className="mt-1 text-[10.5px] text-rec">{preview.error}</p>
-                )
-              ) : null}
-            </div>
-            <Row
-              id="set-strip-emoji"
-              focus={focusId === "set-strip-emoji"}
-              title={t("settings.stripEmoji")}
-              desc={t("settings.stripEmojiHint")}
-            >
-              <Switch
-                checked={settings.mediaStripEmoji}
-                onChange={(next) => patch({ mediaStripEmoji: next })}
-                label={t("settings.stripEmoji")}
-              />
-            </Row>
-            <Row
-              id="set-group-dirs"
-              focus={focusId === "set-group-dirs"}
-              title={t("settings.groupDirs")}
-              desc={t("settings.groupDirsHint")}
-            >
-              <Switch
-                checked={settings.mediaGroupDirs}
-                onChange={(next) => patch({ mediaGroupDirs: next })}
-                label={t("settings.groupDirs")}
-              />
-            </Row>
-          </Section>
-
-          <Section title={t("settings.sectionTrash")}>
-            <Row
-              id="set-trash"
-              focus={focusId === "set-trash"}
-              title={t("settings.trashTitle")}
-              desc={t("settings.trashHint")}
-            >
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => {
-                  void trashOpen().catch((err) => notify.error(err));
-                }}
-              >
-                {t("settings.trashOpen")}
-              </Button>
-            </Row>
-            <div className="space-y-0.5 px-5 pb-4 text-[10.5px] leading-4 text-faint">
-              {trash ? (
-                <>
-                  <p className="break-all font-mono">
-                    {trash.platform === "windows" ? t("settings.trashLocationWindows") : trash.location}
-                  </p>
-                  <p className={trash.canRestore ? "" : "text-warn"}>
-                    {trash.canRestore ? t("settings.trashRestoreYes") : t("settings.trashRestoreNo")}
-                  </p>
-                  <p>{t("settings.trashNote")}</p>
-                </>
-              ) : (
-                <p>{t("settings.trashUnavailable")}</p>
-              )}
-            </div>
-          </Section>
-
-          <Section title={t("settings.sectionRetention")}>
             <Row
               id="set-retention"
               focus={focusId === "set-retention"}
               title={t("settings.retention")}
-              desc={t("settings.retentionHint")}
               tip={t("settings.retentionHint")}
             >
               <div className="flex items-center gap-3">
@@ -1457,6 +1260,221 @@ export default function SettingsView({
                 </label>
               </div>
             </Row>
+
+            <Row
+              id="set-trash"
+              focus={focusId === "set-trash"}
+              title={t("settings.trashTitle")}
+              tip={trashTip}
+            >
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  void trashOpen().catch((err) => notify.error(err));
+                }}
+              >
+                {t("settings.trashOpen")}
+              </Button>
+            </Row>
+            {trash && !trash.canRestore ? (
+              <StatusStrip>
+                <p className="text-warn">{t("settings.trashRestoreNo")}</p>
+              </StatusStrip>
+            ) : null}
+          </Section>
+
+          <Section title={t("settings.sectionNaming")}>
+            <Row
+              id="set-filename-template"
+              focus={focusId === "set-filename-template"}
+              title={t("settings.filenameTemplate")}
+              tip={filenameTip}
+            >
+              <div className="w-[480px]">
+                <input
+                  value={settings.mediaFilenameTemplate}
+                  onChange={(event) => patch({ mediaFilenameTemplate: event.target.value })}
+                  className={FIELD + " font-mono text-[11px]"}
+                  spellCheck={false}
+                />
+              </div>
+            </Row>
+            {preview && settings.mediaFilenameTemplate.trim() ? (
+              <StatusStrip>
+                {preview.valid ? (
+                  <p className="flex items-baseline gap-2 break-all">
+                    <span className="shrink-0 text-[10.5px] text-faint">{t("settings.filenamePreviewLabel")}</span>
+                    <span className="font-mono text-[10.5px] text-muted">{preview.path}</span>
+                  </p>
+                ) : (
+                  <p className="text-rec">{preview.error}</p>
+                )}
+              </StatusStrip>
+            ) : null}
+            <Row
+              id="set-strip-emoji"
+              focus={focusId === "set-strip-emoji"}
+              title={t("settings.stripEmoji")}
+              tip={t("settings.stripEmojiHint")}
+            >
+              <Switch
+                checked={settings.mediaStripEmoji}
+                onChange={(next) => patch({ mediaStripEmoji: next })}
+                label={t("settings.stripEmoji")}
+              />
+            </Row>
+            <Row
+              id="set-group-dirs"
+              focus={focusId === "set-group-dirs"}
+              title={t("settings.groupDirs")}
+              tip={t("settings.groupDirsHint")}
+            >
+              <Switch
+                checked={settings.mediaGroupDirs}
+                onChange={(next) => patch({ mediaGroupDirs: next })}
+                label={t("settings.groupDirs")}
+              />
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionLogs")}>
+            <Row
+              id="set-log-dir"
+              focus={focusId === "set-log-dir"}
+              title={t("settings.logDir")}
+              tip={t("settings.logDirHint")}
+            >
+              <div className="flex w-[480px] items-center gap-1.5">
+                <input
+                  value={settings.logDir}
+                  onChange={(event) => patch({ logDir: event.target.value })}
+                  placeholder={logStatus?.defaultDir ?? ""}
+                  className={FIELD + " font-mono text-[11px]"}
+                  spellCheck={false}
+                />
+                <Button size="sm" variant="secondary" onClick={() => void chooseFolder("logDir")}>
+                  {t("settings.choose")}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => void openLogs()} title={t("settings.logOpen")}>
+                  {t("settings.logOpenShort")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => patch({ logDir: "" })}
+                  disabled={!settings.logDir}
+                  title={t("settings.logReset")}
+                >
+                  {t("settings.resetShort")}
+                </Button>
+              </div>
+            </Row>
+            <StatusStrip>
+              {logStatus ? (
+                <>
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-faint">
+                    <span>
+                      {t("settings.logFiles", {
+                        n: logStatus.fileCount,
+                        size: formatBytes(Number(logStatus.totalBytes)),
+                      })}
+                    </span>
+                    {logCurrentName ? <span className="font-mono text-muted">{logCurrentName}</span> : null}
+                  </p>
+                  {logStatus.dropped > 0 ? (
+                    <p className="text-rec">{t("settings.logDropped", { n: logStatus.dropped })}</p>
+                  ) : null}
+                  {logStatus.fallback ? (
+                    <p className="break-all text-rec">
+                      {t("settings.logFallback", { detail: logStatus.fallback })}
+                    </p>
+                  ) : null}
+                  {logStatus.lastError ? (
+                    <p className="break-all text-rec">
+                      {t("settings.logError", { detail: logStatus.lastError })}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[10.5px] text-faint">{t("settings.logUnavailable")}</p>
+              )}
+            </StatusStrip>
+            <Row
+              id="set-log-retention"
+              focus={focusId === "set-log-retention"}
+              title={t("settings.logRetention")}
+              tip={t("settings.logRetentionHint")}
+            >
+              <label className="flex items-center gap-2 whitespace-nowrap text-[11px] text-muted">
+                {t("settings.retentionDays")}
+                <div className="w-[72px]">
+                  <input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={settings.logRetentionDays}
+                    onChange={(event) => patch({ logRetentionDays: Number(event.target.value) })}
+                    className={FIELD + " font-mono tabular-nums"}
+                  />
+                </div>
+                <span>{t("settings.unitDays")}</span>
+              </label>
+            </Row>
+          </Section>
+
+          <Section title={t("settings.sectionTools")}>
+            <Row
+              id="set-ffmpeg-path"
+              focus={focusId === "set-ffmpeg-path"}
+              title={t("settings.ffmpegPath")}
+              tip={t("settings.ffmpegPathHint")}
+            >
+              <div className="flex w-[480px] items-center gap-1.5">
+                <input
+                  value={settings.ffmpegPath}
+                  onChange={(event) => patch({ ffmpegPath: event.target.value })}
+                  placeholder={t("settings.ffmpegAuto")}
+                  className={FIELD + " font-mono text-[11px]"}
+                  spellCheck={false}
+                />
+                <Button size="sm" variant="secondary" onClick={() => void chooseFfmpeg()}>
+                  {t("settings.ffmpegChoose")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => patch({ ffmpegPath: "" })}
+                  disabled={!settings.ffmpegPath}
+                  title={t("settings.ffmpegReset")}
+                >
+                  {t("settings.resetShort")}
+                </Button>
+              </div>
+            </Row>
+            <StatusStrip>
+              {ffmpeg ? (
+                <>
+                  {ffmpeg.path ? (
+                    <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px]">
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-ok" aria-hidden />
+                      <span className="break-all font-mono text-muted">{ffmpeg.path}</span>
+                      {ffmpegShortVer ? <span className="font-mono text-faint">· {ffmpegShortVer}</span> : null}
+                      {ffmpegSourceLabel ? <span className="text-faint">· {ffmpegSourceLabel}</span> : null}
+                    </p>
+                  ) : (
+                    <p className="text-rec">{t("settings.ffmpegMissing")}</p>
+                  )}
+                  {ffmpeg.configured && ffmpeg.source !== "manual" ? (
+                    <p className="break-all text-rec">
+                      {t("settings.ffmpegFallback", { path: ffmpeg.configured })}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[10.5px] text-faint">{t("settings.ffmpegUnavailable")}</p>
+              )}
+            </StatusStrip>
           </Section>
         </div>
       );
@@ -1469,7 +1487,7 @@ export default function SettingsView({
             id="set-notify-record"
             focus={focusId === "set-notify-record"}
             title={t("settings.notifyRecord")}
-            desc={t("settings.notifyRecordHint")}
+            tip={t("settings.notifyRecordHint")}
           >
             <Switch
               checked={settings.notifyEnabled}
@@ -1481,7 +1499,7 @@ export default function SettingsView({
             id="set-notify-error"
             focus={focusId === "set-notify-error"}
             title={t("settings.notifyError")}
-            desc={t("settings.notifyErrorHint")}
+            tip={t("settings.notifyErrorHint")}
           >
             <Switch
               checked={settings.notifyError}
@@ -1493,7 +1511,7 @@ export default function SettingsView({
             id="set-notify-auth"
             focus={focusId === "set-notify-auth"}
             title={t("settings.notifyAuth")}
-            desc={t("settings.notifyAuthHint")}
+            tip={t("settings.notifyAuthHint")}
           >
             <Switch
               checked={settings.notifyAuth}
@@ -1512,7 +1530,7 @@ export default function SettingsView({
             id="set-theme"
             focus={focusId === "set-theme"}
             title={t("settings.theme")}
-            desc={t("settings.themeHint")}
+            tip={t("settings.themeHint")}
           >
             <Segmented
               items={[
@@ -1528,7 +1546,7 @@ export default function SettingsView({
             id="set-language"
             focus={focusId === "set-language"}
             title={t("settings.language")}
-            desc={t("settings.languageHint")}
+            tip={t("settings.languageHint")}
           >
             <Segmented
               items={[
@@ -1546,14 +1564,23 @@ export default function SettingsView({
 
     if (page === "system") {
       const closeIsQuit = settings.closeAction === "quit";
+      const closeTip = t(
+        closeIsQuit
+          ? isMac
+            ? "settings.closeQuitHintMac"
+            : "settings.closeQuitHintWin"
+          : isMac
+            ? "settings.trayHintMac"
+            : "settings.trayHint",
+      );
       return (
-        <div className="space-y-7">
+        <div className="space-y-6">
           <Section title={t("settings.sectionClose")}>
             <Row
               id="set-close-action"
               focus={focusId === "set-close-action"}
               title={t("settings.closeAction")}
-              desc={t(isMac ? "settings.closeActionHintMac" : "settings.closeActionHint")}
+              tip={closeTip}
             >
               <Segmented
                 items={[
@@ -1567,19 +1594,6 @@ export default function SettingsView({
                 onChange={(next) => saveImmediate({ closeAction: next })}
               />
             </Row>
-            <div className="px-5 py-3">
-              <p className="text-[11px] leading-[17px] text-faint">
-                {t(
-                  closeIsQuit
-                    ? isMac
-                      ? "settings.closeQuitHintMac"
-                      : "settings.closeQuitHintWin"
-                    : isMac
-                      ? "settings.trayHintMac"
-                      : "settings.trayHint",
-                )}
-              </p>
-            </div>
           </Section>
 
           <Section title={t("settings.sectionPower")}>
@@ -1587,7 +1601,7 @@ export default function SettingsView({
               id="set-prevent-sleep"
               focus={focusId === "set-prevent-sleep"}
               title={t("settings.preventSleep")}
-              desc={t("settings.preventSleepHint")}
+              tip={t("settings.preventSleepHint")}
             >
               <Switch
                 checked={settings.preventSleep}
