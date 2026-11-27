@@ -458,14 +458,16 @@ mod tests {
             .await
             .unwrap()
             .success());
-        let database = root.join("legacy.sqlite");
+        let database = root.join("local.sqlite");
         let db = Db::open(&database).unwrap();
-        db.exec_batch_for_test("INSERT INTO room (id,platform,room_key,canonical_url,host_name,title,created_at,updated_at) VALUES ('r','bilibili','1','test','a','t',0,0);
-            INSERT INTO record_session (id,room_id,started_at,status,file_path,file_size,duration_ms) VALUES ('s','r',1,'finished','old/video.mp4',1000,2000);").unwrap();
+        let clip_sql = clip.display().to_string().replace('\'', "''");
+        db.exec_batch_for_test(&format!(
+            "INSERT INTO room (id,platform,room_key,canonical_url,host_name,title,created_at,updated_at) VALUES ('r','bilibili','1','test','a','t',0,0);
+             INSERT INTO record_session (id,room_id,started_at,status,file_path,file_size,duration_ms) VALUES ('s','r',1,'finished','{clip_sql}',1000,2000);"
+        ))
+        .unwrap();
         drop(db);
         let db = Db::open(&database).unwrap();
-        db.locate_legacy_media(&root, Some(Path::new("old")))
-            .unwrap();
         let player = LocalPlayer::new(root.join("cache"), StreamServer::start().await.unwrap());
         let opened = player.open(&db, "s", None, false).await.unwrap();
         let http = reqwest::Client::builder().no_proxy().build().unwrap();

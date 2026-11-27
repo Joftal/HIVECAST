@@ -60,11 +60,9 @@ impl Secret {
         ))
     }
 
-    /// 解密。没有前缀的一律当历史明文原样返回（迁移期兼容）。
+    /// 解密；要求必须带 `enc:v1:` 前缀。
     pub fn open(&self, stored: &str) -> Option<String> {
-        let Some(body) = stored.strip_prefix(PREFIX) else {
-            return Some(stored.to_string());
-        };
+        let body = stored.strip_prefix(PREFIX)?;
         let packed = base64::engine::general_purpose::STANDARD
             .decode(body)
             .ok()?;
@@ -77,6 +75,7 @@ impl Secret {
         String::from_utf8(plain).ok()
     }
 
+    #[cfg(test)]
     pub fn is_sealed(stored: &str) -> bool {
         stored.starts_with(PREFIX)
     }
@@ -133,15 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn passes_legacy_plaintext_through() {
-        let (secret, _path) = temp_secret("legacy");
-        assert_eq!(secret.open("a=1").as_deref(), Some("a=1"));
-        assert!(!Secret::is_sealed("a=1"));
-    }
-
-    #[test]
-    fn rejects_tampered_ciphertext() {
+    fn rejects_unsealed_and_tampered_ciphertext() {
         let (secret, _path) = temp_secret("tamper");
+        assert!(secret.open("a=1").is_none());
+        assert!(!Secret::is_sealed("a=1"));
         let sealed = secret.seal("a=1").expect("加密失败");
         let mut bytes = sealed.into_bytes();
         let last = bytes.len() - 2;

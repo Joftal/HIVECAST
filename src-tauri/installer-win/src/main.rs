@@ -45,8 +45,8 @@ fn main() {
                 .map(|_| ())
                 .map_err(InstallError::into_message)
         }
-        CliAction::SilentUninstall { dir } => {
-            resolve_uninstall_dir(dir).and_then(|target| perform_uninstall(&target))
+        CliAction::SilentUninstall { dir, purge_data } => {
+            resolve_uninstall_dir(dir).and_then(|target| perform_uninstall(&target, purge_data))
         }
         CliAction::GuiInstall => launch_gui(false),
         CliAction::GuiUninstall => launch_gui(true),
@@ -245,6 +245,7 @@ where
                     .map_err(|e| InstallError::Directory(e.to_string()))?
                     .next()
                     .is_some()
+                    && !install::is_reusable_preserved_dir(install_dir)
                 {
                     return Err(InstallError::Directory(
                         "目录非空，请选择新的 HIVECAST 专用子目录".into(),
@@ -310,7 +311,35 @@ where
     Ok((target, dest_exe))
 }
 
-pub(crate) fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
+fn remove_real_dir_if_exists(dir: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            let mut last_err = None;
+            for attempt in 0..20 {
+                match fs::remove_dir_all(dir) {
+                    Ok(()) => return Ok(true),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+                    Err(err) => {
+                        last_err = Some(err);
+                        if attempt < 19 {
+                            std::thread::sleep(std::time::Duration::from_millis(150));
+                        }
+                    }
+                }
+            }
+            Err(format!(
+                "清理目录 {} 失败：{}",
+                dir.display(),
+                last_err.map_or_else(|| "未知错误".to_string(), |e| e.to_string())
+            ))
+        }
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("检查目录 {} 失败：{err}", dir.display())),
+    }
+}
+
+pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<(), String> {
     let app_exe = install_dir.join("HIVECAST.exe");
     let uninstaller = install_dir.join("uninstall.exe");
     #[cfg(windows)]
@@ -329,6 +358,21 @@ pub(crate) fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
     }
     if app_exe.exists() {
         fs::remove_file(&app_exe).map_err(|e| format!("删除主程序失败：{e}"))?;
+    }
+    for ephemeral in ["cache", "webview", "logs"] {
+        let _ = remove_real_dir_if_exists(&install_dir.join(ephemeral))?;
+    }
+    if purge_data {
+        let removed_local_data = remove_real_dir_if_exists(&install_dir.join("data"))?;
+        #[cfg(windows)]
+        if !removed_local_data {
+            if let Ok(appdata) = env::var("APPDATA") {
+                let fallback_data = PathBuf::from(appdata).join("com.hivecast.desktop");
+                let _ = remove_real_dir_if_exists(&fallback_data)?;
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = removed_local_data;
     }
     #[cfg(windows)]
     {

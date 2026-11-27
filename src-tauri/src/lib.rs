@@ -22,6 +22,7 @@ mod local;
 mod logging;
 mod monitor;
 mod orphan;
+mod paths;
 mod platform;
 mod post;
 mod postprocess;
@@ -55,13 +56,11 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            let paths = paths::resolve(&handle).map_err(Box::<dyn std::error::Error>::from)?;
+
             // 单实例锁：两个进程同时录同一批房间会抢分片、抢缩略图缓存（A7）。
             // 锁跟着进程走，崩溃遗留的 lock 文件不会挡住下次启动。
-            let data_dir = handle
-                .path()
-                .app_data_dir()
-                .map_err(|err| Box::<dyn std::error::Error>::from(err.to_string()))?;
-            let lock = match crate::instance::acquire(&data_dir) {
+            let lock = match crate::instance::acquire(&paths.data_dir) {
                 Ok(lock) => lock,
                 Err(err) => {
                     tracing::warn!(%err, "已有实例在运行，本次启动退出");
@@ -84,7 +83,7 @@ pub fn run() {
             app.manage(lock);
 
             // 启动阶段只做轻量初始化：建目录 + 打开数据库 + 绑定回环端口 + 起监控循环。
-            let state = match tauri::async_runtime::block_on(AppState::init(&handle)) {
+            let state = match tauri::async_runtime::block_on(AppState::init(&handle, &paths)) {
                 Ok(state) => state,
                 Err(err) => {
                     tracing::error!(error = %err, "应用状态初始化失败，启动中止");
@@ -128,7 +127,9 @@ pub fn run() {
                 tracing::info!(
                     target: "hivecast_lib",
                     version = env!("CARGO_PKG_VERSION"),
-                    data_dir = %data_dir.display(),
+                    portable_install_dir = paths.portable_install_dir,
+                    data_dir = %paths.data_dir.display(),
+                    cache_dir = %paths.cache_dir.display(),
                     media_root = %state.media_root.display(),
                     log_dir = %logging::status().dir,
                     "应用启动完成"
@@ -189,64 +190,95 @@ pub fn run() {
                     false
                 }
             };
-            if let Some(window) = app.get_webview_window("main") {
-                // 启动尺寸跟随当前显示器工作区，而不是固定 1320×860：
-                // 小屏不越界，大屏不显得空。仍受 tauri.conf 的 minWidth/minHeight 约束。
-                if let Ok(Some(monitor)) = window
-                    .current_monitor()
-                    .or_else(|_| window.primary_monitor())
-                {
-                    let work = monitor.work_area();
-                    let scale = monitor.scale_factor().max(1.0);
-                    let logical_w = work.size.width as f64 / scale;
-                    let logical_h = work.size.height as f64 / scale;
-                    let width = (logical_w * 0.86)
-                        .clamp(1040.0, 1680.0)
-                        .min((logical_w - 32.0).max(1040.0));
-                    let height = (logical_h * 0.88)
-                        .clamp(680.0, 1040.0)
-                        .min((logical_h - 32.0).max(680.0));
-                    if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
-                        tracing::warn!(%err, "设置启动窗口尺寸失败");
-                    }
-                    if let Err(err) = window.center() {
-                        tracing::warn!(%err, "居中启动窗口失败");
-                    }
-                    tracing::info!(
-                        logical_width = width,
-                        logical_height = height,
-                        screen_width = logical_w,
-                        screen_height = logical_h,
-                        "启动窗口已按屏幕工作区缩放"
-                    );
-                }
-                // Windows 没有 macOS 的 Overlay 标题栏：去掉原生边框，由前端顶栏统一画标题、导航与窗口按钮。
-                #[cfg(target_os = "windows")]
-                {
-                    if let Err(err) = window.set_decorations(false) {
-                        tracing::warn!(%err, "关闭原生标题栏失败");
-                    }
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    let theme = window.theme().unwrap_or(tauri::Theme::Light);
-                    crate::tray::sync_window_icon(&window, theme);
-                }
-                let target = window.clone();
-                window.on_window_event(move |event| match event {
-                    // 一律先拦下：是隐藏还是退出由设置与任务表决定。
-                    tauri::WindowEvent::CloseRequested { api, .. } => {
-                        api.prevent_close();
-                        crate::lifecycle::on_close_requested(target.app_handle(), tray_ready);
-                    }
-                    #[cfg(target_os = "windows")]
-                    tauri::WindowEvent::ThemeChanged(theme) => {
-                        crate::tray::sync_window_icon(&target, *theme);
-                        crate::tray::refresh(target.app_handle());
-                    }
-                    _ => {}
-                });
+            // 主窗口在 setup 内动态创建，便于 Windows 安装目录优先模式把 WebView2 用户数据放进 <install_dir>\webview。
+            let mut win_builder = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("HIVECAST")
+            .inner_size(1320.0, 860.0)
+            .min_inner_size(1180.0, 680.0)
+            .center()
+            .resizable(true);
+
+            #[cfg(target_os = "macos")]
+            {
+                win_builder = win_builder
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    .hidden_title(true);
             }
+
+            #[cfg(target_os = "windows")]
+            {
+                // Windows 没有 macOS 的 Overlay 标题栏：去掉原生边框，由前端顶栏统一画标题、导航与窗口按钮。
+                win_builder = win_builder.decorations(false);
+                if let Some(webview_dir) = &paths.webview_data_dir {
+                    if let Err(err) = std::fs::create_dir_all(webview_dir) {
+                        tracing::warn!(
+                            dir = %webview_dir.display(),
+                            error = %err,
+                            "创建 WebView2 数据目录失败，回落到系统默认目录"
+                        );
+                    } else {
+                        win_builder = win_builder.data_directory(webview_dir.clone());
+                    }
+                }
+            }
+
+            let window = win_builder
+                .build()
+                .map_err(|err| Box::<dyn std::error::Error>::from(err.to_string()))?;
+
+            // 启动尺寸跟随当前显示器工作区，而不是固定 1320×860：
+            // 小屏不越界，大屏不显得空。仍受 min_inner_size 约束。
+            if let Ok(Some(monitor)) = window
+                .current_monitor()
+                .or_else(|_| window.primary_monitor())
+            {
+                let work = monitor.work_area();
+                let scale = monitor.scale_factor().max(1.0);
+                let logical_w = work.size.width as f64 / scale;
+                let logical_h = work.size.height as f64 / scale;
+                let width = (logical_w * 0.86)
+                    .clamp(1040.0, 1680.0)
+                    .min((logical_w - 32.0).max(1040.0));
+                let height = (logical_h * 0.88)
+                    .clamp(680.0, 1040.0)
+                    .min((logical_h - 32.0).max(680.0));
+                if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
+                    tracing::warn!(%err, "设置启动窗口尺寸失败");
+                }
+                if let Err(err) = window.center() {
+                    tracing::warn!(%err, "居中启动窗口失败");
+                }
+                tracing::info!(
+                    logical_width = width,
+                    logical_height = height,
+                    screen_width = logical_w,
+                    screen_height = logical_h,
+                    "启动窗口已按屏幕工作区缩放"
+                );
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let theme = window.theme().unwrap_or(tauri::Theme::Light);
+                crate::tray::sync_window_icon(&window, theme);
+            }
+            let target = window.clone();
+            window.on_window_event(move |event| match event {
+                // 一律先拦下：是隐藏还是退出由设置与任务表决定。
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    crate::lifecycle::on_close_requested(target.app_handle(), tray_ready);
+                }
+                #[cfg(target_os = "windows")]
+                tauri::WindowEvent::ThemeChanged(theme) => {
+                    crate::tray::sync_window_icon(&target, *theme);
+                    crate::tray::refresh(target.app_handle());
+                }
+                _ => {}
+            });
 
             // dev 服务器重启 / 系统注销发的是 SIGTERM，它不会触发 RunEvent::Exit；
             // 不接住就会留下一堆还在写文件的 ffmpeg。

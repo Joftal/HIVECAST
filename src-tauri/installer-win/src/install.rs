@@ -13,6 +13,7 @@ pub enum CliAction {
     },
     SilentUninstall {
         dir: Option<PathBuf>,
+        purge_data: bool,
     },
     SelfTest,
     Pack {
@@ -45,6 +46,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
     let mut uninstall = false;
     let mut silent = false;
     let mut desktop_shortcut = true;
+    let mut purge_data = false;
     let mut dir: Option<PathBuf> = None;
 
     let mut i = 0;
@@ -53,6 +55,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
             "--uninstall" => uninstall = true,
             "--silent" | "/S" => silent = true,
             "--no-shortcut" => desktop_shortcut = false,
+            "--purge-data" => purge_data = true,
             "--dir" => {
                 let value = args
                     .get(i + 1)
@@ -69,7 +72,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliAction, String> {
     }
 
     match (uninstall, silent) {
-        (true, true) => Ok(CliAction::SilentUninstall { dir }),
+        (true, true) => Ok(CliAction::SilentUninstall { dir, purge_data }),
         (true, false) => Ok(CliAction::GuiUninstall),
         (false, true) => Ok(CliAction::SilentInstall {
             dir,
@@ -199,6 +202,33 @@ pub fn has_existing_install(dir: &Path) -> bool {
     dir.join("HIVECAST.exe").is_file()
 }
 
+/// 卸载后保留了 `data/` 和/或 `Recording/` 的原安装目录，允许再次安装复用，
+/// 但仍严格拒绝包含其它未知文件或目录的外部非空目录。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_reusable_preserved_dir(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut count = 0usize;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            return false;
+        };
+        if !meta.file_type().is_dir() {
+            return false;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !matches!(name.as_str(), "data" | "recording") {
+            return false;
+        }
+        count += 1;
+    }
+    count > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +255,18 @@ mod tests {
             CliAction::SilentInstall {
                 dir: Some(PathBuf::from(r"D:\Apps\HIVECAST")),
                 desktop_shortcut: false,
+            }
+        );
+        assert_eq!(
+            parse_cli(&[
+                "--uninstall".into(),
+                "--silent".into(),
+                "--purge-data".into()
+            ])
+            .unwrap(),
+            CliAction::SilentUninstall {
+                dir: None,
+                purge_data: true,
             }
         );
         assert_eq!(
@@ -274,5 +316,29 @@ mod tests {
         for raw in ["\0C:\\Apps", "C:\\Apps\0", "C:\\Apps\0\\HIVECAST"] {
             assert!(validate_install_dir(raw).unwrap_err().contains("U+0000"));
         }
+    }
+
+    #[test]
+    fn reusable_preserved_dir_allows_only_data_and_recording_subdirs() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!is_reusable_preserved_dir(root.path()));
+
+        let only_recording = root.path().join("only-recording");
+        std::fs::create_dir_all(only_recording.join("Recording")).unwrap();
+        assert!(is_reusable_preserved_dir(&only_recording));
+
+        let both = root.path().join("both");
+        std::fs::create_dir_all(both.join("data")).unwrap();
+        std::fs::create_dir_all(both.join("Recording")).unwrap();
+        assert!(is_reusable_preserved_dir(&both));
+
+        let foreign_file = root.path().join("foreign-file");
+        std::fs::create_dir_all(foreign_file.join("data")).unwrap();
+        std::fs::write(foreign_file.join("other.txt"), b"x").unwrap();
+        assert!(!is_reusable_preserved_dir(&foreign_file));
+
+        let foreign_dir = root.path().join("foreign-dir");
+        std::fs::create_dir_all(foreign_dir.join("OtherApp")).unwrap();
+        assert!(!is_reusable_preserved_dir(&foreign_dir));
     }
 }

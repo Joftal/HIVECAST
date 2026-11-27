@@ -58,14 +58,37 @@ try {
 
     $emptyDir = Join-Path $work "空 目录"
     Invoke-Installer $Setup @("--silent", "--dir", $emptyDir, "--no-shortcut")
+    New-Item -ItemType Directory -Force -Path (Join-Path $emptyDir "cache"), (Join-Path $emptyDir "webview"), (Join-Path $emptyDir "logs") | Out-Null
+    Set-Content -LiteralPath (Join-Path $emptyDir "logs\app.log") -Value "log" -NoNewline
     $emptyUninst = Join-Path $emptyDir "uninstall.exe"
     Invoke-Installer $emptyUninst @("--uninstall", "--silent")
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ((Test-Path -LiteralPath $emptyDir) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
     if ((Test-Path -LiteralPath $emptyDir) -or (Test-Path $registry) -or (Test-Path $shortcut)) {
-        throw "Empty install directory was not removed after uninstall"
+        throw "Empty install directory (with ephemeral cache/webview/logs) was not removed after uninstall"
     }
-    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry, preserve user file and empty-dir cleanup)"
+
+    # Verify default uninstall preserves data/ + Recording/, reinstall reuses that directory, and --purge-data clears data/ while keeping Recording/.
+    $reuseDir = Join-Path $work "复用 目录"
+    Invoke-Installer $Setup @("--silent", "--dir", $reuseDir, "--no-shortcut")
+    New-Item -ItemType Directory -Force -Path (Join-Path $reuseDir "data"), (Join-Path $reuseDir "Recording"), (Join-Path $reuseDir "cache") | Out-Null
+    Set-Content -LiteralPath (Join-Path $reuseDir "data\hivecast.db") -Value "db" -NoNewline
+    Set-Content -LiteralPath (Join-Path $reuseDir "Recording\clip.mp4") -Value "vid" -NoNewline
+    $reuseUninst = Join-Path $reuseDir "uninstall.exe"
+    Invoke-Installer $reuseUninst @("--uninstall", "--silent")
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-Path -LiteralPath $reuseUninst) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    if ((Test-Path -LiteralPath (Join-Path $reuseDir "cache")) -or -not (Test-Path -LiteralPath (Join-Path $reuseDir "data\hivecast.db")) -or -not (Test-Path -LiteralPath (Join-Path $reuseDir "Recording\clip.mp4"))) {
+        throw "Default uninstall did not clean cache/ while preserving data/ and Recording/"
+    }
+    Invoke-Installer $Setup @("--silent", "--dir", $reuseDir, "--no-shortcut")
+    Invoke-Installer $reuseUninst @("--uninstall", "--silent", "--purge-data")
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-Path -LiteralPath $reuseUninst) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    if ((Test-Path -LiteralPath (Join-Path $reuseDir "data")) -or -not (Test-Path -LiteralPath (Join-Path $reuseDir "Recording\clip.mp4"))) {
+        throw "--purge-data uninstall did not remove data/ while keeping Recording/"
+    }
+    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry, preserve data/recording, reinstall, purge-data and empty-dir cleanup)"
 } finally {
     $env:APPDATA = $originalAppData
 }

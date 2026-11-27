@@ -760,10 +760,14 @@
       <div class="error-box" id="uninstallError"></div>
       <div class="glass-card">
         <div class="info-list">
-          <div id="uninstLine1">将从本机移除 HIVECAST 主程序、桌面及开始菜单快捷方式。</div>
+          <div id="uninstLine1">将从本机移除 HIVECAST 主程序、缓存与日志及桌面/开始菜单快捷方式。</div>
           <div id="uninstLine2" style="color: var(--ok-text); font-weight: 600;">您的录制视频、数据库与平台账号配置将被完整保留。</div>
           <div id="uninstPath" style="font-family: Consolas, monospace; font-size: 11.5px; color: var(--text-3); word-break: break-all;"></div>
         </div>
+        <label class="check-row" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft);">
+          <input type="checkbox" id="purgeDataCheck" />
+          <span id="purgeDataLabel">同时删除账号与设置数据（保留录像）</span>
+        </label>
       </div>
       <div class="cta-wrap">
         <div class="btn-row">
@@ -782,8 +786,9 @@ const I18N = {
   zh: {
     subtitleInstall: "多平台直播录制与弹幕同步桌面端",
     subtitleUninstall: "卸载桌面客户端（保留录像与配置）",
+    subtitleUninstallPurge: "卸载桌面客户端（仅保留录像）",
     ffmpegOk: "已检测到 FFmpeg",
-    ffmpegMissing: "首次录制前需配置 FFmpeg",
+    ffmpegMissing: "未检测到 FFmpeg · 录制前请先安装 FFmpeg",
     upgradePill: "检测到已安装版本 · 保留数据覆盖升级",
     dirLabel: "安装目录",
     browse: "浏览...",
@@ -792,7 +797,7 @@ const I18N = {
     optHide: "收起安装选项",
     installBtn: "立即安装",
     upgradeBtn: "立即升级",
-    footNote: "安装到当前用户目录，无需管理员权限",
+    footNote: "安装到当前用户目录，数据与日志默认随目录存放",
     step0: "校验 SHA-256 并释放主程序",
     step1: "创建快捷方式与卸载入口",
     step2: "完成安装校验",
@@ -802,12 +807,15 @@ const I18N = {
     doneInstallTitle: "HIVECAST 安装完成",
     doneUpgradeTitle: "HIVECAST 升级完成",
     doneUninstallTitle: "已卸载 HIVECAST",
-    doneUninstallDesc: "主程序与快捷方式已移除，您的录像和配置仍保存在本地。",
+    doneUninstallDesc: "主程序、缓存与快捷方式已移除，您的录像和账号配置仍保存在本地。",
+    doneUninstallPurgedDesc: "主程序、快捷方式及账号配置数据已移除，您的录制视频仍保存在本地。",
     launch: "立即启动",
     finish: "完成",
     closeWin: "关闭窗口",
-    uninstLine1: "将从本机移除 HIVECAST 主程序、桌面及开始菜单快捷方式。",
+    uninstLine1: "将从本机移除 HIVECAST 主程序、运行缓存/日志及快捷方式。",
     uninstLine2: "您的录制视频、数据库与平台账号配置将被完整保留。",
+    uninstLine2Purge: "将同时删除数据库、房间与平台账号配置，仅保留录制视频。",
+    purgeDataLabel: "同时删除账号与设置数据（保留录像）",
     confirmUninst: "确认卸载",
     cancel: "取消",
     progUninst: "正在移除程序与快捷方式..."
@@ -815,8 +823,9 @@ const I18N = {
   en: {
     subtitleInstall: "Multi-platform live recording & danmaku studio",
     subtitleUninstall: "Uninstall desktop app (recordings & settings kept)",
+    subtitleUninstallPurge: "Uninstall desktop app (recordings kept only)",
     ffmpegOk: "FFmpeg detected",
-    ffmpegMissing: "Configure FFmpeg before first recording",
+    ffmpegMissing: "FFmpeg not found · Install before recording",
     upgradePill: "Existing install detected · Data preserved",
     dirLabel: "Install folder",
     browse: "Browse...",
@@ -825,7 +834,7 @@ const I18N = {
     optHide: "Hide options",
     installBtn: "Install Now",
     upgradeBtn: "Upgrade Now",
-    footNote: "Installs for current user · No admin required",
+    footNote: "Installs for current user · Data & logs stay in install folder",
     step0: "Verify SHA-256 & extract binary",
     step1: "Create shortcuts & uninstall entry",
     step2: "Finalize installation",
@@ -835,12 +844,15 @@ const I18N = {
     doneInstallTitle: "HIVECAST is ready",
     doneUpgradeTitle: "HIVECAST upgraded",
     doneUninstallTitle: "HIVECAST uninstalled",
-    doneUninstallDesc: "Application binaries and shortcuts were removed. Recordings and settings were kept.",
+    doneUninstallDesc: "App binaries, cache, and shortcuts were removed. Recordings and account data were kept.",
+    doneUninstallPurgedDesc: "App binaries, shortcuts, and account/settings data were removed. Recordings were kept.",
     launch: "Launch HIVECAST",
     finish: "Done",
     closeWin: "Close",
-    uninstLine1: "Removes the HIVECAST executable, Start Menu and Desktop shortcuts.",
+    uninstLine1: "Removes the HIVECAST executable, cache/logs, and Start Menu/Desktop shortcuts.",
     uninstLine2: "Your recordings, database, and saved credentials will be preserved.",
+    uninstLine2Purge: "Database, rooms, and saved accounts will also be deleted. Recordings are kept.",
+    purgeDataLabel: "Also delete account & settings data (keep recordings)",
     confirmUninst: "Uninstall",
     cancel: "Cancel",
     progUninst: "Removing application & shortcuts..."
@@ -886,8 +898,11 @@ function applyTheme() {
 function renderTexts() {
   document.getElementById("versionPill").textContent = "v" + BOOT.version;
   document.getElementById("langBtn").textContent = state.lang === "zh" ? "EN" : "中";
+  const purgeChecked = document.getElementById("purgeDataCheck").checked;
   document.getElementById("heroSub").textContent =
-    state.mode === "uninstall" ? t("subtitleUninstall") : t("subtitleInstall");
+    state.mode === "uninstall"
+      ? (purgeChecked ? t("subtitleUninstallPurge") : t("subtitleUninstall"))
+      : t("subtitleInstall");
 
   const pillRow = document.getElementById("pillRow");
   pillRow.innerHTML = "";
@@ -920,7 +935,10 @@ function renderTexts() {
   document.getElementById("uninstallDoneBtn").textContent = t("closeWin");
 
   document.getElementById("uninstLine1").textContent = t("uninstLine1");
-  document.getElementById("uninstLine2").textContent = t("uninstLine2");
+  const line2 = document.getElementById("uninstLine2");
+  line2.textContent = purgeChecked ? t("uninstLine2Purge") : t("uninstLine2");
+  line2.style.color = purgeChecked ? "var(--danger)" : "var(--ok-text)";
+  document.getElementById("purgeDataLabel").textContent = t("purgeDataLabel");
   document.getElementById("confirmUninstallBtn").textContent = t("confirmUninst");
   document.getElementById("cancelUninstallBtn").textContent = t("cancel");
   document.getElementById("uninstPath").textContent = state.installDir;
@@ -1002,7 +1020,8 @@ window.__installerEvent = function (ev) {
     case "uninstallDone":
       state.busy = false;
       document.getElementById("doneTitle").textContent = t("doneUninstallTitle");
-      document.getElementById("doneDesc").textContent = t("doneUninstallDesc");
+      document.getElementById("doneDesc").textContent =
+        ev.purgeData ? t("doneUninstallPurgedDesc") : t("doneUninstallDesc");
       document.getElementById("doneInstallBtns").style.display = "none";
       document.getElementById("uninstallDoneBtn").style.display = "block";
       showView("viewDone");
@@ -1056,6 +1075,7 @@ document.getElementById("launchBtn").addEventListener("click", () => {
 document.getElementById("finishBtn").addEventListener("click", () => send("close"));
 document.getElementById("uninstallDoneBtn").addEventListener("click", () => send("close"));
 document.getElementById("cancelUninstallBtn").addEventListener("click", () => send("close"));
+document.getElementById("purgeDataCheck").addEventListener("change", () => renderTexts());
 document.getElementById("confirmUninstallBtn").addEventListener("click", () => {
   if (state.busy) return;
   document.getElementById("uninstallError").classList.remove("show");
@@ -1063,7 +1083,10 @@ document.getElementById("confirmUninstallBtn").addEventListener("click", () => {
   showView("viewProgress");
   document.getElementById("stepList").style.display = "none";
   setProgress(35, 0);
-  send("uninstall", { dir: state.installDir });
+  send("uninstall", {
+    dir: state.installDir,
+    purgeData: document.getElementById("purgeDataCheck").checked
+  });
 });
 
 // Prevent browser refresh / context menu so it feels native.

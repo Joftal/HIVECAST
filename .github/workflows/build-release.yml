@@ -250,6 +250,13 @@ jobs:
           Stop-Process -Id $p.Id -Force
           Start-Sleep -Seconds 1
 
+          # 验证 Windows 安装目录优先模式：data / cache / logs / webview / Recording 全部落在安装目录内。
+          foreach ($sub in @("data\hivecast.db", "data\secret.bin", "cache", "logs", "webview", "Recording")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $installDir $sub))) {
+              throw "安装目录优先模式未在安装目录生成预期路径：$sub"
+            }
+          }
+
           Invoke-Installer $uninstExe @("--uninstall", "--silent", "--dir", $installDir)
           $deadline = [DateTime]::UtcNow.AddSeconds(30)
           while ((Test-Path -LiteralPath $uninstExe) -and [DateTime]::UtcNow -lt $deadline) {
@@ -260,12 +267,25 @@ jobs:
           if (Test-Path $regPath) { throw "静默卸载后卸载注册表仍存在" }
           $startShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\HIVECAST.lnk"
           if (Test-Path -LiteralPath $startShortcut) { throw "静默卸载后开始菜单快捷方式仍存在" }
-          # HIVECAST.exe 首次启动会在安装目录下创建默认录像目录 Recording/，卸载必须保留用户录像目录且不残留程序文件。
-          if (Test-Path -LiteralPath $installDir) {
-            $remaining = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name)
-            if ($remaining.Count -ne 1 -or $remaining[0] -ne "Recording") {
-              throw "静默卸载后安装目录存在预期外残留：$($remaining -join ', ')"
-            }
+          # 默认卸载应清除程序与运行期缓存/日志/webview，仅保留用户数据 data/ 与录像目录 Recording/。
+          $remaining = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name | Sort-Object)
+          if (($remaining -join ',') -ne 'data,Recording') {
+            throw "默认卸载后安装目录残留不符合预期（期望 data,Recording）：$($remaining -join ', ')"
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $installDir "data\hivecast.db"))) {
+            throw "默认卸载后 data\hivecast.db 被误删"
+          }
+
+          # 验证卸载保留 data/ + Recording/ 后，重新安装到原目录可以无缝复用，且 --purge-data 可清除 data/ 仍保留 Recording/。
+          Invoke-Installer $setup.FullName @("--silent", "--dir", $installDir, "--no-shortcut")
+          Invoke-Installer $uninstExe @("--uninstall", "--silent", "--dir", $installDir, "--purge-data")
+          $deadline = [DateTime]::UtcNow.AddSeconds(30)
+          while ((Test-Path -LiteralPath $uninstExe) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+          }
+          $afterPurge = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name)
+          if ($afterPurge.Count -ne 1 -or $afterPurge[0] -ne "Recording") {
+            throw "--purge-data 卸载后应仅保留 Recording/，实际：$($afterPurge -join ', ')"
           }
 
           # 2. Verify portable zip extract & SHA-256.

@@ -63,6 +63,8 @@ enum IpcCommand {
     },
     Uninstall {
         dir: String,
+        #[serde(rename = "purgeData", default)]
+        purge_data: bool,
     },
 }
 
@@ -254,7 +256,7 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         }
                         *control_flow = ControlFlow::Exit;
                     }
-                    IpcCommand::Uninstall { dir } => {
+                    IpcCommand::Uninstall { dir, purge_data } => {
                         let target = match install::validate_install_dir(&dir) {
                             Ok(p) => p,
                             Err(msg) => {
@@ -269,13 +271,13 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         }
                         busy = true;
                         let worker_proxy = proxy.clone();
-                        thread::spawn(move || match perform_uninstall(&target) {
+                        thread::spawn(move || match perform_uninstall(&target, purge_data) {
                             Ok(()) => {
                                 let _ = worker_proxy.send_event(AppEvent::EmitJs(
                                     serde_json::json!({ "type": "progress", "percent": 100, "stage": 2 }),
                                 ));
                                 let _ = worker_proxy.send_event(AppEvent::EmitJs(
-                                    serde_json::json!({ "type": "uninstallDone" }),
+                                    serde_json::json!({ "type": "uninstallDone", "purgeData": purge_data }),
                                 ));
                             }
                             Err(msg) => {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hivecast_ipc::{AppInfo, StreamDescriptor};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::broker::StreamBroker;
 use crate::danmaku::DanmakuHub;
@@ -44,15 +44,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn init(app: &AppHandle) -> Result<Self, AppError> {
-        let cache_root = app
-            .path()
-            .app_cache_dir()
-            .map_err(|err| AppError::Internal(err.to_string()))?;
-        let data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|err| AppError::Internal(err.to_string()))?;
+    pub async fn init(app: &AppHandle, paths: &crate::paths::AppPaths) -> Result<Self, AppError> {
+        let cache_root = paths.cache_dir.clone();
+        let data_dir = paths.data_dir.clone();
 
         tracing::info!(
             data_dir = %data_dir.display(),
@@ -83,12 +77,6 @@ impl AppState {
         crate::settings::apply_ffmpeg_path(&settings.ffmpeg_path);
         // 先杀掉上次崩溃遗留、还在往分片里写的 ffmpeg（A6）：
         // 否则后面的「分片合成 mp4」会和它同时动同一批文件，产物直接坏掉。
-        db.locate_legacy_media(
-            std::path::Path::new(&settings.media_root),
-            db.get_setting(crate::settings::KEY_MEDIA_ROOT)?
-                .as_deref()
-                .map(std::path::Path::new),
-        )?;
         let deferred = crate::recorder::reap_orphans(&db)?;
         // 收尾要放在合并之前：合并会删掉分片，之后就取不到最后写入时间了（I1）。
         let count = db.close_orphan_sessions(&deferred)?;
@@ -119,9 +107,6 @@ impl AppState {
         });
 
         // 账号凭据先灌进内存，之后所有 HTTP 请求按域名自动带上。
-        if let Err(err) = db.reseal_credentials() {
-            tracing::warn!(error = %err, "历史 Cookie 加密迁移失败");
-        }
         crate::credential::load_from_db(&db);
         // 自动续期与复验是两条独立的循环：
         // - 续期每 12 小时问一次 cookie/info，需要时才轮换 Cookie；
@@ -302,9 +287,10 @@ impl AppState {
     }
 }
 
-/// 媒体库根目录：默认在「程序安装目录/Recording」，程序装在哪就存哪；
-/// 装到不可写的位置（例如 /Applications 下无权限、直接从 DMG 运行）时，
-/// 回落到用户影片目录。`HIVECAST_MEDIA_DIR` 可覆盖（测试与迁移用）。
+/// 媒体库根目录：
+/// - Windows 优先「程序安装目录/Recording」，装到不可写位置（如 Program Files）或网络盘时回落到用户视频目录；
+/// - macOS 统一使用用户影片目录 `~/Movies/HIVECAST`（避免管理员账号在 `/Applications` 下建出 `/Applications/Recording`）；
+/// - `HIVECAST_MEDIA_DIR` 可覆盖（测试与迁移用）。
 pub fn default_media_root() -> PathBuf {
     if let Ok(custom) = std::env::var("HIVECAST_MEDIA_DIR") {
         if !custom.trim().is_empty() {
@@ -335,16 +321,25 @@ fn empty_settings_reuse_default_media_directory() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_default_media_root_uses_movies_folder() {
+    if std::env::var("HIVECAST_MEDIA_DIR")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return;
+    }
+    let home = std::env::var("HOME").expect("HOME 应存在");
+    assert_eq!(
+        default_media_root(),
+        PathBuf::from(home).join("Movies").join("HIVECAST")
+    );
+}
+
 fn discover_media_root() -> PathBuf {
     #[cfg(test)]
     DEFAULT_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(dir) = install_dir() {
-        let candidate = dir.join("Recording");
-        if ensure_writable(&candidate) {
-            return candidate;
-        }
-        tracing::info!(dir = %candidate.display(), "安装目录不可写，媒体库回落到用户影片目录");
-    }
 
     #[cfg(target_os = "macos")]
     {
@@ -355,6 +350,19 @@ fn discover_media_root() -> PathBuf {
 
     #[cfg(target_os = "windows")]
     {
+        if let Some(root) = crate::paths::portable_root() {
+            return root.join("Recording");
+        }
+        if cfg!(debug_assertions) {
+            if let Some(dir) = install_dir() {
+                let candidate = dir.join("Recording");
+                if crate::paths::ensure_writable(&candidate) {
+                    return candidate;
+                }
+            }
+        } else {
+            tracing::info!("安装目录不可写或位于网络路径，媒体库回落到用户视频目录");
+        }
         if let Ok(profile) = std::env::var("USERPROFILE") {
             return PathBuf::from(profile).join("Videos").join("HIVECAST");
         }
@@ -362,6 +370,13 @@ fn discover_media_root() -> PathBuf {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
+        if let Some(dir) = install_dir() {
+            let candidate = dir.join("Recording");
+            if crate::paths::ensure_writable(&candidate) {
+                return candidate;
+            }
+            tracing::info!(dir = %candidate.display(), "安装目录不可写，媒体库回落到用户视频目录");
+        }
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join("Videos").join("HIVECAST");
         }
@@ -370,78 +385,10 @@ fn discover_media_root() -> PathBuf {
     PathBuf::from("Recording")
 }
 
-/// 安装目录：macOS 取 .app 所在目录（可执行文件在 Contents/MacOS 下，上溯四层），
-/// 其它平台取可执行文件所在目录。未打包运行时就是 target/debug 这类目录。
+/// 可执行文件所在目录（仅用于非 macOS 的 debug / Linux 场景）。
+#[cfg(not(target_os = "macos"))]
 fn install_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.to_path_buf();
-
-    #[cfg(target_os = "macos")]
-    {
-        // .../HIVECAST.app/Contents/MacOS/hivecast
-        let is_macos = dir.file_name().and_then(|n| n.to_str()) == Some("MacOS");
-        if is_macos {
-            if let Some(root) = dir
-                .parent()
-                .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("Contents"))
-                .and_then(|p| p.parent())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
-                .and_then(|p| p.parent())
-            {
-                return Some(root.to_path_buf());
-            }
-        }
-    }
-
     Some(dir)
-}
-
-/// 目录能建出来、也能真的写进去一个文件。
-fn ensure_writable(dir: &std::path::Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    // 唯一文件名 + create_new：不能截断用户目录里恰好同名的文件，
-    // 也不能跟随已存在的符号链接。
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let probe = dir.join(format!(
-        ".hivecast-write-test-{}-{stamp}",
-        std::process::id()
-    ));
-    let Ok(file) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    else {
-        return false;
-    };
-    drop(file);
-    let _ = std::fs::remove_file(&probe);
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ensure_writable;
-
-    #[test]
-    fn write_probe_never_touches_an_existing_fixed_name() {
-        let dir = std::env::temp_dir().join(format!("hivecast-probe-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy = dir.join(".hivecast-write-test");
-        std::fs::write(&legacy, b"do not touch").unwrap();
-
-        assert!(ensure_writable(&dir));
-        assert_eq!(std::fs::read(&legacy).unwrap(), b"do not touch");
-        let leaked: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy() != ".hivecast-write-test")
-            .collect();
-        assert!(leaked.is_empty(), "探测文件必须删除");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }

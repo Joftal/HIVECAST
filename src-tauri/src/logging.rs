@@ -488,7 +488,7 @@ fn writer_loop(state: Arc<LogState>, rx: std::sync::mpsc::Receiver<LogMsg>) {
     state.flush_inner();
 }
 
-/// 平台默认日志目录。开发构建放工程根目录 logs/，安装后放系统日志目录。
+/// 平台默认日志目录。开发构建放工程根目录 logs/；Windows 安装版优先放安装目录 logs/，不可写时回落系统日志目录；macOS 放 ~/Library/Logs。
 pub fn default_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("HIVECAST_LOG_DIR") {
         if !custom.trim().is_empty() {
@@ -511,6 +511,9 @@ pub fn default_dir() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
+        if let Some(root) = crate::paths::portable_root() {
+            return root.join("logs");
+        }
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             return PathBuf::from(local)
                 .join("com.hivecast.desktop")
