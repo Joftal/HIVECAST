@@ -162,6 +162,8 @@ export function describeError(err: unknown): string {
 // ---- M1 监控 ----
 
 export const EVENT_ROOMS_CHANGED = "rooms://changed";
+/** 单房间增量事件：payload 是完整 RoomView，监控/观看页只替换这一行。 */
+export const EVENT_ROOM_CHANGED = "room://changed";
 
 export async function roomsList(): Promise<RoomView[]> {
   return invoke<RoomView[]>("rooms_list");
@@ -350,6 +352,10 @@ export function onPostProgress(handler: (progress: PostProgress) => void): Promi
 
 export function onRoomsChanged(handler: () => void): Promise<UnlistenFn> {
   return listen(EVENT_ROOMS_CHANGED, () => handler());
+}
+
+export function onRoomChanged(handler: (view: RoomView) => void): Promise<UnlistenFn> {
+  return listen<RoomView>(EVENT_ROOM_CHANGED, (event) => handler(event.payload));
 }
 
 // ---- M2 观看 ----

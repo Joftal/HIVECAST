@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Button, Switch, cx } from "../../components/ui/Controls";
@@ -24,6 +24,7 @@ import {
   isTauri,
   mediaReveal,
   monitorStatus,
+  onRoomChanged,
   onRoomsChanged,
   openUrl,
   recordStart,
@@ -51,6 +52,7 @@ import {
   type SessionSummary,
 } from "../../lib/ipc";
 import { codecLabel, recordingCodecSupported, videoCodecSupported } from "../../lib/codecSupport";
+import { mergeRoomViews, patchRoomView } from "./roomViewPatch";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
 const PLATFORM_DOT: Record<string, string> = {
@@ -364,16 +366,54 @@ function compactNumber(value: number, locale: string): string {
   }).format(value);
 }
 
-/** 头像：没有 avatarUrl 时用平台色 + 首字母占位。*/
-function Avatar({ room, size: px }: { room: RoomView["room"]; size: number }) {
-  const src = room.avatarUrl;
-  return src ? (
+/**
+ * 新图预加载成功后再替换 src：平台封面/头像地址一变就直接换 src，
+ * webview 会先清掉旧图再加载，列表看起来像闪了一下。
+ */
+function StableImage({
+  src,
+  className,
+  style,
+}: {
+  src: string;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const [shown, setShown] = useState(src);
+  useEffect(() => {
+    if (src === shown) return;
+    let alive = true;
+    const image = new Image();
+    image.referrerPolicy = "no-referrer";
+    image.onload = () => {
+      if (alive) setShown(src);
+    };
+    // 新地址失败时保留旧图，总比把已有封面清成空白好。
+    image.onerror = () => undefined;
+    image.src = src;
+    return () => {
+      alive = false;
+    };
+  }, [src, shown]);
+  return (
     <img
-      src={src}
+      src={shown}
       alt=""
       referrerPolicy="no-referrer"
       loading="lazy"
       decoding="async"
+      className={className}
+      style={style}
+    />
+  );
+}
+
+/** 头像：没有 avatarUrl 时用平台色 + 首字母占位。*/
+function Avatar({ room, size: px }: { room: RoomView["room"]; size: number }) {
+  const src = room.avatarUrl;
+  return src ? (
+    <StableImage
+      src={src}
       className="shrink-0 rounded-full bg-raised object-cover"
       style={{ width: px, height: px }}
     />
@@ -412,14 +452,7 @@ function Thumb({
       style={fluid ? undefined : { width: w, height: h }}
     >
       {src ? (
-        <img
-          src={src}
-          alt=""
-          className="h-full w-full object-cover"
-          referrerPolicy="no-referrer"
-          loading="lazy"
-          decoding="async"
-        />
+        <StableImage src={src} className="h-full w-full object-cover" />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-[15px] font-semibold text-faint">
           {room.hostName.slice(0, 1) || "?"}
@@ -503,6 +536,10 @@ export default function MonitorPage({
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
 
   const [views, setViews] = useState<RoomView[]>([]);
+  // 事件回调里要读当前列表，不能依赖闭包里的旧 views。
+  const viewsRef = useRef<RoomView[]>([]);
+  // 行级渲染缓存：键是房间 id，签名不变就复用上一次的 React 元素。
+  const rowCache = useRef(new Map<string, { sig: string; node: ReactNode }>());
   const [drawerSummary, setDrawerSummary] = useState<SessionSummary | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -552,6 +589,8 @@ export default function MonitorPage({
   selectedIdRef.current = selectedId;
   // 分屏观看多选：勾在缩略图右上角，最多 4 个在播房间。
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const pickedRef = useRef(picked);
+  pickedRef.current = picked;
   useEffect(() => {
     if (!selectedId) return;
     const onKey = (event: KeyboardEvent) => {
@@ -596,7 +635,13 @@ export default function MonitorPage({
       do {
         loadQueued.current = false;
         try {
-          setViews(await roomsList());
+          const next = mergeRoomViews(viewsRef.current, await roomsList());
+          viewsRef.current = next;
+          setViews(next);
+          // 房间被移除后别再留着它的行缓存。
+          for (const id of rowCache.current.keys()) {
+            if (!next.some((view) => view.room.id === id)) rowCache.current.delete(id);
+          }
           setRemoved(await removedRooms());
           loadErrorShown.current = false;
           setLoadFailed(false);
@@ -635,20 +680,37 @@ export default function MonitorPage({
       return;
     }
     void load();
-    let unlisten: (() => void) | undefined;
+    let unlistenAll: (() => void) | undefined;
+    let unlistenOne: (() => void) | undefined;
     let alive = true;
     onRoomsChanged(() => {
       requestReload();
     })
       .then((fn) => {
-        if (alive) unlisten = fn;
+        if (alive) unlistenAll = fn;
+        else fn();
+      })
+      .catch(() => undefined);
+    onRoomChanged((view) => {
+      const next = patchRoomView(viewsRef.current, view);
+      if (!next) {
+        // 列表里还没有这个房间（例如刚导入）：退回一次全量刷新。
+        requestReload();
+        return;
+      }
+      viewsRef.current = next;
+      setViews(next);
+    })
+      .then((fn) => {
+        if (alive) unlistenOne = fn;
         else fn();
       })
       .catch(() => undefined);
     return () => {
       alive = false;
       if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
-      if (unlisten) unlisten();
+      if (unlistenAll) unlistenAll();
+      if (unlistenOne) unlistenOne();
     };
   }, [load, requestReload]);
 
@@ -790,7 +852,7 @@ export default function MonitorPage({
       try {
         await action();
         await load();
-        if (selectedId === id) await loadDrawerSummary(id);
+        if (selectedIdRef.current === id) await loadDrawerSummary(id);
         return true;
       } catch (err) {
         notify.error(err);
@@ -800,7 +862,7 @@ export default function MonitorPage({
         setBusyAction(null);
       }
     },
-    [load, loadDrawerSummary, notify, selectedId],
+    [load, loadDrawerSummary, notify],
   );
 
   const openWatch = async (roomId: string) => {
@@ -988,17 +1050,45 @@ export default function MonitorPage({
   const togglePick = (view: RoomView) => {
     const room = view.room;
     if (!room.isLive) return;
-    if (picked.has(room.id)) {
-      const next = new Set(picked);
+    // 行元素可能来自缓存，闭包里的 picked 会过期，统一读 ref 再写回。
+    const current = pickedRef.current;
+    if (current.has(room.id)) {
+      const next = new Set(current);
       next.delete(room.id);
+      pickedRef.current = next;
       setPicked(next);
       return;
     }
-    if (picked.size >= 4) {
+    if (current.size >= 4) {
       notify.warning(t("monitor.maxSelection"));
       return;
     }
-    setPicked(new Set(picked).add(room.id));
+    const next = new Set(current).add(room.id);
+    pickedRef.current = next;
+    setPicked(next);
+  };
+
+  // 行内容只依赖房间数据与几个行级状态：签名不变时复用 React 元素，
+  // 在线人数刷新/别的行开录都不会让整张表重建 DOM。
+  const renderRowCached = (view: RoomView) => {
+    const room = view.room;
+    const busy = busyId === room.id;
+    const sig = JSON.stringify({
+      view,
+      selected: selectedId === room.id,
+      picked: picked.has(room.id),
+      busy,
+      action: busy ? busyAction : null,
+      removeDone,
+      locale,
+      files: Boolean(onOpenRoomFiles),
+      tasks: Boolean(onOpenTasks),
+    });
+    const hit = rowCache.current.get(room.id);
+    if (hit?.sig === sig) return hit.node;
+    const node = renderRow(view);
+    rowCache.current.set(room.id, { sig, node });
+    return node;
   };
 
   const renderRow = (view: RoomView) => {
@@ -1861,7 +1951,7 @@ export default function MonitorPage({
                 icon={<EmptyArt kind="search" />}
               />
             ) : (
-              shown.map(renderRow)
+              shown.map(renderRowCached)
             )}
           </div>
         </div>

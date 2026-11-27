@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-use hivecast_ipc::{AppNotice, QualitySegment, RecordSession, RecordingInfo, RoomRecord};
+use hivecast_ipc::{AppNotice, QualitySegment, RecordSession, RecordingInfo, RoomRecord, RoomView};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
@@ -64,6 +64,9 @@ const HEALTHY_RESET: Duration = Duration::from_secs(30 * 60);
 /// 平台状态查不到时间隔这么久再问一次，避免把限流当成下播（A4）。
 const PLATFORM_RECHECK_DELAY: Duration = Duration::from_secs(20);
 pub const EVENT_ROOMS_CHANGED: &str = "rooms://changed";
+/// 单房间增量事件：payload 是完整的 `RoomView`，前端只替换这一行。
+/// 集合级变化（添加/导入/移除）仍用 `EVENT_ROOMS_CHANGED` 触发整表重拉。
+pub const EVENT_ROOM_CHANGED: &str = "room://changed";
 /// 启动后的崩溃恢复合并完成（I2：合并在后台跑，媒体库要重新取列表）。
 pub const EVENT_MEDIA_CHANGED: &str = "media://changed";
 /// 录制状态播报事件：前端收到后弹系统通知（文案走 i18n）。
@@ -459,6 +462,25 @@ impl Recorder {
             .expect("录制状态被污染")
             .get(room_id)
             .map(|active| active.recording.clone())
+    }
+
+    /// 组装某个房间当前的完整视图；前端收到增量事件后直接替换这一行。
+    pub fn room_view(&self, room_id: &str) -> Option<RoomView> {
+        let room = self.db.get_room(room_id).ok().flatten()?;
+        Some(RoomView {
+            recording: self.active(room_id),
+            error: self.last_error(room_id),
+            room,
+        })
+    }
+
+    /// 只广播一个房间的最新视图，避免监控页因为一次在线人数变化而整表重拉。
+    pub fn broadcast_room(&self, app: &AppHandle, room_id: &str) {
+        if let Some(view) = self.room_view(room_id) {
+            if let Err(err) = app.emit(EVENT_ROOM_CHANGED, view) {
+                tracing::debug!(room_id, %err, "广播单房间变化失败");
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -974,7 +996,7 @@ impl Recorder {
                 "拒绝开录：磁盘空间不足"
             );
             self.set_error(&room.id, message.clone());
-            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+            self.broadcast_room(app, &room.id);
             return Err(AppError::User(message));
         }
 
@@ -1285,7 +1307,7 @@ impl Recorder {
                     send_graceful(&mut active.child);
                 }
             }
-            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+            self.broadcast_room(app, &room.id);
             self.spawn_watcher(app.clone(), room.id.clone());
             return Ok(recording);
         }
@@ -1308,7 +1330,7 @@ impl Recorder {
             "开始录制"
         );
         self.clear_error(&room.id);
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        self.broadcast_room(app, &room.id);
         if notify_started && room.notify_live.unwrap_or(true) {
             emit_notice(app, "started", &room.id, &room.host_name, None);
         }
@@ -1405,7 +1427,7 @@ impl Recorder {
             send_graceful(&mut active.child);
         }
         tracing::info!(room_id, reason, "请求停止录制");
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        self.broadcast_room(app, room_id);
         Ok(())
     }
 
@@ -1576,7 +1598,7 @@ impl Recorder {
                         state.broker.clone()
                     };
                     if stalls <= MAX_STALL_RESTARTS && rec.respawn(&app, &broker, &room_id).await {
-                        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                        rec.broadcast_room(&app, &room_id);
                         continue;
                     }
                     rec.finalize(
@@ -1636,7 +1658,7 @@ impl Recorder {
                                 if status.success() {
                                     rec.bump_eof_retry(&room_id);
                                 }
-                                let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                                rec.broadcast_room(&app, &room_id);
                                 continue;
                             }
                             // 续不上了，但平台说还在播：绝不能落到下面那条「确认下播」
@@ -1667,7 +1689,7 @@ impl Recorder {
                         state.broker.clone()
                     };
                     if rec.respawn(&app, &broker, &room_id).await {
-                        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                        rec.broadcast_room(&app, &room_id);
                         continue;
                     }
                     // 续录没成功：先问平台，只有明确离线才算确认下播（B1）。
@@ -2033,7 +2055,7 @@ impl Recorder {
                 );
             }
         }
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        self.broadcast_room(app, room_id);
         true
     }
 
@@ -3094,7 +3116,7 @@ impl Recorder {
             elapsed_ms = active.started.elapsed().as_millis() as u64,
             "录制结束"
         );
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        self.broadcast_room(app, room_id);
 
         match (final_status, reason) {
             ("finished", "stream_ended") if confirmed_end => {

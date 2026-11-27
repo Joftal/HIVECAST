@@ -17,14 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 use crate::broker::StreamBroker;
 use crate::db::Db;
 use crate::disk;
 use crate::platform::{PlatformError, RoomInfo, RoomRef};
-use crate::recorder::{Recorder, EVENT_ROOMS_CHANGED};
+use crate::recorder::Recorder;
 use crate::settings;
 
 /// 连续限流时的最大退避倍数（相对基础间隔）。
@@ -1324,7 +1324,7 @@ async fn apply_room_info(
     // 否则监控页会一直挂着「房间不存在」之类的旧提示（F1）。
     if recorder.clear_detect_error(&room.id) {
         recorder.clear_error(&room.id);
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        recorder.broadcast_room(app, &room.id);
     }
     // 只有结构性字段变化才整行写库并推前端（G2）。
     // 在线人数这类数字每次检测都在跳，以前会让每个房间每秒一次整行 UPDATE，
@@ -1346,14 +1346,14 @@ async fn apply_room_info(
         if let Err(err) = db.update_room_info(&room.id, &info) {
             tracing::warn!(%err, "更新房间信息失败");
         }
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        recorder.broadcast_room(app, &room.id);
     } else {
         // 在线人数这类高频字段走节流写库；但写进去了就得推事件，
         // 否则监控页的数字会一直冻在打开那一刻（H1）。
         match db.touch_room_throttled(&room.id, info.online, ROOM_TOUCH_INTERVAL) {
             Ok(changed) => {
                 if changed && room.online != info.online {
-                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                    recorder.broadcast_room(app, &room.id);
                 }
             }
             Err(err) => tracing::debug!(%err, "节流更新房间信息失败"),
@@ -1438,7 +1438,7 @@ async fn run_room_action(
                     };
                     tracing::warn!(room = %room.host_name, %message, "{reason}");
                     recorder.set_error(&room.id, message);
-                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                    recorder.broadcast_room(app, &room.id);
                 }
                 return;
             }
@@ -1450,7 +1450,7 @@ async fn run_room_action(
                 if changed {
                     tracing::warn!(room = %room.host_name, %err, "自动开录失败");
                     recorder.set_error(&room.id, message);
-                    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+                    recorder.broadcast_room(app, &room.id);
                 } else {
                     tracing::debug!(room = %room.host_name, %err, "自动开录仍失败");
                 }
@@ -1490,7 +1490,7 @@ async fn check_room_error(
     if recorder.note_detect_error(&room.id, &hint) {
         tracing::warn!(room = %room.host_name, %hint, "刷新房间失败");
         recorder.set_error(&room.id, hint);
-        let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+        recorder.broadcast_room(app, &room.id);
     } else {
         tracing::debug!(room = %room.host_name, %hint, "刷新房间仍失败");
     }

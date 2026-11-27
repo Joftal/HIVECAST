@@ -1016,7 +1016,8 @@ pub async fn room_refresh(
         .db
         .get_room(&id)?
         .ok_or_else(|| AppError::Internal("房间不存在".into()))?;
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    // 单房间刷新只推这一行；集合级变化（添加/导入/移除）才用 rooms://changed。
+    state.recorder.broadcast_room(&app, &room.id);
     Ok(RoomView {
         recording: state.recorder.active(&room.id),
         error: state.recorder.last_error(&room.id),
@@ -1071,7 +1072,7 @@ pub async fn room_set_auto_record(
             }
         }
     }
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    state.recorder.broadcast_room(&app, &id);
     Ok(())
 }
 
@@ -1085,7 +1086,7 @@ pub async fn room_set_monitor(
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", room_id = %id, paused, "设置房间监控");
     state.db.set_monitor_paused(&id, paused)?;
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    state.recorder.broadcast_room(&app, &id);
     Ok(())
 }
 
@@ -1099,7 +1100,7 @@ pub async fn room_set_quality(
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", room_id = %id, record_qn, view_qn, "设置房间画质");
     state.db.set_quality(&id, record_qn, view_qn)?;
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    state.recorder.broadcast_room(&app, &id);
     Ok(())
 }
 
@@ -1136,7 +1137,7 @@ pub async fn room_set_rules(
         notify_live,
         notify_error,
     )?;
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    state.recorder.broadcast_room(&app, &id);
     Ok(())
 }
 
@@ -1220,7 +1221,7 @@ pub async fn room_set_line(
 ) -> Result<(), AppError> {
     tracing::info!(target: "hivecast_lib::commands", room_id = %id, line = ?line, "设置录制线路");
     state.db.set_record_line(&id, line.as_deref())?;
-    let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+    state.recorder.broadcast_room(&app, &id);
     Ok(())
 }
 
@@ -1245,7 +1246,7 @@ pub async fn record_start(
         Ok(_) => Ok(()),
         Err(err) => {
             state.recorder.set_error(&id, err.to_string());
-            let _ = app.emit(EVENT_ROOMS_CHANGED, ());
+            state.recorder.broadcast_room(&app, &id);
             Err(err)
         }
     }

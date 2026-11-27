@@ -28,6 +28,7 @@ import {
   isTauri,
   layoutGet,
   layoutSet,
+  onRoomChanged,
   onRoomsChanged,
   onViewChanged,
   roomStreamOptions,
@@ -46,6 +47,7 @@ import {
 } from "../../lib/ipc";
 import { whenViewsIdle } from "../../lib/viewLifecycle";
 import { useWatchPrefs } from "../../lib/watchPrefs";
+import { patchRoomView } from "../monitor/roomViewPatch";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const MAX_SLOTS = 4;
@@ -132,6 +134,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     let disposed = false;
     let offView: (() => void) | undefined;
     let offRooms: (() => void) | undefined;
+    let offRoom: (() => void) | undefined;
     let roomsTimer: number | undefined;
 
     void (async () => {
@@ -169,12 +172,14 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       setBooted(true);
       offView = await onViewChanged((next) => setSlots(next));
       offRooms = await onRoomsChanged(() => {
-        // 监控一拍会为大量房间连续推事件；每次都拉一遍列表只会造成
-        // 几百个并发 IPC。和监控页一致，200ms 内合并成一次。
+        // 集合级变化（添加/移除/导入）仍然整表重拉；单房间变化走下面的增量事件。
         if (roomsTimer !== undefined) window.clearTimeout(roomsTimer);
         roomsTimer = window.setTimeout(() => {
           void roomsList().then(setRooms).catch(() => undefined);
         }, 200);
+      });
+      offRoom = await onRoomChanged((view) => {
+        setRooms((prev) => patchRoomView(prev, view) ?? prev);
       });
     })();
 
@@ -183,6 +188,7 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
       if (roomsTimer !== undefined) window.clearTimeout(roomsTimer);
       offView?.();
       offRooms?.();
+      offRoom?.();
     };
     // 只在挂载时跑一次；seed 变化由下面的 effect 处理
     // eslint-disable-next-line react-hooks/exhaustive-deps
