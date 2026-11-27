@@ -339,6 +339,9 @@ export default function SettingsView({
   const dirty = changedCount > 0;
   const reduceMotion = useReducedMotion();
   const isWindows = /Win/.test(navigator.platform || navigator.userAgent);
+  const isMac = info?.platform
+    ? /mac|darwin/i.test(info.platform)
+    : /Mac/i.test(navigator.platform || navigator.userAgent);
 
   // App 负责拿这个状态决定切页前是否要确认保存/放弃。
   useEffect(() => {
@@ -413,6 +416,67 @@ export default function SettingsView({
   const patch = (next: Partial<Settings>) => {
     setSettings((current) => (current ? { ...current, ...next } : current));
   };
+
+  // 维护最新已落库快照 ref，确保连续快速切换多个即时开关时按序叠加，不会互相覆盖。
+  const persistedRef = useRef<Settings | null>(null);
+  useEffect(() => {
+    if (!initial) {
+      persistedRef.current = null;
+      return;
+    }
+    try {
+      persistedRef.current = JSON.parse(initial) as Settings;
+    } catch {
+      persistedRef.current = null;
+    }
+  }, [initial]);
+
+  // 系统级开关（关闭窗口行为、防休眠）点选即落库，避免用户切完「直接退出程序」
+  // 顺手点关窗测试时后端仍读到旧数据库值；只提交本次变更字段，不干扰其他页未保存草稿。
+  const immediateQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveImmediate = useCallback(
+    (next: Partial<Settings>) => {
+      if (!settings || !persistedRef.current) return;
+      const previous = settings;
+      setSettings((current) => (current ? { ...current, ...next } : current));
+      if (!isTauri()) return;
+      const run = async () => {
+        const base = persistedRef.current;
+        if (!base) return;
+        const payload: Settings = { ...base, ...next };
+        try {
+          const result = await settingsUpdate(payload);
+          const applied: Partial<Settings> = {};
+          for (const key of Object.keys(next) as Array<keyof Settings>) {
+            (applied as Record<string, unknown>)[key] = result[key];
+          }
+          persistedRef.current = { ...base, ...applied };
+          setSettings((current) => (current ? { ...current, ...applied } : current));
+          setInitial((current) => {
+            if (!current) return JSON.stringify(result);
+            try {
+              return JSON.stringify({ ...(JSON.parse(current) as Settings), ...applied });
+            } catch {
+              return JSON.stringify(result);
+            }
+          });
+          onSaved(result);
+        } catch (err) {
+          setSettings((current) => {
+            if (!current) return current;
+            const rollback: Partial<Settings> = {};
+            for (const key of Object.keys(next) as Array<keyof Settings>) {
+              (rollback as Record<string, unknown>)[key] = previous[key];
+            }
+            return { ...current, ...rollback };
+          });
+          notify.error(err);
+        }
+      };
+      immediateQueueRef.current = immediateQueueRef.current.then(run, run);
+    },
+    [notify, onSaved, settings],
+  );
 
   // 顶栏是设置页之外的另一个写入口：它改主题/语言时，把新值同步到本地
   // settings 和 initial，否则保存会把顶栏刚写入的旧值覆盖回去。
@@ -1481,6 +1545,7 @@ export default function SettingsView({
     }
 
     if (page === "system") {
+      const closeIsQuit = settings.closeAction === "quit";
       return (
         <div className="space-y-7">
           <Section title={t("settings.sectionClose")}>
@@ -1488,19 +1553,32 @@ export default function SettingsView({
               id="set-close-action"
               focus={focusId === "set-close-action"}
               title={t("settings.closeAction")}
-              desc={t("settings.closeActionHint")}
+              desc={t(isMac ? "settings.closeActionHintMac" : "settings.closeActionHint")}
             >
               <Segmented
                 items={[
-                  { key: "tray", label: t("settings.closeTray") },
+                  {
+                    key: "tray",
+                    label: t(isMac ? "settings.closeBackgroundMac" : "settings.closeTray"),
+                  },
                   { key: "quit", label: t("settings.closeQuit") },
                 ]}
-                value={settings.closeAction === "quit" ? "quit" : "tray"}
-                onChange={(next) => patch({ closeAction: next })}
+                value={closeIsQuit ? "quit" : "tray"}
+                onChange={(next) => saveImmediate({ closeAction: next })}
               />
             </Row>
-            <div className="px-4 py-3">
-              <p className="text-[11px] leading-4 text-faint">{t("settings.trayHint")}</p>
+            <div className="px-5 py-3">
+              <p className="text-[11px] leading-[17px] text-faint">
+                {t(
+                  closeIsQuit
+                    ? isMac
+                      ? "settings.closeQuitHintMac"
+                      : "settings.closeQuitHintWin"
+                    : isMac
+                      ? "settings.trayHintMac"
+                      : "settings.trayHint",
+                )}
+              </p>
             </div>
           </Section>
 
@@ -1513,7 +1591,7 @@ export default function SettingsView({
             >
               <Switch
                 checked={settings.preventSleep}
-                onChange={(next) => patch({ preventSleep: next })}
+                onChange={(next) => saveImmediate({ preventSleep: next })}
                 label={t("settings.preventSleep")}
               />
             </Row>
