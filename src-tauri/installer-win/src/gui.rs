@@ -202,11 +202,12 @@ pub fn run(mode: GuiMode, version: String) -> Result<(), String> {
                         let init = PathBuf::from(current_dir);
                         thread::spawn(move || {
                             if let Some(chosen) = win_os::pick_folder(&init) {
-                                let existing = install::has_existing_install(&chosen);
+                                let resolved = install::normalize_browsed_dir(&chosen);
+                                let existing = install::has_existing_install(&resolved);
                                 let _ = worker_proxy.send_event(AppEvent::EmitJs(
                                     serde_json::json!({
                                         "type": "dirSelected",
-                                        "dir": chosen.display().to_string(),
+                                        "dir": resolved.display().to_string(),
                                         "existing": existing,
                                     }),
                                 ));

@@ -202,6 +202,22 @@ pub fn has_existing_install(dir: &Path) -> bool {
     dir.join("HIVECAST.exe").is_file()
 }
 
+/// 通过文件夹选择框选中父目录（如 `D:\` 或 `D:\Apps`）时自动补齐 `\HIVECAST` 子目录，
+/// 避免用户每次都要手动新建文件夹；若选中的目录本身已名为 `HIVECAST`、或已是既有安装/保留数据目录则保持原样。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn normalize_browsed_dir(chosen: &Path) -> PathBuf {
+    if has_existing_install(chosen) || is_reusable_preserved_dir(chosen) {
+        return chosen.to_path_buf();
+    }
+    let raw = chosen.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['\\', '/']);
+    let last_segment = trimmed.rsplit(['\\', '/']).next().unwrap_or("");
+    if last_segment.eq_ignore_ascii_case("hivecast") {
+        return chosen.to_path_buf();
+    }
+    chosen.join("HIVECAST")
+}
+
 /// 卸载后保留了 `data/` 和/或 `Recording/` 的原安装目录，允许再次安装复用，
 /// 但仍严格拒绝包含其它未知文件或目录的外部非空目录。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -340,5 +356,37 @@ mod tests {
         let foreign_dir = root.path().join("foreign-dir");
         std::fs::create_dir_all(foreign_dir.join("OtherApp")).unwrap();
         assert!(!is_reusable_preserved_dir(&foreign_dir));
+    }
+
+    #[test]
+    fn browsed_folder_appends_hivecast_subdir_unless_already_named_or_existing() {
+        let root = tempfile::tempdir().unwrap();
+
+        let parent = root.path().join("Apps");
+        std::fs::create_dir_all(&parent).unwrap();
+        assert_eq!(normalize_browsed_dir(&parent), parent.join("HIVECAST"));
+
+        let already_named = root.path().join("HIVECAST");
+        std::fs::create_dir_all(&already_named).unwrap();
+        assert_eq!(normalize_browsed_dir(&already_named), already_named);
+
+        let lower_named = root.path().join("hivecast");
+        std::fs::create_dir_all(&lower_named).unwrap();
+        assert_eq!(normalize_browsed_dir(&lower_named), lower_named);
+
+        let existing_custom = root.path().join("MyStudio");
+        std::fs::create_dir_all(&existing_custom).unwrap();
+        std::fs::write(existing_custom.join("HIVECAST.exe"), b"exe").unwrap();
+        assert_eq!(normalize_browsed_dir(&existing_custom), existing_custom);
+
+        let preserved_custom = root.path().join("KeptData");
+        std::fs::create_dir_all(preserved_custom.join("data")).unwrap();
+        assert_eq!(normalize_browsed_dir(&preserved_custom), preserved_custom);
+
+        // Windows drive root path appends HIVECAST instead of blocking the user.
+        assert_eq!(
+            normalize_browsed_dir(Path::new(r"D:\")),
+            Path::new(r"D:\").join("HIVECAST")
+        );
     }
 }

@@ -151,8 +151,14 @@ Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
 $dlg.Description = '选择 HIVECAST 安装目录'
 $dlg.ShowNewFolderButton = $true
-if ($env:HIVECAST_INIT_DIR -and (Test-Path -LiteralPath $env:HIVECAST_INIT_DIR)) {
-  $dlg.SelectedPath = $env:HIVECAST_INIT_DIR
+$init = $env:HIVECAST_INIT_DIR
+while ($init -and -not (Test-Path -LiteralPath $init)) {
+  $parent = Split-Path -Path $init -Parent
+  if ($parent -eq $init) { break }
+  $init = $parent
+}
+if ($init -and (Test-Path -LiteralPath $init)) {
+  $dlg.SelectedPath = $init
 }
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   [Console]::Out.Write($dlg.SelectedPath)
