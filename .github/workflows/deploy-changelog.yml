@@ -2,7 +2,7 @@ name: Deploy Changelog & Update Feed
 
 on:
   release:
-    types: [published, edited, deleted]
+    types: [published, unpublished, edited, deleted]
   workflow_dispatch:
   workflow_call:
   push:
@@ -64,8 +64,17 @@ jobs:
           git commit -m "chore: sync changelog site and update feed"
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" gh-pages
 
+      - name: Purge jsDelivr CDN cache
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/changelog.json" \
+            || echo "::warning::jsDelivr purge failed for changelog.json (gh-pages was already updated)"
+          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/latest.json" \
+            || echo "::warning::jsDelivr purge failed for latest.json (gh-pages was already updated)"
+
   deploy:
-    name: Deploy GitHub Pages & purge jsDelivr
+    name: Deploy GitHub Pages
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -76,12 +85,3 @@ jobs:
       - name: Deploy Pages
         id: pages
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
-
-      - name: Purge jsDelivr CDN cache
-        env:
-          GH_REPO: ${{ github.repository }}
-        run: |
-          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/changelog.json" \
-            || echo "::warning::jsDelivr purge failed for changelog.json (Pages and gh-pages were already updated)"
-          curl --retry 3 -fsS "https://purge.jsdelivr.net/gh/${GH_REPO}@gh-pages/latest.json" \
-            || echo "::warning::jsDelivr purge failed for latest.json (Pages and gh-pages were already updated)"
