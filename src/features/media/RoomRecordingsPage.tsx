@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import Player from "../watch/Player";
@@ -157,6 +157,85 @@ function IconBack() {
   );
 }
 
+function IconChevron({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      aria-hidden
+      className={direction === "right" ? "rotate-180" : undefined}
+    >
+      <path d="M8.4 3 4.4 7l4 4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconInfo() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+      <circle cx="7" cy="7" r="5.1" />
+      <path d="M7 6.5v3" strokeLinecap="round" />
+      <circle cx="7" cy="4.6" r=".7" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function IconFolder() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+      <path
+        d="M1.9 3.5c0-.4.3-.7.7-.7h2.4l1.1 1.2h5.3c.4 0 .7.3.7.7v6.1c0 .4-.3.7-.7.7H2.6a.7.7 0 0 1-.7-.7V3.5Z"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** 剧院详情面板的一行：左标签右值，值可等宽显示数字。 */
+function DetailRow({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="shrink-0 text-[11px] text-white/40">{label}</dt>
+      <dd className={cx("min-w-0 truncate text-right text-[11.5px] text-white/85", mono && "font-mono tabular-nums")}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+/** 深色面板里的次要操作按钮，和浅色主题的 Button 分开，避免主题色打架。 */
+function DetailAction({
+  children,
+  onClick,
+  disabled,
+  tone = "default",
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cx(
+        "focus-ring flex h-8 items-center justify-center rounded-[6px] border px-2 text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+        tone === "danger"
+          ? "border-rec/25 text-rec hover:bg-rec/10"
+          : "border-white/10 bg-white/[0.04] text-white/75 hover:bg-white/10 hover:text-white",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function PlatformChip({ platform, dark }: { platform: string; dark?: boolean }) {
   const { t } = useTranslation();
   return (
@@ -213,6 +292,9 @@ export default function RoomRecordingsPage({
     source: boolean;
   } | null>(null);
   const [playBusy, setPlayBusy] = useState<string | null>(null);
+  // 剧院右侧详情面板：默认收起，把画面留给视频；顶栏的「详情」随时拉出。
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [confirmGroupDelete, setConfirmGroupDelete] = useState(false);
   const [volume, setVolume] = useState(loadVolume);
   // 录像弹幕轨：从 JSONL 读进内存，由播放位置驱动，不订阅直播流。
   const [danmakuTrack, setDanmakuTrack] = useState<DanmakuMessage[] | null>(null);
@@ -233,11 +315,22 @@ export default function RoomRecordingsPage({
   const loadSeq = useRef(0);
   const playingRef = useRef(playing);
   playingRef.current = playing;
+  const theaterRef = useRef<HTMLDivElement | null>(null);
+  const playingItemId = playing?.item.id;
   // 离开页面或请求被后一次点击取代时，迟到的 mediaPlay 结果必须自己停掉，
   // 否则后端回放槽位会一直被占着（文档 196-12）。
   const mountedRef = useRef(true);
   const playSeqRef = useRef(0);
   const desiredPlayRef = useRef<{ id: string; source: boolean } | null>(null);
+
+  // 剧院是覆盖层，打开后把焦点收进来；否则空格会命中背后的卡片按钮，把剧院关掉。
+  useEffect(() => {
+    if (!playingItemId) return;
+    // 切片段/切版本时焦点已经在剧院里，不要再抢走按钮焦点。
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && theaterRef.current?.contains(active)) return;
+    theaterRef.current?.focus();
+  }, [playingItemId]);
 
   useEffect(() => {
     const item = playing?.item;
@@ -535,6 +628,34 @@ export default function RoomRecordingsPage({
       } satisfies MediaGroup;
     });
   }, [items]);
+
+  // 剧院顶栏的片段导航：只在当前这一组已加载的片段之间走动。
+  const playGroup = playing
+    ? groups.find((group) => group.clips.some((clip) => clip.id === playing.item.id))
+    : undefined;
+  const playClipIndex = playGroup && playing
+    ? playGroup.clips.findIndex((clip) => clip.id === playing.item.id)
+    : -1;
+  const prevClip = playGroup && playClipIndex > 0 ? playGroup.clips[playClipIndex - 1] : null;
+  const nextClip =
+    playGroup && playClipIndex >= 0 && playClipIndex < playGroup.clips.length - 1
+      ? playGroup.clips[playClipIndex + 1]
+      : null;
+
+  // 删除整场是两步确认：换片段/关播放器后必须重新确认，避免误删。
+  useEffect(() => {
+    setConfirmGroupDelete(false);
+  }, [playing?.item.id]);
+
+  const playingPostJob = playing ? postJobs[playing.item.id] : undefined;
+  const canRetryPost = Boolean(
+    playing && (playing.item.postState === "failed" || playing.item.postState === "cancelled"),
+  );
+  const canDeleteSource = Boolean(
+    playing && playing.item.hasSource && playing.item.sourcePath !== playing.item.path,
+  );
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const revealLabel = t(isMac ? "media.revealFinder" : "media.revealFolder");
 
   const stopPlayback = async (id: string) => {
     await mediaStop(id).catch(() => undefined);
@@ -1140,138 +1261,260 @@ export default function RoomRecordingsPage({
 
       {playing
         ? createPortal(
-            <div className="fixed inset-0 z-50 flex justify-end">
-              <div
-                className="absolute inset-0 animate-fade-in bg-black/35 backdrop-blur-[2px]"
-                onClick={() => void closePlay()}
-              />
-              <aside className="relative my-auto flex max-h-[94vh] w-[min(760px,94vw)] animate-sheet flex-col overflow-hidden rounded-l-[10px] border border-r-0 border-line bg-surface shadow-2xl">
-                <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line px-5">
-                  <div className="min-w-0">
-                    <div className="text-[10.5px] uppercase tracking-[0.08em] text-faint">
-                      {t("media.playingNow")}
-                    </div>
-                    <h2 className="truncate text-[13.5px] font-semibold text-ink">
-                      {playing.item.title || playing.item.hostName}
-                    </h2>
+            <div
+              ref={theaterRef}
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("media.theater")}
+              tabIndex={-1}
+              className="fixed inset-0 z-50 flex animate-fade-in flex-col bg-[#07080a] text-white outline-none"
+            >
+              <header
+                style={isMac ? { paddingLeft: 78 } : undefined}
+                className="flex h-14 shrink-0 items-center gap-2 border-b border-white/10 bg-[#0b0d10] px-2.5"
+              >
+                <button
+                  type="button"
+                  onClick={() => void closePlay()}
+                  title={t("media.backToLibrary")}
+                  className="focus-ring flex h-8 shrink-0 items-center gap-1.5 rounded-[7px] px-2 text-[12px] text-white/65 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  <IconBack />
+                  <span>{t("media.backToLibrary")}</span>
+                </button>
+
+                <span aria-hidden className="mx-0.5 h-5 w-px shrink-0 bg-white/10" />
+
+                <div className="min-w-0 flex-1">
+                  <h1 className="truncate text-[13px] font-medium leading-5 text-white/90">
+                    {playing.item.title || playing.item.hostName || playing.item.id}
+                  </h1>
+                  <div className="mt-0.5 flex items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10.5px] leading-4 text-white/40">
+                    <span className="shrink-0 text-white/55">{t("media.theater")}</span>
+                    <span aria-hidden>·</span>
+                    <span className="shrink-0">
+                      {t("platformName." + playing.item.platform, { defaultValue: playing.item.platform })}
+                    </span>
+                    <span aria-hidden>·</span>
+                    <span className="shrink-0 font-mono tabular-nums">{formatDate(playing.item.startedAt)}</span>
+                    <span aria-hidden>·</span>
+                    <span className="shrink-0 font-mono tabular-nums">{formatDuration(playing.item.durationMs)}</span>
+                    <span aria-hidden>·</span>
+                    <span className="shrink-0 font-mono tabular-nums">{formatSize(playing.item.size)}</span>
+                    {playing.item.clipCount > 1 ? (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span className="shrink-0">
+                          {t("media.clipOf", { n: playing.item.clipIndex + 1, total: playing.item.clipCount })}
+                        </span>
+                      </>
+                    ) : null}
                   </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1">
+                  {playGroup && playGroup.clips.length > 1 ? (
+                    <div className="mr-1 flex h-8 items-center rounded-[7px] border border-white/10 bg-white/[0.06]">
+                      <button
+                        type="button"
+                        disabled={!prevClip}
+                        onClick={() => prevClip && void openPlay(prevClip, playing.source && prevClip.hasSource)}
+                        title={t("media.clipIndex", { n: prevClip ? prevClip.clipIndex + 1 : 1 })}
+                        aria-label={t("media.clipIndex", { n: prevClip ? prevClip.clipIndex + 1 : 1 })}
+                        className="focus-ring flex h-full w-7 items-center justify-center rounded-l-[6px] text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                      >
+                        <IconChevron direction="left" />
+                      </button>
+                      <span className="min-w-[34px] px-0.5 text-center font-mono text-[10.5px] tabular-nums text-white/45">
+                        {playClipIndex + 1}/{playGroup.clips.length}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={!nextClip}
+                        onClick={() => nextClip && void openPlay(nextClip, playing.source && nextClip.hasSource)}
+                        title={t("media.clipIndex", { n: nextClip ? nextClip.clipIndex + 1 : playGroup.clips.length })}
+                        aria-label={t("media.clipIndex", { n: nextClip ? nextClip.clipIndex + 1 : playGroup.clips.length })}
+                        className="focus-ring flex h-full w-7 items-center justify-center rounded-r-[6px] text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                      >
+                        <IconChevron direction="right" />
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => setInfoOpen((value) => !value)}
+                    aria-pressed={infoOpen}
+                    title={infoOpen ? t("media.hideDetails") : t("media.details")}
+                    className={cx(
+                      "focus-ring flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[12px] transition-colors",
+                      infoOpen
+                        ? "bg-white/10 text-white"
+                        : "text-white/65 hover:bg-white/10 hover:text-white",
+                    )}
+                  >
+                    <IconInfo />
+                    <span>{infoOpen ? t("media.hideDetails") : t("media.details")}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void mediaReveal(playing.item.id).catch((err) => notify.error(err))}
+                    title={revealLabel}
+                    aria-label={revealLabel}
+                    className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                  >
+                    <IconFolder />
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => void closePlay()}
+                    title={t("media.close")}
                     aria-label={t("media.close")}
-                    className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-ctl text-muted transition-colors hover:bg-raised hover:text-ink"
+                    className="focus-ring flex h-8 w-8 items-center justify-center rounded-[7px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
                   >
                     <IconClose />
                   </button>
-                </header>
+                </div>
+              </header>
 
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <div className="bg-black">
-                    <div className="aspect-video w-full">
-                      <Player
-                        url={playing.playback.url}
-                        volume={volume}
-                        onVolumeChange={changeVolume}
-                        onFatal={(detail) => notify.error(detail, t("media.playFailed"))}
-                        durationMs={playing.item.durationMs}
-                        startMs={playing.playback.startMs}
-                        leadMs={playing.playback.leadMs}
-                        startAtSec={playing.playback.offsetMs / 1000}
-                        onSeek={(positionMs) => void seekTo(playing.item, positionMs)}
-                        onPositionChange={setPlayPosition}
-                        danmakuEnabled={
-                          danmakuOn &&
-                          ((playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0)
-                        }
-                        onToggleDanmaku={
-                          (playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0
-                            ? () => setDanmakuOn((value) => !value)
-                            : undefined
-                        }
-                        overlay={
-                          danmakuTrack && danmakuTrack.length > 0 ? (
-                            <div className="pointer-events-none absolute inset-0">
-                              <DanmakuCanvas
-                                enabled={danmakuOn}
-                                messages={danmakuTrack}
-                                positionMs={playPosition}
-                              />
-                            </div>
-                          ) : null
-                        }
-                      />
-                    </div>
-                  </div>
+              <div className="flex min-h-0 flex-1">
+                <div className="relative min-w-0 flex-1 bg-black">
+                  <Player
+                    url={playing.playback.url}
+                    volume={volume}
+                    onVolumeChange={changeVolume}
+                    onFatal={(detail) => notify.error(detail, t("media.playFailed"))}
+                    durationMs={playing.item.durationMs}
+                    startMs={playing.playback.startMs}
+                    leadMs={playing.playback.leadMs}
+                    startAtSec={playing.playback.offsetMs / 1000}
+                    onSeek={(positionMs) => void seekTo(playing.item, positionMs)}
+                    onPositionChange={setPlayPosition}
+                    hotkeys
+                    danmakuEnabled={
+                      danmakuOn &&
+                      ((playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0)
+                    }
+                    onToggleDanmaku={
+                      (playing.item.danmakuCount ?? 0) > 0 || (danmakuTrack?.length ?? 0) > 0
+                        ? () => setDanmakuOn((value) => !value)
+                        : undefined
+                    }
+                    overlay={
+                      danmakuTrack && danmakuTrack.length > 0 ? (
+                        <div className="pointer-events-none absolute inset-0">
+                          <DanmakuCanvas
+                            enabled={danmakuOn}
+                            messages={danmakuTrack}
+                            positionMs={playPosition}
+                          />
+                        </div>
+                      ) : null
+                    }
+                  />
+                </div>
 
-                  <div className="px-5 py-4">
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">{t("media.colPlatform")}</div>
-                        <div className="mt-0.5 text-[12px] text-ink">
-                          {t("platformName." + playing.item.platform, { defaultValue: playing.item.platform })}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">{t("media.colDuration")}</div>
-                        <div className="mt-0.5 font-mono text-[12px] tabular-nums text-ink">
-                          {formatDuration(playing.item.durationMs)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">{t("media.colSize")}</div>
-                        <div className="mt-0.5 font-mono text-[12px] tabular-nums text-ink">
-                          {formatSize(playing.item.size)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">{t("media.colDate")}</div>
-                        <div className="mt-0.5 font-mono text-[12px] tabular-nums text-ink">
-                          {formatDate(playing.item.startedAt)}
-                        </div>
-                      </div>
+                {infoOpen ? (
+                  <aside className="flex w-[344px] shrink-0 flex-col overflow-y-auto border-l border-white/10 bg-[#0b0d10]">
+                    <div className="sticky top-0 z-10 flex h-10 shrink-0 items-center justify-between border-b border-white/10 bg-[#0b0d10]/95 px-4 backdrop-blur">
+                      <h2 className="text-[11px] font-medium tracking-wide text-white/70">{t("media.details")}</h2>
+                      <button
+                        type="button"
+                        onClick={() => setInfoOpen(false)}
+                        title={t("media.hideDetails")}
+                        aria-label={t("media.hideDetails")}
+                        className="focus-ring flex h-6 w-6 items-center justify-center rounded-[5px] text-white/45 transition-colors hover:bg-white/10 hover:text-white"
+                      >
+                        <IconClose />
+                      </button>
                     </div>
 
-                    {playing.item.danmakuPath ? (
-                      <div className="mt-4 flex items-center gap-2 rounded-[7px] border border-line bg-raised/40 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
-                          {t("media.danmakuTrack")}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void mediaRevealFile(playing.item.id, playing.item.danmakuPath!).catch(() => undefined)
-                          }
-                          title={playing.item.danmakuPath}
-                          className="focus-ring min-w-0 truncate font-mono text-[10.5px] text-accent-text hover:underline"
-                        >
-                          {baseName(playing.item.danmakuPath)}
-                        </button>
-                        <span className="ml-auto shrink-0 font-sans text-[10px] tabular-nums text-faint">
-                          {danmakuLoading
-                            ? t("media.danmakuLoading")
-                            : (playing.item.danmakuCount ?? 0) > 0
-                              ? t("media.danmakuTrackCount", { n: playing.item.danmakuCount })
-                              : danmakuTrack && danmakuTrack.length > 0
-                                ? t("media.danmakuTrackCount", { n: danmakuTrack.length })
-                                : t("media.danmakuEmpty")}
+                    <section className="border-b border-white/10 px-4 py-3.5">
+                      <h3 className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                        {t("media.overview")}
+                      </h3>
+                      <dl className="mt-2.5 space-y-1.5">
+                        <DetailRow
+                          label={t("media.colPlatform")}
+                          value={t("platformName." + playing.item.platform, { defaultValue: playing.item.platform })}
+                        />
+                        <DetailRow label={t("media.colDuration")} value={formatDuration(playing.item.durationMs)} mono />
+                        <DetailRow label={t("media.colSize")} value={formatSize(playing.item.size)} mono />
+                        <DetailRow label={t("media.colDate")} value={formatDate(playing.item.startedAt)} mono />
+                        {playing.item.clipCount > 1 ? (
+                          <DetailRow
+                            label={t("media.clipCount", { n: playing.item.clipCount })}
+                            value={t("media.clipOf", {
+                              n: playing.item.clipIndex + 1,
+                              total: playing.item.clipCount,
+                            })}
+                            mono
+                          />
+                        ) : null}
+                      </dl>
+                    </section>
+
+                    <section className="border-b border-white/10 px-4 py-3.5">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <h3 className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                          {t("media.playbackSource")}
+                        </h3>
+                        <span className="font-mono text-[10px] text-white/30">
+                          {playing.source ? t("media.sourceFile") : t("media.mainFile")}
                         </span>
                       </div>
-                    ) : null}
+                      <div className="mt-2 grid grid-cols-2 gap-1 rounded-[7px] bg-white/[0.05] p-1">
+                        <button
+                          type="button"
+                          disabled={playBusy !== null || !playing.source}
+                          onClick={() => void switchVariant(false)}
+                          className={cx(
+                            "focus-ring flex h-7 items-center justify-center rounded-[5px] text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                            playing.source
+                              ? "text-white/55 hover:bg-white/[0.06] hover:text-white/85"
+                              : "bg-white/10 text-white",
+                          )}
+                        >
+                          {t("media.mainFile")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={playBusy !== null || playing.source || !playing.item.hasSource}
+                          onClick={() => void switchVariant(true)}
+                          className={cx(
+                            "focus-ring flex h-7 items-center justify-center rounded-[5px] text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                            playing.source
+                              ? "bg-white/10 text-white"
+                              : "text-white/55 hover:bg-white/[0.06] hover:text-white/85",
+                          )}
+                        >
+                          {t("media.sourceFile")}
+                        </button>
+                      </div>
+                      <p
+                        className="mt-2 truncate font-mono text-[10px] leading-4 text-white/35"
+                        title={playing.source ? playing.item.sourcePath ?? playing.item.path : playing.item.path}
+                      >
+                        {baseName(playing.source ? playing.item.sourcePath ?? playing.item.path : playing.item.path)}
+                      </p>
+                    </section>
 
-                    {detailFiles.length > 1 ? (
-                      <div className="mt-4 rounded-[7px] border border-line bg-raised/40 px-3 py-2">
-                        <div className="flex items-baseline gap-2">
-                          <div className="text-[10px] uppercase tracking-[0.08em] text-faint">
-                            {t("media.files")}
-                          </div>
-                          <span className="text-[10px] tabular-nums text-faint">{detailFiles.length}</span>
-                        </div>
-                        <div className="mt-1.5 space-y-1 font-mono text-[10.5px] leading-4">
-                          {detailFiles.map((file) => {
+                    <section className="border-b border-white/10 px-4 py-3.5">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <h3 className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                          {t("media.files")}
+                        </h3>
+                        <span className="font-mono text-[10px] text-white/30">{detailFiles.length}</span>
+                      </div>
+                      <div className="mt-2 space-y-1">
+                        {detailFiles.length > 0 ? (
+                          detailFiles.map((file) => {
                             const active = file.state === "present" && file.exists;
                             return (
-                              <div key={file.path} className="flex min-w-0 items-center gap-2">
-                                <span className="w-[52px] shrink-0 font-sans text-faint">
+                              <div key={file.path} className="flex min-w-0 items-center gap-2 text-[10.5px] leading-4">
+                                <span className="w-9 shrink-0 text-white/35">
                                   {t(FILE_ROLE[file.role] ?? "media.derivedFile")}
                                 </span>
                                 {active ? (
@@ -1279,127 +1522,156 @@ export default function RoomRecordingsPage({
                                     type="button"
                                     onClick={() => void revealFile(file)}
                                     title={file.path}
-                                    className="focus-ring truncate text-left text-accent-text hover:underline"
+                                    className="focus-ring min-w-0 truncate text-left font-mono text-white/75 transition-colors hover:text-white hover:underline"
                                   >
                                     {baseName(file.path)}
                                   </button>
                                 ) : (
-                                  <span className="truncate text-faint">
+                                  <span className="min-w-0 truncate text-white/30">
                                     {file.state === "deleted" ? t("media.fileDeleted") : t("media.fileMissing")}
                                   </span>
                                 )}
-                                <span className="ml-auto shrink-0 font-sans text-[10px] tabular-nums text-faint">
+                                <span className="ml-auto shrink-0 font-mono text-[9.5px] tabular-nums text-white/30">
                                   {file.format ? file.format.toUpperCase() + " · " : ""}
                                   {formatSize(file.size)}
                                 </span>
                               </div>
                             );
-                          })}
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          <Button
-                            size="sm"
-                            variant={playing.source ? "ghost" : "secondary"}
-                            disabled={playBusy !== null}
-                            onClick={() => void switchVariant(false)}
-                          >
-                            {t("media.playMain")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant={playing.source ? "secondary" : "ghost"}
-                            disabled={playBusy !== null || !playing.item.hasSource}
-                            onClick={() => void switchVariant(true)}
-                          >
-                            {t("media.playSource")}
-                          </Button>
-                          {playing.item.hasSource && playing.item.sourcePath !== playing.item.path ? (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-rec"
-                              disabled={busy !== null}
-                              onClick={() => void deleteSource(playing.item)}
+                          })
+                        ) : (
+                          <div className="flex min-w-0 items-center gap-2 text-[10.5px] leading-4">
+                            <span className="w-9 shrink-0 text-white/35">{t("media.mainFile")}</span>
+                            <button
+                              type="button"
+                              onClick={() => void mediaReveal(playing.item.id).catch((err) => notify.error(err))}
+                              title={playing.item.path}
+                              className="focus-ring min-w-0 truncate text-left font-mono text-white/75 transition-colors hover:text-white hover:underline"
                             >
-                              {confirmSourceDelete ? t("media.confirmDeleteSource") : t("media.deleteSource")}
-                            </Button>
+                              {baseName(playing.item.path)}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+
+                    {playing.item.danmakuPath ? (
+                      <section className="border-b border-white/10 px-4 py-3.5">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <h3 className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                            {t("media.danmakuTrack")}
+                          </h3>
+                          <span className="font-mono text-[10px] tabular-nums text-white/30">
+                            {danmakuLoading
+                              ? t("media.danmakuLoading")
+                              : (playing.item.danmakuCount ?? 0) > 0
+                                ? t("media.danmakuTrackCount", { n: playing.item.danmakuCount })
+                                : danmakuTrack && danmakuTrack.length > 0
+                                  ? t("media.danmakuTrackCount", { n: danmakuTrack.length })
+                                  : t("media.danmakuEmpty")}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void mediaRevealFile(playing.item.id, playing.item.danmakuPath!).catch(() => undefined)
+                          }
+                          title={playing.item.danmakuPath}
+                          className="focus-ring mt-1.5 flex w-full min-w-0 items-center gap-2 rounded-[6px] px-1 py-1 text-left transition-colors hover:bg-white/[0.06]"
+                        >
+                          <IconFolder />
+                          <span className="min-w-0 truncate font-mono text-[10px] text-white/55">
+                            {baseName(playing.item.danmakuPath)}
+                          </span>
+                        </button>
+                      </section>
+                    ) : null}
+
+                    <section className="px-4 py-3.5">
+                      <h3 className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                        {t("media.processing")}
+                      </h3>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                        <DetailAction
+                          disabled={busy !== null || playing.item.path.endsWith(".mp4")}
+                          onClick={() => void postOne("remux", playing.item)}
+                        >
+                          {t("media.remux")}
+                        </DetailAction>
+                        <DetailAction
+                          disabled={busy !== null || playing.item.danmakuCount === 0}
+                          onClick={() => void postOne("ass", playing.item)}
+                        >
+                          {t("media.exportAss")}
+                        </DetailAction>
+                        <DetailAction onClick={() => void mediaReveal(playing.item.id).catch((err) => notify.error(err))}>
+                          {revealLabel}
+                        </DetailAction>
+                        {canRetryPost ? (
+                          <DetailAction disabled={busy !== null} onClick={() => void retryOne(playing.item)}>
+                            {t("media.retry")}
+                          </DetailAction>
+                        ) : null}
+                        {canDeleteSource ? (
+                          <DetailAction
+                            tone="danger"
+                            disabled={busy !== null}
+                            onClick={() => void deleteSource(playing.item)}
+                          >
+                            {confirmSourceDelete ? t("media.confirmDeleteSource") : t("media.deleteSource")}
+                          </DetailAction>
+                        ) : null}
+                      </div>
+
+                      {playingPostJob ? (
+                        <div className="mt-2 flex items-center gap-2 font-mono text-[10.5px] tabular-nums text-white/40">
+                          <span>
+                            {playingPostJob.stage === "queued"
+                              ? t("media.postQueued")
+                              : playingPostJob.percent + "%"}
+                          </span>
+                          {playingPostJob.state === "queued" || playingPostJob.state === "running" ? (
+                            <button
+                              type="button"
+                              onClick={() => void cancelOne(playing.item)}
+                              className="focus-ring font-sans text-accent-text hover:underline"
+                            >
+                              {t("media.cancelPost")}
+                            </button>
+                          ) : null}
+                          {playingPostJob.message ? (
+                            <span className="truncate font-sans text-rec">{playingPostJob.message}</span>
                           ) : null}
                         </div>
-                      </div>
-                    ) : null}
-
-                    <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line pt-3">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busy !== null || playing.item.path.endsWith(".mp4")}
-                        onClick={() => void postOne("remux", playing.item)}
-                      >
-                        {t("media.remux")}
-                      </Button>
-                      {playing.item.postState === "failed" || playing.item.postState === "cancelled" ? (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={busy !== null}
-                          onClick={() => void retryOne(playing.item)}
-                        >
-                          {t("media.retry")}
-                        </Button>
                       ) : null}
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busy !== null || playing.item.danmakuCount === 0}
-                        onClick={() => void postOne("ass", playing.item)}
-                      >
-                        {t("media.exportAss")}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => void mediaReveal(playing.item.id).catch((err) => notify.error(err))}
-                      >
-                        {t("media.reveal")}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="ml-auto text-rec"
-                        disabled={busy === playing.item.id}
-                        onClick={() => void removeOne(playing.item)}
-                      >
-                        {t("media.delete")}
-                      </Button>
-                    </div>
 
-                    {postJobs[playing.item.id] ? (
-                      <div className="mt-2 flex items-center gap-2 font-mono text-[10.5px] tabular-nums text-faint">
-                        <span>
-                          {postJobs[playing.item.id].stage === "queued"
-                            ? t("media.postQueued")
-                            : postJobs[playing.item.id].percent + "%"}
-                        </span>
-                        {postJobs[playing.item.id].state === "queued" ||
-                        postJobs[playing.item.id].state === "running" ? (
-                          <button
-                            type="button"
-                            onClick={() => void cancelOne(playing.item)}
-                            className="focus-ring font-sans text-accent-text hover:underline"
-                          >
-                            {t("media.cancelPost")}
-                          </button>
-                        ) : null}
-                        {postJobs[playing.item.id].message ? (
-                          <span className="truncate font-sans text-rec">
-                            {postJobs[playing.item.id].message}
-                          </span>
-                        ) : null}
+                      <div className="mt-3 border-t border-white/10 pt-3">
+                        <button
+                          type="button"
+                          disabled={busy === playing.item.id}
+                          onClick={() => {
+                            if (!confirmGroupDelete) {
+                              setConfirmGroupDelete(true);
+                              return;
+                            }
+                            setConfirmGroupDelete(false);
+                            void removeOne(playing.item);
+                          }}
+                          className={cx(
+                            "focus-ring flex h-8 w-full items-center justify-center rounded-[6px] border text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                            confirmGroupDelete
+                              ? "border-rec/50 bg-rec/15 text-rec"
+                              : "border-white/10 text-white/55 hover:border-rec/30 hover:text-rec",
+                          )}
+                        >
+                          {confirmGroupDelete ? t("media.confirmDeleteAll") : t("media.deleteAll")}
+                        </button>
                       </div>
-                    ) : null}
-                  </div>
-                </div>
-              </aside>
+
+                      <p className="mt-3 text-[10px] leading-4 text-white/25">{t("media.hotkeysHint")}</p>
+                    </section>
+                  </aside>
+                ) : null}
+              </div>
             </div>,
             document.body,
           )

@@ -1362,7 +1362,7 @@ function SlotCell({
         ) : null}
 
         {stats && stats.width > 0 ? (
-          <span className="pointer-events-none shrink-0 rounded-[4px] bg-black/35 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/65">
+          <span className="pointer-events-none shrink-0 rounded-[4px] bg-black/35 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/65 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             {stats.width + "x" + stats.height}
             {droppedText ? " · " + t("watch.stats.dropped") + " " + droppedText : ""}
           </span>

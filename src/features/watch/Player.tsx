@@ -69,6 +69,8 @@ type Props = {
   fit?: "contain" | "cover";
   /** 切换画面填充/适应；不传就不显示对应按钮。 */
   onToggleFit?: () => void;
+  /** 剧院模式：空格/方向键/F/M/D 快捷键，视频双击全屏。多实例页面别开。 */
+  hotkeys?: boolean;
 };
 
 const EMPTY_STATS: PlayerStats = {
@@ -215,6 +217,7 @@ export default function Player({
   onMenuOpen,
   fit = "contain",
   onToggleFit,
+  hotkeys = false,
 }: Props) {
   const { t } = useTranslation();
   const reducedMotion = useReducedMotion() ?? false;
@@ -508,6 +511,77 @@ export default function Player({
     else void shell.requestFullscreen();
   };
 
+  // 剧院模式的键盘跳转：窗口内直接改 currentTime，窗口外交给外层重开。
+  const seekBy = (deltaMs: number) => {
+    if (!vod || !onSeek) return;
+    const base = scrubMs ?? positionMs;
+    const target = Math.min(Math.max(0, base + deltaMs), durationMs ?? 0);
+    setScrubMs(null);
+    const video = videoRef.current;
+    if (video && withinWindow(target)) {
+      video.currentTime = Math.max(0, (target - startMs) / 1000);
+      setPositionMs(target);
+      onPositionChange?.(target);
+    } else {
+      onSeek(target);
+    }
+  };
+
+  useEffect(() => {
+    if (!hotkeys) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          tag === "BUTTON" ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+      }
+      // 键盘操作也算一次交互：把控制条亮出来，否则空格暂停后用户看不到反馈。
+      wakeChrome();
+      switch (event.key) {
+        case " ":
+          event.preventDefault();
+          toggle();
+          break;
+        case "ArrowLeft":
+        case "ArrowRight":
+          if (!vod) return;
+          event.preventDefault();
+          seekBy(event.key === "ArrowLeft" ? -10_000 : 10_000);
+          break;
+        case "f":
+        case "F":
+          event.preventDefault();
+          fullscreen();
+          break;
+        case "m":
+        case "M":
+          event.preventDefault();
+          toggleMute();
+          break;
+        case "d":
+        case "D":
+          if (!onToggleDanmaku) return;
+          event.preventDefault();
+          onToggleDanmaku();
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hotkeys, vod, positionMs, scrubMs, startMs, durationMs, onSeek, onPositionChange, onToggleDanmaku, volume]);
+
   const muted = volume === 0;
   const pipSupported = typeof document !== "undefined" && document.pictureInPictureEnabled !== false;
 
@@ -630,6 +704,10 @@ export default function Player({
           setQualityOpen(false);
           toggle();
         }}
+        onDoubleClick={() => {
+          if (document.fullscreenElement) void document.exitFullscreen();
+          else void shellRef.current?.requestFullscreen();
+        }}
       />
 
       {/* 弹幕层在视频之上、控件之下：不拦截点击，全屏时也保留；只覆盖画面本身。 */}
@@ -642,7 +720,26 @@ export default function Player({
         </div>
       ) : null}
 
-      {showStats && stats.width > 0 ? (
+      {/* 剧院模式：WebView 拦下自动播放时画面是静止的，给一个明确的起播入口。 */}
+      {hotkeys && !playing && stats.width > 0 ? (
+        <button
+          type="button"
+          onClick={() => {
+            toggle();
+            wakeChrome();
+          }}
+          aria-label={t("media.play")}
+          className="absolute inset-0 z-[6] flex items-center justify-center bg-black/15 transition-colors hover:bg-black/25"
+        >
+          <span className="grid h-16 w-16 place-items-center rounded-full border border-white/15 bg-black/55 text-white shadow-[0_10px_36px_rgba(0,0,0,0.55)] backdrop-blur-sm">
+            <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden className="translate-x-[2px]">
+              <path d="M8 5.14v13.72c0 .86.94 1.4 1.68.96l10.4-6.86a1.15 1.15 0 0 0 0-1.92L9.68 4.18A1.15 1.15 0 0 0 8 5.14Z" />
+            </svg>
+          </span>
+        </button>
+      ) : null}
+
+      {showStats && stats.width > 0 && chromeShown ? (
         <div
           className={[
             "pointer-events-none absolute z-10 rounded-[5px] bg-black/40 px-1.5 py-0.5 font-mono text-[9.5px] leading-4 text-white/55 backdrop-blur-[2px]",
