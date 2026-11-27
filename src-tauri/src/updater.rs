@@ -181,17 +181,22 @@ pub fn parse_github_api_releases(raw: &str) -> Result<Vec<ReleaseEntry>, String>
 pub fn parse_release_notes(body: &str) -> Vec<ChangelogNote> {
     let mut notes = Vec::new();
     let mut guide_depth = None;
+    let mut section_kind = "other";
     for raw_line in body.lines() {
         let line = raw_line.trim();
         if line.starts_with('#') {
             let title = line.trim_start_matches('#');
             let depth = line.len() - title.len();
             if guide_depth.is_none_or(|d| depth <= d) {
+                let normalized = title.trim().to_ascii_lowercase();
                 guide_depth = matches!(
-                    title.trim().to_ascii_lowercase().as_str(),
+                    normalized.as_str(),
                     "安装说明" | "installation" | "installation instructions" | "录制与更新"
                 )
                 .then_some(depth);
+                if guide_depth.is_none() {
+                    section_kind = classify_heading_kind(&normalized);
+                }
             }
             continue;
         }
@@ -209,7 +214,7 @@ pub fn parse_release_notes(body: &str) -> Vec<ChangelogNote> {
             continue;
         }
         let cleaned = strip_markdown_links(text);
-        let (kind, body_text) = classify_note(&cleaned);
+        let (kind, body_text) = classify_note(&cleaned, section_kind);
         if !body_text.is_empty() {
             notes.push(ChangelogNote {
                 kind: kind.to_string(),
@@ -221,6 +226,25 @@ pub fn parse_release_notes(body: &str) -> Vec<ChangelogNote> {
         }
     }
     notes
+}
+
+fn classify_heading_kind(lower_title: &str) -> &'static str {
+    if lower_title.contains("新增")
+        || lower_title.contains("feat")
+        || lower_title.contains("feature")
+    {
+        "feat"
+    } else if lower_title.contains("修复") || lower_title.contains("fix") {
+        "fix"
+    } else if lower_title.contains("优化")
+        || lower_title.contains("perf")
+        || lower_title.contains("体验")
+        || lower_title.contains("改进")
+    {
+        "perf"
+    } else {
+        "other"
+    }
 }
 
 fn strip_markdown_links(input: &str) -> String {
@@ -242,10 +266,20 @@ fn strip_markdown_links(input: &str) -> String {
         out.push(ch);
         i += ch.len_utf8();
     }
-    out.replace("**", "").trim().to_string()
+    let cleaned = out.replace("**", "");
+    let trimmed = cleaned.trim();
+    if let Some(open_idx) = trimmed.rfind('(') {
+        if trimmed.ends_with(')') {
+            let inner = &trimmed[open_idx + 1..trimmed.len() - 1];
+            if (7..=40).contains(&inner.len()) && inner.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return trimmed[..open_idx].trim_end().to_string();
+            }
+        }
+    }
+    trimmed.to_string()
 }
 
-fn classify_note(text: &str) -> (&'static str, String) {
+fn classify_note(text: &str, fallback_kind: &'static str) -> (&'static str, String) {
     let lower = text.to_ascii_lowercase();
     for (prefix, kind) in [
         ("feat:", "feat"),
@@ -274,7 +308,7 @@ fn classify_note(text: &str) -> (&'static str, String) {
             return (kind, stripped.to_string());
         }
     }
-    ("other", text.to_string())
+    (fallback_kind, text.to_string())
 }
 
 pub fn build_result(
@@ -514,5 +548,37 @@ mod tests {
         assert_eq!(notes[0].kind, "feat");
         assert_eq!(notes[1].kind, "fix");
         assert_eq!(notes[2].kind, "perf");
+
+        let categorized_md = r#"
+## 更新内容
+
+### ✨ 新增功能
+- Windows 采用安装目录优先布局 ([0e54571](https://github.com/Joftal/HIVECAST/commit/0e54571))
+
+### 🐛 问题修复
+- 安装器浏览目录自动补齐 HIVECAST ([da080ba](https://github.com/Joftal/HIVECAST/commit/da080ba))
+
+### ⚡ 优化与体验
+- 对齐关于页图标视觉 ([c0dadcb](https://github.com/Joftal/HIVECAST/commit/c0dadcb))
+
+### 🔧 工程与维护
+- 新增自动化分诊工作流 ([da16d54](https://github.com/Joftal/HIVECAST/commit/da16d54))
+
+---
+
+## 安装说明
+
+- **macOS**：拖拽安装
+"#;
+        let categorized = parse_release_notes(categorized_md);
+        assert_eq!(categorized.len(), 4);
+        assert_eq!(categorized[0].kind, "feat");
+        assert_eq!(categorized[0].text, "Windows 采用安装目录优先布局");
+        assert_eq!(categorized[1].kind, "fix");
+        assert_eq!(categorized[1].text, "安装器浏览目录自动补齐 HIVECAST");
+        assert_eq!(categorized[2].kind, "perf");
+        assert_eq!(categorized[2].text, "对齐关于页图标视觉");
+        assert_eq!(categorized[3].kind, "other");
+        assert_eq!(categorized[3].text, "新增自动化分诊工作流");
     }
 }

@@ -38,10 +38,19 @@ function stripMarkdownLinks(input) {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
     .replace(/\*\*/g, "")
     .replace(/`([^`]+)`/g, "$1")
+    .replace(/\s*\([0-9a-f]{7,40}\)\s*$/i, "")
     .trim();
 }
 
-function classifyNote(text) {
+function classifyHeadingKind(title) {
+  const lower = title.toLowerCase();
+  if (lower.includes("新增") || lower.includes("feat") || lower.includes("feature")) return "feat";
+  if (lower.includes("修复") || lower.includes("fix")) return "fix";
+  if (lower.includes("优化") || lower.includes("perf") || lower.includes("体验") || lower.includes("改进")) return "perf";
+  return "other";
+}
+
+function classifyNote(text, fallbackKind = "other") {
   const lower = text.toLowerCase();
   const rules = [
     ["feat:", "feat"],
@@ -71,13 +80,14 @@ function classifyNote(text) {
       return { kind, text: body };
     }
   }
-  return { kind: "other", text };
+  return { kind: fallbackKind, text };
 }
 
 function parseReleaseNotes(body) {
   if (!body || typeof body !== "string") return [];
   const notes = [];
   let guideDepth = 0;
+  let sectionKind = "other";
   for (const rawLine of body.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -85,6 +95,9 @@ function parseReleaseNotes(body) {
       const [, marks, title] = /^(#+)\s*(.*)$/.exec(line);
       if (!guideDepth || marks.length <= guideDepth) {
         guideDepth = ["安装说明", "installation", "installation instructions", "录制与更新"].includes(title.toLowerCase()) ? marks.length : 0;
+        if (!guideDepth) {
+          sectionKind = classifyHeadingKind(title);
+        }
       }
       continue;
     }
@@ -94,7 +107,7 @@ function parseReleaseNotes(body) {
     else if (line.startsWith("* ")) bullet = line.slice(2).trim();
     if (!bullet || bullet.startsWith("Full Changelog:")) continue;
     const cleaned = stripMarkdownLinks(bullet);
-    const note = classifyNote(cleaned);
+    const note = classifyNote(cleaned, sectionKind);
     if (note.text) notes.push(note);
     if (notes.length >= 16) break;
   }

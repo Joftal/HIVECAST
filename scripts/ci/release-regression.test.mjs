@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { reconcileLabels } from "./issue-labels.mjs";
+import { buildReleaseNotes, selectPreviousTag } from "./generate-release-notes.mjs";
 
 function generate(t, releases) {
   const dir = mkdtempSync(join(tmpdir(), "hivecast-site-"));
@@ -71,4 +72,46 @@ test("form edits and cleared selections preserve manually applied labels", async
   body = "### 操作系统\n_No response_";
   await reconcileLabels(url, previous, {}, request);
   assert.deepEqual(labels, new Set(["area: playback", "priority: high"]));
+});
+
+test("selectPreviousTag respects SemVer precedence and stable/prerelease channels", () => {
+  const tags = ["v0.9.0", "v1.0.0", "v1.1.0-rc.2", "v1.1.0-rc.10", "v1.1.0", "not-a-tag"];
+  assert.equal(selectPreviousTag(tags, "1.1.0"), "v1.0.0");
+  assert.equal(selectPreviousTag(tags, "1.1.0-rc.11"), "v1.1.0-rc.10");
+  assert.equal(selectPreviousTag(tags, "1.2.0-rc.1"), "v1.1.0");
+  assert.equal(selectPreviousTag(["v1.0.0-rc.1"], "1.0.0"), null);
+  assert.equal(selectPreviousTag([], "1.0.0"), null);
+});
+
+test("generated release notes lead with categorized commits and feed cleanly into changelog site", t => {
+  const body = buildReleaseNotes({
+    version: "1.0.1",
+    signMacos: false,
+    repo: "Joftal/HIVECAST",
+    prevTag: "v1.0.0",
+    commits: [
+      { hash: "0e54571abcdef1234567890", shortHash: "0e54571", subject: "feat: Windows 采用安装目录优先布局" },
+      { hash: "da080baabcdef1234567890", shortHash: "da080ba", subject: "fix(installer): 浏览目录自动补齐 HIVECAST" },
+      { hash: "c0dadcbabcdef1234567890", shortHash: "c0dadcb", subject: "style: 对齐关于页图标视觉" },
+      { hash: "da16d54abcdef1234567890", shortHash: "da16d54", subject: "chore: 新增分诊工作流" },
+    ],
+  });
+
+  assert.ok(body.indexOf("## 更新内容") < body.indexOf("## 安装说明"));
+  assert.match(body, /### ✨ 新增功能/);
+  assert.match(body, /### 🐛 问题修复/);
+  assert.match(body, /### ⚡ 优化与体验/);
+  assert.match(body, /### 🔧 工程与维护/);
+  assert.match(body, /\*\*installer\*\*：浏览目录自动补齐 HIVECAST/);
+  assert.match(body, /compare\/v1\.0\.0\.\.\.v1\.0\.1/);
+  assert.doesNotMatch(body, /当前版本请从发布页手动更新/);
+
+  const { latest } = generate(t, [{ tag_name: "v1.0.1", prerelease: false, body }]);
+  assert.equal(latest.version, "1.0.1");
+  assert.deepEqual(latest.notes, [
+    { kind: "feat", text: "Windows 采用安装目录优先布局" },
+    { kind: "fix", text: "installer：浏览目录自动补齐 HIVECAST" },
+    { kind: "perf", text: "对齐关于页图标视觉" },
+    { kind: "other", text: "新增分诊工作流" },
+  ]);
 });
