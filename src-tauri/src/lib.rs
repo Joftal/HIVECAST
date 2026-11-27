@@ -41,7 +41,9 @@ mod thumbs;
 mod tray;
 mod updater;
 mod view;
+mod window_state;
 
+use std::sync::Arc;
 use state::AppState;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
@@ -191,6 +193,7 @@ pub fn run() {
                 }
             };
             // 主窗口在 setup 内动态创建，便于 Windows 安装目录优先模式把 WebView2 用户数据放进 <install_dir>\webview。
+            // 先隐藏创建，应用完历史窗口尺寸/位置后再显示，避免启动瞬间闪烁跳变。
             let mut win_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -198,8 +201,11 @@ pub fn run() {
             )
             .title("HIVECAST")
             .inner_size(1320.0, 860.0)
-            .min_inner_size(1180.0, 680.0)
-            .center()
+            .min_inner_size(
+                crate::window_state::MIN_LOGICAL_WIDTH,
+                crate::window_state::MIN_LOGICAL_HEIGHT,
+            )
+            .visible(false)
             .resizable(true);
 
             #[cfg(target_os = "macos")]
@@ -230,47 +236,30 @@ pub fn run() {
                 .build()
                 .map_err(|err| Box::<dyn std::error::Error>::from(err.to_string()))?;
 
-            // 启动尺寸跟随当前显示器工作区，而不是固定 1320×860：
-            // 小屏不越界，大屏不显得空。仍受 min_inner_size 约束。
-            if let Ok(Some(monitor)) = window
-                .current_monitor()
-                .or_else(|_| window.primary_monitor())
-            {
-                let work = monitor.work_area();
-                let scale = monitor.scale_factor().max(1.0);
-                let logical_w = work.size.width as f64 / scale;
-                let logical_h = work.size.height as f64 / scale;
-                let width = (logical_w * 0.86)
-                    .clamp(1040.0, 1680.0)
-                    .min((logical_w - 32.0).max(1040.0));
-                let height = (logical_h * 0.88)
-                    .clamp(680.0, 1040.0)
-                    .min((logical_h - 32.0).max(680.0));
-                if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
-                    tracing::warn!(%err, "设置启动窗口尺寸失败");
-                }
-                if let Err(err) = window.center() {
-                    tracing::warn!(%err, "居中启动窗口失败");
-                }
-                tracing::info!(
-                    logical_width = width,
-                    logical_height = height,
-                    screen_width = logical_w,
-                    screen_height = logical_h,
-                    "启动窗口已按屏幕工作区缩放"
-                );
-            }
             #[cfg(target_os = "windows")]
             {
                 let theme = window.theme().unwrap_or(tauri::Theme::Light);
                 crate::tray::sync_window_icon(&window, theme);
             }
+
+            let window_tracker = Arc::new(crate::window_state::WindowStateTracker::default());
+            app.manage(Arc::clone(&window_tracker));
+            {
+                let state = app.state::<AppState>();
+                crate::window_state::restore_and_show(&window, &state.db, &window_tracker);
+            }
+
             let target = window.clone();
             window.on_window_event(move |event| match event {
                 // 一律先拦下：是隐藏还是退出由设置与任务表决定。
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     crate::lifecycle::on_close_requested(target.app_handle(), tray_ready);
+                }
+                tauri::WindowEvent::Resized(_)
+                | tauri::WindowEvent::Moved(_)
+                | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    crate::window_state::schedule_save(target.app_handle());
                 }
                 #[cfg(target_os = "windows")]
                 tauri::WindowEvent::ThemeChanged(theme) => {
@@ -415,6 +404,7 @@ pub fn run() {
                     crate::lifecycle::on_quit_requested(handle);
                 } else {
                     tracing::info!("退出请求放行：没有进行中的任务");
+                    crate::window_state::flush_now(handle);
                 }
             } else {
                 tracing::info!("退出请求放行：已确认强制退出");

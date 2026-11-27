@@ -106,6 +106,7 @@ fn emit_visibility<R: Runtime>(app: &AppHandle<R>, visible: bool) {
 
 /// 窗口的关闭按钮：按设置决定隐藏还是走退出流程。
 pub fn on_close_requested<R: Runtime>(app: &AppHandle<R>, tray_ready: bool) {
+    crate::window_state::flush_now(app);
     let state = app.state::<AppState>();
     let action = settings::load(&state.db).close_action;
     if tray_ready && action == CLOSE_TRAY {
@@ -144,6 +145,7 @@ fn quit_or_warn<R: Runtime>(app: &AppHandle<R>) {
 }
 
 pub fn quit_now<R: Runtime>(app: &AppHandle<R>) {
+    crate::window_state::flush_now(app);
     tracing::info!(target: "hivecast_lib::lifecycle", "应用退出");
     FORCE_QUIT.store(true, Ordering::SeqCst);
     app.exit(0);
