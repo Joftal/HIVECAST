@@ -224,6 +224,50 @@ pub fn has_existing_install(dir: &Path) -> bool {
     dir.join("HIVECAST.exe").is_file()
 }
 
+pub fn same_location(a: &Path, b: &Path) -> bool {
+    std::fs::canonicalize(a)
+        .ok()
+        .zip(std::fs::canonicalize(b).ok())
+        .is_some_and(|(a, b)| a == b)
+}
+
+/// 安装/升级前的目录归属与非空策略校验：
+/// - 已登记的原安装目录允许就地覆盖升级；
+/// - 若存在其它路径的已登记有效安装，禁止在别处再装一份；
+/// - 若无其它有效登记安装（首次安装、目录被手动迁移、重装系统丢注册表或绿色版转安装版），
+///   允许空目录、仅保留 `data/` + `Recording/` 的旧卸载目录、或已含 `HIVECAST.exe` 的目录就地覆盖；
+/// - 仍严格拒绝无关非空目录（包括仅含其他软件 `uninstall.exe` 的目录）。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn check_target_dir_policy(
+    install_dir: &Path,
+    registered_dir: Option<&Path>,
+) -> Result<(), String> {
+    let dir_exists = install_dir.try_exists().map_err(|e| e.to_string())?;
+    if dir_exists && !install_dir.is_dir() {
+        return Err("所选路径不是有效文件夹".into());
+    }
+    let owned = dir_exists
+        && registered_dir
+            .is_some_and(|dir| same_location(dir, install_dir) && has_existing_install(dir));
+    if owned {
+        return Ok(());
+    }
+    if registered_dir.is_some_and(has_existing_install) {
+        return Err("请使用已登记的安装目录升级，或先卸载原版本".into());
+    }
+    if dir_exists
+        && std::fs::read_dir(install_dir)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some()
+        && !is_reusable_preserved_dir(install_dir)
+        && !has_existing_install(install_dir)
+    {
+        return Err("目录非空，请选择新的 HIVECAST 专用子目录".into());
+    }
+    Ok(())
+}
+
 /// 通过文件夹选择框选中父目录（如 `D:\` 或 `D:\Apps`）时自动补齐 `\HIVECAST` 子目录，
 /// 避免用户每次都要手动新建文件夹；若选中的目录本身已名为 `HIVECAST`、或已是既有安装/保留数据目录则保持原样。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -444,5 +488,34 @@ mod tests {
             .unwrap(),
             CliAction::GuiInstall
         );
+    }
+
+    #[test]
+    fn target_dir_policy_allows_moved_or_registry_lost_hivecast_but_blocks_foreign_dirs() {
+        let root = tempfile::tempdir().unwrap();
+
+        // 1. Registry-lost or portable HIVECAST directory is allowed to upgrade/repair in place.
+        let lost_reg = root.path().join("HIVECAST-moved");
+        std::fs::create_dir_all(lost_reg.join("data")).unwrap();
+        std::fs::write(lost_reg.join("HIVECAST.exe"), b"old-exe").unwrap();
+        std::fs::write(lost_reg.join("data").join("hivecast.db"), b"db").unwrap();
+        assert!(check_target_dir_policy(&lost_reg, None).is_ok());
+
+        // 2. Old registered path no longer exists (user moved folder) -> upgrading new location succeeds.
+        let stale_reg = root.path().join("HIVECAST-old-gone");
+        assert!(check_target_dir_policy(&lost_reg, Some(&stale_reg)).is_ok());
+
+        // 3. Another active registered installation still exists -> refuse duplicate install elsewhere.
+        let other_dir = root.path().join("HIVECAST-second");
+        assert!(check_target_dir_policy(&other_dir, Some(&lost_reg)).is_err());
+
+        // 4. Registered installation itself -> allowed.
+        assert!(check_target_dir_policy(&lost_reg, Some(&lost_reg)).is_ok());
+
+        // 5. Foreign non-empty directory (even with uninstall.exe, but no HIVECAST.exe) -> blocked.
+        let foreign = root.path().join("OtherApp");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("uninstall.exe"), b"other").unwrap();
+        assert!(check_target_dir_policy(&foreign, None).is_err());
     }
 }

@@ -89,7 +89,27 @@ try {
     if ((Test-Path -LiteralPath (Join-Path $reuseDir "data")) -or -not (Test-Path -LiteralPath (Join-Path $reuseDir "Recording\clip.mp4"))) {
         throw "--purge-data uninstall did not remove data/ while keeping Recording/"
     }
-    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry, preserve data/recording, reinstall, purge-data and empty-dir cleanup)"
+
+    # Verify registry-lost / moved HIVECAST directory can be upgraded/repaired in place without losing data/ or Recording/.
+    $movedDir = Join-Path $work "迁移 目录"
+    New-Item -ItemType Directory -Force -Path (Join-Path $movedDir "data"), (Join-Path $movedDir "Recording") | Out-Null
+    Copy-Item -LiteralPath $Stub -Destination (Join-Path $movedDir "HIVECAST.exe")
+    Set-Content -LiteralPath (Join-Path $movedDir "data\hivecast.db") -Value "moved-db" -NoNewline
+    Set-Content -LiteralPath (Join-Path $movedDir "Recording\clip.mp4") -Value "moved-vid" -NoNewline
+    Invoke-Installer $Setup @("--silent", "--dir", $movedDir, "--no-shortcut")
+    if ((Get-ItemProperty $registry).InstallLocation -ne $movedDir -or
+        (Get-Content -LiteralPath (Join-Path $movedDir "data\hivecast.db") -Raw) -ne "moved-db" -or
+        (Get-Content -LiteralPath (Join-Path $movedDir "Recording\clip.mp4") -Raw) -ne "moved-vid") {
+        throw "Registry-lost in-place repair did not preserve data/Recording or re-register InstallLocation"
+    }
+    $movedUninst = Join-Path $movedDir "uninstall.exe"
+    Invoke-Installer $movedUninst @("--silent", "--purge-data")
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-Path -LiteralPath $movedUninst) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    if ((Test-Path $registry) -or -not (Test-Path -LiteralPath (Join-Path $movedDir "Recording\clip.mp4"))) {
+        throw "Cleanup after registry-lost repair test failed"
+    }
+    Write-Host "upgrade smoke ok (ownership, rollback, quoted path, retry, preserve data/recording, reinstall, purge-data, moved-dir repair and empty-dir cleanup)"
 } finally {
     $env:APPDATA = $originalAppData
 }

@@ -101,20 +101,13 @@ fn resolve_uninstall_dir(cli_dir: Option<PathBuf>) -> Result<PathBuf, String> {
         let parent = exe.parent().ok_or("无法定位卸载程序目录")?;
         if cli_dir
             .as_ref()
-            .is_some_and(|dir| !same_location(dir, parent))
+            .is_some_and(|dir| !install::same_location(dir, parent))
         {
             return Err("卸载目标与卸载程序所在目录不一致".into());
         }
         return Ok(parent.to_owned());
     }
     Ok(cli_dir.unwrap_or_else(preferred_install_dir))
-}
-
-fn same_location(a: &Path, b: &Path) -> bool {
-    fs::canonicalize(a)
-        .ok()
-        .zip(fs::canonicalize(b).ok())
-        .is_some_and(|(a, b)| a == b)
 }
 
 // Keep original files on their own volume until registry and shortcut changes have succeeded.
@@ -223,38 +216,8 @@ where
     #[cfg(windows)]
     {
         let registered = win_os::read_installed_dir();
-        let dir_exists = install_dir
-            .try_exists()
-            .map_err(|e| InstallError::Directory(e.to_string()))?;
-        let owned = dir_exists
-            && registered.as_ref().is_some_and(|dir| {
-                same_location(dir, install_dir) && install::has_existing_install(dir)
-            });
-        if !owned {
-            if registered
-                .as_ref()
-                .is_some_and(|dir| install::has_existing_install(dir))
-            {
-                return Err(InstallError::Directory(
-                    "请使用已登记的安装目录升级，或先卸载原版本".into(),
-                ));
-            }
-            if dir_exists {
-                if !install_dir.is_dir() {
-                    return Err(InstallError::Directory("所选路径不是有效文件夹".into()));
-                }
-                if fs::read_dir(install_dir)
-                    .map_err(|e| InstallError::Directory(e.to_string()))?
-                    .next()
-                    .is_some()
-                    && !install::is_reusable_preserved_dir(install_dir)
-                {
-                    return Err(InstallError::Directory(
-                        "目录非空，请选择新的 HIVECAST 专用子目录".into(),
-                    ));
-                }
-            }
-        }
+        install::check_target_dir_policy(install_dir, registered.as_deref())
+            .map_err(InstallError::Directory)?;
     }
     fs::create_dir_all(install_dir).map_err(|e| InstallError::Directory(e.to_string()))?;
     let staging =
@@ -349,7 +312,7 @@ pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<
     #[cfg(windows)]
     {
         if !win_os::read_installed_dir()
-            .is_some_and(|registered| same_location(&registered, install_dir))
+            .is_some_and(|registered| install::same_location(&registered, install_dir))
         {
             return Err("卸载目录与当前安装登记不符".into());
         }
@@ -379,7 +342,7 @@ pub(crate) fn perform_uninstall(install_dir: &Path, purge_data: bool) -> Result<
     #[cfg(windows)]
     {
         let exe = env::current_exe().map_err(|e| e.to_string())?;
-        if same_location(&exe, &uninstaller) {
+        if install::same_location(&exe, &uninstaller) {
             win_os::delete_uninstall_registry()?;
             return win_os::schedule_self_cleanup(&exe, install_dir);
         }
