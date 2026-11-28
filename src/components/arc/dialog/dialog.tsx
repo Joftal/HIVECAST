@@ -28,6 +28,8 @@ export interface DialogContentProps extends ComponentPropsWithoutRef<typeof Dial
   children: ReactNode;
   /** HIVECAST：sm 保持 Arc 的 440px，md 给添加房间这类较宽的表单，lg 给关注导入这类多列表格。 */
   size?: "sm" | "md" | "lg";
+  /** 入场缩放起始值；大尺寸弹窗传 1 可只做淡入上浮，避免边缘扩张。 */
+  enterScale?: number;
 }
 
 const fade: Transition = { duration: motionTokens.duration.instant };
@@ -41,7 +43,7 @@ function SwapText({ text }: { text: string }) {
   </AnimatePresence>;
 }
 
-export function DialogContent({ title, description, children, className, size = "sm", onPointerDownOutside, ...props }: DialogContentProps) {
+export function DialogContent({ title, description, children, className, size = "sm", enterScale = 0.96, onPointerDownOutside, ...props }: DialogContentProps) {
   const open = useContext(OpenContext);
   const reduced = useReducedMotion();
   // When the open state last changed. Radix waits for the click before treating a press as outside, and a press on the trigger
@@ -67,7 +69,7 @@ export function DialogContent({ title, description, children, className, size = 
     {open && <DialogPrimitive.Portal key="dialog" forceMount>
       <DialogPrimitive.Overlay asChild forceMount><motion.div className={styles.overlay} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: reduced ? fade : leave }} transition={reduced ? fade : { duration: motionTokens.duration.standard, ease: [...motionTokens.ease.enter] }}/></DialogPrimitive.Overlay>
       <DialogPrimitive.Content {...props} aria-modal={props["aria-modal"] ?? "true"} onPointerDownOutside={pressOutside} asChild forceMount>
-        <motion.div className={classes} initial={reduced ? { opacity: 0 } : { opacity: 0, y: 8, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={reduced ? { opacity: 0, transition: fade } : { opacity: 0, y: 4, scale: .98, transition: leave }} transition={reduced ? fade : { default: motionTokens.spring.smooth, opacity: { duration: motionTokens.duration.fast, ease: [...motionTokens.ease.enter] } }}>{inner}</motion.div>
+        <motion.div className={classes} initial={reduced ? { opacity: 0 } : { opacity: 0, y: 8, scale: enterScale }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={reduced ? { opacity: 0, transition: fade } : { opacity: 0, y: 4, scale: .98, transition: leave }} transition={reduced ? fade : { default: motionTokens.spring.smooth, opacity: { duration: motionTokens.duration.fast, ease: [...motionTokens.ease.enter] } }}>{inner}</motion.div>
       </DialogPrimitive.Content>
     </DialogPrimitive.Portal>}
   </AnimatePresence>;

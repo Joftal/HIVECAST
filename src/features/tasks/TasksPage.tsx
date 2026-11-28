@@ -6,7 +6,7 @@ import { Dialog, DialogContent } from "../../components/arc/dialog/dialog";
 import { Button, Chip, Switch, cx } from "../../components/ui/Controls";
 import EmptyArt from "../../components/ui/EmptyArt";
 import PageEmpty from "../../components/ui/PageEmpty";
-import { PageBody, PageChip, PageHeader, PageShell, PageToolbar } from "../../components/ui/PageShell";
+import { PageBody, PageChip, PageShell, PageToolbar } from "../../components/ui/PageShell";
 import {
   isTauri,
   postCancel,
@@ -1059,6 +1059,7 @@ function EventSearchDialog({
         title={t("tasks.eventSearchTitle")}
         description={t("tasks.eventSearchHint")}
         size="lg"
+        enterScale={1}
       >
         <form
           onSubmit={(event) => {
@@ -1114,9 +1115,14 @@ function EventSearchDialog({
           {failed ? <span className="text-[11px] text-rec">{t("tasks.eventSearchError")}</span> : null}
         </div>
 
-        <div className="mt-2 max-h-[48vh] overflow-auto rounded-panel border border-line bg-surface">
-          {result && result.hits.length === 0 ? (
-            <div className="px-4 py-10 text-center text-[12px] text-faint">
+        {/* 固定结果区高度，加载和结果到达时弹窗不抽高。 */}
+        <div className="mt-2 h-[42vh] max-h-[420px] min-h-[200px] overflow-auto rounded-panel border border-line bg-surface">
+          {!result ? (
+            <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-faint">
+              {failed ? t("tasks.eventSearchError") : t("tasks.eventSearchLoading")}
+            </div>
+          ) : result.hits.length === 0 ? (
+            <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-faint">
               {t("tasks.eventSearchEmpty")}
             </div>
           ) : null}
@@ -1535,28 +1541,7 @@ export default function TasksPage({
 
   return (
     <PageShell>
-      <PageHeader
-        title={t("tasks.title")}
-        subtitle={t("tasks.subtitle")}
-        leading={
-          <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-            <span>{t("tasks.eyebrow")}</span>
-          </div>
-        }
-        actions={
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={() => setSearchOpen(true)}>
-              {t("tasks.eventSearch")}
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => void refresh()}>
-              {t("tasks.refresh")}
-            </Button>
-          </div>
-        }
-      />
-
-      <PageToolbar>
+      <PageToolbar className="pt-4">
         <PageChip active={filter === "all"} onClick={() => setFilter("all")}>
           {t("tasks.filterAll")}
           <span className="tnum ml-1.5 text-[11.5px] opacity-60">{runCount + historyRuns.length + orphanIncidentCount}</span>
@@ -1585,6 +1570,14 @@ export default function TasksPage({
             <span className="ml-1.5 opacity-60">×</span>
           </PageChip>
         ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Button size="sm" variant="secondary" onClick={() => setSearchOpen(true)}>
+            {t("tasks.eventSearch")}
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => void refresh()}>
+            {t("tasks.refresh")}
+          </Button>
+        </div>
       </PageToolbar>
 
       <PageBody className="pb-8">
