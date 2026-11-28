@@ -174,6 +174,7 @@ function VolumeSlider({ volume, onChange, label }: VolumeSliderProps) {
       aria-valuemax={100}
       aria-valuenow={Math.round(value * 100)}
       aria-valuetext={`${Math.round(value * 100)}%`}
+      aria-orientation="vertical"
       style={{ "--level": `${value * 100}%` } as CSSProperties}
       onPointerDown={(event) => {
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -823,7 +824,7 @@ export default function Player({
 
         <div className="player-controls__area">
           <PlayerButton
-            label={playing ? t("watch.paused") : t("watch.playing")}
+            label={playing ? t("watch.pause") : t("watch.play")}
             className="player-controls__button"
             onClick={toggle}
           >
@@ -853,7 +854,7 @@ export default function Player({
             <AnimatePresence>
               {volOpen ? (
                 <motion.div
-                  className="absolute bottom-full left-1/2 z-40 pb-1"
+                  className="absolute bottom-full left-1/2 z-40 pb-0.5"
                   style={{ x: "-50%" }}
                   initial={reducedMotion ? false : { opacity: 0, y: 5, scale: 0.97 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}

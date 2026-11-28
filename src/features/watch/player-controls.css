@@ -207,41 +207,44 @@
   align-items: center;
 }
 
-/* 音量浮层与画质菜单同一材质：视频内始终深色玻璃，不跟随浅色主题。 */
+/* 音量浮层与画质菜单同一材质：视频内始终深色玻璃，不跟随浅色主题。
+   几何尺寸对齐 B 站播放器：32×110 面板、72 高轨道、12px 滑块；
+   数值与滑块之间留 8px，100% 时不会贴住数字。 */
 .player-volume-popover {
   display: flex;
-  width: 44px;
-  height: 128px;
+  width: 32px;
+  height: 110px;
   flex-direction: column;
   align-items: center;
-  border: 1px solid rgba(255, 255, 255, .12);
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(17, 18, 22, .88);
-  padding: 9px 6px 7px;
+  padding: 8px 6px;
   color: rgba(255, 255, 255, .92);
   box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, .12),
     0 24px 64px -24px rgba(0, 0, 0, .9),
-    inset 0 1px 0 rgba(255, 255, 255, .08),
-    0 0 0 1px rgba(255, 255, 255, .04);
+    inset 0 1px 0 rgba(255, 255, 255, .08);
   backdrop-filter: blur(24px) saturate(1.45);
   -webkit-backdrop-filter: blur(24px) saturate(1.45);
 }
 
 .player-volume-popover__value {
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
   line-height: 14px;
 }
 
 .player-volume-popover .hv-volume {
-  height: 92px;
-  margin-top: 5px;
+  width: 20px;
+  height: 72px;
+  margin-top: 8px;
 }
 
 .player-volume-popover .hv-volume:focus-visible {
   outline-color: color-mix(in oklab, var(--c-accent) 58%, #fff);
+  outline-offset: 2px;
 }
 
 .player-volume-popover .hv-volume__rail {
@@ -249,12 +252,10 @@
 }
 
 .player-volume-popover .hv-volume__fill {
-  background: var(--c-accent);
+  background: rgba(255, 255, 255, .96);
 }
 
 .player-volume-popover .hv-volume__thumb {
-  width: 14px;
-  height: 14px;
   background: #fff;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, .22),
