@@ -27,6 +27,7 @@ import {
   type TaskView,
 } from "../../lib/ipc";
 import { useNotify } from "../../lib/notify";
+import { qualityText } from "../../lib/platformText";
 
 const HISTORY_PAGE = 100;
 const HISTORY_MAX = 1_000;
@@ -439,7 +440,7 @@ function RunCard({
             {run.quality ? (
               <>
                 <span>·</span>
-                <span className="truncate">{run.quality}</span>
+                <span className="truncate">{qualityText(run.quality)}</span>
               </>
             ) : null}
           </div>
@@ -1515,7 +1516,7 @@ export default function TasksPage({
       `ended: ${formatTime(run.endedAt)}`,
       `duration: ${formatDuration(run.durationMs)}`,
       `bytes: ${run.bytes}`,
-      `quality: ${run.quality ?? "-"}`,
+      `quality: ${qualityText(run.quality) || "-"}`,
       `stages: ${run.stages.map((stage) => stage.key + "=" + stage.state).join(", ")}`,
       `tasks: ${run.tasks.map((task) => task.id + "=" + task.state + (task.stage ? "/" + task.stage : "")).join(", ")}`,
     ].join("\n");

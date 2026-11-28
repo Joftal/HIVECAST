@@ -101,7 +101,7 @@
 .trigger[data-variant="dark"][data-state="open"] { border-color: transparent; background: rgba(255, 255, 255, .15); color: #fff; box-shadow: none; }
 .trigger[data-variant="dark"] .chevron { width: 9px; height: 9px; color: currentColor; }
 
-/* HIVECAST: B 站式视频内触发器，菜单仍跟随应用浅/深色主题。 */
+/* HIVECAST: B 站式视频内触发器，弹出菜单固定深色。 */
 .trigger[data-variant="video"] {
   justify-content: center;
   width: 108px;
@@ -134,40 +134,55 @@
 .menu[data-variant="dark"] .highlight { background: rgba(255, 255, 255, .1); }
 .menu[data-variant="dark"] .separator { background: rgba(255, 255, 255, .1); }
 
-/* HIVECAST: 视频内画质菜单与播放器浮层共用玻璃材质，同时保留浅/深色主题。 */
+/* HIVECAST: 视频内画质菜单始终使用深色玻璃，避免浅色主题下白色面板压过画面。 */
 .menu[data-variant="video"] {
-  max-width: min(17rem, calc(100vw - 24px));
+  --c-accent-text: color-mix(in oklab, var(--c-accent) 55%, #fff);
+  width: min(15rem, var(--radix-dropdown-menu-content-available-width));
+  max-width: min(15rem, calc(100vw - 24px));
   max-height: var(--radix-dropdown-menu-content-available-height);
   overflow-y: auto;
   overscroll-behavior: contain;
-  border-color: color-mix(in oklab, var(--c-line) 55%, transparent);
-  background: color-mix(in oklab, var(--c-surface) 78%, transparent);
-  backdrop-filter: blur(22px) saturate(1.45);
-  -webkit-backdrop-filter: blur(22px) saturate(1.45);
+  border-color: rgba(255, 255, 255, .12);
+  background: rgba(17, 18, 22, .88);
+  color: #fff;
+  backdrop-filter: blur(24px) saturate(1.45);
+  -webkit-backdrop-filter: blur(24px) saturate(1.45);
   box-shadow:
-    0 22px 60px -24px color-mix(in oklab, var(--c-ink) 45%, transparent),
-    inset 0 1px 0 color-mix(in oklab, #fff 48%, transparent),
-    0 0 0 1px color-mix(in oklab, #fff 8%, transparent);
+    0 24px 64px -24px rgba(0, 0, 0, .9),
+    inset 0 1px 0 rgba(255, 255, 255, .08),
+    0 0 0 1px rgba(255, 255, 255, .04);
+}
+.menu[data-variant="video"] .item {
+  min-height: 34px;
+  padding: 0 10px;
+  color: rgba(255, 255, 255, .82);
+  font-size: 12.5px;
+}
+.menu[data-variant="video"] .item[data-highlighted] {
+  color: #fff;
+}
+.menu[data-variant="video"] .item[data-disabled] {
+  opacity: .38;
+}
+.menu[data-variant="video"] .icon {
+  color: rgba(255, 255, 255, .5);
 }
 .menu[data-variant="video"] .highlight {
-  background: color-mix(in oklab, var(--c-ink) 7%, transparent);
+  background: rgba(255, 255, 255, .1);
 }
 .menu[data-variant="video"] .hint {
   max-width: 12em;
   overflow: hidden;
+  color: rgba(255, 255, 255, .4);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-:global([data-theme="dark"]) .menu[data-variant="video"] {
-  border-color: color-mix(in oklab, #fff 13%, transparent);
-  box-shadow:
-    0 22px 60px -24px rgba(0, 0, 0, .85),
-    inset 0 1px 0 rgba(255, 255, 255, .1),
-    0 0 0 1px rgba(255, 255, 255, .04);
+.menu[data-variant="video"] .separator {
+  background: rgba(255, 255, 255, .1);
 }
 @media (prefers-reduced-transparency: reduce) {
   .menu[data-variant="video"] {
-    background: var(--surface-raised);
+    background: #111216;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }

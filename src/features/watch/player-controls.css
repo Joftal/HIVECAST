@@ -207,25 +207,28 @@
   align-items: center;
 }
 
+/* 音量浮层与画质菜单同一材质：视频内始终深色玻璃，不跟随浅色主题。 */
 .player-volume-popover {
   display: flex;
   width: 44px;
   height: 128px;
   flex-direction: column;
   align-items: center;
-  border: 1px solid color-mix(in oklab, var(--c-line) 65%, transparent);
+  border: 1px solid rgba(255, 255, 255, .12);
   border-radius: 10px;
-  background: color-mix(in oklab, var(--c-surface) 82%, transparent);
+  background: rgba(17, 18, 22, .88);
   padding: 9px 6px 7px;
-  color: var(--c-ink);
+  color: rgba(255, 255, 255, .92);
   box-shadow:
-    0 20px 44px -20px color-mix(in oklab, var(--c-ink) 46%, transparent),
-    inset 0 1px 0 color-mix(in oklab, #fff 42%, transparent);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    0 24px 64px -24px rgba(0, 0, 0, .9),
+    inset 0 1px 0 rgba(255, 255, 255, .08),
+    0 0 0 1px rgba(255, 255, 255, .04);
+  backdrop-filter: blur(24px) saturate(1.45);
+  -webkit-backdrop-filter: blur(24px) saturate(1.45);
 }
 
 .player-volume-popover__value {
+  color: #fff;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
@@ -238,11 +241,11 @@
 }
 
 .player-volume-popover .hv-volume:focus-visible {
-  outline-color: color-mix(in oklab, var(--c-accent) 72%, transparent);
+  outline-color: color-mix(in oklab, var(--c-accent) 58%, #fff);
 }
 
 .player-volume-popover .hv-volume__rail {
-  background: color-mix(in oklab, var(--c-ink) 20%, transparent);
+  background: rgba(255, 255, 255, .2);
 }
 
 .player-volume-popover .hv-volume__fill {
@@ -252,10 +255,10 @@
 .player-volume-popover .hv-volume__thumb {
   width: 14px;
   height: 14px;
-  background: var(--c-surface);
+  background: #fff;
   box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--c-ink) 12%, transparent),
-    0 1px 5px color-mix(in oklab, var(--c-ink) 32%, transparent);
+    0 0 0 1px rgba(255, 255, 255, .22),
+    0 1px 5px rgba(0, 0, 0, .55);
 }
 
 .player-controls__time {
@@ -275,22 +278,48 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .player-volume-popover {
-    background: var(--c-surface);
+    background: #111216;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
 }
 
-/* Bilibili live danmaku panel: 298px wide, theme-aware glass surface, project accent. */
+/* Bilibili live danmaku panel: 298px wide, always-dark glass shared with the quality menu.
+   局部覆盖两套 token：--c-* 给 Tailwind 控件，Arc 变量给 Segmented/Checkbox/SelectMenu。 */
 .dm-settings-anchor {
   width: calc(100% - 36px);
   max-width: 298px;
   max-height: calc(100% - 46px);
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-color: rgba(255, 255, 255, .24) transparent;
 }
 
 .dm-settings {
+  --c-surface: rgba(255, 255, 255, .14);
+  --c-raised: rgba(255, 255, 255, .06);
+  --c-line: rgba(255, 255, 255, .12);
+  --c-line-strong: rgba(255, 255, 255, .22);
+  --c-ink: #fff;
+  --c-ink-soft: rgba(255, 255, 255, .86);
+  --c-muted: rgba(255, 255, 255, .6);
+  --c-faint: rgba(255, 255, 255, .42);
+  --c-accent-text: color-mix(in oklab, var(--c-accent) 55%, #fff);
+  --c-accent-soft: rgba(255, 255, 255, .12);
+  --c-accent-line: rgba(255, 255, 255, .2);
+
+  --surface: rgba(255, 255, 255, .08);
+  --surface-raised: rgba(255, 255, 255, .12);
+  --surface-muted: rgba(255, 255, 255, .1);
+  --foreground: #fff;
+  --border: rgba(255, 255, 255, .14);
+  --border-strong: rgba(255, 255, 255, .24);
+  --text-secondary: rgba(255, 255, 255, .72);
+  --text-muted: rgba(255, 255, 255, .48);
+  --control-track: rgba(255, 255, 255, .22);
+  --control-track-hover: rgba(255, 255, 255, .32);
+  --control-thumb: #fff;
+
   --dm-accent: var(--c-accent);
   --dm-yellow: var(--c-accent-text);
   --dm-text: var(--c-ink);
@@ -298,15 +327,17 @@
   --dm-line: var(--c-line);
   width: 100%;
   overflow: hidden;
-  border: 1px solid color-mix(in oklab, var(--c-line) 65%, transparent);
+  border: 1px solid rgba(255, 255, 255, .12);
   border-radius: 10px;
-  background: color-mix(in oklab, var(--c-surface) 78%, transparent);
+  background: rgba(17, 18, 22, .88);
   color: var(--dm-text);
+  color-scheme: dark;
   box-shadow:
-    0 20px 50px -22px color-mix(in oklab, var(--c-ink) 42%, transparent),
-    inset 0 1px 0 color-mix(in oklab, #fff 42%, transparent);
-  backdrop-filter: blur(22px) saturate(1.4);
-  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+    0 24px 64px -24px rgba(0, 0, 0, .9),
+    inset 0 1px 0 rgba(255, 255, 255, .08),
+    0 0 0 1px rgba(255, 255, 255, .04);
+  backdrop-filter: blur(24px) saturate(1.45);
+  -webkit-backdrop-filter: blur(24px) saturate(1.45);
 }
 
 .dm-settings__body {
@@ -433,6 +464,15 @@
   color: var(--dm-text);
 }
 
+/* 面板 overflow:hidden 会裁掉默认外轮廓，改成内描边保证键盘焦点可见。 */
+.dm-settings__footer:focus-visible,
+.dm-settings__header:focus-visible {
+  outline: 2px solid var(--dm-accent);
+  outline-offset: -2px;
+  background: color-mix(in oklab, var(--dm-accent) 16%, transparent);
+  color: var(--dm-text);
+}
+
 .dm-settings__header {
   height: 40px;
   gap: 5px;
@@ -469,7 +509,7 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .dm-settings {
-    background: var(--c-surface);
+    background: #111216;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }

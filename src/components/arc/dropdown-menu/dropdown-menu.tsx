@@ -13,8 +13,10 @@ export interface DropdownMenuProps {
   label: string;
   items: DropdownItem[];
   icon?: ReactNode;
-  /** default: form field plate; bare: toolbar text button; chip: 与 PageChip 同尺寸的筛选芯片; dark: in-video overlay; video: in-video trigger with theme-aware menu. */
+  /** default: form field plate; bare: toolbar text button; chip: 与 PageChip 同尺寸的筛选芯片; dark: in-video overlay; video: in-video trigger with an always-dark glass menu. */
   variant?: "default" | "bare" | "chip" | "dark" | "video";
+  /** 单独指定菜单表面；默认跟随 variant。用于深色面板里「触发器是表单、菜单是深色玻璃」的组合。 */
+  menuVariant?: "default" | "dark" | "video";
   size?: "sm" | "md";
   align?: "start" | "center" | "end";
   side?: "top" | "right" | "bottom" | "left";
@@ -62,7 +64,7 @@ function TriggerLabel({ text, morph }: { text: string; morph: boolean }) {
   </motion.span>;
 }
 
-export function DropdownMenu({ label, items, icon, variant = "default", size = "sm", align = "end", side = "bottom", disabled = false, active = false, ariaLabel, iconOnly = false, morphLabel = true, className, footer, onOpenChange }: DropdownMenuProps) {
+export function DropdownMenu({ label, items, icon, variant = "default", menuVariant, size = "sm", align = "end", side = "bottom", disabled = false, active = false, ariaLabel, iconOnly = false, morphLabel = true, className, footer, onOpenChange }: DropdownMenuProps) {
   const reduced = useReducedMotion();
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const pointer = useRef(false);
@@ -92,7 +94,7 @@ export function DropdownMenu({ label, items, icon, variant = "default", size = "
       aria-label={ariaLabel ?? label}
       type="button"
     >{icon && <span className={styles.triggerIcon} aria-hidden="true">{icon}</span>}{iconOnly ? null : <TriggerLabel text={label} morph={morphLabel}/>}{iconOnly ? null : <ChevronDown className={styles.chevron} size={15} strokeWidth={1.8} aria-hidden="true"/>}</DropdownPrimitive.Trigger>
-    <DropdownPrimitive.Portal><DropdownPrimitive.Content className={styles.menu} data-variant={variant} sideOffset={6} align={align} side={side} collisionPadding={12} loop onFocus={onMenuFocus} onPointerMoveCapture={() => { pointer.current = true; }} onKeyDownCapture={() => { pointer.current = false; }}>
+    <DropdownPrimitive.Portal><DropdownPrimitive.Content className={styles.menu} data-variant={menuVariant ?? variant} sideOffset={6} align={align} side={side} collisionPadding={12} loop onFocus={onMenuFocus} onPointerMoveCapture={() => { pointer.current = true; }} onKeyDownCapture={() => { pointer.current = false; }}>
       {/* One highlight glides between items for the pointer and jumps instantly for the keyboard. */}
       <motion.span className={styles.highlight} data-tone={highlight?.danger ? "danger" : undefined} aria-hidden="true" initial={false} animate={highlight ? { y: highlight.top, height: highlight.height, opacity: 1 } : { opacity: 0 }} transition={{ default: highlight?.glide && !reduced ? motionTokens.spring.snappy : { duration: 0 }, opacity: { duration: reduced ? 0 : .08 } }}/>
       {items.map((item, index) => <Fragment key={item.key ?? item.label}>{item.separatorBefore && <DropdownPrimitive.Separator className={styles.separator}/>}<DropdownPrimitive.Item className={[styles.item, item.destructive ? styles.destructive : ""].filter(Boolean).join(" ")} data-tone={item.destructive ? "danger" : undefined} style={{ "--i": index } as CSSProperties} disabled={item.disabled} onSelect={(event) => { if (item.keepOpen) event.preventDefault(); item.onSelect?.(); }}>{item.icon && <span className={styles.icon} aria-hidden="true">{item.icon}</span>}<span className={styles.itemLabel}>{item.label}</span>{item.hint && <span className={styles.hint}>{item.hint}</span>}</DropdownPrimitive.Item></Fragment>)}

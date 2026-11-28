@@ -606,11 +606,14 @@ export default function Player({
   const playbackPct = durationMs && durationMs > 0 ? Math.min(100, ((scrubMs ?? positionMs) / durationMs) * 100) : 0;
   const droppedText = formatDroppedFrames(stats);
 
-  const qualityLabel =
-    quality?.options.find((option) => option.value === quality.value)?.label ?? t("watch.qn.auto");
   const autoLabel = quality?.actual
     ? t("watch.autoQuality", { q: quality.actual })
     : t("watch.qn.auto");
+  const qualityLabel =
+    quality?.value === 0
+      ? autoLabel
+      : (quality?.options.find((option) => option.value === quality.value)?.label ??
+        t("watch.qn.auto"));
   const lineLabel =
     lines?.options.find((option) => (option.value ?? null) === (lines.value ?? null))?.label ??
     t("watch.lineAuto");
@@ -624,11 +627,13 @@ export default function Player({
         keepOpen: true,
         onSelect: () => setLineMode(false),
       });
+      let lineNumber = 0;
       for (const option of lines.options) {
         const selected = (lines.value ?? null) === option.value;
+        if (option.value != null) lineNumber += 1;
         qualityItems.push({
           key: "line:" + (option.value ?? "auto"),
-          label: option.label,
+          label: option.value == null ? option.label : t("watch.lineN", { n: lineNumber }),
           hint: option.hint,
           separatorBefore: qualityItems.length === 1,
           icon: selected ? <Check size={15} className="text-accent-text" /> : <span />,
@@ -668,7 +673,8 @@ export default function Player({
       if (lines && lines.options.length > 0) {
         qualityItems.push({
           key: "line",
-          label: `${t("watch.line")} · ${lineLabel}`,
+          label: t("watch.line"),
+          hint: lineLabel,
           separatorBefore: true,
           icon: <ChevronRight size={15} strokeWidth={1.8} />,
           keepOpen: true,

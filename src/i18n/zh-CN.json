@@ -968,6 +968,19 @@
     "reload": "重新连接",
     "pip": "画中画",
     "autoQuality": "自动（{{q}}）",
+    "qualityText": {
+      "sd": "标清",
+      "sourceBitrate": "源码率",
+      "dolbyAtmos": "杜比全景声",
+      "originalTrueColor": "原画真彩"
+    },
+    "lineDefault": "默认线路",
+    "lineVendor": {
+      "aliyun": "阿里云",
+      "tencent": "腾讯云",
+      "huawei": "华为云",
+      "wangsu": "网宿"
+    },
     "lineN": "线路 {{n}}",
     "portrait": "竖屏优先",
     "dragHint": "拖动格子标题到另一格即可交换位置，拖动分割线可调大小",

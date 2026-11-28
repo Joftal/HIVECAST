@@ -968,6 +968,19 @@
     "reload": "Reconnect",
     "pip": "Picture in picture",
     "autoQuality": "Auto ({{q}})",
+    "qualityText": {
+      "sd": "SD",
+      "sourceBitrate": "Source bitrate",
+      "dolbyAtmos": "Dolby Atmos",
+      "originalTrueColor": "Original · True color"
+    },
+    "lineDefault": "Default line",
+    "lineVendor": {
+      "aliyun": "Alibaba Cloud",
+      "tencent": "Tencent Cloud",
+      "huawei": "Huawei Cloud",
+      "wangsu": "Wangsu"
+    },
     "lineN": "Line {{n}}",
     "portrait": "Portrait first",
     "dragHint": "Drag a cell title onto another cell to swap them; drag a divider to resize",

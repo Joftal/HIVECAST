@@ -96,6 +96,7 @@ export default function DanmakuSettingsPanel() {
                 onChange={(value) =>
                   prefs.set({ fontFamily: value as DanmakuFontFamily })
                 }
+                menuVariant="video"
                 className="w-[154px]"
               />
               <div className={cx("dm-settings__checkbox-row dm-settings__bold", prefs.bold && "is-checked")}>

@@ -52,6 +52,7 @@ import {
   type SessionSummary,
 } from "../../lib/ipc";
 import { codecLabel, recordingCodecSupported, videoCodecSupported } from "../../lib/codecSupport";
+import { lineText, qualityText, unavailableQualityHint } from "../../lib/platformText";
 import { mergeRoomViews, patchRoomView } from "./roomViewPatch";
 
 const PLATFORMS = ["bilibili", "douyu", "huya", "douyin"];
@@ -983,14 +984,18 @@ export default function MonitorPage({
         mode === "view" ? videoCodecSupported(quality.codec) : recordingCodecSupported(quality.codec);
       return {
         value: String(quality.qn),
-        label: quality.label,
+        label: qualityText(quality.label),
         hint: !quality.available
-          ? (quality.hint ?? t("watch.qualityUnavailable"))
+          ? unavailableQualityHint(
+              quality.label,
+              quality.hint,
+              t("watch.qualityUnavailable"),
+            )
           : !supported
             ? mode === "view"
               ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
               : t("monitor.recordingCodecUnsupported", { codec: codecLabel(quality.codec) })
-            : (quality.hint ?? undefined),
+            : (qualityText(quality.hint) || undefined),
         disabled: !quality.available || !supported,
       };
     });
@@ -1006,7 +1011,11 @@ export default function MonitorPage({
   };
 
   const lineOptions = [{ value: "", label: t("monitor.lineAuto") }].concat(
-    (lines ?? []).map((line) => ({ value: line.name, label: line.name, hint: line.quality })),
+    (lines ?? []).map((line) => ({
+      value: line.name,
+      label: lineText(line.name),
+      hint: qualityText(line.quality),
+    })),
   );
 
   const platformOptions = PLATFORMS.map((key) => ({
@@ -1116,7 +1125,7 @@ export default function MonitorPage({
     const startedAt = view.recording ? view.recording.startedAt : last?.startedAt;
     // 录制中优先用活动会话的实际画质：升级/降档只更新 session，
     // room.last_session_quality 要等本场结束才回写，直接用它会一直显示开录时的档位。
-    const shownQuality = view.recording?.quality || room.lastSessionQuality;
+    const shownQuality = qualityText(view.recording?.quality || room.lastSessionQuality) || null;
     const durationMs = last?.durationMs ?? 0;
     return (
       <div
@@ -1343,6 +1352,11 @@ export default function MonitorPage({
           .filter(Boolean)
           .join(" · ")
       : "—";
+    const targetQuality = qualityText(recording?.targetQuality);
+    const actualQuality = qualityText(recording?.quality);
+    const qualityMismatch = Boolean(
+      recording?.targetQuality && recording.targetQuality !== recording.quality,
+    );
     const roomTags = parseTags(room.tags);
     return createPortal(
       <div className="fixed inset-0 z-50 flex justify-end">
@@ -1549,15 +1563,13 @@ export default function MonitorPage({
                         <LiveDuration startedAt={recording.startedAt} />
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-faint">
-                        {recording.targetQn < 40000 &&
-                        recording.targetQuality &&
-                        recording.targetQuality !== recording.quality
+                        {recording.targetQn < 40000 && qualityMismatch
                           ? t("monitor.qualityTargetActual", {
-                              target: recording.targetQuality,
-                              actual: recording.quality || "—",
+                              target: targetQuality || "—",
+                              actual: actualQuality || "—",
                             })
-                          : recording.quality || "—"}{" "}
-                        · {recording.line || t("monitor.lineAuto")}
+                          : actualQuality || "—"}{" "}
+                        · {lineText(recording.line) || t("monitor.lineAuto")}
                       </div>
                     </div>
                   </div>
@@ -1651,7 +1663,7 @@ export default function MonitorPage({
                 { label: t("monitor.colArea"), value: room.areaName ?? "—" },
                 { label: t("monitor.statOnline"), value: room.online ? compactNumber(room.online, locale) : "—" },
                 { label: t("monitor.colQuality"), value: t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) }) },
-                { label: t("monitor.actualQuality"), value: room.lastSessionQuality ?? "—" },
+                { label: t("monitor.actualQuality"), value: qualityText(room.lastSessionQuality) || "—" },
                 { label: t("monitor.detailRecorded"), value: recordedLabel },
               ].map((item, index) => (
                 <div

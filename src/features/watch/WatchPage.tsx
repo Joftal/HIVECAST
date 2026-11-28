@@ -46,6 +46,7 @@ import {
   type RoomView,
   type ViewSlotInfo,
 } from "../../lib/ipc";
+import { lineText, qualityText, unavailableQualityHint } from "../../lib/platformText";
 import { whenViewsIdle } from "../../lib/viewLifecycle";
 import { useWatchPrefs } from "../../lib/watchPrefs";
 import { patchRoomView } from "../monitor/roomViewPatch";
@@ -1260,8 +1261,10 @@ function SlotCell({
   const degraded =
     session.requestedQn > 0 && session.actualQn > 0 && session.actualQn !== session.requestedQn;
   const actualQuality =
-    (session.quality ?? "").split(" · ")[0].trim() ||
-    t("watch.qn." + session.actualQn, { defaultValue: String(session.actualQn) });
+    qualityText((session.quality ?? "").split(" · ")[0].trim()) ||
+    (session.actualQn > 0
+      ? t("watch.qn." + session.actualQn, { defaultValue: String(session.actualQn) })
+      : "");
   // 画质直接从平台能力清单渲染；清单未到时只补一个当前档位，避免入口空标签。
   const qualityOptions: Array<{
     value: number;
@@ -1272,12 +1275,16 @@ function SlotCell({
     const supported = videoCodecSupported(quality.codec);
     return {
       value: quality.qn,
-      label: quality.label,
+      label: qualityText(quality.label),
       hint: !quality.available
-        ? (quality.hint ?? t("watch.qualityUnavailable"))
+        ? unavailableQualityHint(
+            quality.label,
+            quality.hint,
+            t("watch.qualityUnavailable"),
+          )
         : !supported
           ? t("watch.qualityCodecUnsupported", { codec: codecLabel(quality.codec) })
-          : (quality.hint ?? undefined),
+          : (qualityText(quality.hint) || undefined),
       disabled: !quality.available || !supported,
     };
   });
@@ -1307,11 +1314,17 @@ function SlotCell({
     { value: null as string | null, label: t("watch.lineAuto") },
     ...knownLines.map((line) => ({
       value: line.name,
-      label: line.name,
-      hint: line.quality,
+      label: lineText(line.name),
+      hint: qualityText(line.quality),
     })),
     ...(session.preferredLine != null && lines === null
-      ? [{ value: session.preferredLine, label: session.preferredLine, hint: session.preferredLine }]
+      ? [
+          {
+            value: session.preferredLine,
+            label: lineText(session.preferredLine),
+            hint: qualityText(session.preferredLine),
+          },
+        ]
       : []),
   ];
 
@@ -1403,7 +1416,9 @@ function SlotCell({
             quality={{
               value: session.requestedQn,
               options: qualityOptions,
-              actual: degraded ? actualQuality : undefined,
+              // 只有自动画质才把实际命中的档位交给播放器，菜单/入口显示“自动（蓝光）”。
+              // 手选档位时“自动”项保持纯文字，实际降级由顶部“↓ 超清”角标表达。
+              actual: session.requestedQn === 0 ? actualQuality || undefined : undefined,
               onChange: onQuality,
             }}
             lines={{
