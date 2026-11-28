@@ -3175,7 +3175,8 @@ impl Recorder {
                 if active.notify_error
                     && (failed_streak == 1 || failed_streak == FAILED_STREAK_LIMIT)
                 {
-                    emit_notice(app, "failed", room_id, &active.host_name, error.clone());
+                    let detail = error.as_deref().map(crate::i18n::translate);
+                    emit_notice(app, "failed", room_id, &active.host_name, detail);
                 }
             }
             _ => {}

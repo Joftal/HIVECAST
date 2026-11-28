@@ -178,21 +178,37 @@ pub fn is_low(path: &Path) -> bool {
     matches!(status(path), DiskStatus::Low)
 }
 
-/// 开录被拦时的说明文案（中文，直接进 UI 行内错误）。
+/// 开录被拦时的说明文案（直接进 UI 行内错误）。
 pub fn start_blocked_message(path: &Path) -> String {
     if !cached_root_ready(path) {
-        return format!(
-            "录制目录不可用，外接盘可能已断开（{}），已拒绝开录",
-            path.display()
-        );
+        return if crate::i18n::is_english() {
+            format!(
+                "Recording folder is unavailable; the external drive may be disconnected ({}). Recording was blocked.",
+                path.display()
+            )
+        } else {
+            format!(
+                "录制目录不可用，外接盘可能已断开（{}），已拒绝开录",
+                path.display()
+            )
+        };
     }
     match cached_free_bytes(path) {
+        Some(free) if crate::i18n::is_english() => format!(
+            "Not enough disk space ({}); at least {} is required to start recording.",
+            human(free),
+            human(MIN_START_FREE)
+        ),
         Some(free) => format!(
             "磁盘剩余空间不足（{}），至少需要 {} 才能开录",
             human(free),
             human(MIN_START_FREE)
         ),
-        None => "无法读取磁盘剩余空间，已拒绝开录".to_string(),
+        None => crate::i18n::text(
+            "无法读取磁盘剩余空间，已拒绝开录",
+            "Could not read free disk space; recording was blocked.",
+        )
+        .to_string(),
     }
 }
 

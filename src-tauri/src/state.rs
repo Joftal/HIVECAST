@@ -117,6 +117,8 @@ impl AppState {
         }
         db.reseal_credentials()?;
         let mut settings = crate::settings::load(&db);
+        // 后续错误序列化、系统通知都按这个语言输出。
+        crate::i18n::set_preference(&settings.language);
         db.locate_legacy_media(
             std::path::Path::new(&settings.media_root),
             db.get_setting(crate::settings::KEY_MEDIA_ROOT)?

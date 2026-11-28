@@ -13,6 +13,7 @@ mod error;
 mod ffmpeg;
 mod filename;
 mod huya_auth;
+mod i18n;
 #[cfg(windows)]
 mod install_receipt;
 mod instance;
@@ -54,6 +55,8 @@ use tauri_plugin_notification::NotificationExt;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     logging::init();
+    // 通知可能在设置读出来之前发出：先按系统语言初始化，AppState::init 会覆盖为设置值。
+    i18n::set_preference("system");
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "HIVECAST 进程启动");
 
     let app = tauri::Builder::default()
@@ -68,10 +71,17 @@ pub fn run() {
             let lock = match crate::instance::acquire(&paths.data_dir) {
                 Ok(lock) => lock,
                 Err(err) if err.kind() != std::io::ErrorKind::WouldBlock => {
-                    let message = format!(
-                        "无法访问 HIVECAST 数据目录 {}：{err}。请检查目录类型和写入权限。",
-                        paths.data_dir.display()
-                    );
+                    let message = if i18n::is_english() {
+                        format!(
+                            "Cannot access the HIVECAST data folder {}: {err}. Check the folder type and write permissions.",
+                            paths.data_dir.display()
+                        )
+                    } else {
+                        format!(
+                            "无法访问 HIVECAST 数据目录 {}：{err}。请检查目录类型和写入权限。",
+                            paths.data_dir.display()
+                        )
+                    };
                     tracing::error!("{message}");
                     let _ = handle
                         .notification()
@@ -83,12 +93,21 @@ pub fn run() {
                 }
                 Err(err) => {
                     tracing::warn!(%err, "已有实例在运行，本次启动退出");
-                    eprintln!("HIVECAST 已在运行，本次启动退出");
+                    eprintln!(
+                        "{}",
+                        i18n::text(
+                            "HIVECAST 已在运行，本次启动退出",
+                            "HIVECAST is already running. This launch will exit."
+                        )
+                    );
                     if let Err(err) = handle
                         .notification()
                         .builder()
                         .title("HIVECAST")
-                        .body("HIVECAST 已在运行，本次启动已退出")
+                        .body(i18n::text(
+                            "HIVECAST 已在运行，本次启动已退出",
+                            "HIVECAST is already running. This launch has exited.",
+                        ))
                         .show()
                     {
                         tracing::warn!(%err, "系统通知发送失败");
@@ -117,10 +136,19 @@ pub fn run() {
                 if let Err(err) = handle
                     .notification()
                     .builder()
-                    .title("HIVECAST 媒体目录已切换")
-                    .body(format!(
-                        "{configured} 当前不可用，新录像已改存到 {actual}；设置里已同步为后者"
+                    .title(i18n::text(
+                        "HIVECAST 媒体目录已切换",
+                        "HIVECAST media folder changed",
                     ))
+                    .body(if i18n::is_english() {
+                        format!(
+                            "{configured} is unavailable. New recordings are now saved to {actual}; the setting has been updated to the latter."
+                        )
+                    } else {
+                        format!(
+                            "{configured} 当前不可用，新录像已改存到 {actual}；设置里已同步为后者"
+                        )
+                    })
                     .show()
                 {
                     tracing::warn!(%err, "系统通知发送失败");
@@ -131,10 +159,19 @@ pub fn run() {
                 if let Err(err) = handle
                     .notification()
                     .builder()
-                    .title("HIVECAST 日志目录已切换")
-                    .body(format!(
-                        "{configured} 当前不可用，本次日志写入 {actual}；设置里仍保留原路径"
+                    .title(i18n::text(
+                        "HIVECAST 日志目录已切换",
+                        "HIVECAST log folder changed",
                     ))
+                    .body(if i18n::is_english() {
+                        format!(
+                            "{configured} is unavailable. Logs for this session are written to {actual}; the setting keeps the original path."
+                        )
+                    } else {
+                        format!(
+                            "{configured} 当前不可用，本次日志写入 {actual}；设置里仍保留原路径"
+                        )
+                    })
                     .show()
                 {
                     tracing::warn!(%err, "系统通知发送失败");
@@ -164,10 +201,19 @@ pub fn run() {
                         if let Err(err) = fallback_handle
                             .notification()
                             .builder()
-                            .title("HIVECAST 日志目录已切换")
-                            .body(format!(
-                                "{configured} 当前不可写，日志已改写到 {actual}；设置里仍保留原路径"
+                            .title(i18n::text(
+                                "HIVECAST 日志目录已切换",
+                                "HIVECAST log folder changed",
                             ))
+                            .body(if i18n::is_english() {
+                                format!(
+                                    "{configured} is not writable. Logs have been redirected to {actual}; the setting keeps the original path."
+                                )
+                            } else {
+                                format!(
+                                    "{configured} 当前不可写，日志已改写到 {actual}；设置里仍保留原路径"
+                                )
+                            })
                             .show()
                         {
                             tracing::warn!(%err, "系统通知发送失败");
@@ -324,6 +370,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::ui_language_set,
             commands::app_open_data_dir,
             commands::app_check_update,
             commands::ffmpeg_status,

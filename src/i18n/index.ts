@@ -1,5 +1,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { invoke } from "../lib/invoke";
+import { isTauri } from "../lib/ipc";
 import zhCN from "./zh-CN.json";
 import enUS from "./en-US.json";
 
@@ -47,6 +49,10 @@ export function setLanguagePreference(preference: "system" | Language) {
 function applyLanguage(lang: Language) {
   void i18n.changeLanguage(lang);
   document.documentElement.lang = lang;
+  // 后端错误与系统通知也要跟着切换；浏览器预览里没有 IPC。
+  if (isTauri()) {
+    void invoke("ui_language_set", { language: lang }).catch(() => {});
+  }
 }
 
 export default i18n;

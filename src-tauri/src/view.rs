@@ -572,7 +572,10 @@ impl ViewManager {
                             }
                             attempts += 1;
                             if attempts > MAX_RETRIES {
-                                let message = "转封装多次失败，已停止重连";
+                                let message = crate::i18n::text(
+                                    "转封装多次失败，已停止重连",
+                                    "Stream remuxing failed repeatedly; reconnecting has stopped.",
+                                );
                                 {
                                     let mut state = handle.lock();
                                     state.status = "error".into();
@@ -592,7 +595,13 @@ impl ViewManager {
                             {
                                 let mut state = handle.lock();
                                 state.status = "reconnecting".into();
-                                state.error = Some(format!("转封装中断，正在第 {attempts} 次重连"));
+                                state.error = Some(if crate::i18n::is_english() {
+                                    format!(
+                                        "Remuxing was interrupted; reconnecting (attempt {attempts})"
+                                    )
+                                } else {
+                                    format!("转封装中断，正在第 {attempts} 次重连")
+                                });
                             }
                             let wait = backoff(attempts);
                             {
@@ -616,9 +625,10 @@ impl ViewManager {
                         break;
                     }
                     attempts += 1;
-                    let message = err.to_string();
+                    let log_message = err.to_string();
+                    let message = err.localized_message();
                     if attempts > MAX_RETRIES {
-                        tracing::warn!(slot, room_id = %room.id, attempts, error = %message, "观看多次起播失败，放弃重连");
+                        tracing::warn!(slot, room_id = %room.id, attempts, error = %log_message, "观看多次起播失败，放弃重连");
                         {
                             let mut state = handle.lock();
                             state.status = "error".into();
@@ -629,7 +639,7 @@ impl ViewManager {
                         self.teardown(&handle).await;
                         break;
                     }
-                    tracing::warn!(slot, room_id = %room.id, attempt = attempts, max = MAX_RETRIES, error = %message, "观看起播失败，准备重连");
+                    tracing::warn!(slot, room_id = %room.id, attempt = attempts, max = MAX_RETRIES, error = %log_message, "观看起播失败，准备重连");
                     {
                         let mut state = handle.lock();
                         state.status = "reconnecting".into();

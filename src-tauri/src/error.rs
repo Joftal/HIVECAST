@@ -49,6 +49,16 @@ impl AppError {
         let path: PathBuf = path.into();
         AppError::Path(format!("{} ({})", path.display(), err))
     }
+
+    /// 展示给用户/写进通知的文案。日志仍用 Display 的中文原文。
+    pub fn localized_message(&self) -> String {
+        match self {
+            AppError::User(message) => crate::i18n::translate(message),
+            AppError::Platform { message, .. } => crate::i18n::translate(message),
+            AppError::Internal(message) => crate::i18n::translate(message),
+            other => other.to_string(),
+        }
+    }
 }
 
 impl From<crate::platform::PlatformError> for AppError {
@@ -65,7 +75,7 @@ impl serde::Serialize for AppError {
         use serde::ser::SerializeStruct;
         let mut st = serializer.serialize_struct("AppError", 2)?;
         st.serialize_field("code", self.code())?;
-        st.serialize_field("message", &self.to_string())?;
+        st.serialize_field("message", &self.localized_message())?;
         st.end()
     }
 }

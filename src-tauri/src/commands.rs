@@ -290,7 +290,7 @@ pub async fn room_add(
     if room.is_live && room.auto_record {
         if let Err(err) = state.recorder.start(&app, &state.broker, &room).await {
             tracing::warn!(target: "hivecast_lib::commands", room_id = %room.id, error = %err, "添加房间后自动开录失败");
-            state.recorder.set_error(&room.id, err.to_string());
+            state.recorder.set_error(&room.id, err.localized_message());
         }
     }
 
@@ -916,7 +916,7 @@ pub async fn rooms_import(
             .await
         {
             tracing::warn!(target: "hivecast_lib::commands", room_id = %room.id, error = %err, "导入后自动开录失败");
-            state.recorder.set_error(&room.id, err.to_string());
+            state.recorder.set_error(&room.id, err.localized_message());
         }
     }
 
@@ -998,7 +998,7 @@ pub async fn room_refresh(
                 .start_checked(&app, &state.broker, &fresh)
                 .await
             {
-                state.recorder.set_error(&room_id, err.to_string());
+                state.recorder.set_error(&room_id, err.localized_message());
             }
         }
     } else if state.recorder.is_recording(&room.id) {
@@ -1061,7 +1061,7 @@ pub async fn room_set_auto_record(
             .await
         {
             tracing::warn!(target: "hivecast_lib::commands", room_id = %id, error = %err, "开启自动录制后开录失败");
-            state.recorder.set_error(&id, err.to_string());
+            state.recorder.set_error(&id, err.localized_message());
         }
     } else if !enabled {
         // 解析线路可能已经跑了几秒：先打取消标记，让在途的自动开录在拉 ffmpeg 前退出。
@@ -1245,7 +1245,7 @@ pub async fn record_start(
     match state.recorder.start(&app, &state.broker, &room).await {
         Ok(_) => Ok(()),
         Err(err) => {
-            state.recorder.set_error(&id, err.to_string());
+            state.recorder.set_error(&id, err.localized_message());
             state.recorder.broadcast_room(&app, &id);
             Err(err)
         }
@@ -3204,12 +3204,19 @@ pub fn filename_preview(
 }
 
 #[tauri::command]
+pub(crate) fn ui_language_set(language: String) {
+    crate::i18n::set_effective(&language);
+}
+
+#[tauri::command]
 pub(crate) fn settings_preferences(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     patch: crate::settings::Preferences,
 ) -> Result<Settings, AppError> {
     let saved = crate::settings::save_preferences(&state.db, patch)?;
+    // 语言可能在本次保存里改了：先切后端文案，再刷新托盘。
+    crate::i18n::set_preference(&saved.language);
     crate::tray::refresh(&app);
     Ok(saved)
 }
@@ -3227,17 +3234,28 @@ pub async fn settings_update(
             return Err(err);
         }
     };
+    crate::i18n::set_preference(&saved.language);
     crate::settings::apply(&saved, &state.recorder);
     if let Err(reason) = crate::logging::apply_settings(&saved.log_dir, saved.log_retention_days) {
         tracing::warn!(error = %reason, "日志目录切换失败，已回落到默认目录");
         let pair = crate::logging::take_fallback();
-        let body = pair
-            .map(|(from, to)| format!("{from} 不可写，日志已改写到 {to}；设置里仍保留原路径"))
-            .unwrap_or(reason);
+        let body = match pair {
+            Some((from, to)) if crate::i18n::is_english() => format!(
+                "{from} is not writable. Logs have been redirected to {to}; the setting keeps the original path."
+            ),
+            Some((from, to)) => format!("{from} 不可写，日志已改写到 {to}；设置里仍保留原路径"),
+            None if crate::i18n::is_english() => {
+                "The log folder could not be changed; details are in the log.".to_string()
+            }
+            None => reason,
+        };
         if let Err(err) = app
             .notification()
             .builder()
-            .title("HIVECAST 日志目录已切换")
+            .title(crate::i18n::text(
+                "HIVECAST 日志目录已切换",
+                "HIVECAST log folder changed",
+            ))
             .body(body)
             .show()
         {

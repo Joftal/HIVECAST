@@ -1452,7 +1452,7 @@ async fn run_room_action(
             if let Err(err) = recorder.start_checked(app, broker, room).await {
                 // 自动开录可能每个检测周期失败一次：只在原因变化时告警 + 推送，
                 // 否则间隔 10 秒就是每 10 秒一条 WARN（C7）。
-                let message = err.to_string();
+                let message = err.localized_message();
                 let changed = recorder.last_error(&room.id).as_deref() != Some(message.as_str());
                 if changed {
                     tracing::warn!(room = %room.host_name, %err, "自动开录失败");
@@ -1489,8 +1489,12 @@ async fn check_room_error(
         return Outcome::Retry(secs as i64);
     }
     let hint = match &err {
-        PlatformError::RoomNotFound(_) => "房间不存在或已注销".to_string(),
-        other => other.to_string(),
+        PlatformError::RoomNotFound(_) => crate::i18n::text(
+            "房间不存在或已注销",
+            "The room does not exist or has been deactivated",
+        )
+        .to_string(),
+        other => crate::i18n::translate(&other.to_string()),
     };
     // 同一句失败只告警、只推一次事件：坏房间会被退避到几分钟一次，
     // 但两次失败之间间隔可能很久，期间不该反复让前端全量重拉（F1）。
