@@ -764,6 +764,8 @@ function renderHtml(feed) {
   .release-card::before {
     content: "";
     position: absolute;
+    /* Pseudo-elements are outside the global * reset; make the 12px ring border-box so it centers on the rail. */
+    box-sizing: border-box;
     left: -25px;
     top: 25px;
     width: 12px;
