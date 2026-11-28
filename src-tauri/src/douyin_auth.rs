@@ -534,7 +534,7 @@ async fn revalidate_inner(db: &Db, app: &AppHandle, force: bool) {
                     );
                     credential::set_status("douyin", "ok");
                     crate::account::emit_account_refresh(app);
-                    tracing::info!("抖音登录态已恢复");
+                    tracing::info!("抖音登录态复验通过");
                     recovered = true;
                 } else if row.account_name != account.name || row.avatar != account.avatar {
                     let _ = db.update_credential_profile(

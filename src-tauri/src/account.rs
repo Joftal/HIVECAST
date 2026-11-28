@@ -330,8 +330,18 @@ pub async fn bilibili_qr_poll(db: &Db, qrcode_key: &str) -> Result<QrPoll, AppEr
         ),
     };
 
-    if state == "expired" || state == "error" {
-        tracing::warn!(platform = "bilibili", state, message = %message, "扫码状态异常");
+    match state {
+        "expired" => tracing::info!(
+            platform = "bilibili",
+            message = %message,
+            "扫码二维码已失效"
+        ),
+        "error" => tracing::warn!(
+            platform = "bilibili",
+            message = %message,
+            "扫码轮询失败"
+        ),
+        _ => {}
     }
     if state == "confirmed" {
         tracing::info!(platform = "bilibili", "扫码已确认，开始校验登录态");
@@ -892,12 +902,21 @@ async fn refresh_bilibili_cookie_inner(
         refreshed_row
     };
     clear_stream_cache(app);
-    tracing::info!(
-        platform = "bilibili",
-        account = %refreshed_row.account_name,
-        refreshable = credential::has_refresh_token(&refreshed_row.cookie),
-        "B 站 Cookie 续期成功"
-    );
+    if confirm_failed {
+        tracing::info!(
+            platform = "bilibili",
+            account = %refreshed_row.account_name,
+            refreshable = credential::has_refresh_token(&refreshed_row.cookie),
+            "B 站 Cookie 已轮换，确认续期待下次重试"
+        );
+    } else {
+        tracing::info!(
+            platform = "bilibili",
+            account = %refreshed_row.account_name,
+            refreshable = credential::has_refresh_token(&refreshed_row.cookie),
+            "B 站 Cookie 续期成功"
+        );
+    }
     Ok(if confirm_failed {
         RefreshOutcome::ConfirmFailed
     } else {

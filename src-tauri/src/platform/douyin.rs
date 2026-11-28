@@ -162,7 +162,7 @@ impl DouyinAdapter {
             fresh_ttwid,
             fresh_cookies = cookie_parts.len(),
             has_ttwid,
-            "抖音房间页 Cookie"
+            "抖音房间页 Cookie 解析完成"
         );
         // 连 ttwid 都拿不到时，继续请求 enter 只会得到空 body。
         if !has_ttwid {

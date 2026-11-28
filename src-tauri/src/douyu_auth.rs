@@ -1002,7 +1002,7 @@ pub async fn revalidate(db: &Db, app: &AppHandle) {
                         );
                         crate::credential::set_status("douyu", "ok");
                         crate::account::emit_account_refresh(app);
-                        tracing::info!("斗鱼登录态已恢复");
+                        tracing::info!("斗鱼登录态复验通过");
                         true
                     }
                 };

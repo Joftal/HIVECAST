@@ -32,7 +32,7 @@ const PROFILE_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/self
 const REFERER: &str = "https://www.douyin.com/follow";
 /// 设置变更的检查粒度：间隔改小或关闭后，不必等完旧的睡眠周期。
 const POOL_TICK: Duration = Duration::from_secs(2);
-/// 启动后的首次扫描上限：监控间隔很长时也别让关注池干等一整个周期。
+/// 启动后的首次检查上限：监控间隔很长时也别让关注池干等一整个周期。
 const POOL_STARTUP_MAX: Duration = Duration::from_secs(25);
 const PROFILE_TTL: Duration = Duration::from_secs(600);
 
@@ -316,13 +316,31 @@ fn number_text(value: &Value) -> Option<String> {
 pub async fn refresh_pool(db: &Db, app: &AppHandle) -> anyhow::Result<PoolStats> {
     let pending = db.pending_douyin_follows().context("读取抖音关注池失败")?;
     if pending.is_empty() {
+        tracing::trace!(
+            target: "hivecast_lib::douyin_follow",
+            "抖音关注池为空，跳过扫描"
+        );
         return Ok(PoolStats::default());
     }
+    let pending_total = pending.len();
     let cookie = match login_cookie() {
         Ok(cookie) => cookie,
-        Err(_) => return Ok(PoolStats::default()),
+        Err(err) => {
+            tracing::debug!(
+                target: "hivecast_lib::douyin_follow",
+                pending = pending_total,
+                error = %err,
+                "抖音关注池有待转正关注，但登录态不可用，跳过扫描"
+            );
+            return Ok(PoolStats::default());
+        }
     };
     let _ = identity(&cookie).await?;
+    tracing::debug!(
+        target: "hivecast_lib::douyin_follow",
+        pending = pending_total,
+        "抖音关注池开始扫描待转正关注"
+    );
     let pending_by_uid: HashMap<String, DouyinFollow> = pending
         .into_iter()
         .map(|item| (item.uid.clone(), item))
@@ -371,6 +389,7 @@ pub async fn refresh_pool(db: &Db, app: &AppHandle) -> anyhow::Result<PoolStats>
 
     tracing::info!(
         target: "hivecast_lib::douyin_follow",
+        pending = pending_total,
         pages = stats.pages,
         matched = stats.matched,
         promoted = stats.promoted,
@@ -490,13 +509,13 @@ fn pool_interval(db: &Db) -> Option<Duration> {
     pool_interval_from_secs(crate::settings::load(db).monitor_interval_sec)
 }
 
-/// 首次扫描最多等 25 秒；监控间隔更短时按用户的间隔来。
+/// 首次检查最多等 25 秒；监控间隔更短时按用户的间隔来。
 fn pool_first_delay(interval: Duration) -> Duration {
     interval.min(POOL_STARTUP_MAX)
 }
 
-/// 关注池后台循环：启动后先扫一次，之后跟随「监控检测间隔」。
-/// 间隔为 0（关闭自动检测）时暂停扫描，改回正数后重新开始。
+/// 关注池后台循环：启动后先检查一次，之后跟随「监控检测间隔」。
+/// 间隔为 0（关闭自动检测）时暂停检查，改回正数后重新开始。
 pub async fn pool_loop(db: std::sync::Arc<Db>, app: AppHandle) {
     let mut interval = pool_interval(&db);
     let mut next_at = interval.map(|delay| Instant::now() + pool_first_delay(delay));
@@ -504,11 +523,11 @@ pub async fn pool_loop(db: std::sync::Arc<Db>, app: AppHandle) {
         Some(delay) => tracing::info!(
             target: "hivecast_lib::douyin_follow",
             interval_sec = delay.as_secs(),
-            "抖音关注池扫描已启动"
+            "抖音关注池后台检查已启动"
         ),
         None => tracing::info!(
             target: "hivecast_lib::douyin_follow",
-            "监控检测已关闭，抖音关注池暂停扫描"
+            "监控检测已关闭，抖音关注池暂停检查"
         ),
     }
     let mut settings_at = Instant::now();
@@ -521,14 +540,14 @@ pub async fn pool_loop(db: std::sync::Arc<Db>, app: AppHandle) {
                         tracing::info!(
                             target: "hivecast_lib::douyin_follow",
                             interval_sec = delay.as_secs(),
-                            "抖音关注池扫描间隔已更新"
+                            "抖音关注池检查间隔已更新"
                         );
                         next_at = Some(Instant::now() + delay);
                     }
                     None => {
                         tracing::info!(
                             target: "hivecast_lib::douyin_follow",
-                            "监控检测已关闭，抖音关注池暂停扫描"
+                            "监控检测已关闭，抖音关注池暂停检查"
                         );
                         next_at = None;
                     }
@@ -542,11 +561,6 @@ pub async fn pool_loop(db: std::sync::Arc<Db>, app: AppHandle) {
             let now = Instant::now();
             let due = next_at.is_none_or(|at| now >= at);
             if due {
-                tracing::debug!(
-                    target: "hivecast_lib::douyin_follow",
-                    interval_sec = delay.as_secs(),
-                    "抖音关注池开始扫描"
-                );
                 if let Err(err) = refresh_pool(&db, &app).await {
                     tracing::warn!(
                         target: "hivecast_lib::douyin_follow",

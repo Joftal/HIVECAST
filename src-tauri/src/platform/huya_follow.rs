@@ -186,7 +186,7 @@ pub async fn confirm_live(statuses: Vec<LiveStatus>) -> (Vec<LiveStatus>, usize)
                         target: "hivecast_lib::platform::huya_follow",
                         room = key,
                         error = %err,
-                        "虎牙批量状态复核失败，保留批量结果"
+                        "虎牙单房状态复核失败，保留批量结果"
                     );
                     (status, false)
                 }

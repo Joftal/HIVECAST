@@ -670,7 +670,7 @@ async fn fetch_session(room_key: &str) -> Result<DanmuSession, String> {
     let init_url = format!("{API}/room/v1/Room/room_init?id={room_key}");
     let init: Envelope<RoomInitData> = http::get_json_anon(&init_url, REFERER, &[])
         .await
-        .map_err(|err| format!("解析真实房间号失败：{err}"))?;
+        .map_err(|err| format!("获取真实房间号失败：{err}"))?;
     let real_id = init
         .data
         .map(|data| data.room_id)
@@ -925,7 +925,11 @@ async fn run_room(app: AppHandle, conn: Arc<RoomConn>) {
             match fetch_session(&conn.room.room_key).await {
                 Ok(found) => session = Some(found),
                 Err(err) => {
-                    tracing::warn!(room = %conn.room.room_key, %err, "弹幕服务器解析失败");
+                    tracing::warn!(
+                        room = %conn.room.room_key,
+                        %err,
+                        "获取弹幕会话信息失败"
+                    );
                     conn.set_error(err);
                     sleep_interruptible(&conn, retry_delay(backoff, &conn.room.room_key)).await;
                     backoff = (backoff * 2).min(RETRY_MAX);
@@ -2788,7 +2792,11 @@ async fn huya_once(
             ws.send(ws_binary(huya_verify_cookie_packet(cookie, uid)))
                 .await
                 .map_err(|err| format!("发送 Cookie 校验包失败：{err}"))?;
-            tracing::info!(room = %conn.room.room_key, uid, "虎牙弹幕使用登录态");
+            tracing::info!(
+                room = %conn.room.room_key,
+                uid,
+                "虎牙弹幕已发送登录态校验包，等待服务端确认"
+            );
         }
     } else {
         tracing::debug!(room = %conn.room.room_key, "虎牙弹幕使用匿名连接");
