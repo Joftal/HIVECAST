@@ -170,8 +170,8 @@ fn contains_user_content(dir: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
-// Chromium cache directories store opaque, regenerable blobs whose names vary by
-// runtime version. They are not evidence of user files.
+// Chromium-owned directories store opaque, regenerable data whose names vary
+// by runtime version. They are not evidence of user files.
 fn browser_cache_file(path: &Path) -> bool {
     const CACHE_DIRS: &[&str] = &[
         "Cache",
@@ -186,6 +186,7 @@ fn browser_cache_file(path: &Path) -> bool {
         "ShaderCache",
         "Service Worker",
         "CacheStorage",
+        "Subresource Filter",
     ];
     path.ancestors().skip(1).any(|ancestor| {
         ancestor
@@ -496,6 +497,34 @@ mod tests {
         fs::write(profile.join("Local State"), b"{}").unwrap();
         fs::write(gpu.join("f_000001"), b"cache").unwrap();
         fs::write(code.join("f_000002"), b"cache").unwrap();
+        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
+        clean_runtime(root.path(), Some(&[])).unwrap();
+        assert!(!webview.exists());
+    }
+
+    #[test]
+    fn clean_runtime_removes_profile_with_webview_component_files() {
+        let root = tempfile::tempdir().unwrap();
+        let webview = root.path().join("webview");
+        let profile = webview.join("EBWebView");
+        let files = [
+            "Default/Shared Dictionary/db-journal",
+            "Default/Shared Dictionary/cache/index",
+            "Default/Shared Dictionary/cache/index-dir/the-real-index",
+            "Default/shared_proto_db/metadata",
+            "Default/shared_proto_db/000003.log",
+            "Default/Site Characteristics Database/000003.log",
+            "Default/Sync Data/LevelDB/000003.log",
+            "GraphiteDawnCache/data_0",
+            "GrShaderCache/data_0",
+            "ShaderCache/data_0",
+            "Subresource Filter/Unindexed Rules",
+        ];
+        for file in files {
+            let path = profile.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"browser").unwrap();
+        }
         fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
         clean_runtime(root.path(), Some(&[])).unwrap();
         assert!(!webview.exists());
