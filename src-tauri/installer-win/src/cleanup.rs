@@ -119,7 +119,6 @@ fn clean_runtime(root: &Path, protected: Option<&[PathBuf]>) -> io::Result<()> {
                         // by this app is disposable. Imported/legacy trees stay in place.
                         if regular(&dir.join(".hivecast-webview"), false)
                             && fs::read(dir.join(".hivecast-webview"))? == b"HIVECAST WebView2 v1"
-                            && regular(&path.join("Local State"), false)
                             && !contains_user_content(&path)?
                         {
                             fs::remove_dir_all(&path)?;
@@ -154,6 +153,10 @@ fn contains_user_content(dir: &Path) -> io::Result<bool> {
                 continue;
             }
             if !regular(&path, false) {
+                // A file removed between read_dir and inspection is not user content.
+                if fs::symlink_metadata(&path).is_err() {
+                    continue;
+                }
                 return Ok(true);
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -167,9 +170,38 @@ fn contains_user_content(dir: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+// Chromium cache directories store opaque, regenerable blobs whose names vary by
+// runtime version. They are not evidence of user files.
+fn browser_cache_file(path: &Path) -> bool {
+    const CACHE_DIRS: &[&str] = &[
+        "Cache",
+        "Code Cache",
+        "DawnCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "GPUCache",
+        "GPUPersistentCache",
+        "GraphiteDawnCache",
+        "GrShaderCache",
+        "ShaderCache",
+        "Service Worker",
+        "CacheStorage",
+    ];
+    path.ancestors().skip(1).any(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| CACHE_DIRS.contains(&name))
+    })
+}
+
 // WebView2 owns an opaque profile. Keep it intact when a new runtime version
 // creates unfamiliar files or a user stores other content alongside browser data.
 fn browser_generated_file(name: &str, path: &Path) -> bool {
+    if browser_cache_file(path) {
+        return true;
+    }
+
     const KNOWN: &[&str] = &[
         "Last Version",
         "Local State",
@@ -192,12 +224,15 @@ fn browser_generated_file(name: &str, path: &Path) -> bool {
         "Network Action Predictor",
         "Preferences",
         "Preferences.bak",
+        "QuotaManager",
         "README",
         "Secure Preferences",
         "Secure Preferences.bak",
         "ServerCertificate",
         "settings_diagnostic.log",
         "Top Sites",
+        "TransportSecurity",
+        "Visited Links",
         "Vpn Tokens",
         "Web Data",
         "CURRENT",
@@ -447,5 +482,35 @@ mod tests {
         assert_eq!(fs::read(dir.join("project.txt")).unwrap(), b"user");
         assert!(!dir.join("secret.bin").exists());
         assert!(!dir.join("hivecast.db").exists());
+    }
+
+    #[test]
+    fn clean_runtime_removes_profile_with_unknown_cache_blobs() {
+        let root = tempfile::tempdir().unwrap();
+        let webview = root.path().join("webview");
+        let profile = webview.join("EBWebView");
+        let gpu = profile.join("Default/GPUCache");
+        let code = profile.join("Default/Code Cache/js");
+        fs::create_dir_all(&gpu).unwrap();
+        fs::create_dir_all(&code).unwrap();
+        fs::write(profile.join("Local State"), b"{}").unwrap();
+        fs::write(gpu.join("f_000001"), b"cache").unwrap();
+        fs::write(code.join("f_000002"), b"cache").unwrap();
+        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
+        clean_runtime(root.path(), Some(&[])).unwrap();
+        assert!(!webview.exists());
+    }
+
+    #[test]
+    fn clean_runtime_keeps_profile_with_unfamiliar_user_file() {
+        let root = tempfile::tempdir().unwrap();
+        let webview = root.path().join("webview");
+        let profile = webview.join("EBWebView");
+        fs::create_dir_all(profile.join("Default")).unwrap();
+        fs::write(profile.join("Local State"), b"{}").unwrap();
+        fs::write(profile.join("notes.txt"), b"user").unwrap();
+        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
+        clean_runtime(root.path(), Some(&[])).unwrap();
+        assert!(profile.join("notes.txt").exists());
     }
 }

@@ -255,13 +255,27 @@ jobs:
             exit 1
           }
           Stop-Process -Id $p.Id -Force
-          Start-Sleep -Seconds 1
+          # WebView2 子进程可能比主进程晚退出；强杀后先等它们释放 webview 目录。
+          $webviewWait = [DateTime]::UtcNow.AddSeconds(15)
+          while ([DateTime]::UtcNow -lt $webviewWait) {
+            $running = @(Get-Process -Name msedgewebview2 -ErrorAction SilentlyContinue)
+            if ($running.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 250
+          }
+          if ($running.Count -gt 0) {
+            $running | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+          }
 
           # 验证 Windows 安装目录优先模式：data / cache / logs / webview / Recording 全部落在安装目录内。
           foreach ($sub in @("data\hivecast.db", "data\secret.bin", "cache", "logs", "webview", "Recording")) {
             if (-not (Test-Path -LiteralPath (Join-Path $installDir $sub))) {
               throw "安装目录优先模式未在安装目录生成预期路径：$sub"
             }
+          }
+          $webviewMarker = Join-Path $installDir "webview\.hivecast-webview"
+          if (-not (Test-Path -LiteralPath $webviewMarker)) {
+            throw "安装目录优先模式未写入 WebView2 创建标记：$webviewMarker"
           }
 
           Invoke-Installer $uninstExe @("--uninstall", "--silent", "--dir", $installDir)
@@ -277,6 +291,11 @@ jobs:
           # 默认卸载应清除程序与运行期缓存/日志/webview，仅保留用户数据 data/ 与录像目录 Recording/。
           $remaining = @(Get-ChildItem -Force -LiteralPath $installDir | Select-Object -ExpandProperty Name | Sort-Object)
           if (($remaining -join ',') -ne '.hivecast-install,data,Recording') {
+            if (Test-Path -LiteralPath (Join-Path $installDir "webview")) {
+              Get-ChildItem -Force -Recurse -LiteralPath (Join-Path $installDir "webview") | ForEach-Object {
+                Write-Host ("webview 残留: " + $_.FullName.Substring($installDir.Length + 1))
+              }
+            }
             throw "默认卸载后安装目录残留不符合预期（期望安装标记、data、Recording）：$($remaining -join ', ')"
           }
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "data\hivecast.db"))) {
