@@ -4,7 +4,11 @@ use rusqlite::{Connection, OpenFlags};
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+const WEBVIEW_MARKER: &str = ".hivecast-webview";
+const WEBVIEW_MARKER_CONTENT: &[u8] = b"HIVECAST WebView2 v1";
 
 fn regular(path: &Path, directory: bool) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| {
@@ -21,6 +25,30 @@ fn regular(path: &Path, directory: bool) -> bool {
             m.is_file()
         }
     })
+}
+
+fn owned_webview(dir: &Path) -> bool {
+    let marker = dir.join(WEBVIEW_MARKER);
+    regular(&marker, false) && fs::read(marker).is_ok_and(|value| value == WEBVIEW_MARKER_CONTENT)
+}
+
+fn remove_webview_profile(path: &Path) -> io::Result<()> {
+    // WebView2 children can briefly keep profile files open after the app exits.
+    // Retry within the uninstall request, but still fail loudly if the profile stays locked.
+    let mut last = None;
+    for attempt in 0..5 {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt < 4 {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("删除 WebView2 缓存失败")))
 }
 
 pub fn product_db(dir: &Path) -> Option<Connection> {
@@ -115,13 +143,12 @@ fn clean_runtime(root: &Path, protected: Option<&[PathBuf]>) -> io::Result<()> {
                         }
                     }
                     "EBWebView" => {
-                        // Treat a browser profile as opaque. Only the directory allocated
-                        // by this app is disposable. Imported/legacy trees stay in place.
-                        if regular(&dir.join(".hivecast-webview"), false)
-                            && fs::read(dir.join(".hivecast-webview"))? == b"HIVECAST WebView2 v1"
-                            && !contains_user_content(&path)?
-                        {
-                            fs::remove_dir_all(&path)?;
+                        // The marker is written before WebView2 creates the profile. Once
+                        // present, EBWebView is this app's disposable runtime cache; WebView2
+                        // adds opaque files across runtime versions, so content sniffing is
+                        // not a stable ownership test. Registered media was skipped above.
+                        if owned_webview(&dir) {
+                            remove_webview_profile(&path)?;
                         }
                     }
                     _ => {}
@@ -131,186 +158,12 @@ fn clean_runtime(root: &Path, protected: Option<&[PathBuf]>) -> io::Result<()> {
                 fs::remove_file(&path)?;
             }
         }
-        if parent == "webview"
-            && !dir.join("EBWebView").exists()
-            && regular(&dir.join(".hivecast-webview"), false)
-            && fs::read(dir.join(".hivecast-webview"))? == b"HIVECAST WebView2 v1"
-        {
-            fs::remove_file(dir.join(".hivecast-webview"))?;
+        if parent == "webview" && !dir.join("EBWebView").exists() && owned_webview(&dir) {
+            fs::remove_file(dir.join(WEBVIEW_MARKER))?;
         }
         remove_empty(&dir)?;
     }
     Ok(())
-}
-
-fn contains_user_content(dir: &Path) -> io::Result<bool> {
-    let mut pending = vec![dir.to_owned()];
-    while let Some(parent) = pending.pop() {
-        for entry in fs::read_dir(parent)? {
-            let path = entry?.path();
-            if regular(&path, true) {
-                pending.push(path);
-                continue;
-            }
-            if !regular(&path, false) {
-                // A file removed between read_dir and inspection is not user content.
-                if fs::symlink_metadata(&path).is_err() {
-                    continue;
-                }
-                return Ok(true);
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                return Ok(true);
-            };
-            if !browser_generated_file(name, &path) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-// Chromium-owned directories store opaque, regenerable data whose names vary
-// by runtime version. They are not evidence of user files.
-fn browser_cache_file(path: &Path) -> bool {
-    const CACHE_DIRS: &[&str] = &[
-        "Cache",
-        "Code Cache",
-        "DawnCache",
-        "DawnGraphiteCache",
-        "DawnWebGPUCache",
-        "GPUCache",
-        "GPUPersistentCache",
-        "GraphiteDawnCache",
-        "GrShaderCache",
-        "ShaderCache",
-        "Service Worker",
-        "CacheStorage",
-        "Subresource Filter",
-    ];
-    path.ancestors().skip(1).any(|ancestor| {
-        ancestor
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| CACHE_DIRS.contains(&name))
-    })
-}
-
-// WebView2 owns an opaque profile. Keep it intact when a new runtime version
-// creates unfamiliar files or a user stores other content alongside browser data.
-fn browser_generated_file(name: &str, path: &Path) -> bool {
-    if browser_cache_file(path) {
-        return true;
-    }
-
-    const KNOWN: &[&str] = &[
-        "Last Version",
-        "Local State",
-        "Variations",
-        "VariationsRuntimeSeedV2",
-        "VariationsSafeSeedV2",
-        "VariationsSeedV2",
-        "BookmarkMergedSurfaceOrdering",
-        "declarative_performance_observer.db",
-        "DIPS",
-        "ExtensionActivityEdge",
-        "Favicons",
-        "favorites_diagnostic.log",
-        "History",
-        "LOCK",
-        "LOG",
-        "LOG.old",
-        "Login Data",
-        "Login Data For Account",
-        "Network Action Predictor",
-        "Preferences",
-        "Preferences.bak",
-        "QuotaManager",
-        "README",
-        "Secure Preferences",
-        "Secure Preferences.bak",
-        "ServerCertificate",
-        "settings_diagnostic.log",
-        "Top Sites",
-        "TransportSecurity",
-        "Visited Links",
-        "Vpn Tokens",
-        "Web Data",
-        "CURRENT",
-        "index",
-        "the-real-index",
-        "journal.baj",
-        "snapshot.baf",
-        "SessionRestoreLog",
-        "Cookies",
-        "Device Bound Sessions",
-        "Network Persistent State",
-        "NetworkDataMigrated",
-        "Reporting and NEL",
-        "SCT Auditing Pending Reports",
-        "Sdch Dictionaries",
-        "Trust Tokens",
-        "Trust Token Key Commitments",
-        "db",
-        "cache.db",
-        "metadata",
-        "settings.dat",
-        "throttle_store.dat",
-    ];
-    let base = ["-journal", "-shm", "-wal"]
-        .iter()
-        .find_map(|suffix| name.strip_suffix(suffix))
-        .unwrap_or(name);
-    if name == "cache.journal" && path.ancestors().any(|p| p.ends_with("GPUPersistentCache")) {
-        return true;
-    }
-    if KNOWN.contains(&base) {
-        return true;
-    }
-    let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if name.strip_prefix("MANIFEST-").is_some_and(digits)
-        || name.strip_prefix("data_").is_some_and(digits)
-        || name
-            .strip_suffix(".log")
-            .or_else(|| name.strip_suffix(".ldb"))
-            .is_some_and(digits)
-        || name
-            .strip_suffix("_0")
-            .or_else(|| name.strip_suffix("_1"))
-            .is_some_and(|s| s.len() == 16 && hex(s))
-        || name
-            .strip_prefix("BrowserMetrics-")
-            .and_then(|s| s.strip_suffix(".pma"))
-            .is_some_and(|s| s.split('-').all(hex))
-        || name.len() == 64 && hex(name)
-    {
-        return true;
-    }
-    let parent = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
-    if matches!(parent, "extensions_crx_cache" | "component_crx_cache") {
-        return name == "metadata.json";
-    }
-    if parent == "_metadata" {
-        return name == "verified_contents.json";
-    }
-    parent.split('.').all(digits)
-        && matches!(
-            name,
-            "manifest.json"
-                | "protocols.json"
-                | "crl-set"
-                | "crs.pb"
-                | "ct_config.pb"
-                | "kp_pinslist.pb"
-                | "keys.json"
-                | "LICENSE"
-                | "Microsoft.CognitiveServices.Speech.core.dll"
-        )
 }
 
 fn is_app_log(name: &str) -> bool {
@@ -474,6 +327,11 @@ mod tests {
         .unwrap();
         drop(db);
         let paths = protected_paths(&product_db(&dir).unwrap()).unwrap();
+        fs::write(
+            root.path().join("webview").join(WEBVIEW_MARKER),
+            WEBVIEW_MARKER_CONTENT,
+        )
+        .unwrap();
         fs::write(dir.join("secret.bin"), b"key").unwrap();
         fs::write(dir.join("project.txt"), b"user").unwrap();
         clean_runtime(root.path(), Some(&paths)).unwrap();
@@ -486,60 +344,44 @@ mod tests {
     }
 
     #[test]
-    fn clean_runtime_removes_profile_with_unknown_cache_blobs() {
+    fn clean_runtime_removes_owned_profile_with_arbitrary_files() {
         let root = tempfile::tempdir().unwrap();
         let webview = root.path().join("webview");
         let profile = webview.join("EBWebView");
-        let gpu = profile.join("Default/GPUCache");
-        let code = profile.join("Default/Code Cache/js");
-        fs::create_dir_all(&gpu).unwrap();
-        fs::create_dir_all(&code).unwrap();
+        fs::create_dir_all(profile.join("Default/SomeFutureComponent")).unwrap();
         fs::write(profile.join("Local State"), b"{}").unwrap();
-        fs::write(gpu.join("f_000001"), b"cache").unwrap();
-        fs::write(code.join("f_000002"), b"cache").unwrap();
-        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
+        fs::write(profile.join("Default/SomeFutureComponent/blob"), b"browser").unwrap();
+        fs::write(
+            profile.join("Default/notes.txt"),
+            b"not a whitelisted browser file",
+        )
+        .unwrap();
+        fs::write(webview.join(WEBVIEW_MARKER), WEBVIEW_MARKER_CONTENT).unwrap();
         clean_runtime(root.path(), Some(&[])).unwrap();
         assert!(!webview.exists());
     }
 
     #[test]
-    fn clean_runtime_removes_profile_with_webview_component_files() {
-        let root = tempfile::tempdir().unwrap();
-        let webview = root.path().join("webview");
-        let profile = webview.join("EBWebView");
-        let files = [
-            "Default/Shared Dictionary/db-journal",
-            "Default/Shared Dictionary/cache/index",
-            "Default/Shared Dictionary/cache/index-dir/the-real-index",
-            "Default/shared_proto_db/metadata",
-            "Default/shared_proto_db/000003.log",
-            "Default/Site Characteristics Database/000003.log",
-            "Default/Sync Data/LevelDB/000003.log",
-            "GraphiteDawnCache/data_0",
-            "GrShaderCache/data_0",
-            "ShaderCache/data_0",
-            "Subresource Filter/Unindexed Rules",
-        ];
-        for file in files {
-            let path = profile.join(file);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"browser").unwrap();
-        }
-        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
-        clean_runtime(root.path(), Some(&[])).unwrap();
-        assert!(!webview.exists());
-    }
-
-    #[test]
-    fn clean_runtime_keeps_profile_with_unfamiliar_user_file() {
+    fn clean_runtime_keeps_profile_without_creation_marker() {
         let root = tempfile::tempdir().unwrap();
         let webview = root.path().join("webview");
         let profile = webview.join("EBWebView");
         fs::create_dir_all(profile.join("Default")).unwrap();
-        fs::write(profile.join("Local State"), b"{}").unwrap();
-        fs::write(profile.join("notes.txt"), b"user").unwrap();
-        fs::write(webview.join(".hivecast-webview"), b"HIVECAST WebView2 v1").unwrap();
+        fs::write(profile.join("Default/notes.txt"), b"unowned").unwrap();
         clean_runtime(root.path(), Some(&[])).unwrap();
-        assert!(profile.join("notes.txt").exists());
+        assert!(profile.join("Default/notes.txt").exists());
+        assert!(!webview.join(WEBVIEW_MARKER).exists());
+    }
+
+    #[test]
+    fn clean_runtime_keeps_profile_with_foreign_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let webview = root.path().join("webview");
+        let profile = webview.join("EBWebView");
+        fs::create_dir_all(profile.join("Default")).unwrap();
+        fs::write(profile.join("Default/notes.txt"), b"unowned").unwrap();
+        fs::write(webview.join(WEBVIEW_MARKER), b"another app").unwrap();
+        clean_runtime(root.path(), Some(&[])).unwrap();
+        assert!(profile.join("Default/notes.txt").exists());
     }
 }
