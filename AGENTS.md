@@ -31,3 +31,10 @@ agent-desktop skills get platform
   `~/Library/Application Support/com.hivecast.desktop/hivecast.db`。
 - 应用未启动时可用 `agent-desktop launch com.hivecast.desktop --activate`；
   测试结束后用 `agent-desktop close-app HIVECAST` 正常退出。
+
+## Windows 真机测试
+
+- Windows 相关功能验证固定使用项目约定的远程 Windows 测试机；连接方式、源码路径和工具链位置见本地 `GEMINI.md`（仅本机，不入库）。
+- 测试前必须先在远端同步到 Mac 端最新提交：`git fetch origin && git pull --ff-only origin main`，确认 `git rev-parse HEAD` 与 Mac 一致、工作区干净；不要用旧构建做验收。
+- 远端 GUI 必须在交互桌面 Session 1 通过一次性计划任务启动；SSH 默认在 Session 0，直接启动会以 101 退出。
+- 安装/卸载测试只用 `%TEMP%` 下的独立目录，并确认没有既有 HIVECAST 卸载注册表项；不得操作真实 Cookie、账号数据或录像。测试后清理测试目录、注册表项和辅助脚本。
