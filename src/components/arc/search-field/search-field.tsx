@@ -6,10 +6,12 @@ import { Search, X as Xmark } from "lucide-react";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./search-field.module.css";
 
-export interface SearchFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
+export interface SearchFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "size"> {
   label: string;
   value: string;
   onValueChange: (value: string) => void;
+  /** Control height. Matches Button's size scale so toolbars line up. */
+  size?: "sm" | "md" | "lg";
   /** Keep the label for assistive tech but hide it visually (toolbars, compact panels). */
   hideLabel?: boolean;
   /** Accessible name for the clear button. */
@@ -21,7 +23,7 @@ export interface SearchFieldProps extends Omit<InputHTMLAttributes<HTMLInputElem
 }
 
 export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(function SearchField({
-  label, value, onValueChange, id, className, hideLabel, clearLabel = "Clear search", rootClassName, hint, onKeyDown, ...props
+  label, value, onValueChange, id, className, size = "md", hideLabel, clearLabel = "Clear search", rootClassName, hint, onKeyDown, ...props
 }, ref) {
   const generated = useId();
   const controlId = id ?? generated;
@@ -40,7 +42,7 @@ export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(functi
   return (
     <div className={[styles.field, rootClassName].filter(Boolean).join(" ")} data-label-hidden={hideLabel ? "true" : undefined}>
       <label htmlFor={controlId} className={hideLabel ? styles.labelHidden : undefined}>{label}</label>
-      <div className={styles.shell} data-filled={value ? "true" : undefined}>
+      <div className={styles.shell} data-size={size} data-filled={value ? "true" : undefined}>
         <Search width={18} height={18} aria-hidden="true" />
         <input {...props} ref={setRefs} id={controlId} type="search" value={value} onChange={event => onValueChange(event.target.value)}
           onKeyDown={event => {

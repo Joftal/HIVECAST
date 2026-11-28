@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { Check, Undo2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { setLanguagePreference, type Language } from "../../i18n";
+import i18n, { detectSystemLanguage, setLanguagePreference, type Language } from "../../i18n";
 import {
   appInfo,
   ffmpegStatus,
@@ -508,11 +508,13 @@ export default function SettingsView({
         }));
         // 存活的是「偏好」而不是解析后的语言：选「跟随系统」后再次保存也要把 system 写进 localStorage，
         // 否则下次启动仍会读到上一次的具体语言。
-        setLanguagePreference(result.language === "system" ? "system" : (result.language as Language));
+        const savedLanguage = result.language === "system" ? detectSystemLanguage() : (result.language as Language);
+        setLanguagePreference(result.language === "system" ? "system" : savedLanguage);
         onSaved(result);
         void loadLogs();
         void loadFfmpeg();
-        if (!options?.quiet) notify.success(t("settings.savedAll"));
+        // save 闭包捕获的是切换语言前的 t；提示文案要按刚保存的语言取，否则会滞后一版。
+        if (!options?.quiet) notify.success(i18n.t("settings.savedAll", { lng: savedLanguage }));
         return Object.fromEntries(Object.keys(changed).map((key) => [key, previous[key as keyof Settings]]));
       } catch (err) {
         notify.error(err);
@@ -660,7 +662,22 @@ export default function SettingsView({
   }, [query, t]);
 
   const renderBody = () => {
-    if (!settings) return <div className="py-10 text-center text-[12px] text-muted">{t("common.loading")}</div>;
+    if (!settings) {
+      return (
+        <div className="space-y-5" role="status" aria-live="polite">
+          <span className="sr-only">{t("common.loading")}</span>
+          {[0, 1, 2].map((section) => (
+            <div key={section} className="rounded-panel border border-line bg-surface px-5 py-4">
+              <div className="h-3.5 w-28 animate-pulse rounded bg-raised motion-reduce:animate-none" />
+              <div className="mt-4 space-y-3">
+                <div className="h-9 animate-pulse rounded-ctl bg-raised/80 motion-reduce:animate-none" />
+                <div className="h-9 animate-pulse rounded-ctl bg-raised/60 motion-reduce:animate-none" />
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
 
     if (query.trim()) {
       if (results.length === 0) {

@@ -1588,7 +1588,13 @@ export default function TasksPage({
       </PageToolbar>
 
       <PageBody className="pb-8">
-        {loaded && center.summary.rooms === 0 && allRuns.length === 0 && center.incidents.length === 0 ? (
+        {!loaded ? (
+          // 首帧 center 还是 EMPTY_CENTER；先别拿它渲染统计和平台卡，
+          // 否则会在真实数据到达前闪一下全 0 的仪表盘，再切到空态。
+          <div className="flex flex-1 items-center justify-center" aria-live="polite">
+            <span className="sr-only">{t("tasks.loading")}</span>
+          </div>
+        ) : center.summary.rooms === 0 && allRuns.length === 0 && center.incidents.length === 0 ? (
           <PageEmpty
             className="flex-1"
             title={t("tasks.emptyTitle")}

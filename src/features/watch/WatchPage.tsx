@@ -11,6 +11,7 @@ import DanmakuCanvas from "./DanmakuCanvas";
 import { codecLabel, videoCodecSupported } from "../../lib/codecSupport";
 import { useSecondsLeft } from "../../lib/countdown";
 import Player, { PlayerButton, type PlayerStats } from "./Player";
+import WatchSkeleton from "./WatchSkeleton";
 import { formatDroppedFrames } from "./playerStats";
 import SplitStage, { type DragPayload, type DropZone, type SplitStageHandle } from "./SplitStage";
 import {
@@ -95,7 +96,8 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   // 首帧还不知道上次的布局，先别把空布局写回去覆盖它。
-  const [booted, setBooted] = useState(false);
+  // 浏览器预览没有 Tauri 运行时，不存在要恢复的布局，直接视为已启动。
+  const [booted, setBooted] = useState(() => !isTauri());
   const [roomsLoaded, setRoomsLoaded] = useState(false);
   // 指针拖拽：不依赖 HTML5 DnD，WKWebView 里更可靠；拖拽中显示跟随指针的浮标。
   const [drag, setDrag] = useState<{ payload: DragPayload; x: number; y: number } | null>(null);
@@ -677,6 +679,9 @@ export default function WatchPage({ seed, onSeedApplied, onImmersiveChange }: Pr
     layoutOptions.find((option) =>
       option.kind === "portrait" ? portrait : !portrait && variant === option.kind,
     ) ?? layoutOptions[0];
+
+  // 布局还没恢复前先显示页面骨架：否则 count 初始为 0，会先闪一帧「还没有在观看」。
+  if (!booted) return <WatchSkeleton />;
 
   return (
     <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-canvas text-ink">

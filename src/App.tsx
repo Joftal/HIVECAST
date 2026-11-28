@@ -7,13 +7,11 @@ import { ToastStack } from "./components/arc/toast-stack/toast-stack";
 import { UndoToast } from "./components/arc/undo-toast/undo-toast";
 import ResizeHandles from "./components/ResizeHandles";
 import MonitorPage from "./features/monitor/MonitorPage";
-import type { PageKey } from "./features/settings/SettingsView";
+import TasksPage from "./features/tasks/TasksPage";
+import RoomRecordingsPage from "./features/media/RoomRecordingsPage";
+import SettingsView, { type PageKey } from "./features/settings/SettingsView";
 import type { WatchSeed } from "./features/watch/WatchPage";
-
-const RoomRecordingsPage = lazy(() => import("./features/media/RoomRecordingsPage"));
-const SettingsView = lazy(() => import("./features/settings/SettingsView"));
-const TasksPage = lazy(() => import("./features/tasks/TasksPage"));
-const WatchPage = lazy(() => import("./features/watch/WatchPage"));
+import WatchSkeleton from "./features/watch/WatchSkeleton";
 import { setLanguage, setLanguagePreference, type Language } from "./i18n";
 import appMark from "./assets/app-mark.png";
 import CloseDialog from "./features/close/CloseDialog";
@@ -40,6 +38,13 @@ import { suspendViews } from "./lib/viewLifecycle";
 import { useNotify } from "./lib/notify";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "./lib/theme";
 import { ThemeSwitch, type Theme, type ThemeSwitchVariant } from "@/components/arc/theme-switch/theme-switch";
+
+const loadWatchPage = () => import("./features/watch/WatchPage");
+const WatchPage = lazy(loadWatchPage);
+
+function preloadWatchPage() {
+  void loadWatchPage().catch(() => undefined);
+}
 
 type TabKey = "monitor" | "watch" | "tasks" | "settings";
 const PAGE_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
@@ -148,6 +153,23 @@ export default function App() {
   useEffect(() => {
     refreshFfmpeg();
   }, [refreshFfmpeg]);
+
+  // 观看页仍按 chunk 懒加载（播放器依赖较重），但在空闲时先取回来；
+  // 这样第一次点顶部“观看”通常不用再等，点得很快时还有页面骨架兜底。
+  useEffect(() => {
+    if (!isTauri()) return;
+    type IdleWindow = Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const idleWindow = window as IdleWindow;
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(preloadWatchPage, { timeout: 2500 });
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(preloadWatchPage, 1200);
+    return () => window.clearTimeout(handle);
+  }, []);
 
   // 撤销刚刚的默认保存：把保存前的快照写回，并同步主题/语言与通知开关。
   const undoSettingsSave = useCallback(async () => {
@@ -442,6 +464,8 @@ export default function App() {
               key={item.key}
               type="button"
               onClick={() => void requestTab(item.key)}
+              onPointerEnter={item.key === "watch" ? preloadWatchPage : undefined}
+              onFocus={item.key === "watch" ? preloadWatchPage : undefined}
               className={cx(
                 "focus-ring relative px-3 text-[12px] font-medium transition-colors",
                 tab === item.key ? "text-ink" : "text-muted hover:text-ink-soft",
@@ -505,7 +529,6 @@ export default function App() {
         transition={{ duration: reduceMotion ? 0 : 0.16, ease: PAGE_EASE }}
         className="flex min-h-0 flex-1 flex-col"
       >
-        <Suspense fallback={null}>
         {tab === "monitor" ? (
           roomFiles ? (
             <RoomRecordingsPage
@@ -529,11 +552,13 @@ export default function App() {
             />
           )
         ) : tab === "watch" ? (
-          <WatchPage
-            seed={watchSeed}
-            onSeedApplied={() => setWatchSeed(null)}
-            onImmersiveChange={setImmersive}
-          />
+          <Suspense fallback={<WatchSkeleton />}>
+            <WatchPage
+              seed={watchSeed}
+              onSeedApplied={() => setWatchSeed(null)}
+              onImmersiveChange={setImmersive}
+            />
+          </Suspense>
         ) : tab === "tasks" ? (
           <TasksPage
             seed={taskSeed}
@@ -577,7 +602,6 @@ export default function App() {
             }}
           />
         )}
-        </Suspense>
       </motion.main>
 
       {closeTasks ? (

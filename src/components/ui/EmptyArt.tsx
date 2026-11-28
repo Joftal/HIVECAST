@@ -65,12 +65,18 @@ export default function EmptyArt({ kind, size = 24 }: { kind: EmptyArtKind; size
   if (kind === "tasks") {
     return (
       <svg {...common}>
-        <path className="empty-art-draw" d="M3.5 6.2l1.5 1.5 2.6-2.8" />
-        <path d="M10.5 6.5h10" opacity="0.35" />
-        <path className="empty-art-draw empty-art-draw-2" d="M3.5 12.2l1.5 1.5 2.6-2.8" />
-        <path d="M10.5 12.5h10" opacity="0.35" />
-        <path className="empty-art-draw empty-art-draw-3" d="M3.5 18.2l1.5 1.5 2.6-2.8" />
-        <path d="M10.5 18.5h6" opacity="0.35" />
+        <g className="empty-art-task-row empty-art-task-row-1">
+          <circle className="empty-art-task-dot" cx="4.2" cy="6.4" r="1.65" />
+          <path className="empty-art-task-line" d="M9 6.5h11" />
+        </g>
+        <g className="empty-art-task-row empty-art-task-row-2">
+          <circle className="empty-art-task-dot" cx="4.2" cy="12" r="1.65" />
+          <path className="empty-art-task-line" d="M9 12h11" />
+        </g>
+        <g className="empty-art-task-row empty-art-task-row-3">
+          <circle className="empty-art-task-dot" cx="4.2" cy="17.6" r="1.65" />
+          <path className="empty-art-task-line" d="M9 17.5h7" />
+        </g>
       </svg>
     );
   }

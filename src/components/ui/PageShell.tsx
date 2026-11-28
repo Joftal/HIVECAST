@@ -148,7 +148,8 @@ export function PageSearch({
       placeholder={placeholder}
       clearLabel={clearLabel}
       spellCheck={false}
-      rootClassName={cx("w-[228px]", className)}
+      size="lg"
+      rootClassName={cx("w-[260px]", className)}
     />
   );
 }

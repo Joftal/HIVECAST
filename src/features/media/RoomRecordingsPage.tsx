@@ -267,7 +267,8 @@ export default function RoomRecordingsPage({
   // 已从服务端消费的片段数。点「+N」补组会往 items 里塞额外片段，
   // 不能用 items.length 当分页 offset，否则会跳过或重复后面的片段。
   const [loadedRows, setLoadedRows] = useState(0);
-  const [loading, setLoading] = useState(false);
+  // 首帧就是加载态：若从 false 起步，effect 生效前会先闪一帧「暂无录像」。
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [groupLoading, setGroupLoading] = useState<string | null>(null);
 
@@ -496,7 +497,10 @@ export default function RoomRecordingsPage({
   );
 
   useEffect(() => {
-    if (!hostId) return;
+    if (!hostId) {
+      setLoading(false);
+      return;
+    }
     void loadFiles(0);
   }, [loadFiles, hostId]);
 
@@ -1042,7 +1046,18 @@ export default function RoomRecordingsPage({
 
       <PageBody className="pb-5">
       {loading ? (
-          <div className="flex flex-1 items-center justify-center text-[12px] text-faint">{t("common.loading")}</div>
+          <div className="grid gap-3" style={GRID_STYLE} role="status" aria-live="polite">
+            <span className="sr-only">{t("common.loading")}</span>
+            {[0, 1, 2, 3, 4, 5].map((card) => (
+              <div key={card} className="overflow-hidden rounded-panel border border-line bg-surface">
+                <div className="aspect-video animate-pulse bg-raised motion-reduce:animate-none" />
+                <div className="space-y-2 px-3 py-2.5">
+                  <div className="h-3 w-4/5 animate-pulse rounded bg-raised motion-reduce:animate-none" />
+                  <div className="h-2.5 w-3/5 animate-pulse rounded bg-raised/70 motion-reduce:animate-none" />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : items.length === 0 ? (
           <PageEmpty
             className="flex-1"
