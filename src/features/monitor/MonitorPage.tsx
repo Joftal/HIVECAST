@@ -572,15 +572,16 @@ export default function MonitorPage({
     });
   }, [views]);
 
-  // 详情是「录制详情」抽屉，默认不展开；点行不再自动打开。
+  // 详情是「详情与设置」抽屉，默认不展开；点行不再自动打开。
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // 同一个抽屉既展示录制详情，也承载行菜单的「直播间设置」。
-  const [detailMode, setDetailMode] = useState<"detail" | "settings">("detail");
+  // 同一个抽屉既展示录制详情，也承载面板设置；点画质时直接滚到设置节。
+  const settingsSectionRef = useRef<HTMLHeadingElement | null>(null);
+  const pendingSettingsScroll = useRef<string | null>(null);
   // 任务中心的「打开直播间」跳过来时直接展开该房间详情。
   useEffect(() => {
     if (!seed) return;
+    pendingSettingsScroll.current = null;
     setSelectedId(seed.roomId);
-    setDetailMode("detail");
     onSeedApplied?.();
     // 只响应新的跳转请求；回调换引用不应重新打开抽屉。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -594,10 +595,22 @@ export default function MonitorPage({
   useEffect(() => {
     if (!selectedId) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedId(null);
+      if (event.key === "Escape") {
+        pendingSettingsScroll.current = null;
+        setSelectedId(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId]);
+  // 点画质打开抽屉后，等内容挂载再滚到「面板设置」，避免弹窗先停在顶部。
+  useEffect(() => {
+    if (!selectedId || pendingSettingsScroll.current !== selectedId) return;
+    const frame = window.requestAnimationFrame(() => {
+      pendingSettingsScroll.current = null;
+      settingsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [selectedId]);
 
   const [lines, setLines] = useState<LineInfo[] | null>(null);
@@ -1168,7 +1181,7 @@ export default function MonitorPage({
         <button
           type="button"
           onClick={() => {
-            setDetailMode("settings");
+            pendingSettingsScroll.current = room.id;
             setSelectedId(room.id);
           }}
           title={`${t("monitor.actualQuality")}: ${shownQuality ?? "—"}\n${t("monitor.targetQuality")}: ${t("monitor.qn." + room.recordQn, { defaultValue: String(room.recordQn) })}`}
@@ -1262,9 +1275,9 @@ export default function MonitorPage({
             items={[
               {
                 key: "detail",
-                label: t("monitor.recordDetail"),
+                label: t("monitor.detailSettings"),
                 onSelect: () => {
-                  setDetailMode("detail");
+                  pendingSettingsScroll.current = null;
                   setSelectedId(room.id);
                 },
               },
@@ -1272,14 +1285,6 @@ export default function MonitorPage({
                 key: "refresh",
                 label: t("monitor.refreshInfo"),
                 onSelect: () => refreshRoom(room.id),
-              },
-              {
-                key: "settings",
-                label: t("monitor.roomSettings"),
-                onSelect: () => {
-                  setDetailMode("settings");
-                  setSelectedId(room.id);
-                },
               },
               {
                 key: "files",
@@ -1344,15 +1349,16 @@ export default function MonitorPage({
         <button
           type="button"
           aria-label={t("monitor.closeDetail")}
-          onClick={() => setSelectedId(null)}
+          onClick={() => {
+            pendingSettingsScroll.current = null;
+            setSelectedId(null);
+          }}
           className="absolute inset-0 animate-fade-in bg-black/35 backdrop-blur-[2px]"
         />
         <aside className="relative flex h-full w-[min(440px,94vw)] animate-sheet flex-col border-l border-line bg-surface shadow-2xl">
           <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
             <div className="min-w-0">
-              <h2 className="text-[14px] font-semibold text-ink">
-                {detailMode === "settings" ? t("monitor.roomSettings") : t("monitor.recordDetail")}
-              </h2>
+              <h2 className="text-[14px] font-semibold text-ink">{t("monitor.detailSettings")}</h2>
               <p className="mt-0.5 truncate text-[11.5px] leading-4 text-muted">
                 {t("platformName." + room.platform)} · {room.roomKey}
               </p>
@@ -1360,7 +1366,10 @@ export default function MonitorPage({
             <div className="flex shrink-0 items-center gap-1">
               <button
                 type="button"
-                onClick={() => setSelectedId(null)}
+                onClick={() => {
+                  pendingSettingsScroll.current = null;
+                  setSelectedId(null);
+                }}
                 aria-label={t("monitor.closeDetail")}
                 className="focus-ring -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-ctl text-faint transition-colors hover:bg-raised hover:text-ink"
               >
@@ -1726,7 +1735,11 @@ export default function MonitorPage({
               <span aria-hidden>→</span>
             </button>
 
-            <h3 className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted">
+            <h3
+              ref={settingsSectionRef}
+              style={{ scrollMarginTop: "1rem" }}
+              className="mt-5 flex items-center gap-1 text-[11.5px] font-medium text-muted"
+            >
               {t("monitor.panelSettings")}
               <InfoTip content={t("monitor.tip.panelSettings")} />
             </h3>

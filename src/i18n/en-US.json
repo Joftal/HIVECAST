@@ -862,6 +862,7 @@
     "statusRecording": "Recording",
     "statusIdle": "Idle",
     "recordDetail": "Recording details",
+    "detailSettings": "Details & settings",
     "recordingCodecUnsupported": "Recording does not support {{codec}} yet",
     "rowActions": "Room actions",
     "refreshed": "Room info refreshed",

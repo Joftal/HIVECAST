@@ -862,6 +862,7 @@
     "statusRecording": "录制中",
     "statusIdle": "未录制",
     "recordDetail": "录制详情",
+    "detailSettings": "详情与设置",
     "recordingCodecUnsupported": "录制链路暂不支持 {{codec}}",
     "rowActions": "直播间操作",
     "refreshed": "直播间信息已刷新",
