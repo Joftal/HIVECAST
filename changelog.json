@@ -1,0 +1,495 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-28T08:40:34.184Z",
+  "repo": "Joftal/HIVECAST",
+  "latestStable": "1.0.2",
+  "latestAll": "1.0.2",
+  "releases": [
+    {
+      "version": "1.0.2",
+      "publishedAt": "2026-11-28",
+      "url": "https://github.com/Joftal/HIVECAST/releases/tag/v1.0.2",
+      "prerelease": false,
+      "notes": [
+        {
+          "kind": "feat",
+          "text": "本地录像改为全屏剧院播放器并收敛统计角标显示"
+        },
+        {
+          "kind": "feat",
+          "text": "新增主窗口大小位置与最大化状态记忆，兼容高分屏与多屏切换"
+        },
+        {
+          "kind": "fix",
+          "text": "按创建标记彻底清理 Windows WebView2 缓存"
+        },
+        {
+          "kind": "fix",
+          "text": "清理 Windows 卸载后残留的 WebView2 组件"
+        },
+        {
+          "kind": "fix",
+          "text": "清理 Windows 卸载后的 WebView2 缓存残留"
+        },
+        {
+          "kind": "fix",
+          "text": "兼容抖音无值裸 Cookie 片段并修复回放抽屉转封装后源文件操作状态同步，补充四平台双端实测验收文档"
+        },
+        {
+          "kind": "fix",
+          "text": "补齐 macOS RunEvent::Exit 窗口状态幂等补写，并补充 eae0408 复核与 macOS 实机验收文档"
+        },
+        {
+          "kind": "fix",
+          "text": "防止 Windows 卸载误删数据，修复旧库搬迁、窗口状态与设置竞态"
+        },
+        {
+          "kind": "fix",
+          "text": "精简关于界面版本展示并修复更新日志站点版本索引与时间轴样式"
+        },
+        {
+          "kind": "perf",
+          "text": "监控列表按房间增量刷新，减少全表重拉与重排"
+        },
+        {
+          "kind": "perf",
+          "text": "账号页统一为单网格卡片布局，合并已关联与可添加分区"
+        },
+        {
+          "kind": "perf",
+          "text": "全设置页统一收拢说明至 InfoTip，重组存储页卡片并清理 Windows 逐字路径前缀"
+        },
+        {
+          "kind": "fix",
+          "text": "lib.rs import 顺序以通过 CI cargo fmt 检查"
+        },
+        {
+          "kind": "other",
+          "text": "logs：修正日志字段与级别，补全排障上下文"
+        },
+        {
+          "kind": "other",
+          "text": "logs：修正平台日志描述与关注池检查时机"
+        },
+        {
+          "kind": "other",
+          "text": "记录 Windows 真机测试约定"
+        },
+        {
+          "kind": "other",
+          "text": "补充 macOS 三平台扫码登录与自动续期专项测试验收报告"
+        }
+      ],
+      "assets": [
+        {
+          "name": "HIVECAST-v1.0.2-macOS-universal.dmg",
+          "size": 31025040,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.2/HIVECAST-v1.0.2-macOS-universal.dmg"
+        },
+        {
+          "name": "HIVECAST-v1.0.2-Windows-x64-portable.zip",
+          "size": 14010638,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.2/HIVECAST-v1.0.2-Windows-x64-portable.zip"
+        },
+        {
+          "name": "HIVECAST-v1.0.2-Windows-x64-setup.exe",
+          "size": 16827768,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.2/HIVECAST-v1.0.2-Windows-x64-setup.exe"
+        },
+        {
+          "name": "SHA256SUMS.txt",
+          "size": 313,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.2/SHA256SUMS.txt"
+        }
+      ]
+    },
+    {
+      "version": "1.0.1",
+      "publishedAt": "2026-11-27",
+      "url": "https://github.com/Joftal/HIVECAST/releases/tag/v1.0.1",
+      "prerelease": false,
+      "notes": [
+        {
+          "kind": "fix",
+          "text": "支持 Windows 目录迁移或注册表丢失后就地覆盖升级并重新登记"
+        },
+        {
+          "kind": "fix",
+          "text": "隔离 Windows 卸载器与安装包职责，直接运行 uninstall.exe 默认进入卸载流程"
+        }
+      ],
+      "assets": [
+        {
+          "name": "HIVECAST-v1.0.1-macOS-universal.dmg",
+          "size": 30901317,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.1/HIVECAST-v1.0.1-macOS-universal.dmg"
+        },
+        {
+          "name": "HIVECAST-v1.0.1-Windows-x64-portable.zip",
+          "size": 13901138,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.1/HIVECAST-v1.0.1-Windows-x64-portable.zip"
+        },
+        {
+          "name": "HIVECAST-v1.0.1-Windows-x64-setup.exe",
+          "size": 14985940,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.1/HIVECAST-v1.0.1-Windows-x64-setup.exe"
+        },
+        {
+          "name": "SHA256SUMS.txt",
+          "size": 313,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.1/SHA256SUMS.txt"
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "publishedAt": "2026-11-27",
+      "url": "https://github.com/Joftal/HIVECAST/releases/tag/v1.0.0",
+      "prerelease": false,
+      "notes": [
+        {
+          "kind": "feat",
+          "text": "重设计账号管理界面，引入官方平台图标、分层筛选与独立认证弹窗"
+        },
+        {
+          "kind": "feat",
+          "text": "macOS 切换为 Universal 通用安装包，并对齐三端更新日志展示"
+        },
+        {
+          "kind": "feat",
+          "text": "Release 页面以提交记录分类更新日志为主体并精简更新安装说明"
+        },
+        {
+          "kind": "feat",
+          "text": "Windows 采用安装目录优先布局与卸载清理选项，修复 macOS 默认录像目录并移除历史数据迁移"
+        },
+        {
+          "kind": "feat",
+          "text": "重构关于界面，新增多源版本更新检测与 GitHub Pages 更新日志站"
+        },
+        {
+          "kind": "feat",
+          "text": "落地双端液态玻璃极简安装器并接入 CI 发布流水线"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：虚拟化历史并支持跨 Run 检索导出"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：事件时间线游标分页并停止终态轮询"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：按需加载任务时间线并恢复表格语义"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：支持历史增量加载与部分完成文案"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：完善收尾重试、部分入库与历史分组"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：新增阶段事件与真实任务时间线"
+        },
+        {
+          "kind": "feat",
+          "text": "tasks：新增任务中心全链路追踪 P1"
+        },
+        {
+          "kind": "feat",
+          "text": "monitor：下线媒体库并改为房间录制文件入口"
+        },
+        {
+          "kind": "feat",
+          "text": "monitor：新增虎牙关注导入与批量状态"
+        },
+        {
+          "kind": "feat",
+          "text": "huya：按登录态与源码率限制 4K 画质"
+        },
+        {
+          "kind": "feat",
+          "text": "account：虎牙扫码登录、Cookie 校验与自动续期"
+        },
+        {
+          "kind": "feat",
+          "text": "monitor：斗鱼单房批量并按登录失效/风控分流"
+        },
+        {
+          "kind": "fix",
+          "text": "系统关闭与休眠设置改为点选即生效，并区分 macOS 与 Windows 动态提示文案"
+        },
+        {
+          "kind": "fix",
+          "text": "补齐 Release 撤回触发并将 jsDelivr 刷新前移至 gh-pages 推送后"
+        },
+        {
+          "kind": "fix",
+          "text": "Windows 安装器浏览目录时自动补齐 HIVECAST 子目录并回溯定位父目录"
+        },
+        {
+          "kind": "fix",
+          "text": "加固 Windows 卸载自清理并修正冒烟测试对 Recording 目录保留的断言"
+        },
+        {
+          "kind": "fix",
+          "text": "Windows 快捷方式改用 Unicode IShellLinkW，并将 Pages 部署拆分为 build/deploy 双任务"
+        },
+        {
+          "kind": "fix",
+          "text": "优化关于页初帧状态与空态展示，避免非法目标目录空建并容错 CDN 缓存刷新"
+        },
+        {
+          "kind": "fix",
+          "text": "拒绝安装路径中的 NUL，修复目录报错展开与键盘焦点"
+        },
+        {
+          "kind": "fix",
+          "text": "Windows 升级回滚与卸载清理，打通更新发布链路并补齐回归验收"
+        },
+        {
+          "kind": "fix",
+          "text": "移除 Windows 安装器图标白框与按钮黑边，修复旧注册表空字节导致的路径校验异常"
+        },
+        {
+          "kind": "fix",
+          "text": "核验 FLV 合并完整性与实测时长，修正发布说明并完成 Windows 验收"
+        },
+        {
+          "kind": "fix",
+          "text": "优化多段合并时长容差与前端分包，补充 URL 校验、CI 单测及 macOS 终审验收"
+        },
+        {
+          "kind": "fix",
+          "text": "修复录像合并漏片、字幕复制中断误判与 Windows 恢复闪窗"
+        },
+        {
+          "kind": "fix",
+          "text": "macOS 打包退出码、缺 PID 探测阻塞与缺弹幕恢复卡死，补齐验收文档"
+        },
+        {
+          "kind": "fix",
+          "text": "修复录像崩溃恢复与分片误删，完善媒体库操作及 macOS 分发校验"
+        },
+        {
+          "kind": "fix",
+          "text": "修复200审查缺陷，完成Windows测试"
+        },
+        {
+          "kind": "fix",
+          "text": "修复200审查缺陷并完善长录像弹幕回放"
+        },
+        {
+          "kind": "fix",
+          "text": "修复196审查的23项缺陷并补齐回归"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：完成检索、筛选与时间线五项残留修复"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：保留阶段事件并补齐中文检索标签"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：prioritize recording history and expose queued cancel"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：修复排队显示与收尾重试锁冲突"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：修复陈旧收尾失败与历史加载回滚"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：修复分组逐段重试与事件保留"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：收口任务中心中断与重试边界"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：修复任务中心统计口径与历史分页边界"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：按场次分组并修复收尾与异常状态"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：修复任务中心筛选统计与开录态"
+        },
+        {
+          "kind": "fix",
+          "text": "tasks：收尾记录合并并统一排队状态计数"
+        },
+        {
+          "kind": "fix",
+          "text": "media：修复房间录制文件分页与缩略图加载"
+        },
+        {
+          "kind": "fix",
+          "text": "danmaku：修复虎牙弹幕颜色、去重、分段与合并偏移"
+        },
+        {
+          "kind": "fix",
+          "text": "monitor：修复虎牙导入别名重复与批量缺项降级"
+        },
+        {
+          "kind": "fix",
+          "text": "huya：隔离凭据重检并补齐扫码后画质重检"
+        },
+        {
+          "kind": "fix",
+          "text": "huya：识别重播并按实际取流探测 4K"
+        },
+        {
+          "kind": "fix",
+          "text": "huya：修复房间在线人数与开播时间解析"
+        },
+        {
+          "kind": "fix",
+          "text": "account：完善虎牙扫码取消与 Cookie 续期链路"
+        },
+        {
+          "kind": "fix",
+          "text": "account：支持虎牙扫码快速登录票据"
+        },
+        {
+          "kind": "fix",
+          "text": "danmaku：普通聊天不记录用户名并移除礼物去重"
+        },
+        {
+          "kind": "fix",
+          "text": "recorder：收尾时立即摘除弹幕 writer"
+        },
+        {
+          "kind": "fix",
+          "text": "danmaku：修复抖音/斗鱼弹幕礼物字段、分段越界与重复"
+        },
+        {
+          "kind": "perf",
+          "text": "对齐关于界面与更新日志站视觉图标并精简重复入口"
+        },
+        {
+          "kind": "other",
+          "text": "任务中心保留策略与导出加固"
+        },
+        {
+          "kind": "feat",
+          "text": "GitHub Issues 结构化表单、六维标签同步与自动分诊工作流"
+        },
+        {
+          "kind": "other",
+          "text": "补记 d2c198e 逻辑复核与 macOS arm64 专机验收结论"
+        },
+        {
+          "kind": "other",
+          "text": "更新审查文档"
+        },
+        {
+          "kind": "other",
+          "text": "支持无证书开源发布与 Windows 绿色版，按方案 A 放宽合并时长容差并补记 MAC-2 验收"
+        },
+        {
+          "kind": "other",
+          "text": "更新 205、206 号验收报告，记录 Windows 实测结果与暂缓上线结论"
+        },
+        {
+          "kind": "other",
+          "text": "增加 macOS 独立审查与 d3108fa 真机验收报告"
+        },
+        {
+          "kind": "other",
+          "text": "deps：清理 Clippy 并迁移 jiff，补齐逐页回归"
+        },
+        {
+          "kind": "other",
+          "text": "deps：补齐依赖升级复核与工具链检查"
+        },
+        {
+          "kind": "other",
+          "text": "deps：升级 pnpm 到 12.23.0"
+        },
+        {
+          "kind": "other",
+          "text": "deps：升级工具链到 Node 24.22.3 与 pnpm 12"
+        },
+        {
+          "kind": "other",
+          "text": "deps：upgrade remaining Rust majors"
+        },
+        {
+          "kind": "other",
+          "text": "deps：upgrade Rust crypto majors"
+        },
+        {
+          "kind": "other",
+          "text": "deps：upgrade Rust runtime majors"
+        },
+        {
+          "kind": "other",
+          "text": "deps：upgrade Rust patch versions"
+        },
+        {
+          "kind": "other",
+          "text": "deps：upgrade frontend major versions"
+        },
+        {
+          "kind": "other",
+          "text": "web：升级前端补丁与次版本依赖"
+        },
+        {
+          "kind": "other",
+          "text": "新增固定版本的 Windows/macOS 发布流水线"
+        },
+        {
+          "kind": "other",
+          "text": "danmaku：锁定 ASS 字体与回放读取口径"
+        },
+        {
+          "kind": "other",
+          "text": "danmaku：明确复验文件口径"
+        },
+        {
+          "kind": "other",
+          "text": "danmaku：修正构建产物体积"
+        },
+        {
+          "kind": "other",
+          "text": "douyin：修正关注池删除条件说明"
+        }
+      ],
+      "assets": [
+        {
+          "name": "HIVECAST-v1.0.0-macOS-universal.dmg",
+          "size": 30900894,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.0/HIVECAST-v1.0.0-macOS-universal.dmg"
+        },
+        {
+          "name": "HIVECAST-v1.0.0-Windows-x64-portable.zip",
+          "size": 13901428,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.0/HIVECAST-v1.0.0-Windows-x64-portable.zip"
+        },
+        {
+          "name": "HIVECAST-v1.0.0-Windows-x64-setup.exe",
+          "size": 14985764,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.0/HIVECAST-v1.0.0-Windows-x64-setup.exe"
+        },
+        {
+          "name": "SHA256SUMS.txt",
+          "size": 313,
+          "downloadUrl": "https://github.com/Joftal/HIVECAST/releases/download/v1.0.0/SHA256SUMS.txt"
+        }
+      ]
+    }
+  ]
+}

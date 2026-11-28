@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-28T08:40:34.184Z",
+  "version": "1.0.2",
+  "publishedAt": "2026-11-28",
+  "url": "https://github.com/Joftal/HIVECAST/releases/tag/v1.0.2",
+  "prerelease": false,
+  "notes": [
+    {
+      "kind": "feat",
+      "text": "本地录像改为全屏剧院播放器并收敛统计角标显示"
+    },
+    {
+      "kind": "feat",
+      "text": "新增主窗口大小位置与最大化状态记忆，兼容高分屏与多屏切换"
+    },
+    {
+      "kind": "fix",
+      "text": "按创建标记彻底清理 Windows WebView2 缓存"
+    },
+    {
+      "kind": "fix",
+      "text": "清理 Windows 卸载后残留的 WebView2 组件"
+    },
+    {
+      "kind": "fix",
+      "text": "清理 Windows 卸载后的 WebView2 缓存残留"
+    },
+    {
+      "kind": "fix",
+      "text": "兼容抖音无值裸 Cookie 片段并修复回放抽屉转封装后源文件操作状态同步，补充四平台双端实测验收文档"
+    },
+    {
+      "kind": "fix",
+      "text": "补齐 macOS RunEvent::Exit 窗口状态幂等补写，并补充 eae0408 复核与 macOS 实机验收文档"
+    },
+    {
+      "kind": "fix",
+      "text": "防止 Windows 卸载误删数据，修复旧库搬迁、窗口状态与设置竞态"
+    },
+    {
+      "kind": "fix",
+      "text": "精简关于界面版本展示并修复更新日志站点版本索引与时间轴样式"
+    },
+    {
+      "kind": "perf",
+      "text": "监控列表按房间增量刷新，减少全表重拉与重排"
+    },
+    {
+      "kind": "perf",
+      "text": "账号页统一为单网格卡片布局，合并已关联与可添加分区"
+    },
+    {
+      "kind": "perf",
+      "text": "全设置页统一收拢说明至 InfoTip，重组存储页卡片并清理 Windows 逐字路径前缀"
+    },
+    {
+      "kind": "fix",
+      "text": "lib.rs import 顺序以通过 CI cargo fmt 检查"
+    },
+    {
+      "kind": "other",
+      "text": "logs：修正日志字段与级别，补全排障上下文"
+    },
+    {
+      "kind": "other",
+      "text": "logs：修正平台日志描述与关注池检查时机"
+    },
+    {
+      "kind": "other",
+      "text": "记录 Windows 真机测试约定"
+    },
+    {
+      "kind": "other",
+      "text": "补充 macOS 三平台扫码登录与自动续期专项测试验收报告"
+    }
+  ]
+}
