@@ -2123,7 +2123,7 @@ async fn douyu_once(
                 }
             }
             _ = stats_tick.tick() => {
-                tracing::info!(
+                tracing::debug!(
                     target: "hivecast_lib::danmaku",
                     room = %conn.room.room_key,
                     frames,

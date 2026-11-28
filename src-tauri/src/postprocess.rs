@@ -445,6 +445,7 @@ pub async fn merge(
             tracing::warn!(
                 target: "hivecast_lib::postprocess",
                 task = "merge",
+                out = %out.display(),
                 sources = sources.len(),
                 expected_ms = expected.total_ms,
                 actual_ms,

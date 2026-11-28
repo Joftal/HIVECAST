@@ -290,11 +290,19 @@ impl AppState {
         crate::settings::apply(&settings, &recorder);
         let local = LocalPlayer::new(cache_root.join("play"), server.clone());
         let play_root = cache_root.join("play");
-        let cleanup =
-            tauri::async_runtime::spawn_blocking(move || crate::session_cache::clean(&play_root))
-                .await;
-        if !matches!(cleanup, Ok(Ok(()))) {
-            tracing::warn!(?cleanup, "清理回放缓存失败");
+        let cleanup_root = play_root.clone();
+        let cleanup = tauri::async_runtime::spawn_blocking(move || {
+            crate::session_cache::clean(&cleanup_root)
+        })
+        .await;
+        match cleanup {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(dir = %play_root.display(), error = %err, "清理回放缓存失败")
+            }
+            Err(err) => {
+                tracing::warn!(dir = %play_root.display(), error = %err, "清理回放缓存任务失败")
+            }
         }
         let thumbs = Arc::new(crate::thumbs::Thumbs::new(
             cache_root.join("thumbs"),

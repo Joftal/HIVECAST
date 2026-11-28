@@ -747,7 +747,7 @@ impl ViewManager {
 
         let child = command.spawn().map_err(|err| {
             tracing::warn!(
-                slot = %handle.room.id,
+                room_id = %handle.room.id,
                 quality = %candidate.name,
                 line = %group.name,
                 %err,
@@ -785,7 +785,7 @@ impl ViewManager {
                 }
                 self.emit(app);
                 tracing::info!(
-                    slot = handle.room.id,
+                    room_id = handle.room.id,
                     quality = %candidate.name,
                     line = %group.name,
                     "观看起播"
@@ -795,7 +795,7 @@ impl ViewManager {
             Ready::Closed => Err(AppError::User("会话已取消".into())),
             Ready::Timeout => {
                 tracing::warn!(
-                    slot = %handle.room.id,
+                    room_id = %handle.room.id,
                     quality = %candidate.name,
                     line = %group.name,
                     "观看起播超时（12 秒内没有输出分片）"
@@ -873,7 +873,7 @@ impl ViewManager {
         if let Some(child) = child.as_mut() {
             send_graceful(child);
             if wait_exit(child, STOP_TIMEOUT).await.is_none() {
-                tracing::warn!(slot = handle.room.id, "转封装进程未在超时内退出，已强杀");
+                tracing::warn!(room_id = handle.room.id, "转封装进程未在超时内退出，已强杀");
             }
         }
         if let Some(session) = session.as_deref() {
@@ -881,7 +881,7 @@ impl ViewManager {
         }
         if let Some(dir) = dir {
             if let Err(err) = tokio::fs::remove_dir_all(&dir).await {
-                tracing::debug!(slot = handle.room.id, dir = %dir.display(), error = %err, "删除观看分片目录失败");
+                tracing::debug!(room_id = handle.room.id, dir = %dir.display(), error = %err, "删除观看分片目录失败");
             }
         }
 

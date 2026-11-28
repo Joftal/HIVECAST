@@ -359,7 +359,7 @@ impl Jobs {
         let Some(db) = self.db() else { return };
         match db.mark_tasks_interrupted() {
             Ok(count) if count > 0 => {
-                tracing::info!(count, "任务中心：把上次未完成的任务标为 interrupted")
+                tracing::info!(count, "任务中心：把上次未完成的任务标记为中断")
             }
             Ok(_) => {}
             Err(err) => tracing::warn!(error = %err, "标记遗留任务失败"),

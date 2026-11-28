@@ -37,11 +37,11 @@ impl StreamServer {
         let app = router(server.clone());
         tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
-                tracing::error!(error = %err, "loopback stream server stopped");
+                tracing::error!(error = %err, "回环播放服务已停止");
             }
         });
 
-        tracing::info!(port, "loopback stream server listening on 127.0.0.1");
+        tracing::info!(port, "回环播放服务已启动，监听 127.0.0.1");
         Ok(server)
     }
 

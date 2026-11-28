@@ -464,7 +464,7 @@ pub async fn qr_start() -> Result<QrTicket, AppError> {
             sessions.drain(0..drop);
         }
     }
-    tracing::info!("虎牙扫码二维码已生成 expires_in={expires_in}");
+    tracing::info!(expires_in, "虎牙扫码二维码已生成");
     Ok(QrTicket {
         qrcode_key: qr_id,
         url: MAIN_REFERER.into(),

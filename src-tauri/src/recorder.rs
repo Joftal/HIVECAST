@@ -918,12 +918,28 @@ impl Recorder {
             let fresh = self.db.get_room(&room.id).ok().flatten();
             let paused = fresh.as_ref().is_some_and(|room| room.monitor_paused);
             if !monitor_start_allowed(removed, paused) {
-                tracing::info!(room = %room.host_name, removed, paused, "监控开录复查未通过");
+                let reason = if removed {
+                    "房间已移除"
+                } else {
+                    "监控已暂停"
+                };
+                tracing::info!(
+                    room_id = %room.id,
+                    room = %room.host_name,
+                    reason,
+                    removed,
+                    paused,
+                    "监控开录复查未通过"
+                );
                 return Err(AppError::User("房间已移除或监控已暂停".into()));
             }
             if let Some(fresh) = fresh.as_ref() {
                 if !fresh.auto_record {
-                    tracing::info!(room = %room.host_name, "监控开录复查未通过：自动录制已关闭");
+                    tracing::info!(
+                        room_id = %room.id,
+                        room = %room.host_name,
+                        "监控开录复查未通过：自动录制已关闭"
+                    );
                     return Err(AppError::User("自动录制已关闭".into()));
                 }
             } else {
@@ -2497,7 +2513,11 @@ impl Recorder {
         // 它能保留「分片还在、成品未落定」的现场，启动后按清单重试。
         // 成功后清单会被删除，正常录制不会留下额外文件。
         let fail_before_merge = |message: String| {
-            tracing::warn!(session = %active.recording.session_id, %message, "保留原始分片等待重试");
+            tracing::warn!(
+                session = %active.recording.session_id,
+                detail = %message,
+                "保留原始分片等待重试"
+            );
             if let Err(err) = self.db.finish_session_with_post(
                 &active.recording.session_id,
                 "failed",
@@ -2833,7 +2853,12 @@ impl Recorder {
         if final_status == "failed" {
             let tail = tail_text(&active.stderr_tail);
             if !tail.is_empty() {
-                tracing::warn!(room_id, tail = %tail, "ffmpeg 错误输出");
+                tracing::warn!(
+                    room_id,
+                    session_id = %active.recording.session_id,
+                    tail = %tail,
+                    "ffmpeg 错误输出"
+                );
             }
         }
 
@@ -3086,7 +3111,12 @@ impl Recorder {
         for (path, _) in ass_targets {
             match crate::postprocess::danmaku_to_ass(std::path::Path::new(&path)) {
                 Ok(result) => tracing::info!(ass = %result.path, "已导出弹幕字幕"),
-                Err(err) => tracing::warn!(%err, file = %path, "导出弹幕字幕失败"),
+                Err(err) => tracing::warn!(
+                    session_id = %active.recording.session_id,
+                    %err,
+                    file = %path,
+                    "导出弹幕字幕失败"
+                ),
             }
         }
 

@@ -1902,7 +1902,11 @@ async fn finish_merge_registration(
         })?;
     }
     if let Err(err) = std::fs::remove_file(receipt) {
-        tracing::warn!(%err, "成品已登记，清理登记单失败");
+        tracing::warn!(
+            file = %receipt.display(),
+            %err,
+            "成品已登记，清理登记单失败"
+        );
     }
     Ok(pending.result)
 }

@@ -683,7 +683,7 @@ fn tick(
         if rooms.is_empty() {
             continue;
         }
-        tracing::info!(
+        tracing::debug!(
             target: "hivecast_lib::monitor",
             platform,
             rooms = rooms.len(),
@@ -904,7 +904,7 @@ async fn run_batch_check(
             for (id, outcome) in results {
                 send_batch_outcome(&tx, &completed, id, outcome);
             }
-            tracing::info!(
+            tracing::debug!(
                 target: "hivecast_lib::monitor",
                 platform,
                 authed,
@@ -915,6 +915,7 @@ async fn run_batch_check(
                 missing,
                 unresolved,
                 confirm_failed,
+                missing_keys_total = missing_keys.len(),
                 missing_keys = ?missing_keys.iter().take(10).collect::<Vec<_>>(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "批量状态检查完成"
@@ -1436,7 +1437,13 @@ async fn run_room_action(
                     } else {
                         "空间不足，暂不自动开录"
                     };
-                    tracing::warn!(room = %room.host_name, %message, "{reason}");
+                    tracing::warn!(
+                        room_id = %room.id,
+                        room = %room.host_name,
+                        reason,
+                        detail = %message,
+                        "自动开录已跳过"
+                    );
                     recorder.set_error(&room.id, message);
                     recorder.broadcast_room(app, &room.id);
                 }
